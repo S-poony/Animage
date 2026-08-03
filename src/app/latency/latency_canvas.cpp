@@ -5,12 +5,12 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPointingDevice>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QTabletEvent>
 #include <QTextStream>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -19,6 +19,8 @@ namespace {
 constexpr int kSampleWindow = 240;
 constexpr qreal kMinWidth = 1.5;
 constexpr qreal kMaxWidth = 26.0;
+constexpr int kCrosshairArm = 22;
+constexpr qint64 kHudRebuildIntervalNs = 100'000'000;  // 10 Hz is plenty for text
 
 QString pointerTypeName(QPointingDevice::PointerType type) {
     switch (type) {
@@ -29,6 +31,13 @@ QString pointerTypeName(QPointingDevice::PointerType type) {
         case QPointingDevice::PointerType::Generic: return QStringLiteral("generic");
         default: return QStringLiteral("unknown");
     }
+}
+
+bool comesFromAStylus(const QPointingDevice* device) {
+    if (!device) return false;
+    const QInputDevice::DeviceType type = device->type();
+    return type == QInputDevice::DeviceType::Stylus ||
+           type == QInputDevice::DeviceType::Airbrush || type == QInputDevice::DeviceType::Puck;
 }
 
 double percentile(std::vector<double> values, double fraction) {
@@ -49,14 +58,26 @@ LatencyCanvas::LatencyCanvas(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::CrossCursor);
     clock_.start();
+
+    // The HUD repaints on its own slow schedule rather than riding along with
+    // every pen event. Laying out fourteen lines of text per pen event costs
+    // more than drawing the stroke does.
+    hud_timer_ = new QTimer(this);
+    hud_timer_->setInterval(100);
+    connect(hud_timer_, &QTimer::timeout, this, [this] {
+        if (show_hud_ && !hud_rect_.isEmpty()) update(hud_rect_);
+    });
+    hud_timer_->start();
 }
 
 void LatencyCanvas::clear() {
     canvas_.fill(Qt::black);
-    latencies_ms_.clear();
+    latency_newest_ms_.clear();
+    latency_oldest_ms_.clear();
     intervals_ms_.clear();
     tablet_events_ = 0;
     mouse_events_ = 0;
+    mouse_from_pen_ = 0;
     frames_ = 0;
     update();
 }
@@ -75,6 +96,12 @@ void LatencyCanvas::resizeEvent(QResizeEvent* event) {
     canvas_ = resized;
 }
 
+QRect LatencyCanvas::crosshairRect(const QPointF& centre) const {
+    return QRect(static_cast<int>(centre.x()) - kCrosshairArm - 2,
+                 static_cast<int>(centre.y()) - kCrosshairArm - 2, 2 * kCrosshairArm + 5,
+                 2 * kCrosshairArm + 5);
+}
+
 void LatencyCanvas::noteEventArrival() {
     const qint64 now = clock_.nsecsElapsed();
     if (last_event_ns_ >= 0) {
@@ -83,24 +110,30 @@ void LatencyCanvas::noteEventArrival() {
     }
     last_event_ns_ = now;
 
-    // Keep the oldest unpainted event: latency is measured from the first event
-    // a frame carries, not the last.
-    if (pending_event_ns_ < 0) pending_event_ns_ = now;
+    if (pending_oldest_ns_ < 0) pending_oldest_ns_ = now;
+    pending_newest_ns_ = now;
+}
+
+void LatencyCanvas::moveCursorTo(const QPointF& position) {
+    if (show_crosshair_ && cursor_valid_) update(crosshairRect(cursor_));
+    cursor_ = position;
+    cursor_valid_ = true;
+    if (show_crosshair_) update(crosshairRect(cursor_));
 }
 
 void LatencyCanvas::beginStroke(const QPointF& position, qreal pressure) {
     drawing_ = true;
     last_position_ = position;
-    last_pressure_ = pressure;
+    (void)pressure;
 }
 
 void LatencyCanvas::extendStroke(const QPointF& position, qreal pressure) {
     if (!drawing_ || canvas_.isNull()) return;
 
+    const qreal width = kMinWidth + (kMaxWidth - kMinWidth) * std::max(pressure, qreal(0.02));
+
     QPainter painter(&canvas_);
     painter.setRenderHint(QPainter::Antialiasing, true);
-
-    const qreal width = kMinWidth + (kMaxWidth - kMinWidth) * std::max(pressure, qreal(0.02));
     QPen pen(erasing_ ? QColor(0, 0, 0) : QColor(255, 255, 255));
     pen.setWidthF(width);
     pen.setCapStyle(Qt::RoundCap);
@@ -108,8 +141,14 @@ void LatencyCanvas::extendStroke(const QPointF& position, qreal pressure) {
     painter.setPen(pen);
     painter.drawLine(last_position_, position);
 
+    // Repaint only what changed. Blitting the whole canvas on every pen event
+    // is work proportional to the window, not to the stroke, and at 200 events
+    // per second that is most of the frame budget on a large window.
+    const qreal margin = width * 0.5 + 2.0;
+    const QRectF segment = QRectF(last_position_, position).normalized();
+    update(segment.adjusted(-margin, -margin, margin, margin).toAlignedRect());
+
     last_position_ = position;
-    last_pressure_ = pressure;
 }
 
 void LatencyCanvas::endStroke() { drawing_ = false; }
@@ -129,8 +168,6 @@ void LatencyCanvas::tabletEvent(QTabletEvent* event) {
     pressure_ = event->pressure();
     tilt_x_ = event->xTilt();
     tilt_y_ = event->yTilt();
-    cursor_ = event->position();
-    cursor_valid_ = true;
 
     switch (event->type()) {
         case QEvent::TabletPress: beginStroke(event->position(), event->pressure()); break;
@@ -141,43 +178,52 @@ void LatencyCanvas::tabletEvent(QTabletEvent* event) {
         default: break;
     }
 
-    update();
+    moveCursorTo(event->position());
 }
 
-// Mouse handling exists only so that a missing or misconfigured tablet is
-// obvious rather than silent: the HUD shows mouse events arriving and no tablet
-// events, which is the failure everyone hits first.
-void LatencyCanvas::mousePressEvent(QMouseEvent* event) {
+// Windows Ink synthesises a mouse event for every pen event so that
+// tablet-unaware applications still work. Acting on those would draw the same
+// stroke twice, at a made-up pressure, and double the work in the one code path
+// being measured. They are counted and then dropped.
+//
+// Returns true when the event was a real mouse and should still be drawn with.
+bool LatencyCanvas::handleAsMouse(QMouseEvent* event) {
     ++mouse_events_;
+    const bool synthesised = comesFromAStylus(event->pointingDevice()) || tablet_events_ > 0;
+    if (synthesised) {
+        ++mouse_from_pen_;
+        return false;
+    }
+    return true;
+}
+
+void LatencyCanvas::mousePressEvent(QMouseEvent* event) {
+    if (!handleAsMouse(event)) return;
     noteEventArrival();
     erasing_ = false;
-    cursor_ = event->position();
-    cursor_valid_ = true;
     beginStroke(event->position(), 0.5);
-    update();
+    moveCursorTo(event->position());
 }
 
 void LatencyCanvas::mouseMoveEvent(QMouseEvent* event) {
-    ++mouse_events_;
+    if (!handleAsMouse(event)) return;
     noteEventArrival();
-    cursor_ = event->position();
-    cursor_valid_ = true;
     if (drawing_) extendStroke(event->position(), 0.5);
-    update();
+    moveCursorTo(event->position());
 }
 
-void LatencyCanvas::mouseReleaseEvent(QMouseEvent*) {
+void LatencyCanvas::mouseReleaseEvent(QMouseEvent* event) {
+    if (!handleAsMouse(event)) return;
     endStroke();
-    update();
 }
 
-LatencyCanvas::Stats LatencyCanvas::latencyStats() const {
-    const std::vector<double> samples(latencies_ms_.begin(), latencies_ms_.end());
-    if (samples.empty()) return {};
+LatencyCanvas::Stats LatencyCanvas::latencyStats(const std::deque<double>& samples) const {
+    const std::vector<double> values(samples.begin(), samples.end());
+    if (values.empty()) return {};
     Stats stats;
-    stats.median = percentile(samples, 0.5);
-    stats.p95 = percentile(samples, 0.95);
-    stats.worst = *std::max_element(samples.begin(), samples.end());
+    stats.median = percentile(values, 0.5);
+    stats.p95 = percentile(values, 0.95);
+    stats.worst = *std::max_element(values.begin(), values.end());
     return stats;
 }
 
@@ -189,91 +235,134 @@ double LatencyCanvas::eventRateHz() const {
     return (mean > 0.0) ? 1000.0 / mean : 0.0;
 }
 
-void LatencyCanvas::paintEvent(QPaintEvent*) {
-    if (pending_event_ns_ >= 0) {
-        latencies_ms_.push_back(static_cast<double>(clock_.nsecsElapsed() - pending_event_ns_) /
-                                1e6);
-        if (latencies_ms_.size() > kSampleWindow) latencies_ms_.pop_front();
-        pending_event_ns_ = -1;
-    }
-    ++frames_;
-
-    QPainter painter(this);
-    if (!canvas_.isNull()) painter.drawImage(0, 0, canvas_);
-
-    // The gap between the physical pen tip and this crosshair while the pen is
-    // moving steadily is the latency, made visible. It is the cheapest estimate
-    // available without a camera.
-    if (show_crosshair_ && cursor_valid_) {
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        QPen pen(QColor(255, 64, 64));
-        pen.setWidthF(1.5);
-        painter.setPen(pen);
-        painter.drawLine(QPointF(cursor_.x() - 22, cursor_.y()),
-                         QPointF(cursor_.x() + 22, cursor_.y()));
-        painter.drawLine(QPointF(cursor_.x(), cursor_.y() - 22),
-                         QPointF(cursor_.x(), cursor_.y() + 22));
-    }
-
-    if (!show_hud_) return;
-
-    const Stats stats = latencyStats();
+void LatencyCanvas::rebuildHud() {
+    const Stats newest = latencyStats(latency_newest_ms_);
+    const Stats oldest = latencyStats(latency_oldest_ms_);
     const qreal refresh = screen() ? screen()->refreshRate() : 0.0;
+    const double frame_ms = (refresh > 0.0) ? 1000.0 / refresh : 0.0;
 
     QStringList lines;
     lines << QStringLiteral("device      %1  (%2)").arg(device_name_, pointer_kind_);
-    lines << QStringLiteral("tablet ev   %1     mouse ev  %2").arg(tablet_events_).arg(mouse_events_);
-    lines << QStringLiteral("pressure    %1").arg(pressure_, 0, 'f', 3);
-    lines << QStringLiteral("tilt        %1 / %2").arg(tilt_x_, 0, 'f', 1).arg(tilt_y_, 0, 'f', 1);
+    lines << QStringLiteral("tablet ev   %1").arg(tablet_events_);
+    lines << QStringLiteral("mouse ev    %1   of which synthesised from the pen: %2")
+                 .arg(mouse_events_)
+                 .arg(mouse_from_pen_);
+    lines << QStringLiteral("pressure    %1        tilt  %2 / %3")
+                 .arg(pressure_, 0, 'f', 3)
+                 .arg(tilt_x_, 0, 'f', 1)
+                 .arg(tilt_y_, 0, 'f', 1);
     lines << QStringLiteral("event rate  %1 Hz").arg(eventRateHz(), 0, 'f', 0);
-    lines << QStringLiteral("screen      %1 Hz     frames %2").arg(refresh, 0, 'f', 0).arg(frames_);
+    lines << QStringLiteral("screen      %1 Hz  = %2 ms per frame   painted %3")
+                 .arg(refresh, 0, 'f', 0)
+                 .arg(frame_ms, 0, 'f', 1)
+                 .arg(frames_);
     lines << QString();
-    lines << QStringLiteral("event to paint, application only:");
-    lines << QStringLiteral("  median %1 ms   p95 %2 ms   worst %3 ms")
-                 .arg(stats.median, 0, 'f', 2)
-                 .arg(stats.p95, 0, 'f', 2)
-                 .arg(stats.worst, 0, 'f', 2);
+    lines << QStringLiteral("ink lag, application only:  median %1  p95 %2  worst %3 ms")
+                 .arg(newest.median, 0, 'f', 2)
+                 .arg(newest.p95, 0, 'f', 2)
+                 .arg(newest.worst, 0, 'f', 2);
+    lines << QStringLiteral("queue depth, oldest event:  median %1  p95 %2  worst %3 ms")
+                 .arg(oldest.median, 0, 'f', 2)
+                 .arg(oldest.p95, 0, 'f', 2)
+                 .arg(oldest.worst, 0, 'f', 2);
     lines << QString();
-    lines << QStringLiteral("This is not the number that matters. Film the pen tip and");
-    lines << QStringLiteral("the screen at 120 fps or more and count frames. Pass: < 25 ms.");
+    lines << QStringLiteral("Neither is the answer. Film the pen tip and the screen at 120 fps");
+    lines << QStringLiteral("or more and count frames. Pass: under 25 ms.");
     lines << QString();
-    lines << QStringLiteral("C clear    H hud    X crosshair    S report    F fullscreen    Q quit");
+    lines << QStringLiteral("C clear   H hud   X crosshair   S report   F fullscreen   Q quit");
 
     QFont font(QStringLiteral("Consolas"));
     font.setPointSizeF(10.0);
     font.setStyleHint(QFont::Monospace);
-    painter.setFont(font);
 
     const QFontMetricsF metrics(font);
     qreal widest = 0.0;
     for (const QString& line : lines) widest = std::max(widest, metrics.horizontalAdvance(line));
     const qreal line_height = metrics.height();
-    const QRectF panel(12, 12, widest + 24, line_height * lines.size() + 20);
 
+    const QSizeF panel(widest + 24, line_height * lines.size() + 20);
+    hud_rect_ = QRect(12, 12, static_cast<int>(panel.width()) + 1,
+                      static_cast<int>(panel.height()) + 1);
+
+    const qreal dpr = devicePixelRatioF();
+    hud_ = QPixmap(hud_rect_.size() * dpr);
+    hud_.setDevicePixelRatio(dpr);
+    hud_.fill(Qt::transparent);
+
+    QPainter painter(&hud_);
+    painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 190));
-    painter.drawRoundedRect(panel, 6, 6);
+    painter.setBrush(QColor(0, 0, 0, 200));
+    painter.drawRoundedRect(QRectF(0, 0, panel.width(), panel.height()), 6, 6);
 
+    painter.setFont(font);
     painter.setPen(QColor(220, 220, 220));
-    qreal y = panel.top() + 10 + metrics.ascent();
+    qreal y = 10 + metrics.ascent();
     for (const QString& line : lines) {
-        painter.drawText(QPointF(panel.left() + 12, y), line);
+        painter.drawText(QPointF(12, y), line);
         y += line_height;
     }
+
+    hud_built_ns_ = clock_.nsecsElapsed();
+}
+
+void LatencyCanvas::paintEvent(QPaintEvent* event) {
+    const qint64 now = clock_.nsecsElapsed();
+    if (pending_newest_ns_ >= 0) {
+        latency_newest_ms_.push_back(static_cast<double>(now - pending_newest_ns_) / 1e6);
+        latency_oldest_ms_.push_back(static_cast<double>(now - pending_oldest_ns_) / 1e6);
+        if (latency_newest_ms_.size() > kSampleWindow) latency_newest_ms_.pop_front();
+        if (latency_oldest_ms_.size() > kSampleWindow) latency_oldest_ms_.pop_front();
+        pending_oldest_ns_ = -1;
+        pending_newest_ns_ = -1;
+    }
+    ++frames_;
+
+    const QRect dirty = event->rect();
+
+    QPainter painter(this);
+    painter.setClipRect(dirty);
+    if (!canvas_.isNull()) painter.drawImage(0, 0, canvas_);
+
+    // The gap between the physical pen tip and this crosshair while the pen is
+    // moving steadily is the latency, made visible. It is the cheapest estimate
+    // available without a camera.
+    if (show_crosshair_ && cursor_valid_ && dirty.intersects(crosshairRect(cursor_))) {
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QPen pen(QColor(255, 64, 64));
+        pen.setWidthF(1.5);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(cursor_.x() - kCrosshairArm, cursor_.y()),
+                         QPointF(cursor_.x() + kCrosshairArm, cursor_.y()));
+        painter.drawLine(QPointF(cursor_.x(), cursor_.y() - kCrosshairArm),
+                         QPointF(cursor_.x(), cursor_.y() + kCrosshairArm));
+    }
+
+    if (!show_hud_) return;
+    if (hud_.isNull() || now - hud_built_ns_ > kHudRebuildIntervalNs) rebuildHud();
+    if (dirty.intersects(hud_rect_)) painter.drawPixmap(hud_rect_.topLeft(), hud_);
 }
 
 void LatencyCanvas::printReport() const {
-    const Stats stats = latencyStats();
+    const Stats newest = latencyStats(latency_newest_ms_);
+    const Stats oldest = latencyStats(latency_oldest_ms_);
+    const qreal refresh = screen() ? screen()->refreshRate() : 0.0;
+
     QTextStream out(stdout);
+    out << Qt::fixed << qSetRealNumberPrecision(2);
     out << "\n--- M0 latency report ---\n"
         << "device        " << device_name_ << " (" << pointer_kind_ << ")\n"
         << "tablet events " << tablet_events_ << "\n"
-        << "mouse events  " << mouse_events_ << "\n"
-        << "event rate    " << Qt::fixed << qSetRealNumberPrecision(0) << eventRateHz() << " Hz\n"
-        << "event->paint  median " << qSetRealNumberPrecision(2) << stats.median << " ms, p95 "
-        << stats.p95 << " ms, worst " << stats.worst << " ms\n"
-        << "Application share only. The pass criterion of 25 ms is pen tip to\n"
-        << "photons and must be measured with a camera.\n";
+        << "mouse events  " << mouse_events_ << " (" << mouse_from_pen_
+        << " synthesised from the pen and ignored)\n"
+        << "event rate    " << eventRateHz() << " Hz\n"
+        << "screen        " << refresh << " Hz\n"
+        << "ink lag       median " << newest.median << " ms, p95 " << newest.p95 << " ms, worst "
+        << newest.worst << " ms\n"
+        << "queue depth   median " << oldest.median << " ms, p95 " << oldest.p95 << " ms, worst "
+        << oldest.worst << " ms\n"
+        << "Application share only. The 25 ms criterion is pen tip to photons\n"
+        << "and has to be measured with a camera.\n";
     out.flush();
 }
 
