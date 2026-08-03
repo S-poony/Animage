@@ -103,6 +103,25 @@ int main() {
         }
     }
 
+    // Zooming out samples every nth pixel over a much wider region. It was
+    // never measured before, and it was the slowest path in the program.
+    std::printf("\nzoomed out, 4 layers over a wide drawing\n");
+    {
+        Document doc;
+        const TimelineId timeline = doc.addTimeline("main");
+        const ImageId image = doc.insertImage(timeline, 0);
+        for (int i = 0; i < 4; ++i) {
+            const LayerId layer = doc.addLayer(timeline, "layer " + std::to_string(i + 1));
+            scribble(doc, timeline, image, layer, 240, kViewportWidth * 6, kViewportHeight * 6,
+                     0x51edu + i * 7919u);
+        }
+        for (int step : {1, 2, 5, 10, 20}) {
+            const PixelRect region{0, 0, kViewportWidth * step, kViewportHeight * step};
+            const double timed = timeComposites(doc, timeline, image, region, step, 10);
+            std::printf("    step %2d (zoom %5.2f)  %7.2f ms\n", step, 1.0 / step, timed);
+        }
+    }
+
     std::printf("\nA frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.\n");
     return 0;
 }

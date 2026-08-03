@@ -43,21 +43,27 @@ void blendLayerRows(const Cel& cel, const Layer& layer, const PixelRect& region,
             const int tile_x = tileCoordFor(image_x, 0).x;
             const int local_x = tileLocal(image_x);
 
-            // With a sampling step, consecutive outputs are not consecutive
-            // image pixels, so a run cannot span more than one of them.
-            const int run = (step == 1) ? std::min(out.width() - x, kTileSize - local_x) : 1;
+            // How many outputs stay inside this tile. With a sampling step they
+            // are `step` image pixels apart, so fewer fit -- but several still
+            // do, and looking the tile up once per output instead was what made
+            // zooming out crawl.
+            const int in_tile = (step == 1) ? (kTileSize - local_x)
+                                            : (kTileSize - local_x + step - 1) / step;
+            const int run = std::min(out.width() - x, std::max(1, in_tile));
 
-            const TileRef tile = grid.find({tile_x, tile_y});
-            if (!tile) {
+            // findSlot borrows the handle. find() would copy the shared_ptr,
+            // and an atomic increment per tile lookup is not free at this rate.
+            const TileRef* held = grid.findSlot({tile_x, tile_y});
+            if (!held || !*held) {
                 x += run;
                 continue;  // absent tile is transparent, so nothing to blend
             }
 
-            const Half* pixels =
-                tile->rgba.data() + (static_cast<std::size_t>(local_y) * kTileSize + local_x) * 4;
+            const Half* row =
+                (*held)->rgba.data() + static_cast<std::size_t>(local_y) * kTileSize * 4;
 
             for (int i = 0; i < run; ++i) {
-                const Half* p = pixels + static_cast<std::size_t>(i) * 4;
+                const Half* p = row + static_cast<std::size_t>(local_x + i * step) * 4;
                 if (p[3].bits == 0) continue;  // nothing here
 
                 Rgba source{p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat()};

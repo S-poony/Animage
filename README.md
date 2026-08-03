@@ -77,6 +77,13 @@ There is no timeline UI and nothing can be saved yet.
 | Space-drag, middle-drag | pan |
 | `1` / `0` | actual size / fit the drawing |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
+| `Alt`+right-drag | brush size |
+| Hold `Z` and drag | scrubby zoom |
+
+In the timeline: drag the ruler to scrub, drag the right edge of a card to
+change how long the drawing is held, and drag the body of a numbered card to
+reorder it. Held frames carry no number and cannot be picked up -- they are the
+same drawing still showing, not a thing of their own, and they travel with it.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the timeline rather than to the image, which is the point of

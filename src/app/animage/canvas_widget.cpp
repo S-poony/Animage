@@ -127,7 +127,10 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // each frame it passed over, which is how you sketch a moving point.
     if (changed && stroking_) rebindStrokeToCurrentImage();
 
-    rebuildOnion();
+    // Marked, not rebuilt. Holding an arrow key produces frame changes faster
+    // than a rebuild takes, and rebuilding on each one let the queue run away:
+    // the timeline carried on moving for a while after the key came up.
+    onion_dirty_ = true;
     refreshAll();
 }
 
@@ -142,14 +145,14 @@ void CanvasWidget::setBackground(Background background) {
 
 void CanvasWidget::setOnion(const OnionSettings& settings) {
     onion_settings_ = settings;
-    rebuildOnion();
+    onion_dirty_ = true;
     refreshAll();
 }
 
 void CanvasWidget::setPlaying(bool playing) {
     if (playing_ == playing) return;
     playing_ = playing;
-    rebuildOnion();
+    onion_dirty_ = true;
     refreshAll();
 }
 
@@ -285,7 +288,7 @@ void CanvasWidget::ensureCacheCoversView() {
 
     display_ = QImage((cached_region_.width + step - 1) / step,
                       (cached_region_.height + step - 1) / step, QImage::Format_RGB32);
-    rebuildOnion();
+    onion_dirty_ = true;
     dirty_everything_ = true;
 }
 
@@ -375,6 +378,11 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     // All the compositing for this frame happens here, once, however many
     // edits arrived since the last paint.
+    if (onion_dirty_) {
+        rebuildOnion();
+        onion_dirty_ = false;
+        dirty_everything_ = true;
+    }
     if (dirty_everything_) {
         refreshRegion(cached_region_);
         dirty_everything_ = false;

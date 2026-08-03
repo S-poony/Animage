@@ -15,6 +15,7 @@ constexpr int kCellWidth = 26;
 constexpr int kRulerHeight = 18;
 constexpr int kStripHeight = 64;
 constexpr int kEdgeGrab = 5;
+constexpr int kDragThreshold = 5;
 
 // Taken from the widget's palette rather than hardcoded, so the timeline
 // belongs to the same application as everything above it -- and follows a dark
@@ -174,6 +175,23 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         }
     }
 
+    if (dragging_ && drop_index_ >= 0) {
+        // Count past the drawing being carried: it is not in the timeline it is
+        // about to be dropped into.
+        int seen = 0;
+        int at = static_cast<int>(line->slots.size());
+        for (std::size_t i = 0; i < line->slots.size(); ++i) {
+            if (line->slots[i] == drag_image_) continue;
+            if (seen == drop_index_) {
+                at = static_cast<int>(i);
+                break;
+            }
+            ++seen;
+        }
+        painter.setPen(QPen(colours.current, 3));
+        painter.drawLine(at * kCellWidth, kRulerHeight, at * kCellWidth, kStripHeight);
+    }
+
     if (current_slot_ < line->slots.size()) {
         const int x = static_cast<int>(current_slot_) * kCellWidth;
         painter.setPen(QPen(colours.current, 2));
@@ -210,7 +228,31 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    setCurrentSlot(slotAt(x));
+    const std::size_t slot = slotAt(x);
+    setCurrentSlot(slot);
+
+    // Only the numbered card starts a move. Pressing a held frame selects it
+    // and nothing more -- there is no separate object there to drag.
+    const Timeline* line = timeline();
+    if (line && slot < line->slots.size() && runAt(slot).first == slot) {
+        may_drag_ = true;
+        drag_image_ = line->slots[slot];
+        press_x_ = x;
+    }
+}
+
+// Where the drawing would land, counted in the timeline as it will be once the
+// drawing has been lifted out of it.
+int TimelineWidget::dropIndexFor(int pointer_x) const {
+    const Timeline* line = timeline();
+    if (!line || drag_image_ == kNoId) return 0;
+
+    const int boundary = (pointer_x + kCellWidth / 2) / kCellWidth;
+    int index = 0;
+    for (int i = 0; i < boundary && i < static_cast<int>(line->slots.size()); ++i) {
+        if (line->slots[static_cast<std::size_t>(i)] != drag_image_) ++index;
+    }
+    return index;
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
@@ -219,6 +261,19 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 
     if (scrubbing_) {
         setCurrentSlot(slotAt(x));
+        return;
+    }
+
+    if (may_drag_ && !dragging_ && std::abs(x - press_x_) >= kDragThreshold) {
+        dragging_ = true;
+        setCursor(Qt::ClosedHandCursor);
+    }
+    if (dragging_) {
+        const int drop = dropIndexFor(x);
+        if (drop != drop_index_) {
+            drop_index_ = drop;
+            update();
+        }
         return;
     }
 
@@ -236,13 +291,48 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 
     const bool on_edge = isOnRunEdge(x, nullptr);
-    if (on_edge != hovering_edge_) {
-        hovering_edge_ = on_edge;
-        setCursor(on_edge ? Qt::SplitHCursor : Qt::ArrowCursor);
+    if (on_edge) {
+        if (!hovering_edge_) {
+            hovering_edge_ = true;
+            setCursor(Qt::SplitHCursor);
+        }
+        return;
     }
+    hovering_edge_ = false;
+
+    const Timeline* line = timeline();
+    const std::size_t slot = slotAt(x);
+    const bool on_card = line && slot < line->slots.size() && runAt(slot).first == slot;
+    setCursor(on_card ? Qt::OpenHandCursor : Qt::ArrowCursor);
 }
 
 void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
+    if (dragging_) {
+        const ImageId moved = drag_image_;
+        const int drop = drop_index_;
+        dragging_ = false;
+        may_drag_ = false;
+        drag_image_ = kNoId;
+        drop_index_ = -1;
+        setCursor(Qt::ArrowCursor);
+
+        if (drop >= 0) {
+            doc_.moveDrawing(timeline_, moved, static_cast<std::size_t>(drop));
+            refresh();
+            const Timeline* line = timeline();
+            if (line) {
+                auto it = std::find(line->slots.begin(), line->slots.end(), moved);
+                if (it != line->slots.end()) {
+                    setCurrentSlot(
+                        static_cast<std::size_t>(std::distance(line->slots.begin(), it)));
+                }
+            }
+            Q_EMIT documentChanged();
+        }
+        return;
+    }
+    may_drag_ = false;
+
     if (scrubbing_) {
         scrubbing_ = false;
         return;

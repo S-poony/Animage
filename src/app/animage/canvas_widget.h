@@ -139,6 +139,7 @@ private:
     // when the frame, the view or the settings do, so a stroke does not pay to
     // recomposite the neighbouring drawings on every dab.
     animage::Framebuffer onion_;
+    bool onion_dirty_ = false;
     OnionSettings onion_settings_;
     std::size_t slot_ = 0;
     bool playing_ = false;

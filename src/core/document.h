@@ -51,6 +51,11 @@ public:
     // Removes the drawing and every slot showing it, in one command.
     void removeDrawing(TimelineId timeline, ImageId image);
 
+    // Moves a drawing, and the whole run of frames it is held over, so that it
+    // starts at `destination` in the timeline as it will be once the drawing
+    // has been lifted out. Reordering only: no cel is touched.
+    void moveDrawing(TimelineId timeline, ImageId image, std::size_t destination);
+
     // Deep copy: new ImageId and a new CelId per layer. The tiles themselves
     // are shared until one side is drawn on, so the copy is nearly free but the
     // two images are genuinely independent.

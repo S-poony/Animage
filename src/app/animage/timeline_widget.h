@@ -46,6 +46,7 @@ private:
     bool isOnRunEdge(int x, std::size_t* run_start) const;
     std::vector<int> drawingNumbers() const;
     void applyStretch(int pointer_x);
+    int dropIndexFor(int pointer_x) const;
 
     animage::Document& doc_;
     animage::TimelineId timeline_ = animage::kNoId;
@@ -58,4 +59,14 @@ private:
     // Dragging in the ruler band scrubs. Keeping it in its own strip is what
     // stops a scrub from turning into an exposure change by accident.
     bool scrubbing_ = false;
+
+    // Dragging the body of a numbered card reorders the drawing. Only the
+    // numbered card can start one: a held frame is not a thing in its own
+    // right, it is the same drawing still showing, so there is nothing there
+    // to pick up.
+    bool may_drag_ = false;      // pressed on a card, not yet moved far enough
+    bool dragging_ = false;
+    animage::ImageId drag_image_ = animage::kNoId;
+    int press_x_ = 0;
+    int drop_index_ = -1;        // insertion point, in slots-without-the-drawing
 };

@@ -206,6 +206,34 @@ void Document::removeDrawing(TimelineId timeline_id, ImageId image_id) {
     }
 }
 
+void Document::moveDrawing(TimelineId timeline_id, ImageId image_id, std::size_t destination) {
+    Timeline* timeline = scene_.findTimeline(timeline_id);
+    if (!timeline || image_id == kNoId) return;
+
+    // A drawing and its holds are one contiguous run, and they travel together:
+    // moving a drawing without its exposure would silently change the timing.
+    std::vector<ImageId> remaining;
+    remaining.reserve(timeline->slots.size());
+    std::size_t held = 0;
+    for (ImageId id : timeline->slots) {
+        if (id == image_id) {
+            ++held;
+        } else {
+            remaining.push_back(id);
+        }
+    }
+    if (held == 0) return;
+
+    const std::size_t at = std::min(destination, remaining.size());
+    std::vector<ImageId> moved = remaining;
+    moved.insert(moved.begin() + static_cast<std::ptrdiff_t>(at), held, image_id);
+    if (moved == timeline->slots) return;
+
+    ScopedCommand command(*this, "Move drawing");
+    recordOp(std::make_unique<SlotsOp>(timeline_id, timeline->slots));
+    timeline->slots = std::move(moved);
+}
+
 ImageId Document::duplicateImage(TimelineId timeline_id, std::size_t slot) {
     Timeline* timeline = scene_.findTimeline(timeline_id);
     if (!timeline || slot >= timeline->slots.size()) return kNoId;

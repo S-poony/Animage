@@ -246,6 +246,82 @@ void runBoundsCoverTheWholeHold() {
     CHECK_EQ(f.tl().imageAtSlot(11), b);
 }
 
+// Dragging a drawing in the timeline reorders it. Its holds travel with it:
+// moving a drawing without its exposure would silently change the timing.
+void movingADrawingCarriesItsHolds() {
+    TEST("a moved drawing takes its holds with it");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    f.doc.extendExposure(f.timeline, 0, 2);  // a held for 3
+    const ImageId b = f.doc.insertImage(f.timeline, 3);
+    const ImageId c = f.doc.insertImage(f.timeline, 4);
+    paintDot(f.doc, f.timeline, a, f.layer, 25.0f, 25.0f);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{5});
+
+    const std::size_t cels = f.doc.celCount();
+    const std::size_t tiles = f.doc.totalTileCount();
+    const std::size_t before = f.doc.undoDepth();
+
+    // Drop a after both b and c: with a lifted out the timeline is [b, c], so
+    // the destination index is 2.
+    f.doc.moveDrawing(f.timeline, a, 2);
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{5});
+    CHECK_EQ(f.tl().imageAtSlot(0), b);
+    CHECK_EQ(f.tl().imageAtSlot(1), c);
+    CHECK_EQ(f.tl().imageAtSlot(2), a);
+    CHECK_EQ(f.tl().imageAtSlot(3), a);
+    CHECK_EQ(f.tl().imageAtSlot(4), a);
+    CHECK_EQ(f.tl().exposureOf(a), std::size_t{3});
+
+    // Reordering only: nothing was drawn, copied or thrown away.
+    CHECK_EQ(f.doc.celCount(), cels);
+    CHECK_EQ(f.doc.totalTileCount(), tiles);
+    CHECK_EQ(f.doc.undoDepth(), before + 1);
+
+    const Cel* kept = f.doc.celAt(f.timeline, a, f.layer);
+    CHECK(kept != nullptr);
+    CHECK_NEAR(kept->pixel(25, 25).a, 1.0, 1e-2);
+
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.tl().imageAtSlot(0), a);
+    CHECK_EQ(f.tl().imageAtSlot(3), b);
+    CHECK_EQ(f.tl().imageAtSlot(4), c);
+}
+
+void movingADrawingToWhereItAlreadyIsDoesNothing() {
+    TEST("dropping a drawing where it already is records no command");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    f.doc.insertImage(f.timeline, 1);
+    const std::size_t before = f.doc.undoDepth();
+
+    f.doc.moveDrawing(f.timeline, a, 0);
+    CHECK_EQ(f.doc.undoDepth(), before);
+    CHECK_EQ(f.tl().imageAtSlot(0), a);
+
+    // Past the end clamps rather than losing the drawing.
+    f.doc.moveDrawing(f.timeline, a, 999);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{2});
+    CHECK_EQ(f.tl().imageAtSlot(1), a);
+}
+
+// The interface only offers a drag from the numbered card, and runBounds is
+// what tells it which slot that is.
+void onlyTheFirstSlotOfARunIsTheCard() {
+    TEST("only the first slot of a hold is the drawing's card");
+    Fixture f;
+    f.doc.insertImage(f.timeline, 0);
+    f.doc.extendExposure(f.timeline, 0, 4);
+    f.doc.insertImage(f.timeline, 5);
+
+    CHECK(f.tl().runBounds(0).first == 0);
+    for (std::size_t slot = 1; slot <= 4; ++slot) {
+        CHECK(f.tl().runBounds(slot).first != slot);  // a held frame, not a card
+    }
+    CHECK(f.tl().runBounds(5).first == 5);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -266,6 +342,9 @@ int main() {
     deletingADrawingTakesEveryFrameOfIt();
     clearingALayerLeavesOtherDrawingsAlone();
     runBoundsCoverTheWholeHold();
+    movingADrawingCarriesItsHolds();
+    movingADrawingToWhereItAlreadyIsDoesNothing();
+    onlyTheFirstSlotOfARunIsTheCard();
     layerNamesStayUnique();
     stretchingExposureIsOneUndoStep();
     holdingCostsNothing();
