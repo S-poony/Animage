@@ -322,6 +322,38 @@ void onlyTheFirstSlotOfARunIsTheCard() {
     CHECK(f.tl().runBounds(5).first == 5);
 }
 
+// A drawing keeps the number it was born with. Deriving it from position meant
+// dragging a drawing renumbered it, which is precisely the moment you need to
+// know which one you are holding.
+void drawingNumbersSurviveReordering() {
+    TEST("a drawing keeps its number when the timing changes");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    const ImageId b = f.doc.insertImage(f.timeline, 1);
+    const ImageId c = f.doc.insertImage(f.timeline, 2);
+
+    CHECK_EQ(f.tl().findImage(a)->number, 1);
+    CHECK_EQ(f.tl().findImage(b)->number, 2);
+    CHECK_EQ(f.tl().findImage(c)->number, 3);
+
+    f.doc.moveDrawing(f.timeline, c, 0);  // drag the last drawing to the front
+    CHECK_EQ(f.tl().imageAtSlot(0), c);
+    CHECK_EQ(f.tl().findImage(c)->number, 3);  // still 3, though it is now first
+    CHECK_EQ(f.tl().findImage(a)->number, 1);
+    CHECK_EQ(f.tl().findImage(b)->number, 2);
+
+    // Holding it does not change it either, and a copy is a new drawing.
+    f.doc.extendExposure(f.timeline, 0, 3);
+    CHECK_EQ(f.tl().findImage(c)->number, 3);
+    const ImageId copy = f.doc.duplicateImage(f.timeline, 0);
+    CHECK_EQ(f.tl().findImage(copy)->number, 4);
+
+    // And a number is never reused, even after the drawing is gone.
+    f.doc.removeDrawing(f.timeline, copy);
+    const ImageId fresh = f.doc.insertImage(f.timeline, 0);
+    CHECK_EQ(f.tl().findImage(fresh)->number, 5);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -345,6 +377,7 @@ int main() {
     movingADrawingCarriesItsHolds();
     movingADrawingToWhereItAlreadyIsDoesNothing();
     onlyTheFirstSlotOfARunIsTheCard();
+    drawingNumbersSurviveReordering();
     layerNamesStayUnique();
     stretchingExposureIsOneUndoStep();
     holdingCostsNothing();

@@ -28,6 +28,10 @@ struct Timeline {
     BlendMode blend = BlendMode::Normal;
     int time_offset = 0;
 
+    // Counts up and is never reused, for the same reason CelIds are not: a
+    // number that comes back means two drawings in one scene answer to it.
+    int next_drawing_number = 1;
+
     const Layer* findLayer(LayerId id) const {
         auto it = std::find_if(layers.begin(), layers.end(),
                                [&](const Layer& l) { return l.id == id; });

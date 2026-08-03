@@ -111,23 +111,18 @@ bool TimelineWidget::isOnRunEdge(int x, std::size_t* run_start) const {
     return true;
 }
 
-// The drawing number an animator would write on the paper: the count of
-// distinct drawings so far, not the frame index.
+// The number the drawing was born with, read straight off the Image. Deriving
+// it from position instead meant a drawing renumbered itself the moment it was
+// dragged, which is precisely when you need to know which one you are holding.
 std::vector<int> TimelineWidget::drawingNumbers() const {
     const Timeline* line = timeline();
     std::vector<int> numbers;
     if (!line) return numbers;
 
     numbers.reserve(line->slots.size());
-    std::vector<ImageId> seen;
     for (ImageId id : line->slots) {
-        auto it = std::find(seen.begin(), seen.end(), id);
-        if (it == seen.end()) {
-            seen.push_back(id);
-            numbers.push_back(static_cast<int>(seen.size()));
-        } else {
-            numbers.push_back(static_cast<int>(it - seen.begin()) + 1);
-        }
+        const Image* image = line->findImage(id);
+        numbers.push_back(image ? image->number : 0);
     }
     return numbers;
 }

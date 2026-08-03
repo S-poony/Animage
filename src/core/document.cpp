@@ -145,6 +145,7 @@ ImageId Document::insertImage(TimelineId timeline_id, std::size_t slot) {
 
     Image image;
     image.id = image_ids_.next();
+    image.number = timeline->next_drawing_number++;
     const ImageId id = image.id;
     recordOp(std::make_unique<ImageOp>(timeline_id, id, std::nullopt));
 
@@ -244,6 +245,7 @@ ImageId Document::duplicateImage(TimelineId timeline_id, std::size_t slot) {
 
     Image copy;
     copy.id = image_ids_.next();
+    copy.number = timeline->next_drawing_number++;  // a copy is a new drawing
     copy.marker = source->marker;
     for (const auto& [layer_id, cel_id] : source->cels) {
         const Cel* original = cel(cel_id);

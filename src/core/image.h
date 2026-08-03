@@ -14,6 +14,12 @@ namespace animage {
 struct Image {
     ImageId id = kNoId;
 
+    // The number an animator would write on the paper. Assigned when the
+    // drawing is made and kept for life: a drawing that renumbers itself when
+    // the timing changes cannot be talked about, and reordering the timeline is
+    // exactly when you most need to know which one you are holding.
+    int number = 0;
+
     // Sparse. A missing entry means the layer is empty here, which is why
     // adding a layer touches no image and adding an interval allocates nothing.
     std::unordered_map<LayerId, CelId> cels;
