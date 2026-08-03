@@ -51,10 +51,37 @@ Then run the CMake commands above from a UCRT64 shell.
 
 | Path | Contents |
 |---|---|
-| `src/core/` | Data model, tiles, undo, colour. Pure C++20, no Qt. |
+| `src/core/` | Data model, tiles, brush, compositor, undo, colour. Pure C++20, no Qt. |
+| `src/app/animage/` | The application. |
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests for the core. |
 | `docs/fr/` | Original design documents. |
+
+## Running it
+
+Double-click `run-animage.bat`, or:
+
+```bash
+cmake --build build --target animage && ./build/src/app/animage
+```
+
+Currently at M2: one image of one timeline, drawn on with a pressure brush.
+There is no timeline UI and nothing can be saved yet.
+
+| | |
+|---|---|
+| Draw | pen, or left mouse |
+| `B` / `E` | brush / eraser (turning the stylus over also erases) |
+| `[` / `]` | smaller / larger |
+| Wheel | zoom about the pointer |
+| Space-drag, middle-drag | pan |
+| `1` / `0` | actual size / fit the drawing |
+| `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
+
+The layer panel on the right adds, removes, reorders, hides and fades layers.
+Layers belong to the timeline rather than to the image, which is the point of
+the whole model — with only one image visible that is not yet observable, and
+it becomes so at M3.
 
 ## Measuring pen latency
 
