@@ -312,8 +312,14 @@ void MainWindow::buildLayerPanel() {
     };
 
 
-    auto* add = panelButton(QStringLiteral("Add layer"), &MainWindow::addLayer);
-    (void)add;
+    panelButton(QStringLiteral("Add layer"), &MainWindow::addLayer);
+
+    auto* colour_layer =
+        panelButton(QStringLiteral("Add colour layer"), &MainWindow::addColourLayer);
+    colour_layer->setToolTip(
+        QStringLiteral("A layer that holds scribbles rather than colour.\n"
+                       "Scrawl roughly inside a region with the ordinary brush and the\n"
+                       "whole region takes that colour, gaps in the line art included."));
 
     panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
     panelButton(QStringLiteral("Move up"), [this] { moveCurrentLayer(-1); });
@@ -621,7 +627,13 @@ void MainWindow::rebuildLayerList() {
     int active_row = 0;
     for (std::size_t i = 0; i < timeline->layers.size(); ++i) {
         const Layer& layer = timeline->layers[i];
-        auto* item = new QListWidgetItem(QString::fromStdString(layer.name), layer_list_);
+        QString label = QString::fromStdString(layer.name);
+        if (layer.kind == LayerKind::Ctg) {
+            label += QStringLiteral("   [colour, %1 source%2]")
+                         .arg(layer.ctg_sources.size())
+                         .arg(layer.ctg_sources.size() == 1 ? "" : "s");
+        }
+        auto* item = new QListWidgetItem(label, layer_list_);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
         if (layer.id == active) active_row = static_cast<int>(i);
@@ -723,6 +735,47 @@ void MainWindow::addLayer() {
     canvas_->setActiveLayer(created);
     rebuildLayerList();
     canvas_->refreshAll();
+}
+
+// Every raster layer becomes a barrier by default. Cutting against the rough as
+// well as the clean closes gaps that leak from either alone, and there is no
+// good reason to make someone ask for that.
+void MainWindow::addColourLayer() {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return;
+
+    const int row = layer_list_ ? std::max(0, layer_list_->currentRow()) : 0;
+
+    doc_.beginCommand("Add colour layer");
+    const LayerId created =
+        doc_.addLayer(timeline_, nextColourLayerName(), static_cast<std::size_t>(row),
+                      LayerKind::Ctg);
+
+    const Timeline* after = doc_.scene().findTimeline(timeline_);
+    if (after) {
+        Layer settings = *after->findLayer(created);
+        for (const Layer& layer : after->layers) {
+            if (layer.kind == LayerKind::Raster) settings.ctg_sources.push_back(layer.id);
+        }
+        doc_.updateLayer(timeline_, created, settings);
+    }
+    doc_.endCommand();
+
+    canvas_->setActiveLayer(created);
+    rebuildLayerList();
+    canvas_->refreshAll();
+}
+
+std::string MainWindow::nextColourLayerName() const {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return "colour 1";
+    for (std::size_t n = 1;; ++n) {
+        const std::string candidate = "colour " + std::to_string(n);
+        const bool taken =
+            std::any_of(timeline->layers.begin(), timeline->layers.end(),
+                        [&](const Layer& l) { return l.name == candidate; });
+        if (!taken) return candidate;
+    }
 }
 
 void MainWindow::removeCurrentLayer() {

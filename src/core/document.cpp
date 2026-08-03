@@ -312,6 +312,18 @@ void Document::clearCel(TimelineId timeline_id, ImageId image_id, LayerId layer_
     releaseCelRef(cel_id);
 }
 
+const CtgFill* Document::ctgFillFor(TimelineId timeline_id, ImageId image_id,
+                                    LayerId layer_id) const {
+    const Timeline* timeline = scene_.findTimeline(timeline_id);
+    if (!timeline) return nullptr;
+    const Image* image = timeline->findImage(image_id);
+    if (!image) return nullptr;
+
+    auto found = ctg_cache_.find(image->celFor(layer_id));
+    if (found == ctg_cache_.end() || !found->second.valid) return nullptr;
+    return &found->second;
+}
+
 std::size_t Document::totalTileCount() const {
     std::size_t total = 0;
     for (const auto& [id, cel] : cels_) total += cel->tiles().tileCount();

@@ -81,6 +81,12 @@ public:
     // Kept here rather than on the Cel because it is derived data: losing it
     // costs a recompute and nothing else.
     std::unordered_map<CelId, CtgFill>& ctgCache() { return ctg_cache_; }
+    const std::unordered_map<CelId, CtgFill>& ctgCache() const { return ctg_cache_; }
+
+    // The regenerated fill for a CTG layer, or null if it has not been built.
+    // Const, so the compositor can draw one but never trigger a solve: the
+    // caller decides when it is worth paying for.
+    const CtgFill* ctgFillFor(TimelineId timeline, ImageId image, LayerId layer) const;
     std::size_t totalTileCount() const;
 
     // --- history ---------------------------------------------------------

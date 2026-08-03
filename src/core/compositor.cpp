@@ -18,12 +18,10 @@ namespace {
 // empty, and a fully transparent premultiplied pixel contributes nothing, so
 // skipping on a single 16-bit compare avoids four table lookups and a blend for
 // the large majority of pixels.
-void blendLayerRows(const Cel& cel, const Layer& layer, const PixelRect& region, int step,
+void blendLayerRows(const TileGrid& grid, const Layer& layer, const PixelRect& region, int step,
                     int y_begin, int y_end, Framebuffer& out) {
     const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
     if (layer_opacity <= 0.0f) return;
-
-    const TileGrid& grid = cel.tiles();
     if (grid.empty()) return;
 
     const bool faded = layer_opacity < 1.0f;
@@ -135,7 +133,7 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     // Bottom upwards: each layer goes over the accumulated result, and the
     // list is topmost first. Resolved once, before any threads start.
     struct Pass {
-        const Cel* cel;
+        const TileGrid* tiles;
         const Layer* layer;
     };
     std::vector<Pass> passes;
@@ -143,9 +141,19 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
         const Layer* layer = timeline->findLayer(*it);
         if (!layer || !layer->visible) continue;
+
+        // A CTG layer shows its regenerated fill, never the scribbles that
+        // produced it. If no fill has been built yet the layer simply does not
+        // draw -- compositing is not the place to start a max-flow.
+        if (layer->kind == LayerKind::Ctg) {
+            const CtgFill* fill = doc.ctgFillFor(timeline_id, image_id, *it);
+            if (fill) passes.push_back({&fill->tiles, layer});
+            continue;
+        }
+
         const Cel* cel = doc.cel(image->celFor(*it));
         if (!cel) continue;  // no cel means the layer is empty here
-        passes.push_back({cel, layer});
+        passes.push_back({&cel->tiles(), layer});
     }
     if (passes.empty()) return;
 
@@ -157,7 +165,7 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
 
     const auto run_band = [&](int y_begin, int y_end) {
         for (const Pass& pass : passes) {
-            blendLayerRows(*pass.cel, *pass.layer, region, step, y_begin, y_end, out);
+            blendLayerRows(*pass.tiles, *pass.layer, region, step, y_begin, y_end, out);
         }
     };
 

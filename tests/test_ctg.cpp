@@ -3,6 +3,7 @@
 // The CTG layer: scribbles in, fill out, and the fill is never what is stored.
 
 #include "brush.h"
+#include "compositor.h"
 #include "ctg.h"
 #include "testing.h"
 
@@ -219,6 +220,36 @@ void aCoarseSolveAgreesWithTheFineOne() {
     CHECK_NEAR(fillAt(quick, 130, 220).b, 1.0, 0.02);
 }
 
+// What the compositor puts on screen for a CTG layer is the fill, never the
+// scribbles -- so the scrawl you made disappears the moment it takes effect.
+void theCompositorShowsTheFillNotTheScribbles() {
+    TEST("the compositor draws the fill, not the scribbles");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
+
+    Compositor compositor;
+    Framebuffer frame;
+    const PixelRect region{0, 0, 260, 240};
+
+    // Before anything is solved the layer draws nothing at all: compositing is
+    // not allowed to start a max-flow behind the caller's back.
+    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(130, 160).a, 0.0, 1e-3);
+
+    ctgFill(f.doc, f.timeline, f.image, f.colour);
+    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+
+    // Now the region is filled, at a spot no scribble ever touched.
+    const Rgba inside = frame.pixel(130, 160);
+    CHECK_NEAR(inside.a, 1.0, 0.02);
+    CHECK_NEAR(inside.r, 1.0, 0.02);
+
+    // And the line art still sits on top of its own colour.
+    CHECK_NEAR(frame.pixel(130, 60).a, 1.0, 0.05);
+}
+
 }  // namespace
 
 int main() {
@@ -230,5 +261,6 @@ int main() {
     twoBarrierLayersClosseEachOthersGaps();
     noScribblesMeansNoFill();
     aCoarseSolveAgreesWithTheFineOne();
+    theCompositorShowsTheFillNotTheScribbles();
     return testing::summarise("ctg");
 }

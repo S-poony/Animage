@@ -156,6 +156,27 @@ void CanvasWidget::setPlaying(bool playing) {
     refreshAll();
 }
 
+// Rebuilds any CTG fill whose scribbles or line art have moved. Regenerating is
+// skipped entirely when nothing has changed, so this is a few comparisons in
+// the common case; the cost only appears when there is something new to solve.
+//
+// Done here rather than inside the compositor on purpose: a max-flow is not
+// something a paint should be able to start by accident.
+void CanvasWidget::refreshCtgFills() {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || image_ == kNoId) return;
+
+    CtgSettings settings;
+    // Coarse while the pen is down, exact once it lifts. A blocky fill that
+    // keeps up is worth more mid-stroke than an exact one that does not.
+    settings.downscale = stroking_ ? 4 : 1;
+
+    for (const Layer& layer : timeline->layers) {
+        if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
+        ctgFill(doc_, timeline_, image_, layer.id, settings);
+    }
+}
+
 // Flattens the neighbouring drawings into one tinted, faded layer. Previous
 // drawings go warm and later ones cool, which is the convention every animator
 // already reads without being told.
@@ -378,6 +399,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     // All the compositing for this frame happens here, once, however many
     // edits arrived since the last paint.
+    refreshCtgFills();
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;
@@ -420,6 +442,15 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
 
     BrushSettings settings = (stylus_eraser_ || erasing_) ? eraser_settings_ : brush_settings_;
     settings.erase = stylus_eraser_ || erasing_;
+
+    // On a CTG layer the stroke is a label, not paint. Pressure must not thin
+    // the mark into a half-vote for a colour, and a soft rim would be read as
+    // scribbled or not depending on a threshold, which is no way to decide.
+    if (layer->kind == LayerKind::Ctg) {
+        settings.pressure_affects_opacity = false;
+        settings.hardness = 1.0f;
+        settings.opacity = 1.0f;
+    }
     brush_.settings() = settings;
 
     doc_.beginCommand(settings.erase ? "Erase" : "Stroke");

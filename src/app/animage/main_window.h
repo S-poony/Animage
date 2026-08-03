@@ -41,6 +41,7 @@ private:
     void refreshEverything();
 
     void addLayer();
+    void addColourLayer();
     void removeCurrentLayer();
     void moveCurrentLayer(int delta);
     void onLayerSelected();
@@ -50,6 +51,7 @@ private:
     void endOpacityDrag();
     void clearCurrentLayer();
     std::string nextLayerName() const;
+    std::string nextColourLayerName() const;
     void chooseColour();
     void syncToolSettings();
     void setBrushRadius(double radius);

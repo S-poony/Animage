@@ -7,6 +7,7 @@
 
 #include "brush.h"
 #include "compositor.h"
+#include "ctg.h"
 #include "document.h"
 
 // The drawing surface. Shows one image of one timeline, composited, and turns
@@ -97,6 +98,7 @@ private:
     void markDirty(const animage::PixelRect& region);
     void repaintImageRect(const animage::PixelRect& region);
     void rebuildOnion();
+    void refreshCtgFills();
 
     void beginStroke(const QPointF& image_point, float pressure);
     void extendStroke(const QPointF& image_point, float pressure);
