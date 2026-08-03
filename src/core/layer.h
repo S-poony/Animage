@@ -39,6 +39,11 @@ struct Layer {
     // allowed on purpose — combining rough and clean closes most of the gaps
     // that leak with a single source.
     std::vector<LayerId> ctg_sources;
+
+    // Show the scribbles instead of the fill they produce. A view setting, not
+    // a property of the drawing: what is on the layer does not change, only
+    // which of the two you are looking at.
+    bool show_scribbles = false;
 };
 
 }  // namespace animage

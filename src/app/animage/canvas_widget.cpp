@@ -462,6 +462,17 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
 
     last_image_point_ = image_point;
     last_pressure_ = pressure;
+    scribbling_ = layer->kind == LayerKind::Ctg;
+
+    // A scribble changes the fill across the whole region, not just where the
+    // pen went, so there is nothing useful to mark dirty. Repainting only the
+    // stroke's own rectangle left the rest of the region showing the previous
+    // colour until some unrelated event forced a repaint -- which looked for
+    // all the world like paint left on the brush.
+    if (scribbling_) {
+        refreshAll();
+        return;
+    }
 
     const int radius = static_cast<int>(std::ceil(settings.radius)) + 2;
     markDirty({static_cast<int>(std::floor(image_point.x())) - radius,
@@ -476,6 +487,13 @@ void CanvasWidget::extendStroke(const QPointF& image_point, float pressure) {
 
     brush_.extend({static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
                    pressure});
+
+    if (scribbling_) {
+        last_image_point_ = image_point;
+        last_pressure_ = pressure;
+        refreshAll();
+        return;
+    }
 
     const int radius = static_cast<int>(std::ceil(brush_.settings().radius)) + 2;
     const QRectF segment = QRectF(last_image_point_, image_point).normalized();
@@ -511,6 +529,13 @@ void CanvasWidget::endStroke() {
     doc_.endCommand();
     stroking_ = false;
     stylus_eraser_ = false;
+
+    // The pen lifting is what triggers the full-resolution solve, so the fill
+    // has to be rebuilt and redrawn even though nothing else changed.
+    if (scribbling_) {
+        scribbling_ = false;
+        refreshAll();
+    }
     Q_EMIT documentChanged();
 }
 

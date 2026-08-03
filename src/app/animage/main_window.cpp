@@ -321,6 +321,12 @@ void MainWindow::buildLayerPanel() {
                        "Scrawl roughly inside a region with the ordinary brush and the\n"
                        "whole region takes that colour, gaps in the line art included."));
 
+    auto* scribbles = panelButton(QStringLiteral("Show scribbles"),
+                                  &MainWindow::toggleShowScribbles);
+    scribbles->setToolTip(
+        QStringLiteral("Look at the scribbles on a colour layer instead of the fill.\n"
+                       "Changes nothing about the drawing, only what is shown."));
+
     panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
     panelButton(QStringLiteral("Move up"), [this] { moveCurrentLayer(-1); });
     panelButton(QStringLiteral("Move down"), [this] { moveCurrentLayer(1); });
@@ -629,9 +635,10 @@ void MainWindow::rebuildLayerList() {
         const Layer& layer = timeline->layers[i];
         QString label = QString::fromStdString(layer.name);
         if (layer.kind == LayerKind::Ctg) {
-            label += QStringLiteral("   [colour, %1 source%2]")
-                         .arg(layer.ctg_sources.size())
-                         .arg(layer.ctg_sources.size() == 1 ? "" : "s");
+            label += layer.show_scribbles ? QStringLiteral("   [scribbles]")
+                                          : QStringLiteral("   [colour, %1 source%2]")
+                                                .arg(layer.ctg_sources.size())
+                                                .arg(layer.ctg_sources.size() == 1 ? "" : "s");
         }
         auto* item = new QListWidgetItem(label, layer_list_);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
@@ -776,6 +783,17 @@ std::string MainWindow::nextColourLayerName() const {
                         [&](const Layer& l) { return l.name == candidate; });
         if (!taken) return candidate;
     }
+}
+
+void MainWindow::toggleShowScribbles() {
+    Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Ctg) return;
+
+    Layer updated = *layer;
+    updated.show_scribbles = !updated.show_scribbles;
+    doc_.updateLayer(timeline_, updated.id, updated);
+    rebuildLayerList();
+    canvas_->refreshAll();
 }
 
 void MainWindow::removeCurrentLayer() {

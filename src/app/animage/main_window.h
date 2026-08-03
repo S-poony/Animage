@@ -43,6 +43,7 @@ private:
     void addLayer();
     void addColourLayer();
     void removeCurrentLayer();
+    void toggleShowScribbles();
     void moveCurrentLayer(int delta);
     void onLayerSelected();
     void onLayerItemChanged(QListWidgetItem* item);

@@ -145,7 +145,7 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
         // A CTG layer shows its regenerated fill, never the scribbles that
         // produced it. If no fill has been built yet the layer simply does not
         // draw -- compositing is not the place to start a max-flow.
-        if (layer->kind == LayerKind::Ctg) {
+        if (layer->kind == LayerKind::Ctg && !layer->show_scribbles) {
             const CtgFill* fill = doc.ctgFillFor(timeline_id, image_id, *it);
             if (fill) passes.push_back({&fill->tiles, layer});
             continue;

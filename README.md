@@ -15,8 +15,12 @@ rough mark inside a region and a max-flow/min-cut finds the best possible
 boundary, tolerating gaps in the line art. Because only the scribbles are
 stored, the fill regenerates whenever the drawing or the scribble changes.
 
-Status: **prototype**. Nothing here is usable for real work yet. See
-[the milestone plan](docs/fr/plan-de-prototype.md).
+Status: **prototype**. You can draw, animate and colour; you cannot save. M0
+through M4 of [the plan](docs/fr/plan-de-prototype.md) exist, M5 does not.
+
+If you are picking this up, read [docs/handover.md](docs/handover.md) first: it
+records what was built, where it deliberately departs from the plan, and the
+mistakes that cost the most time.
 
 ## Design documents
 
@@ -92,7 +96,8 @@ included. What is stored is the scrawl, not the fill, so moving a scribble
 recolours the region and redrawing the line art re-cuts it.
 
 Every ordinary layer becomes a barrier for it automatically. Cutting against a
-rough as well as a clean closes gaps that leak from either alone.
+rough as well as a clean closes gaps that leak from either alone. "Show
+scribbles" looks at the marks instead of the fill.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the timeline rather than to the image, which is the point of

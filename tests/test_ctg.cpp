@@ -250,10 +250,36 @@ void theCompositorShowsTheFillNotTheScribbles() {
     CHECK_NEAR(frame.pixel(130, 60).a, 1.0, 0.05);
 }
 
+// One scribble should fill one shape. Without an implicit background the solver
+// has nothing to cut against, labels the whole canvas, and filling a shape means
+// scribbling twice -- once for the shape and once for the world outside it.
+void oneScribbleFillsOneShape() {
+    TEST("one scribble fills one shape and leaves the rest alone");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+
+    // Only the inside is scribbled. Nothing marks the background.
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    CHECK(fill.valid);
+    CHECK_EQ(fill.colours, 1);
+
+    // The shape is filled, well away from the scribble itself.
+    CHECK_NEAR(fillAt(fill, 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 80, 90).r, 1.0, 0.02);
+
+    // And the world outside it is untouched, including just past the gap.
+    CHECK_NEAR(fillAt(fill, 130, 215).a, 0.0, 1e-3);
+    CHECK_NEAR(fillAt(fill, 20, 20).a, 0.0, 1e-3);
+    CHECK_NEAR(fillAt(fill, 240, 220).a, 0.0, 1e-3);
+}
+
 }  // namespace
 
 int main() {
     std::printf("ctg:\n");
+    oneScribbleFillsOneShape();
     aScribbleFillsItsRegion();
     theLayerStoresScribblesNotTheFill();
     editingAScribbleRecoloursTheWholeRegion();
