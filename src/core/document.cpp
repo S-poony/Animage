@@ -328,6 +328,13 @@ bool Document::redo() {
     return true;
 }
 
+void Document::clearHistory() {
+    undo_stack_.clear();
+    redo_stack_.clear();
+    // Cels the history was keeping alive can go now.
+    collectGarbage();
+}
+
 bool Document::historyReferences(CelId id) const {
     std::vector<CelId> ids;
     auto scan = [&](const std::vector<Command>& stack) {

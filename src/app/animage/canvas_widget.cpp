@@ -79,10 +79,88 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     brush_.settings() = settings;
 }
 
-void CanvasWidget::setTarget(TimelineId timeline, ImageId image) {
+void CanvasWidget::setTimeline(TimelineId timeline) {
     timeline_ = timeline;
-    image_ = image;
+    setFrame(slot_);
+}
+
+void CanvasWidget::setFrame(std::size_t slot) {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return;
+
+    slot_ = std::min(slot, timeline->slots.empty() ? std::size_t{0}
+                                                   : timeline->slots.size() - 1);
+    image_ = timeline->imageAtSlot(slot_);
+    rebuildOnion();
     refreshAll();
+}
+
+void CanvasWidget::setOnion(const OnionSettings& settings) {
+    onion_settings_ = settings;
+    rebuildOnion();
+    refreshAll();
+}
+
+void CanvasWidget::setPlaying(bool playing) {
+    if (playing_ == playing) return;
+    playing_ = playing;
+    rebuildOnion();
+    refreshAll();
+}
+
+// Flattens the neighbouring drawings into one tinted, faded layer. Previous
+// drawings go warm and later ones cool, which is the convention every animator
+// already reads without being told.
+void CanvasWidget::rebuildOnion() {
+    onion_.resize(0, 0);
+    if (playing_ || timeline_ == kNoId) return;
+    if (onion_settings_.before <= 0 && onion_settings_.after <= 0) return;
+
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || cached_region_.isEmpty()) return;
+
+    onion_.resize(cached_region_.width, cached_region_.height);
+
+    struct Ghost {
+        ImageId image;
+        float weight;
+        float r, g, b;
+    };
+    std::vector<Ghost> ghosts;
+
+    const auto collect = [&](int count, int direction, float r, float g, float b) {
+        if (count <= 0) return;
+        const std::vector<ImageId> neighbours =
+            timeline->distinctNeighbours(slot_, count, direction);
+        for (std::size_t i = 0; i < neighbours.size(); ++i) {
+            const float falloff =
+                static_cast<float>(count - static_cast<int>(i)) / static_cast<float>(count);
+            ghosts.push_back({neighbours[i], onion_settings_.opacity * falloff, r, g, b});
+        }
+    };
+    collect(onion_settings_.before, -1, 0.85f, 0.15f, 0.10f);
+    collect(onion_settings_.after, +1, 0.10f, 0.40f, 0.85f);
+
+    // Furthest first, so the nearest drawing ends up on top.
+    std::stable_sort(ghosts.begin(), ghosts.end(),
+                     [](const Ghost& a, const Ghost& b) { return a.weight < b.weight; });
+
+    Framebuffer ghost_frame;
+    for (const Ghost& ghost : ghosts) {
+        compositor_.composite(doc_, timeline_, ghost.image, cached_region_, ghost_frame);
+        for (int y = 0; y < onion_.height(); ++y) {
+            const Rgba* source = ghost_frame.row(y);
+            Rgba* destination = onion_.row(y);
+            for (int x = 0; x < onion_.width(); ++x) {
+                const float alpha = std::clamp(source[x].a, 0.0f, 1.0f) * ghost.weight;
+                if (alpha <= 0.0f) continue;
+                // Tinted silhouette: the shape is what matters, not the colour
+                // the neighbouring drawing happens to be.
+                const Rgba tinted{ghost.r * alpha, ghost.g * alpha, ghost.b * alpha, alpha};
+                destination[x] = over(tinted, destination[x]);
+            }
+        }
+    }
 }
 
 void CanvasWidget::setActiveLayer(LayerId layer) { active_layer_ = layer; }
@@ -123,6 +201,7 @@ void CanvasWidget::ensureCacheCoversView() {
 
     cached_region_ = wanted;
     display_ = QImage(wanted.width, wanted.height, QImage::Format_RGB32);
+    rebuildOnion();
     refreshRegion(wanted);
 }
 
@@ -158,13 +237,19 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
                 background = light ? 1.0f : 0.78f;
             }
 
-            // Source is premultiplied, so this is the paper showing through
-            // whatever transparency is left.
+            // Paper, then the onion skin over it, then the drawing over that.
+            Rgba base{background, background, background, 1.0f};
+            if (!onion_.isEmpty()) {
+                const Rgba ghost = onion_.row(image_y - cached_region_.y)[image_x -
+                                                                          cached_region_.x];
+                base = over(ghost, base);
+            }
+
             const Rgba& pixel = source[x];
             const float keep = 1.0f - std::clamp(pixel.a, 0.0f, 1.0f);
-            const float r = pixel.r + background * keep;
-            const float g = pixel.g + background * keep;
-            const float b = pixel.b + background * keep;
+            const float r = pixel.r + base.r * keep;
+            const float g = pixel.g + base.g * keep;
+            const float b = pixel.b + base.b * keep;
 
             destination[image_x - cached_region_.x] =
                 qRgb(toSrgbByte(r), toSrgbByte(g), toSrgbByte(b));

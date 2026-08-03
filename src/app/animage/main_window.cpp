@@ -7,20 +7,26 @@
 #include <QColorDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenuBar>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStatusBar>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <algorithm>
 
 #include "canvas_widget.h"
 #include "color.h"
+#include "timeline_widget.h"
 
 using namespace animage;
 
@@ -30,20 +36,30 @@ MainWindow::MainWindow() {
 
     timeline_ = doc_.addTimeline("main");
     const LayerId first = doc_.addLayer(timeline_, "layer 1");
-    image_ = doc_.insertImage(timeline_, 0);
+    doc_.insertImage(timeline_, 0);
+    doc_.clearHistory();  // an empty scene is the starting point, not an edit
 
     canvas_ = new CanvasWidget(doc_, this);
-    canvas_->setTarget(timeline_, image_);
+    canvas_->setTimeline(timeline_);
+    canvas_->setFrame(0);
     canvas_->setActiveLayer(first);
     setCentralWidget(canvas_);
 
+    playback_timer_ = new QTimer(this);
+    playback_timer_->setTimerType(Qt::PreciseTimer);
+    connect(playback_timer_, &QTimer::timeout, this, &MainWindow::onPlaybackTick);
+
     buildActions();
     buildLayerPanel();
+    buildTimelinePanel();
     buildStatusBar();
     rebuildLayerList();
 
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
-    connect(canvas_, &CanvasWidget::documentChanged, this, &MainWindow::syncStatus);
+    connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
+        timeline_widget_->refresh();
+        syncStatus();
+    });
     syncStatus();
 
     canvas_->setFocus();
@@ -57,6 +73,31 @@ void MainWindow::buildActions() {
                                            &MainWindow::redo);
     undo_action->setShortcutContext(Qt::ApplicationShortcut);
     redo_action->setShortcutContext(Qt::ApplicationShortcut);
+
+    QMenu* animation = menuBar()->addMenu(QStringLiteral("&Animation"));
+    play_action_ = animation->addAction(QStringLiteral("Play"), QKeySequence(Qt::Key_Return), this,
+                                        &MainWindow::togglePlayback);
+    animation->addSeparator();
+    animation->addAction(QStringLiteral("Previous frame"), QKeySequence(Qt::Key_Left), this,
+                         [this] { stepFrame(-1); });
+    animation->addAction(QStringLiteral("Next frame"), QKeySequence(Qt::Key_Right), this,
+                         [this] { stepFrame(1); });
+    animation->addSeparator();
+    animation->addAction(QStringLiteral("Insert drawing"), QKeySequence(Qt::Key_Insert), this,
+                         &MainWindow::insertInterval);
+    animation->addAction(QStringLiteral("Duplicate drawing"),
+                         QKeySequence(Qt::CTRL | Qt::Key_D), this, &MainWindow::duplicateDrawing);
+    animation->addAction(QStringLiteral("Delete frame"), QKeySequence(Qt::Key_Delete), this,
+                         &MainWindow::deleteFrame);
+    animation->addSeparator();
+    animation->addAction(QStringLiteral("Hold longer"), QKeySequence(Qt::Key_Plus), this,
+                         &MainWindow::extendExposure);
+    animation->addAction(QStringLiteral("Hold shorter"), QKeySequence(Qt::Key_Minus), this,
+                         &MainWindow::shortenExposure);
+
+    for (QAction* action : animation->actions()) {
+        action->setShortcutContext(Qt::ApplicationShortcut);
+    }
 
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
     view->addAction(QStringLiteral("Actual size"), QKeySequence(Qt::Key_1), canvas_,
@@ -121,7 +162,7 @@ void MainWindow::buildActions() {
     // Pressure driving opacity as well as size suits some hands and not
     // others, exactly as in Photoshop. Size stays on pressure regardless;
     // a brush that does not thin out is not worth having on a tablet.
-    pressure_opacity_ = new QCheckBox(QStringLiteral("Pressure \342\206\222 opacity"), this);
+    pressure_opacity_ = new QCheckBox(QStringLiteral("Pressure → opacity"), this);
     pressure_opacity_->setChecked(canvas_->brushSettings().pressure_affects_opacity);
     connect(pressure_opacity_, &QCheckBox::toggled, this, [this](bool on) {
         canvas_->brushSettings().pressure_affects_opacity = on;
@@ -186,6 +227,94 @@ void MainWindow::buildLayerPanel() {
     addDockWidget(Qt::RightDockWidgetArea, dock);
 }
 
+void MainWindow::buildTimelinePanel() {
+    auto* dock = new QDockWidget(QStringLiteral("Timeline"), this);
+    dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+
+    auto* panel = new QWidget(dock);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(4, 4, 4, 4);
+
+    auto* controls = new QWidget(panel);
+    auto* row = new QHBoxLayout(controls);
+    row->setContentsMargins(0, 0, 0, 0);
+
+    const auto button = [&](const QString& text, const QString& tip, auto handler) {
+        auto* b = new QPushButton(text, controls);
+        b->setToolTip(tip);
+        b->setFocusPolicy(Qt::NoFocus);  // keep the pen working after a click
+        connect(b, &QPushButton::clicked, this, handler);
+        row->addWidget(b);
+        return b;
+    };
+
+    button(QStringLiteral("+ Drawing"),
+           QStringLiteral("Insert a new empty drawing after this one (Insert)"),
+           &MainWindow::insertInterval);
+    button(QStringLiteral("Duplicate"),
+           QStringLiteral("Copy this drawing into a new one (Ctrl+D)\n"
+                          "A real copy, not a hold: the cels are independent."),
+           &MainWindow::duplicateDrawing);
+    button(QStringLiteral("Delete frame"), QStringLiteral("Remove this frame (Delete)"),
+           &MainWindow::deleteFrame);
+
+    row->addSpacing(12);
+    button(QStringLiteral("Hold +"),
+           QStringLiteral("Hold this drawing one frame longer (+)\n"
+                          "Repeats the same drawing; costs nothing."),
+           &MainWindow::extendExposure);
+    button(QStringLiteral("Hold -"), QStringLiteral("Hold it one frame less (-)"),
+           &MainWindow::shortenExposure);
+
+    row->addSpacing(16);
+    row->addWidget(new QLabel(QStringLiteral("Onion"), controls));
+    onion_before_ = new QSpinBox(controls);
+    onion_before_->setRange(0, 5);
+    onion_before_->setPrefix(QStringLiteral("-"));
+    onion_before_->setToolTip(QStringLiteral("Drawings shown before this one"));
+    onion_before_->setFocusPolicy(Qt::NoFocus);
+    connect(onion_before_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
+    row->addWidget(onion_before_);
+
+    onion_after_ = new QSpinBox(controls);
+    onion_after_->setRange(0, 5);
+    onion_after_->setPrefix(QStringLiteral("+"));
+    onion_after_->setToolTip(QStringLiteral("Drawings shown after this one"));
+    onion_after_->setFocusPolicy(Qt::NoFocus);
+    connect(onion_after_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
+    row->addWidget(onion_after_);
+
+    row->addSpacing(16);
+    row->addWidget(new QLabel(QStringLiteral("fps"), controls));
+    framerate_ = new QSpinBox(controls);
+    framerate_->setRange(1, 60);
+    framerate_->setValue(doc_.scene().framerate);
+    framerate_->setFocusPolicy(Qt::NoFocus);
+    connect(framerate_, &QSpinBox::valueChanged, this, &MainWindow::setFramerate);
+    row->addWidget(framerate_);
+
+    row->addStretch(1);
+    layout->addWidget(controls);
+
+    timeline_widget_ = new TimelineWidget(doc_, panel);
+    timeline_widget_->setTimeline(timeline_);
+    connect(timeline_widget_, &TimelineWidget::currentSlotChanged, this,
+            &MainWindow::onSlotChanged);
+    connect(timeline_widget_, &TimelineWidget::documentChanged, this,
+            &MainWindow::refreshEverything);
+
+    auto* scroll = new QScrollArea(panel);
+    scroll->setWidget(timeline_widget_);
+    scroll->setWidgetResizable(true);
+    scroll->setFixedHeight(96);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    layout->addWidget(scroll);
+
+    dock->setWidget(panel);
+    addDockWidget(Qt::BottomDockWidgetArea, dock);
+}
+
 void MainWindow::buildStatusBar() {
     status_ = new QLabel(this);
     statusBar()->addWidget(status_);
@@ -194,13 +323,147 @@ void MainWindow::buildStatusBar() {
 void MainWindow::syncStatus() {
     if (!status_) return;
     const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    const std::size_t layers = timeline ? timeline->layers.size() : 0;
+    if (!timeline) return;
+
+    const std::size_t slot = canvas_->frame();
+    const ImageId image = timeline->imageAtSlot(slot);
     status_->setText(
-        QStringLiteral("zoom %1%   layers %2   tiles %3   undo %4")
+        QStringLiteral("frame %1 / %2   held %3   drawings %4   layers %5   zoom %6%   "
+                       "tiles %7   undo %8")
+            .arg(slot + 1)
+            .arg(timeline->frameCount())
+            .arg(timeline->exposureOf(image))
+            .arg(timeline->images.size())
+            .arg(timeline->layers.size())
             .arg(canvas_->zoom() * 100.0, 0, 'f', 0)
-            .arg(layers)
             .arg(doc_.totalTileCount())
             .arg(doc_.undoDepth()));
+}
+
+void MainWindow::refreshEverything() {
+    timeline_widget_->refresh();
+    canvas_->setFrame(timeline_widget_->currentSlot());
+    rebuildLayerList();
+    syncStatus();
+}
+
+// --- time ----------------------------------------------------------------
+
+void MainWindow::onSlotChanged(std::size_t slot) {
+    canvas_->setFrame(slot);
+    syncStatus();
+}
+
+void MainWindow::stepFrame(int delta) {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.empty()) return;
+
+    const int count = static_cast<int>(timeline->slots.size());
+    int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;
+    next = ((next % count) + count) % count;  // wrap, so scrubbing loops
+    timeline_widget_->setCurrentSlot(static_cast<std::size_t>(next));
+}
+
+void MainWindow::insertInterval() {
+    stopPlayback();
+    doc_.insertImage(timeline_, timeline_widget_->currentSlot() + 1);
+    timeline_widget_->refresh();
+    timeline_widget_->setCurrentSlot(timeline_widget_->currentSlot() + 1);
+    refreshEverything();
+}
+
+void MainWindow::duplicateDrawing() {
+    stopPlayback();
+    doc_.duplicateImage(timeline_, timeline_widget_->currentSlot());
+    timeline_widget_->refresh();
+    timeline_widget_->setCurrentSlot(timeline_widget_->currentSlot() + 1);
+    refreshEverything();
+}
+
+void MainWindow::deleteFrame() {
+    stopPlayback();
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.size() <= 1) return;  // never leave no frames at all
+    doc_.removeSlot(timeline_, timeline_widget_->currentSlot());
+    refreshEverything();
+}
+
+void MainWindow::extendExposure() {
+    doc_.extendExposure(timeline_, timeline_widget_->currentSlot(), 1);
+    refreshEverything();
+}
+
+void MainWindow::shortenExposure() {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return;
+    const std::size_t slot = timeline_widget_->currentSlot();
+    const ImageId image = timeline->imageAtSlot(slot);
+    if (timeline->exposureOf(image) <= 1) return;  // that would delete the drawing
+    doc_.removeSlot(timeline_, slot);
+    refreshEverything();
+}
+
+void MainWindow::setFramerate(int fps) {
+    doc_.setFramerate(fps);
+    if (playback_timer_->isActive()) {
+        playback_clock_.restart();
+        playback_start_slot_ = timeline_widget_->currentSlot();
+    }
+    syncStatus();
+}
+
+void MainWindow::togglePlayback() {
+    if (playback_timer_->isActive()) {
+        stopPlayback();
+        return;
+    }
+
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.size() < 2) return;
+
+    playback_start_slot_ = timeline_widget_->currentSlot();
+    playback_clock_.start();
+    canvas_->setPlaying(true);
+    playback_timer_->start(1);
+    if (play_action_) play_action_->setText(QStringLiteral("Stop"));
+    syncStatus();
+}
+
+void MainWindow::stopPlayback() {
+    if (!playback_timer_->isActive()) return;
+    playback_timer_->stop();
+    canvas_->setPlaying(false);
+    if (play_action_) play_action_->setText(QStringLiteral("Play"));
+    canvas_->setFrame(timeline_widget_->currentSlot());
+    syncStatus();
+}
+
+// Driven by elapsed time rather than by counting ticks. A timer that fires late
+// must not make the whole take run slow, which is exactly the thing playback
+// exists to let you judge.
+void MainWindow::onPlaybackTick() {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.empty()) {
+        stopPlayback();
+        return;
+    }
+
+    const int fps = std::max(1, doc_.scene().framerate);
+    const qint64 elapsed = playback_clock_.elapsed();
+    const qint64 advanced = elapsed * fps / 1000;
+    const std::size_t count = timeline->slots.size();
+    const std::size_t slot =
+        (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
+
+    if (slot == timeline_widget_->currentSlot()) return;
+    timeline_widget_->setCurrentSlot(slot);
+}
+
+void MainWindow::onOnionChanged() {
+    CanvasWidget::OnionSettings settings = canvas_->onion();
+    settings.before = onion_before_->value();
+    settings.after = onion_after_->value();
+    canvas_->setOnion(settings);
 }
 
 Layer* MainWindow::currentLayer() {
@@ -339,13 +602,13 @@ void MainWindow::nudgeBrushRadius(double factor) {
 }
 
 void MainWindow::undo() {
+    stopPlayback();
     if (!doc_.undo()) return;
-    rebuildLayerList();
-    canvas_->refreshAll();
+    refreshEverything();
 }
 
 void MainWindow::redo() {
+    stopPlayback();
     if (!doc_.redo()) return;
-    rebuildLayerList();
-    canvas_->refreshAll();
+    refreshEverything();
 }

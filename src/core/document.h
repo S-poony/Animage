@@ -73,6 +73,11 @@ public:
 
     TileJournal& journal() { return journal_; }
 
+    // Forgets the history without touching the document. Used after building a
+    // starting scene: the first Ctrl+Z should not undo the existence of the
+    // layer you are drawing on.
+    void clearHistory();
+
     bool canUndo() const { return !undo_stack_.empty(); }
     bool canRedo() const { return !redo_stack_.empty(); }
     bool undo();

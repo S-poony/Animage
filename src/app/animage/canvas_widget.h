@@ -22,9 +22,28 @@ class CanvasWidget : public QWidget {
 public:
     enum class Background { White, Checker, Black };
 
+    // Onion skin counts distinct drawings, not slots: a drawing held for five
+    // frames is one neighbour, not five. That falls out of the model rather
+    // than being special-cased.
+    struct OnionSettings {
+        int before = 0;
+        int after = 0;
+        float opacity = 0.45f;
+    };
+
     explicit CanvasWidget(animage::Document& document, QWidget* parent = nullptr);
 
-    void setTarget(animage::TimelineId timeline, animage::ImageId image);
+    void setTimeline(animage::TimelineId timeline);
+    void setFrame(std::size_t slot);
+    std::size_t frame() const { return slot_; }
+    animage::ImageId currentImage() const { return image_; }
+
+    void setOnion(const OnionSettings& settings);
+    OnionSettings onion() const { return onion_settings_; }
+
+    // Onion skin is suppressed during playback: it triples the compositing
+    // cost per frame and nobody reads it at twenty-four frames a second.
+    void setPlaying(bool playing);
     void setActiveLayer(animage::LayerId layer);
     animage::LayerId activeLayer() const { return active_layer_; }
 
@@ -66,6 +85,7 @@ private:
     void ensureCacheCoversView();
     void refreshRegion(const animage::PixelRect& region);
     void repaintImageRect(const animage::PixelRect& region);
+    void rebuildOnion();
 
     void beginStroke(const QPointF& image_point, float pressure);
     void extendStroke(const QPointF& image_point, float pressure);
@@ -85,6 +105,14 @@ private:
     // coordinates at one image pixel per entry.
     QImage display_;
     animage::PixelRect cached_region_;
+
+    // The onion skin flattened once, covering the same region. It only changes
+    // when the frame, the view or the settings do, so a stroke does not pay to
+    // recomposite the neighbouring drawings on every dab.
+    animage::Framebuffer onion_;
+    OnionSettings onion_settings_;
+    std::size_t slot_ = 0;
+    bool playing_ = false;
 
     QPointF pan_;  // image coordinate shown at the widget's top-left corner
     double zoom_ = 1.0;

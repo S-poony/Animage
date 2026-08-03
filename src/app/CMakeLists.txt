@@ -21,6 +21,8 @@ add_executable(animage
   animage/main_window.h
   animage/canvas_widget.cpp
   animage/canvas_widget.h
+  animage/timeline_widget.cpp
+  animage/timeline_widget.h
 )
 target_link_libraries(animage PRIVATE Qt6::Widgets animage::core)
 target_include_directories(animage PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/animage)
