@@ -242,11 +242,17 @@ void CanvasWidget::ensureCacheCoversView() {
     const long long budget = std::max<long long>(2'000'000, viewport * 2);
 
     int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
-    int margin = kCacheMargin;
+
+    // The margin is a fixed number of *screen* pixels, converted to image
+    // pixels here. Held in image pixels instead it was 192 at 100% zoom and
+    // 6144 at 3200%, so the cache -- and the rectangle the blit has to scale it
+    // into -- grew without bound the further you zoomed in.
+    int margin = std::max(1, static_cast<int>(std::lround(kCacheMargin / zoom_)));
+
     PixelRect padded{};
     for (;;) {
-        padded = {wanted.x - margin * step, wanted.y - margin * step,
-                  wanted.width + 2 * margin * step, wanted.height + 2 * margin * step};
+        padded = {wanted.x - margin, wanted.y - margin, wanted.width + 2 * margin,
+                  wanted.height + 2 * margin};
         const long long entries = static_cast<long long>((padded.width + step - 1) / step) *
                                   ((padded.height + step - 1) / step);
         if (entries <= budget) break;

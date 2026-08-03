@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QImage>
 #include <QKeyEvent>
+#include <QMouseEvent>
+#include <QWheelEvent>
 #include <cmath>
 
 #include "brush.h"
@@ -211,12 +213,138 @@ void cacheStaysBoundedAtEveryZoom() {
     }
 }
 
+void sendMouse(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
+               Qt::MouseButtons buttons) {
+    QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, Qt::NoModifier);
+    QCoreApplication::sendEvent(widget, &event);
+}
+
+void drawWithMouse(QWidget* canvas, const QPointF& from, const QPointF& to, int steps) {
+    sendMouse(canvas, QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton);
+    for (int i = 1; i <= steps; ++i) {
+        const double t = static_cast<double>(i) / steps;
+        sendMouse(canvas, QEvent::MouseMove, from + (to - from) * t, Qt::NoButton,
+                  Qt::LeftButton);
+    }
+    sendMouse(canvas, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+}
+
+// Panning far enough that the view keeps leaving the cached region, which is
+// what forces the reallocation and the re-composite.
+void longPanGestureSurvives() {
+    TEST("a long pan drag survives");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    drawWithMouse(canvas, QPointF(150, 150), QPointF(1000, 650), 60);
+
+    QKeyEvent pan_down(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &pan_down);
+
+    const QPointF start(600, 400);
+    sendMouse(canvas, QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+    for (int i = 0; i < 400; ++i) {
+        const QPointF at(start.x() + 500.0 * std::sin(i * 0.09),
+                         start.y() + 350.0 * std::cos(i * 0.05));
+        sendMouse(canvas, QEvent::MouseMove, at, Qt::NoButton, Qt::LeftButton);
+        QCoreApplication::processEvents();
+    }
+    sendMouse(canvas, QEvent::MouseButtonRelease, start, Qt::LeftButton, Qt::NoButton);
+
+    QKeyEvent pan_up(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &pan_up);
+    QCoreApplication::processEvents();
+    CHECK(canvas->zoom() > 0.0);
+}
+
+// The whole scrubby-zoom gesture through the real window: hold Z, press, drag
+// for a long time, release. Driving setZoom directly missed whatever this
+// reaches.
+void scrubbyZoomGestureSurvives() {
+    TEST("a long scrubby zoom drag survives");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // Draw something first. On an empty canvas the compositor does almost
+    // nothing, which is why the earlier version of this test passed.
+    drawWithMouse(canvas, QPointF(200, 200), QPointF(900, 600), 40);
+
+    QKeyEvent zoom_down(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &zoom_down);
+
+    const QPointF start(500, 400);
+    QMouseEvent press(QEvent::MouseButtonPress, start, canvas->mapToGlobal(start),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &press);
+
+    // Sweep out and back in, repeatedly, the way a hand does.
+    for (int i = 0; i < 400; ++i) {
+        const double offset = 420.0 * std::sin(i * 0.07);
+        const QPointF at(start.x() + offset, start.y());
+        QMouseEvent move(QEvent::MouseMove, at, canvas->mapToGlobal(at), Qt::NoButton,
+                         Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(canvas, &move);
+        QCoreApplication::processEvents();
+    }
+
+    QMouseEvent release(QEvent::MouseButtonRelease, start, canvas->mapToGlobal(start),
+                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &release);
+    QKeyEvent zoom_up(QEvent::KeyRelease, Qt::Key_Z, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &zoom_up);
+
+    QCoreApplication::processEvents();
+    CHECK(canvas->zoom() > 0.0);
+}
+
+// The same for the wheel, which is the other way in and takes a different code
+// path into setZoom.
+void wheelZoomGestureSurvives() {
+    TEST("a long wheel zoom survives");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    drawWithMouse(canvas, QPointF(200, 200), QPointF(950, 620), 50);
+
+    for (int i = 0; i < 300; ++i) {
+        const int direction = ((i / 25) % 2 == 0) ? -120 : 120;
+        const QPointF at(400 + (i % 17) * 20, 300 + (i % 11) * 20);
+        QWheelEvent wheel(at, canvas->mapToGlobal(at), QPoint(0, 0), QPoint(0, direction),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(canvas, &wheel);
+        QCoreApplication::processEvents();
+    }
+    CHECK(canvas->zoom() > 0.0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
     heldKeysDoNotRecurse();
+    longPanGestureSurvives();
+    scrubbyZoomGestureSurvives();
+    wheelZoomGestureSurvives();
     cacheStaysBoundedAtEveryZoom();
     zoomSweepDoesNotExplode();
     repeatedZoomAndPanStayConsistent();

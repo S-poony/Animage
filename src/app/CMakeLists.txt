@@ -24,6 +24,8 @@ add_library(animage_ui STATIC
   animage/canvas_widget.h
   animage/timeline_widget.cpp
   animage/timeline_widget.h
+  animage/crash_report.cpp
+  animage/crash_report.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
