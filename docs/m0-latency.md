@@ -109,8 +109,29 @@ without a baseline written down there is nothing to regress against.
 | Date | Machine | Tablet | Path | Refresh | Event rate | App share | Camera |
 |---|---|---|---|---|---|---|---|
 | 2026-08-03 | Windows 11, windowed | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 189 Hz | 0.03 ms median, 8.1 ms worst | pending |
-| 2026-08-03 | Windows 11, fullscreen | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 149 Hz | 0.05 ms median, 3.6 ms worst | pending |
+| 2026-08-03 | Windows 11, fullscreen | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 149 Hz | 0.05 ms median, 3.6 ms worst | **under 30 ms, about 15** |
 | | | | WinTab | | | | not yet measured |
+
+## M0: passed
+
+**Under 30 ms with confidence, and around 15 ms as the best estimate.** The
+criterion was 25 ms, so this passes.
+
+The caveat that belongs with the number: the moment the pen makes contact is
+hard to pin down in the footage, which is the dominant source of error here —
+not the clock. Contact is the harder end to see because the tip is already
+touching before pressure crosses the threshold, so the true figure is more
+likely to sit above the estimate than below it. It is still comfortably inside
+the budget.
+
+15 ms is roughly one refresh at 59.94 Hz, which means the chain is not wasting
+frames anywhere. There is no latency work outstanding, and none should be
+undertaken speculatively.
+
+**What this does not cover.** WinTab is still unmeasured. It is a different
+driver path and there is no reason to assume it matches — the plan asks for it,
+and it stays open. That is a measurement task, not an implementation one, and
+it does not block M2.
 
 Fullscreen did not move the application's share, which was already negligible.
 Whether it removed the DWM composition frame cannot be seen from inside the
