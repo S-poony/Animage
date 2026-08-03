@@ -8,6 +8,7 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
@@ -69,10 +70,18 @@ void MainWindow::buildActions() {
     QMenu* edit = menuBar()->addMenu(QStringLiteral("&Edit"));
     QAction* undo_action = edit->addAction(QStringLiteral("&Undo"), QKeySequence::Undo, this,
                                            &MainWindow::undo);
-    QAction* redo_action = edit->addAction(QStringLiteral("&Redo"), QKeySequence::Redo, this,
+    // Ctrl+Shift+Z, not the Ctrl+Y that QKeySequence::Redo gives on Windows.
+    QAction* redo_action = edit->addAction(QStringLiteral("&Redo"),
+                                           QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), this,
                                            &MainWindow::redo);
     undo_action->setShortcutContext(Qt::ApplicationShortcut);
     redo_action->setShortcutContext(Qt::ApplicationShortcut);
+
+    edit->addSeparator();
+    // The framerate belongs to the scene, not to the timeline: every timeline
+    // in the scene runs at it. Putting the control in the timeline panel said
+    // otherwise.
+    edit->addAction(QStringLiteral("Scene framerate..."), this, &MainWindow::chooseFramerate);
 
     QMenu* animation = menuBar()->addMenu(QStringLiteral("&Animation"));
     play_action_ = animation->addAction(QStringLiteral("Play"), QKeySequence(Qt::Key_Return), this,
@@ -82,13 +91,20 @@ void MainWindow::buildActions() {
                          [this] { stepFrame(-1); });
     animation->addAction(QStringLiteral("Next frame"), QKeySequence(Qt::Key_Right), this,
                          [this] { stepFrame(1); });
+    // Up and down move by drawing, skipping over held frames -- the two
+    // questions "what is next in time" and "what is the next drawing" are
+    // different, and both get asked constantly.
+    animation->addAction(QStringLiteral("Previous drawing"), QKeySequence(Qt::Key_Up), this,
+                         [this] { stepDrawing(-1); });
+    animation->addAction(QStringLiteral("Next drawing"), QKeySequence(Qt::Key_Down), this,
+                         [this] { stepDrawing(1); });
     animation->addSeparator();
     animation->addAction(QStringLiteral("Insert drawing"), QKeySequence(Qt::Key_Insert), this,
                          &MainWindow::insertInterval);
     animation->addAction(QStringLiteral("Duplicate drawing"),
                          QKeySequence(Qt::CTRL | Qt::Key_D), this, &MainWindow::duplicateDrawing);
-    animation->addAction(QStringLiteral("Delete frame"), QKeySequence(Qt::Key_Delete), this,
-                         &MainWindow::deleteFrame);
+    animation->addAction(QStringLiteral("Delete drawing"), QKeySequence(Qt::Key_Delete), this,
+                         &MainWindow::deleteDrawing);
     animation->addSeparator();
     animation->addAction(QStringLiteral("Hold longer"), QKeySequence(Qt::Key_Plus), this,
                          &MainWindow::extendExposure);
@@ -124,17 +140,24 @@ void MainWindow::buildActions() {
     tools->setMovable(false);
 
     auto* mode = new QActionGroup(this);
-    QAction* draw = tools->addAction(QStringLiteral("Brush"));
-    QAction* erase = tools->addAction(QStringLiteral("Eraser"));
-    for (QAction* action : {draw, erase}) {
+    brush_action_ = tools->addAction(QStringLiteral("Brush"));
+    eraser_action_ = tools->addAction(QStringLiteral("Eraser"));
+    for (QAction* action : {brush_action_, eraser_action_}) {
         action->setCheckable(true);
+        action->setShortcutContext(Qt::ApplicationShortcut);
         mode->addAction(action);
     }
-    draw->setChecked(true);
-    draw->setShortcut(QKeySequence(Qt::Key_B));
-    erase->setShortcut(QKeySequence(Qt::Key_E));
-    connect(draw, &QAction::triggered, this, [this] { canvas_->setEraser(false); });
-    connect(erase, &QAction::triggered, this, [this] { canvas_->setEraser(true); });
+    brush_action_->setChecked(true);
+    brush_action_->setShortcut(QKeySequence(Qt::Key_B));
+    eraser_action_->setShortcut(QKeySequence(Qt::Key_E));
+    connect(brush_action_, &QAction::triggered, this, [this] {
+        canvas_->setEraser(false);
+        syncToolSettings();
+    });
+    connect(eraser_action_, &QAction::triggered, this, [this] {
+        canvas_->setEraser(true);
+        syncToolSettings();
+    });
 
     tools->addSeparator();
     tools->addWidget(new QLabel(QStringLiteral(" Size ")));
@@ -164,6 +187,8 @@ void MainWindow::buildActions() {
     // a brush that does not thin out is not worth having on a tablet.
     pressure_opacity_ = new QCheckBox(QStringLiteral("Pressure → opacity"), this);
     pressure_opacity_->setChecked(canvas_->brushSettings().pressure_affects_opacity);
+    // brushSettings() returns the active tool's settings, so this and the size
+    // box edit the brush or the eraser depending on which is selected.
     connect(pressure_opacity_, &QCheckBox::toggled, this, [this](bool on) {
         canvas_->brushSettings().pressure_affects_opacity = on;
     });
@@ -192,6 +217,10 @@ void MainWindow::buildLayerPanel() {
     auto* layout = new QVBoxLayout(panel);
 
     layer_list_ = new QListWidget(panel);
+    // No keyboard focus: Qt would otherwise use Space to toggle the checked
+    // item, and Space is worth more as pan than as a visibility toggle you can
+    // hit by accident.
+    layer_list_->setFocusPolicy(Qt::NoFocus);
     layout->addWidget(layer_list_, 1);
     connect(layer_list_, &QListWidget::currentRowChanged, this, &MainWindow::onLayerSelected);
     connect(layer_list_, &QListWidget::itemChanged, this, &MainWindow::onLayerItemChanged);
@@ -203,25 +232,35 @@ void MainWindow::buildLayerPanel() {
     opacity_ = new QSlider(Qt::Horizontal, opacity_row);
     opacity_->setRange(0, 100);
     opacity_->setValue(100);
+    opacity_->setFocusPolicy(Qt::NoFocus);
+    // The drag is one command, not one per tick. Nested commands collapse, so
+    // opening it on press and closing it on release leaves a single undo step
+    // however many values the slider passed through.
+    connect(opacity_, &QSlider::sliderPressed, this, &MainWindow::beginOpacityDrag);
+    connect(opacity_, &QSlider::sliderReleased, this, &MainWindow::endOpacityDrag);
     connect(opacity_, &QSlider::valueChanged, this, &MainWindow::onOpacityChanged);
     opacity_layout->addWidget(opacity_);
     layout->addWidget(opacity_row);
 
-    auto* add = new QPushButton(QStringLiteral("Add layer"), panel);
-    connect(add, &QPushButton::clicked, this, &MainWindow::addLayer);
-    layout->addWidget(add);
+    const auto panelButton = [&](const QString& text, auto handler) {
+        auto* b = new QPushButton(text, panel);
+        b->setFocusPolicy(Qt::NoFocus);  // keep Space and the pen with the canvas
+        connect(b, &QPushButton::clicked, this, handler);
+        layout->addWidget(b);
+        return b;
+    };
 
-    auto* remove = new QPushButton(QStringLiteral("Remove layer"), panel);
-    connect(remove, &QPushButton::clicked, this, &MainWindow::removeCurrentLayer);
-    layout->addWidget(remove);
+    auto* clear = panelButton(QStringLiteral("Clear this drawing's layer"),
+                              &MainWindow::clearCurrentLayer);
+    clear->setToolTip(QStringLiteral("Empty the current layer on the current drawing only.\n"
+                                     "Other drawings keep theirs."));
 
-    auto* up = new QPushButton(QStringLiteral("Move up"), panel);
-    connect(up, &QPushButton::clicked, this, [this] { moveCurrentLayer(-1); });
-    layout->addWidget(up);
+    auto* add = panelButton(QStringLiteral("Add layer"), &MainWindow::addLayer);
+    (void)add;
 
-    auto* down = new QPushButton(QStringLiteral("Move down"), panel);
-    connect(down, &QPushButton::clicked, this, [this] { moveCurrentLayer(1); });
-    layout->addWidget(down);
+    panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
+    panelButton(QStringLiteral("Move up"), [this] { moveCurrentLayer(-1); });
+    panelButton(QStringLiteral("Move down"), [this] { moveCurrentLayer(1); });
 
     dock->setWidget(panel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
@@ -248,6 +287,11 @@ void MainWindow::buildTimelinePanel() {
         return b;
     };
 
+    play_button_ = button(QStringLiteral("Play"),
+                          QStringLiteral("Play the timeline in a loop (Enter)"),
+                          &MainWindow::togglePlayback);
+    row->addSpacing(12);
+
     button(QStringLiteral("+ Drawing"),
            QStringLiteral("Insert a new empty drawing after this one (Insert)"),
            &MainWindow::insertInterval);
@@ -255,8 +299,10 @@ void MainWindow::buildTimelinePanel() {
            QStringLiteral("Copy this drawing into a new one (Ctrl+D)\n"
                           "A real copy, not a hold: the cels are independent."),
            &MainWindow::duplicateDrawing);
-    button(QStringLiteral("Delete frame"), QStringLiteral("Remove this frame (Delete)"),
-           &MainWindow::deleteFrame);
+    button(QStringLiteral("Delete drawing"),
+           QStringLiteral("Delete this drawing and every frame it is held on (Delete).\n"
+                          "To shorten a hold instead, use Hold -."),
+           &MainWindow::deleteDrawing);
 
     row->addSpacing(12);
     button(QStringLiteral("Hold +"),
@@ -283,15 +329,6 @@ void MainWindow::buildTimelinePanel() {
     onion_after_->setFocusPolicy(Qt::NoFocus);
     connect(onion_after_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
     row->addWidget(onion_after_);
-
-    row->addSpacing(16);
-    row->addWidget(new QLabel(QStringLiteral("fps"), controls));
-    framerate_ = new QSpinBox(controls);
-    framerate_->setRange(1, 60);
-    framerate_->setValue(doc_.scene().framerate);
-    framerate_->setFocusPolicy(Qt::NoFocus);
-    connect(framerate_, &QSpinBox::valueChanged, this, &MainWindow::setFramerate);
-    row->addWidget(framerate_);
 
     row->addStretch(1);
     layout->addWidget(controls);
@@ -329,7 +366,7 @@ void MainWindow::syncStatus() {
     const ImageId image = timeline->imageAtSlot(slot);
     status_->setText(
         QStringLiteral("frame %1 / %2   held %3   drawings %4   layers %5   zoom %6%   "
-                       "tiles %7   undo %8")
+                       "tiles %7   undo %8   %9 fps")
             .arg(slot + 1)
             .arg(timeline->frameCount())
             .arg(timeline->exposureOf(image))
@@ -337,7 +374,8 @@ void MainWindow::syncStatus() {
             .arg(timeline->layers.size())
             .arg(canvas_->zoom() * 100.0, 0, 'f', 0)
             .arg(doc_.totalTileCount())
-            .arg(doc_.undoDepth()));
+            .arg(doc_.undoDepth())
+            .arg(doc_.scene().framerate));
 }
 
 void MainWindow::refreshEverything() {
@@ -364,6 +402,22 @@ void MainWindow::stepFrame(int delta) {
     timeline_widget_->setCurrentSlot(static_cast<std::size_t>(next));
 }
 
+// Moves to the first frame of the previous or next distinct drawing, stepping
+// over held frames rather than through them.
+void MainWindow::stepDrawing(int direction) {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.empty()) return;
+
+    const std::vector<ImageId> neighbours =
+        timeline->distinctNeighbours(timeline_widget_->currentSlot(), 1, direction);
+    if (neighbours.empty()) return;
+
+    auto it = std::find(timeline->slots.begin(), timeline->slots.end(), neighbours[0]);
+    if (it == timeline->slots.end()) return;
+    timeline_widget_->setCurrentSlot(
+        static_cast<std::size_t>(std::distance(timeline->slots.begin(), it)));
+}
+
 void MainWindow::insertInterval() {
     stopPlayback();
     doc_.insertImage(timeline_, timeline_widget_->currentSlot() + 1);
@@ -380,11 +434,20 @@ void MainWindow::duplicateDrawing() {
     refreshEverything();
 }
 
-void MainWindow::deleteFrame() {
+// Deletes the drawing and every frame it is held on. Shortening a hold is a
+// different operation and lives on Hold -.
+void MainWindow::deleteDrawing() {
     stopPlayback();
     const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.size() <= 1) return;  // never leave no frames at all
-    doc_.removeSlot(timeline_, timeline_widget_->currentSlot());
+    if (!timeline) return;
+
+    const ImageId image = timeline->imageAtSlot(timeline_widget_->currentSlot());
+    if (image == kNoId) return;
+    if (timeline->exposureOf(image) >= timeline->slots.size()) {
+        return;  // it is the only drawing; leave something to draw on
+    }
+
+    doc_.removeDrawing(timeline_, image);
     refreshEverything();
 }
 
@@ -412,6 +475,14 @@ void MainWindow::setFramerate(int fps) {
     syncStatus();
 }
 
+void MainWindow::chooseFramerate() {
+    bool accepted = false;
+    const int fps = QInputDialog::getInt(this, QStringLiteral("Scene framerate"),
+                                         QStringLiteral("Frames per second:"),
+                                         doc_.scene().framerate, 1, 120, 1, &accepted);
+    if (accepted) setFramerate(fps);
+}
+
 void MainWindow::togglePlayback() {
     if (playback_timer_->isActive()) {
         stopPlayback();
@@ -426,6 +497,7 @@ void MainWindow::togglePlayback() {
     canvas_->setPlaying(true);
     playback_timer_->start(1);
     if (play_action_) play_action_->setText(QStringLiteral("Stop"));
+    if (play_button_) play_button_->setText(QStringLiteral("Stop"));
     syncStatus();
 }
 
@@ -434,6 +506,7 @@ void MainWindow::stopPlayback() {
     playback_timer_->stop();
     canvas_->setPlaying(false);
     if (play_action_) play_action_->setText(QStringLiteral("Play"));
+    if (play_button_) play_button_->setText(QStringLiteral("Play"));
     canvas_->setFrame(timeline_widget_->currentSlot());
     syncStatus();
 }
@@ -523,14 +596,58 @@ void MainWindow::onLayerItemChanged(QListWidgetItem* item) {
     syncStatus();
 }
 
+void MainWindow::beginOpacityDrag() { doc_.beginCommand("Layer opacity"); }
+
+void MainWindow::endOpacityDrag() {
+    doc_.endCommand();
+    syncStatus();
+}
+
 void MainWindow::onOpacityChanged(int percent) {
     Layer* layer = currentLayer();
     if (!layer) return;
     Layer updated = *layer;
     updated.opacity = static_cast<float>(percent) / 100.0f;
     doc_.updateLayer(timeline_, updated.id, updated);
+    // refreshAll only marks the cache dirty; the composite happens once, in the
+    // next paint. Doing it here meant one full-viewport flatten per slider tick.
+    canvas_->refreshAll();
+}
+
+void MainWindow::clearCurrentLayer() {
+    stopPlayback();
+    Layer* layer = currentLayer();
+    if (!layer) return;
+    doc_.clearCel(timeline_, canvas_->currentImage(), layer->id);
     canvas_->refreshAll();
     syncStatus();
+}
+
+// The lowest unused "layer N". Reusing a number after a deletion would give
+// two layers the same name, which makes the panel ambiguous.
+std::string MainWindow::nextLayerName() const {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return "layer 1";
+
+    for (std::size_t n = 1;; ++n) {
+        const std::string candidate = "layer " + std::to_string(n);
+        const bool taken = std::any_of(
+            timeline->layers.begin(), timeline->layers.end(),
+            [&](const Layer& l) { return l.name == candidate; });
+        if (!taken) return candidate;
+    }
+}
+
+void MainWindow::syncToolSettings() {
+    const BrushSettings& settings = canvas_->brushSettings();
+    if (radius_) {
+        const QSignalBlocker block(radius_);
+        radius_->setValue(settings.radius);
+    }
+    if (pressure_opacity_) {
+        const QSignalBlocker block(pressure_opacity_);
+        pressure_opacity_->setChecked(settings.pressure_affects_opacity);
+    }
 }
 
 void MainWindow::addLayer() {
@@ -538,8 +655,8 @@ void MainWindow::addLayer() {
     if (!timeline) return;
 
     const int row = layer_list_ ? std::max(0, layer_list_->currentRow()) : 0;
-    const std::string name = "layer " + std::to_string(timeline->layers.size() + 1);
-    const LayerId created = doc_.addLayer(timeline_, name, static_cast<std::size_t>(row));
+    const LayerId created = doc_.addLayer(timeline_, nextLayerName(),
+                                          static_cast<std::size_t>(row));
     canvas_->setActiveLayer(created);
     rebuildLayerList();
     canvas_->refreshAll();

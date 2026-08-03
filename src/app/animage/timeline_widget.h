@@ -54,4 +54,8 @@ private:
     bool stretching_ = false;
     std::size_t stretch_run_start_ = 0;
     bool hovering_edge_ = false;
+
+    // Dragging in the ruler band scrubs. Keeping it in its own strip is what
+    // stops a scrub from turning into an exposure change by accident.
+    bool scrubbing_ = false;
 };

@@ -44,8 +44,12 @@ public:
     // its id in the slots list. Touches no cel.
     void extendExposure(TimelineId timeline, std::size_t slot, int extra);
 
-    // Removes one slot. The Image record survives if other slots still show it.
+    // Removes one slot. The Image record survives if other slots still show it,
+    // so this shortens a hold rather than deleting the drawing.
     void removeSlot(TimelineId timeline, std::size_t slot);
+
+    // Removes the drawing and every slot showing it, in one command.
+    void removeDrawing(TimelineId timeline, ImageId image);
 
     // Deep copy: new ImageId and a new CelId per layer. The tiles themselves
     // are shared until one side is drawn on, so the copy is nearly free but the
@@ -60,6 +64,10 @@ public:
     // Returns the cel to draw into, creating it on first use. Must be called
     // inside a command; the lazy creation is recorded so undo removes it.
     Cel* celForWriting(TimelineId timeline, ImageId image, LayerId layer);
+
+    // Detaches the cel from this (image, layer). The cel itself survives as
+    // long as the history can bring it back.
+    void clearCel(TimelineId timeline, ImageId image, LayerId layer);
 
     std::size_t celCount() const { return cels_.size(); }
     std::size_t totalTileCount() const;

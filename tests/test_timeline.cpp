@@ -4,6 +4,9 @@
 // in particular depends on many slot edits collapsing into one undo step, and
 // that is not obvious from reading either piece on its own.
 
+#include <algorithm>
+#include <string>
+
 #include "brush.h"
 #include "document.h"
 #include "testing.h"
@@ -163,10 +166,74 @@ void drawingOnAHoldShowsOnEveryFrameOfIt() {
     }
 }
 
+// "Hold shorter" and "delete drawing" are different operations and the
+// interface offers both. Removing a slot shortens the hold; removing the
+// drawing takes every frame it appears on.
+void deletingADrawingTakesEveryFrameOfIt() {
+    TEST("deleting a drawing removes every frame it is held on");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    f.doc.extendExposure(f.timeline, 0, 3);  // a held for 4
+    const ImageId b = f.doc.insertImage(f.timeline, 4);
+    paintDot(f.doc, f.timeline, a, f.layer, 30.0f, 30.0f);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{5});
+
+    const std::size_t before = f.doc.undoDepth();
+    f.doc.removeDrawing(f.timeline, a);
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{1});
+    CHECK(f.tl().findImage(a) == nullptr);
+    CHECK_EQ(f.tl().imageAtSlot(0), b);
+    CHECK_EQ(f.doc.undoDepth(), before + 1);  // one step, not four
+
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.tl().frameCount(), std::size_t{5});
+    CHECK_EQ(f.tl().exposureOf(a), std::size_t{4});
+    const Cel* restored = f.doc.celAt(f.timeline, a, f.layer);
+    CHECK(restored != nullptr);
+    CHECK_NEAR(restored->pixel(30, 30).a, 1.0, 1e-2);
+}
+
+void clearingALayerLeavesOtherDrawingsAlone() {
+    TEST("clearing a layer affects only the drawing it is on");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    const ImageId b = f.doc.insertImage(f.timeline, 1);
+    paintDot(f.doc, f.timeline, a, f.layer, 20.0f, 20.0f);
+    paintDot(f.doc, f.timeline, b, f.layer, 20.0f, 20.0f);
+
+    f.doc.clearCel(f.timeline, a, f.layer);
+    CHECK(f.doc.celAt(f.timeline, a, f.layer) == nullptr);
+    const Cel* untouched = f.doc.celAt(f.timeline, b, f.layer);
+    CHECK(untouched != nullptr);
+    CHECK_NEAR(untouched->pixel(20, 20).a, 1.0, 1e-2);
+
+    CHECK(f.doc.undo());
+    const Cel* restored = f.doc.celAt(f.timeline, a, f.layer);
+    CHECK(restored != nullptr);
+    CHECK_NEAR(restored->pixel(20, 20).a, 1.0, 1e-2);
+}
+
+void layerNamesStayUnique() {
+    TEST("layer names cannot collide");
+    Fixture f;  // starts with "layer 1"
+    const LayerId second = f.doc.addLayer(f.timeline, "layer 1");
+    CHECK(second != kNoId);
+    CHECK(f.tl().findLayer(second)->name != "layer 1");
+
+    std::vector<std::string> names;
+    for (const Layer& layer : f.tl().layers) names.push_back(layer.name);
+    std::sort(names.begin(), names.end());
+    CHECK(std::adjacent_find(names.begin(), names.end()) == names.end());
+}
+
 }  // namespace
 
 int main() {
     std::printf("timeline:\n");
+    deletingADrawingTakesEveryFrameOfIt();
+    clearingALayerLeavesOtherDrawingsAlone();
+    layerNamesStayUnique();
     stretchingExposureIsOneUndoStep();
     holdingCostsNothing();
     shorteningKeepsTheDrawingUntilTheLastSlotGoes();

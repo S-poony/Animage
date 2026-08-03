@@ -42,7 +42,12 @@ private:
     void onLayerSelected();
     void onLayerItemChanged(QListWidgetItem* item);
     void onOpacityChanged(int percent);
+    void beginOpacityDrag();
+    void endOpacityDrag();
+    void clearCurrentLayer();
+    std::string nextLayerName() const;
     void chooseColour();
+    void syncToolSettings();
     void setBrushRadius(double radius);
     void nudgeBrushRadius(double factor);
     void undo();
@@ -50,11 +55,13 @@ private:
 
     void onSlotChanged(std::size_t slot);
     void stepFrame(int delta);
+    void stepDrawing(int direction);
     void insertInterval();
     void duplicateDrawing();
-    void deleteFrame();
+    void deleteDrawing();
     void extendExposure();
     void shortenExposure();
+    void chooseFramerate();
 
     void togglePlayback();
     void stopPlayback();
@@ -77,8 +84,10 @@ private:
     QCheckBox* pressure_opacity_ = nullptr;
     QSpinBox* onion_before_ = nullptr;
     QSpinBox* onion_after_ = nullptr;
-    QSpinBox* framerate_ = nullptr;
     QAction* play_action_ = nullptr;
+    QPushButton* play_button_ = nullptr;
+    QAction* brush_action_ = nullptr;
+    QAction* eraser_action_ = nullptr;
 
     QTimer* playback_timer_ = nullptr;
     QElapsedTimer playback_clock_;

@@ -21,6 +21,7 @@ namespace {
 constexpr double kMinZoom = 0.05;
 constexpr double kMaxZoom = 32.0;
 constexpr int kCheckerSize = 8;
+constexpr double kScrubbyZoomPerPixel = 0.006;
 
 // Linear to sRGB through a lookup table. The conversion is per pixel of the
 // viewport on every recomposite, and std::pow in that loop is measurable.
@@ -59,6 +60,16 @@ PixelRect intersect(const PixelRect& a, const PixelRect& b) {
     return {x0, y0, x1 - x0, y1 - y0};
 }
 
+PixelRect unite(const PixelRect& a, const PixelRect& b) {
+    if (a.isEmpty()) return b;
+    if (b.isEmpty()) return a;
+    const int x0 = std::min(a.x, b.x);
+    const int y0 = std::min(a.y, b.y);
+    const int x1 = std::max(a.x + a.width, b.x + b.width);
+    const int y1 = std::max(a.y + a.height, b.y + b.height);
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
 }  // namespace
 
 CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
@@ -70,13 +81,17 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::CrossCursor);
 
-    BrushSettings settings;
-    settings.radius = 6.0f;
-    settings.hardness = 0.6f;
-    settings.pressure_affects_opacity = true;
-    settings.r = settings.g = settings.b = 0.0f;
-    settings.a = 1.0f;
-    brush_.settings() = settings;
+    brush_settings_.radius = 6.0f;
+    brush_settings_.hardness = 0.6f;
+    brush_settings_.pressure_affects_opacity = true;
+    brush_settings_.r = brush_settings_.g = brush_settings_.b = 0.0f;
+    brush_settings_.a = 1.0f;
+
+    eraser_settings_ = brush_settings_;
+    eraser_settings_.radius = 18.0f;
+    eraser_settings_.hardness = 0.85f;
+    eraser_settings_.pressure_affects_opacity = false;
+    eraser_settings_.erase = true;
 }
 
 void CanvasWidget::setTimeline(TimelineId timeline) {
@@ -90,8 +105,25 @@ void CanvasWidget::setFrame(std::size_t slot) {
 
     slot_ = std::min(slot, timeline->slots.empty() ? std::size_t{0}
                                                    : timeline->slots.size() - 1);
-    image_ = timeline->imageAtSlot(slot_);
+    const ImageId next = timeline->imageAtSlot(slot_);
+    const bool changed = next != image_;
+    image_ = next;
+
+    // A stroke in progress when the frame changes carries on onto the new
+    // drawing. Holding the pen down through playback then leaves a mark on
+    // each frame it passed over, which is how you sketch a moving point.
+    if (changed && stroking_) rebindStrokeToCurrentImage();
+
     rebuildOnion();
+    refreshAll();
+}
+
+void CanvasWidget::setActiveLayer(LayerId layer) { active_layer_ = layer; }
+
+void CanvasWidget::setEraser(bool erasing) { erasing_ = erasing; }
+
+void CanvasWidget::setBackground(Background background) {
+    background_ = background;
     refreshAll();
 }
 
@@ -163,15 +195,6 @@ void CanvasWidget::rebuildOnion() {
     }
 }
 
-void CanvasWidget::setActiveLayer(LayerId layer) { active_layer_ = layer; }
-
-void CanvasWidget::setEraser(bool erasing) { brush_.settings().erase = erasing; }
-
-void CanvasWidget::setBackground(Background background) {
-    background_ = background;
-    refreshAll();
-}
-
 QPointF CanvasWidget::imageFromWidget(const QPointF& widget_point) const {
     return {pan_.x() + widget_point.x() / zoom_, pan_.y() + widget_point.y() / zoom_};
 }
@@ -202,12 +225,17 @@ void CanvasWidget::ensureCacheCoversView() {
     cached_region_ = wanted;
     display_ = QImage(wanted.width, wanted.height, QImage::Format_RGB32);
     rebuildOnion();
-    refreshRegion(wanted);
+    dirty_everything_ = true;
 }
 
 void CanvasWidget::refreshAll() {
-    if (!display_.isNull()) refreshRegion(cached_region_);
+    dirty_everything_ = true;
     update();
+}
+
+void CanvasWidget::markDirty(const PixelRect& region) {
+    if (dirty_everything_) return;
+    pending_dirty_ = unite(pending_dirty_, region);
 }
 
 // Composites `region` and writes it into the cached sRGB image. This is the
@@ -240,8 +268,8 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
             // Paper, then the onion skin over it, then the drawing over that.
             Rgba base{background, background, background, 1.0f};
             if (!onion_.isEmpty()) {
-                const Rgba ghost = onion_.row(image_y - cached_region_.y)[image_x -
-                                                                          cached_region_.x];
+                const Rgba ghost =
+                    onion_.row(image_y - cached_region_.y)[image_x - cached_region_.x];
                 base = over(ghost, base);
             }
 
@@ -266,10 +294,24 @@ void CanvasWidget::repaintImageRect(const PixelRect& region) {
     update(QRectF(top_left, bottom_right).normalized().adjusted(-2, -2, 2, 2).toAlignedRect());
 }
 
-void CanvasWidget::resizeEvent(QResizeEvent*) { ensureCacheCoversView(); }
+void CanvasWidget::resizeEvent(QResizeEvent*) {
+    ensureCacheCoversView();
+    update();
+}
 
 void CanvasWidget::paintEvent(QPaintEvent* event) {
     ensureCacheCoversView();
+
+    // All the compositing for this frame happens here, once, however many
+    // edits arrived since the last paint.
+    if (dirty_everything_) {
+        refreshRegion(cached_region_);
+        dirty_everything_ = false;
+        pending_dirty_ = {};
+    } else if (!pending_dirty_.isEmpty()) {
+        refreshRegion(pending_dirty_);
+        pending_dirty_ = {};
+    }
 
     QPainter painter(this);
     painter.setClipRect(event->rect());
@@ -287,7 +329,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     painter.drawImage(target, display_);
 }
 
-// --- input ---------------------------------------------------------------
+// --- strokes -------------------------------------------------------------
 
 void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
     if (timeline_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
@@ -296,22 +338,26 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
     const Layer* layer = timeline ? timeline->findLayer(active_layer_) : nullptr;
     if (!layer || layer->locked || !layer->visible) return;
 
-    doc_.beginCommand(brush_.settings().erase ? "Erase" : "Stroke");
+    BrushSettings settings = (stylus_eraser_ || erasing_) ? eraser_settings_ : brush_settings_;
+    settings.erase = stylus_eraser_ || erasing_;
+    brush_.settings() = settings;
+
+    doc_.beginCommand(settings.erase ? "Erase" : "Stroke");
     stroking_ = true;
 
-    const StrokePoint point{static_cast<float>(image_point.x()),
-                            static_cast<float>(image_point.y()), pressure};
-    brush_.begin(doc_, timeline_, image_, active_layer_, point);
+    brush_.begin(doc_, timeline_, image_, active_layer_,
+                 {static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
+                  pressure});
 
     last_image_point_ = image_point;
-    last_radius_ = brush_.settings().radius;
+    last_pressure_ = pressure;
 
-    const int radius = static_cast<int>(std::ceil(last_radius_)) + 2;
-    const PixelRect dirty{static_cast<int>(std::floor(image_point.x())) - radius,
-                          static_cast<int>(std::floor(image_point.y())) - radius, 2 * radius,
-                          2 * radius};
-    refreshRegion(dirty);
-    repaintImageRect(dirty);
+    const int radius = static_cast<int>(std::ceil(settings.radius)) + 2;
+    markDirty({static_cast<int>(std::floor(image_point.x())) - radius,
+               static_cast<int>(std::floor(image_point.y())) - radius, 2 * radius, 2 * radius});
+    repaintImageRect({static_cast<int>(std::floor(image_point.x())) - radius,
+                      static_cast<int>(std::floor(image_point.y())) - radius, 2 * radius,
+                      2 * radius});
 }
 
 void CanvasWidget::extendStroke(const QPointF& image_point, float pressure) {
@@ -320,17 +366,32 @@ void CanvasWidget::extendStroke(const QPointF& image_point, float pressure) {
     brush_.extend({static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
                    pressure});
 
-    // Recomposite only what this segment could have touched.
     const int radius = static_cast<int>(std::ceil(brush_.settings().radius)) + 2;
     const QRectF segment = QRectF(last_image_point_, image_point).normalized();
     const PixelRect dirty{static_cast<int>(std::floor(segment.left())) - radius,
                           static_cast<int>(std::floor(segment.top())) - radius,
                           static_cast<int>(std::ceil(segment.width())) + 2 * radius,
                           static_cast<int>(std::ceil(segment.height())) + 2 * radius};
-    refreshRegion(dirty);
+    markDirty(dirty);
     repaintImageRect(dirty);
 
     last_image_point_ = image_point;
+    last_pressure_ = pressure;
+}
+
+// The frame moved under an active stroke. Close the brush on the old drawing
+// and reopen it on the new one at the same place, inside the same command, so
+// the whole gesture is still a single undo step.
+void CanvasWidget::rebindStrokeToCurrentImage() {
+    brush_.end();
+    if (image_ == kNoId || active_layer_ == kNoId) {
+        stroking_ = false;
+        doc_.endCommand();
+        return;
+    }
+    brush_.begin(doc_, timeline_, image_, active_layer_,
+                 {static_cast<float>(last_image_point_.x()),
+                  static_cast<float>(last_image_point_.y()), last_pressure_});
 }
 
 void CanvasWidget::endStroke() {
@@ -338,22 +399,85 @@ void CanvasWidget::endStroke() {
     brush_.end();
     doc_.endCommand();
     stroking_ = false;
+    stylus_eraser_ = false;
     Q_EMIT documentChanged();
 }
+
+// --- navigation ----------------------------------------------------------
+
+bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton button) {
+    if (zoom_key_held_) {
+        zooming_ = true;
+        zoom_anchor_widget_ = widget_point;
+        zoom_at_press_ = zoom_;
+        setCursor(Qt::SizeHorCursor);
+        return true;
+    }
+    if (button == Qt::MiddleButton || (space_held_ && button == Qt::LeftButton)) {
+        panning_ = true;
+        pan_anchor_widget_ = widget_point;
+        pan_anchor_image_ = pan_;
+        setCursor(Qt::ClosedHandCursor);
+        return true;
+    }
+    return false;
+}
+
+bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
+    if (zooming_) {
+        // Scrubby zoom: drag right to come in, left to go out, about the point
+        // the drag started from.
+        const double dx = widget_point.x() - zoom_anchor_widget_.x();
+        setZoom(zoom_at_press_ * std::exp(dx * kScrubbyZoomPerPixel), zoom_anchor_widget_);
+        return true;
+    }
+    if (panning_) {
+        const QPointF moved = widget_point - pan_anchor_widget_;
+        pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
+                pan_anchor_image_.y() - moved.y() / zoom_};
+        ensureCacheCoversView();
+        update();
+        Q_EMIT viewChanged();
+        return true;
+    }
+    return false;
+}
+
+void CanvasWidget::endNavigation() {
+    if (!panning_ && !zooming_) return;
+    panning_ = false;
+    zooming_ = false;
+    setCursor(zoom_key_held_  ? Qt::SizeHorCursor
+              : space_held_   ? Qt::OpenHandCursor
+                              : Qt::CrossCursor);
+}
+
+// --- input ---------------------------------------------------------------
 
 void CanvasWidget::tabletEvent(QTabletEvent* event) {
     event->accept();
     ++tablet_events_seen_;
 
-    if (space_held_) return;  // panning takes precedence
+    const QPointF widget_point = event->position();
+
+    if (event->type() == QEvent::TabletPress && beginNavigation(widget_point, Qt::LeftButton)) {
+        return;
+    }
+    if ((panning_ || zooming_) && event->type() == QEvent::TabletMove) {
+        continueNavigation(widget_point);
+        return;
+    }
+    if ((panning_ || zooming_) && event->type() == QEvent::TabletRelease) {
+        endNavigation();
+        return;
+    }
 
     const QPointingDevice* device = event->pointingDevice();
-    const bool eraser_end =
-        device && device->pointerType() == QPointingDevice::PointerType::Eraser;
-    const bool was_erasing = brush_.settings().erase;
-    if (eraser_end) brush_.settings().erase = true;
+    if (event->type() == QEvent::TabletPress && device) {
+        stylus_eraser_ = device->pointerType() == QPointingDevice::PointerType::Eraser;
+    }
 
-    const QPointF image_point = imageFromWidget(event->position());
+    const QPointF image_point = imageFromWidget(widget_point);
     const float pressure = static_cast<float>(event->pressure());
 
     switch (event->type()) {
@@ -361,10 +485,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         case QEvent::TabletMove:
             if (stroking_) extendStroke(image_point, pressure);
             break;
-        case QEvent::TabletRelease:
-            endStroke();
-            if (eraser_end) brush_.settings().erase = was_erasing;
-            break;
+        case QEvent::TabletRelease: endStroke(); break;
         default: break;
     }
 }
@@ -376,40 +497,21 @@ bool CanvasWidget::eventIsSynthesisedFromPen(QMouseEvent* event) const {
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
-    const bool wants_pan = event->button() == Qt::MiddleButton ||
-                           (space_held_ && event->button() == Qt::LeftButton);
-    if (wants_pan) {
-        panning_ = true;
-        pan_anchor_widget_ = event->position();
-        pan_anchor_image_ = pan_;
-        setCursor(Qt::ClosedHandCursor);
-        return;
-    }
-
+    if (beginNavigation(event->position(), event->button())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
     beginStroke(imageFromWidget(event->position()), 1.0f);
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (panning_) {
-        const QPointF moved = event->position() - pan_anchor_widget_;
-        pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
-                pan_anchor_image_.y() - moved.y() / zoom_};
-        ensureCacheCoversView();
-        update();
-        Q_EMIT viewChanged();
-        return;
-    }
-
+    if (continueNavigation(event->position())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (stroking_) extendStroke(imageFromWidget(event->position()), 1.0f);
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (panning_) {
-        panning_ = false;
-        setCursor(space_held_ ? Qt::OpenHandCursor : Qt::CrossCursor);
+    if (panning_ || zooming_) {
+        endNavigation();
         return;
     }
     if (eventIsSynthesisedFromPen(event)) return;
@@ -465,19 +567,43 @@ void CanvasWidget::fitToDrawing() {
 }
 
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
-        space_held_ = true;
-        if (!panning_) setCursor(Qt::OpenHandCursor);
+    if (event->isAutoRepeat()) {
+        QWidget::keyPressEvent(event);
         return;
+    }
+    switch (event->key()) {
+        case Qt::Key_Space:
+            space_held_ = true;
+            if (!panning_ && !zooming_) setCursor(Qt::OpenHandCursor);
+            return;
+        case Qt::Key_Z:
+            // Held, not toggled: a zoom you have to switch back out of costs
+            // more attention than the zoom is worth.
+            zoom_key_held_ = true;
+            if (!panning_ && !zooming_) setCursor(Qt::SizeHorCursor);
+            return;
+        default: break;
     }
     QWidget::keyPressEvent(event);
 }
 
 void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
-        space_held_ = false;
-        if (!panning_) setCursor(Qt::CrossCursor);
+    if (event->isAutoRepeat()) {
+        QWidget::keyReleaseEvent(event);
         return;
+    }
+    switch (event->key()) {
+        case Qt::Key_Space:
+            space_held_ = false;
+            if (!panning_ && !zooming_) setCursor(zoom_key_held_ ? Qt::SizeHorCursor
+                                                                 : Qt::CrossCursor);
+            return;
+        case Qt::Key_Z:
+            zoom_key_held_ = false;
+            if (!panning_ && !zooming_) setCursor(space_held_ ? Qt::OpenHandCursor
+                                                              : Qt::CrossCursor);
+            return;
+        default: break;
     }
     QWidget::keyReleaseEvent(event);
 }

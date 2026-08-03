@@ -59,9 +59,22 @@ LayerId Document::addLayer(TimelineId timeline_id, std::string name, std::size_t
     ScopedCommand command(*this, "Add layer");
     recordOp(std::make_unique<LayerListOp>(timeline_id, timeline->layers));
 
+    // Two layers with the same name is a trap: the panel becomes ambiguous and
+    // so does anything that later refers to a layer by name, such as the export
+    // filenames. Enforced here rather than in the interface so it holds however
+    // the layer got created.
+    const auto taken = [&](const std::string& candidate) {
+        return std::any_of(timeline->layers.begin(), timeline->layers.end(),
+                           [&](const Layer& l) { return l.name == candidate; });
+    };
+    std::string unique = name;
+    for (int suffix = 2; taken(unique); ++suffix) {
+        unique = name + " (" + std::to_string(suffix) + ")";
+    }
+
     Layer layer;
     layer.id = layer_ids_.next();
-    layer.name = std::move(name);
+    layer.name = std::move(unique);
     layer.kind = kind;
 
     const std::size_t at = std::min(index, timeline->layers.size());
@@ -178,6 +191,21 @@ void Document::removeSlot(TimelineId timeline_id, std::size_t slot) {
     recordOp(std::make_unique<ImageOp>(timeline_id, id, std::move(removed)));
 }
 
+void Document::removeDrawing(TimelineId timeline_id, ImageId image_id) {
+    Timeline* timeline = scene_.findTimeline(timeline_id);
+    if (!timeline || image_id == kNoId) return;
+
+    ScopedCommand command(*this, "Delete drawing");
+    // Shortening a hold to nothing and deleting the drawing are the same
+    // operation seen from different ends; this one means the drawing goes.
+    while (true) {
+        auto it = std::find(timeline->slots.begin(), timeline->slots.end(), image_id);
+        if (it == timeline->slots.end()) break;
+        removeSlot(timeline_id,
+                   static_cast<std::size_t>(std::distance(timeline->slots.begin(), it)));
+    }
+}
+
 ImageId Document::duplicateImage(TimelineId timeline_id, std::size_t slot) {
     Timeline* timeline = scene_.findTimeline(timeline_id);
     if (!timeline || slot >= timeline->slots.size()) return kNoId;
@@ -237,6 +265,21 @@ Cel* Document::celForWriting(TimelineId timeline_id, ImageId image_id, LayerId l
 
     auto it = cels_.find(cel_id);
     return (it == cels_.end()) ? nullptr : it->second.get();
+}
+
+void Document::clearCel(TimelineId timeline_id, ImageId image_id, LayerId layer_id) {
+    Timeline* timeline = scene_.findTimeline(timeline_id);
+    if (!timeline) return;
+    Image* image = timeline->findImage(image_id);
+    if (!image) return;
+
+    const CelId cel_id = image->celFor(layer_id);
+    if (cel_id == kNoId) return;
+
+    ScopedCommand command(*this, "Clear layer");
+    recordOp(std::make_unique<CelAssignOp>(timeline_id, image_id, layer_id, cel_id));
+    image->cels.erase(layer_id);
+    releaseCelRef(cel_id);
 }
 
 std::size_t Document::totalTileCount() const {

@@ -11,7 +11,8 @@ using namespace animage;
 namespace {
 
 constexpr int kCellWidth = 26;
-constexpr int kStripHeight = 62;
+constexpr int kRulerHeight = 18;
+constexpr int kStripHeight = 64;
 constexpr int kEdgeGrab = 5;
 
 const QColor kBackground(38, 38, 42);
@@ -19,6 +20,7 @@ const QColor kCell(70, 72, 80);
 const QColor kCellHeld(56, 58, 64);
 const QColor kCurrent(235, 180, 60);
 const QColor kText(230, 230, 230);
+const QColor kRuler(52, 52, 58);
 
 }  // namespace
 
@@ -118,6 +120,7 @@ std::vector<int> TimelineWidget::drawingNumbers() const {
 void TimelineWidget::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.fillRect(rect(), kBackground);
+    painter.fillRect(QRect(0, 0, width(), kRulerHeight), kRuler);
 
     const Timeline* line = timeline();
     if (!line) return;
@@ -131,7 +134,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     for (std::size_t i = 0; i < line->slots.size(); ++i) {
         const int x = static_cast<int>(i) * kCellWidth;
         const bool held = i > 0 && line->slots[i - 1] == line->slots[i];
-        const QRect cell(x, 16, kCellWidth - 1, kStripHeight - 24);
+        const QRect cell(x, kRulerHeight + 2, kCellWidth - 1, kStripHeight - kRulerHeight - 8);
 
         painter.fillRect(cell, held ? kCellHeld : kCell);
 
@@ -150,8 +153,8 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
 
         // Frame ruler every five, as on an exposure sheet.
         if ((i % 5) == 0) {
-            painter.setPen(QColor(150, 150, 160));
-            painter.drawText(QRect(x, 0, kCellWidth, 14), Qt::AlignCenter,
+            painter.setPen(QColor(165, 165, 175));
+            painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
                              QString::number(i + 1));
         }
     }
@@ -159,13 +162,28 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     if (current_slot_ < line->slots.size()) {
         const int x = static_cast<int>(current_slot_) * kCellWidth;
         painter.setPen(QPen(kCurrent, 2));
-        painter.drawRect(QRect(x, 15, kCellWidth - 1, kStripHeight - 22));
+        painter.drawRect(QRect(x, kRulerHeight + 1, kCellWidth - 1,
+                              kStripHeight - kRulerHeight - 6));
+        // Playhead in the ruler, so the scrub band shows where you are.
+        painter.fillRect(QRect(x, 0, kCellWidth - 1, kRulerHeight), kCurrent);
+        painter.setPen(QColor(30, 30, 30));
+        painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
+                         QString::number(current_slot_ + 1));
     }
 }
 
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
     const int x = static_cast<int>(event->position().x());
+    const int y = static_cast<int>(event->position().y());
+
+    // The ruler is a scrub band and nothing else. Exposure edges live below it,
+    // so dragging along time can never resize a hold by accident.
+    if (y < kRulerHeight) {
+        scrubbing_ = true;
+        setCurrentSlot(slotAt(x));
+        return;
+    }
 
     std::size_t run_start = 0;
     if (isOnRunEdge(x, &run_start)) {
@@ -182,6 +200,20 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
+    const int y = static_cast<int>(event->position().y());
+
+    if (scrubbing_) {
+        setCurrentSlot(slotAt(x));
+        return;
+    }
+
+    if (!stretching_ && y < kRulerHeight) {
+        if (hovering_edge_) {
+            hovering_edge_ = false;
+        }
+        setCursor(Qt::PointingHandCursor);
+        return;
+    }
 
     if (stretching_) {
         applyStretch(x);
@@ -196,6 +228,10 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
+    if (scrubbing_) {
+        scrubbing_ = false;
+        return;
+    }
     if (!stretching_) return;
     stretching_ = false;
     doc_.endCommand();
