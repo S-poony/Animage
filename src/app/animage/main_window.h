@@ -11,6 +11,8 @@ class QListWidgetItem;
 class QSlider;
 class QLabel;
 class QDoubleSpinBox;
+class QCheckBox;
+class QPushButton;
 
 // M2: one image, one timeline, no timeline UI yet. Enough to find out whether
 // the layer model is pleasant to draw on before building time on top of it.
@@ -51,7 +53,8 @@ private:
     QSlider* opacity_ = nullptr;
     QDoubleSpinBox* radius_ = nullptr;
     QLabel* status_ = nullptr;
-    QLabel* colour_swatch_ = nullptr;
+    QPushButton* colour_swatch_ = nullptr;
+    QCheckBox* pressure_opacity_ = nullptr;
 
     bool updating_list_ = false;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;

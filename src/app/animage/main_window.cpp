@@ -3,6 +3,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QCheckBox>
 #include <QColorDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -28,12 +29,12 @@ MainWindow::MainWindow() {
     resize(1400, 900);
 
     timeline_ = doc_.addTimeline("main");
-    const LayerId rough = doc_.addLayer(timeline_, "rough");
+    const LayerId first = doc_.addLayer(timeline_, "layer 1");
     image_ = doc_.insertImage(timeline_, 0);
 
     canvas_ = new CanvasWidget(doc_, this);
     canvas_->setTarget(timeline_, image_);
-    canvas_->setActiveLayer(rough);
+    canvas_->setActiveLayer(first);
     setCentralWidget(canvas_);
 
     buildActions();
@@ -117,15 +118,28 @@ void MainWindow::buildActions() {
     connect(larger, &QAction::triggered, this, [this] { nudgeBrushRadius(1.25); });
     addAction(larger);
 
+    // Pressure driving opacity as well as size suits some hands and not
+    // others, exactly as in Photoshop. Size stays on pressure regardless;
+    // a brush that does not thin out is not worth having on a tablet.
+    pressure_opacity_ = new QCheckBox(QStringLiteral("Pressure \342\206\222 opacity"), this);
+    pressure_opacity_->setChecked(canvas_->brushSettings().pressure_affects_opacity);
+    connect(pressure_opacity_, &QCheckBox::toggled, this, [this](bool on) {
+        canvas_->brushSettings().pressure_affects_opacity = on;
+    });
+    tools->addWidget(pressure_opacity_);
+
     tools->addSeparator();
     auto* colour_button = new QPushButton(QStringLiteral("Colour..."), this);
     connect(colour_button, &QPushButton::clicked, this, &MainWindow::chooseColour);
     tools->addWidget(colour_button);
 
-    colour_swatch_ = new QLabel(this);
+    // The swatch is a button too: a colour patch is the thing people click.
+    colour_swatch_ = new QPushButton(this);
     colour_swatch_->setFixedSize(28, 20);
-    colour_swatch_->setAutoFillBackground(true);
+    colour_swatch_->setToolTip(QStringLiteral("Brush colour"));
+    colour_swatch_->setCursor(Qt::PointingHandCursor);
     colour_swatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #888;"));
+    connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseColour);
     tools->addWidget(colour_swatch_);
 }
 

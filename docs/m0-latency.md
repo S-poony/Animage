@@ -189,6 +189,8 @@ In descending order of expected effect:
    painting as soon as the event arrives cuts most of the 0–16.7 ms wait. This
    is what the fast drawing applications do, and it is an M2 concern rather
    than a fix to apply here.
-5. **Pen prediction.** Extrapolating the stroke ahead of the reported position
-   hides latency rather than removing it. It is a real technique and it costs
-   accuracy at the ends of strokes. Worth knowing about, not worth doing yet.
+
+**Not pen prediction.** Extrapolating the stroke ahead of the reported position
+hides latency instead of removing it, and pays for it with accuracy exactly
+where a drawing is most sensitive — the ends of strokes. It is ruled out for
+this project. Do not propose it again.
