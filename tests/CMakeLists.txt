@@ -1,0 +1,10 @@
+function(animage_test name)
+  add_executable(${name} ${name}.cpp)
+  target_link_libraries(${name} PRIVATE animage::core)
+  target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+animage_test(test_model)
+animage_test(test_undo)
+animage_test(test_color)
