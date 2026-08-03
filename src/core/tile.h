@@ -55,6 +55,17 @@ struct Tile {
 
 using TileRef = std::shared_ptr<const Tile>;
 
+// A rectangle in image pixels. Lives here rather than in the compositor
+// because tiles, fills and bounds all speak in these.
+struct PixelRect {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+
+    bool isEmpty() const { return width <= 0 || height <= 0; }
+};
+
 struct TileCoord {
     int x = 0;
     int y = 0;

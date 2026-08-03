@@ -7,15 +7,6 @@
 
 namespace animage {
 
-struct PixelRect {
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-
-    bool isEmpty() const { return width <= 0 || height <= 0; }
-};
-
 // A block of linear, premultiplied RGBA. This is what the compositor produces
 // and what the display path converts to sRGB at the very last moment.
 class Framebuffer {

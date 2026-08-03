@@ -9,6 +9,7 @@
 
 #include "cel.h"
 #include "command.h"
+#include "ctg_fill.h"
 #include "scene.h"
 
 namespace animage {
@@ -75,6 +76,11 @@ public:
     void clearCel(TimelineId timeline, ImageId image, LayerId layer);
 
     std::size_t celCount() const { return cels_.size(); }
+
+    // Regenerated fills for CTG layers, keyed by the cel holding the scribbles.
+    // Kept here rather than on the Cel because it is derived data: losing it
+    // costs a recompute and nothing else.
+    std::unordered_map<CelId, CtgFill>& ctgCache() { return ctg_cache_; }
     std::size_t totalTileCount() const;
 
     // --- history ---------------------------------------------------------
@@ -129,6 +135,8 @@ private:
 
     std::vector<Command> undo_stack_;
     std::vector<Command> redo_stack_;
+
+    std::unordered_map<CelId, CtgFill> ctg_cache_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

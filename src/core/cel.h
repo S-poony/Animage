@@ -73,6 +73,11 @@ public:
 
     Rgba pixel(int px, int py) const { return grid_.pixel(px, py); }
 
+    // Bumped on every write. A CTG layer regenerates its fill from the
+    // scribbles and the line art beneath, and comparing revisions is how it
+    // knows whether either has moved since it last did.
+    std::uint64_t revision() const { return revision_; }
+
     // Returns a tile that is safe to write to, cloning it first if anyone else
     // can still see the current one.
     Tile* writableTile(TileCoord c, TileJournal& journal);
@@ -85,6 +90,7 @@ private:
     CelId id_;
     TileGrid grid_;
     int image_refcount_ = 0;
+    std::uint64_t revision_ = 1;
 };
 
 }  // namespace animage

@@ -27,6 +27,7 @@ Tile* Cel::writableTile(TileCoord c, TileJournal& journal) {
 
     Tile* raw = writable.get();
     grid_.set(c, std::move(writable));
+    ++revision_;
     return raw;
 }
 
@@ -34,6 +35,7 @@ void Cel::swapTile(TileCoord c, TileRef& other) {
     TileRef current = grid_.find(c);
     grid_.set(c, std::move(other));
     other = std::move(current);
+    ++revision_;
 }
 
 }  // namespace animage

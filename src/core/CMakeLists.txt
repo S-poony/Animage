@@ -4,6 +4,7 @@ add_library(animage_core
   color.cpp
   command.cpp
   compositor.cpp
+  ctg.cpp
   document.cpp
   gridflow.cpp
   lazybrush.cpp
