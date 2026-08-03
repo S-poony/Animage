@@ -16,8 +16,9 @@ open: the device listing at startup and the report on exit both go to stdout.
 
 | Key | |
 |---|---|
+| `M` | camera mode: on-screen millisecond clock, everything else hidden |
 | `C` | clear the canvas |
-| `H` | hide the HUD (do this before filming) |
+| `H` | hide the HUD |
 | `X` | hide the crosshair |
 | `S` | print a report to the console |
 | `F` | fullscreen |
@@ -42,15 +43,33 @@ is not the bottleneck; it does not tell you the tool will feel good.
 
 ## The measurement that counts
 
-**Camera.** Film the pen tip and the screen together at 120 fps or more — a
-recent phone in slow-motion mode is enough. Draw a fast, straight, steady
-stroke. Step through the recording and count the frames between the tip
-reaching a point and ink appearing under it. At 240 fps each frame is 4.2 ms.
+**Press `M` first.** Camera mode clears the screen down to the stroke and a
+large four-digit millisecond clock, and it is what makes the measurement work
+without knowing anything about the camera.
 
-Do this three times and take the worst, not the average.
+Counting frames requires knowing the frame rate, and phones are unhelpful here:
+slow-motion modes are relabelled between models and often are not reported at
+all. So the clock on screen is a real timestamp rather than a frame counter.
+Read it in the frame where the pen tip reaches a point, read it again in the
+frame where ink appears under it, and subtract. **That difference is the
+latency in milliseconds.** The camera's frame rate never enters the arithmetic.
 
-**Before filming:** press `H` to hide the HUD and `X` to hide the crosshair.
-Both add drawing work per frame and the crosshair is easy to mistake for ink.
+**Procedure.** Film the pen tip and the screen together, in slow motion if the
+phone offers it. Draw a fast, straight, steady stroke. Step through the footage
+and find:
+
+1. the frame where the tip is physically over a chosen point — note the digits;
+2. the frame where ink first appears at that point — note the digits again.
+
+Do it three times and take the worst, not the average.
+
+The square next to the digits flips light and dark on every repaint. Digits
+smear when the exposure is long; a block that is simply light or dark survives
+that, and a skipped step in the sequence is easy to spot.
+
+**Resolution is one display refresh**, because that is how often the digits can
+change — about 17 ms on a 60 Hz panel. The measurement cannot be finer than the
+thing being measured.
 
 **The crosshair trick, when there is no camera.** With the crosshair on, move
 the pen steadily and look at the gap between the physical tip and the red
@@ -89,8 +108,14 @@ without a baseline written down there is nothing to regress against.
 
 | Date | Machine | Tablet | Path | Refresh | Event rate | App share | Camera |
 |---|---|---|---|---|---|---|---|
-| 2026-08-03 | Windows 11 | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 189 Hz | 0.03 ms median, 8.1 ms worst | pending |
+| 2026-08-03 | Windows 11, windowed | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 189 Hz | 0.03 ms median, 8.1 ms worst | pending |
+| 2026-08-03 | Windows 11, fullscreen | `wmpointer` (pen) | Windows Ink | 59.94 Hz | 149 Hz | 0.05 ms median, 3.6 ms worst | pending |
 | | | | WinTab | | | | not yet measured |
+
+Fullscreen did not move the application's share, which was already negligible.
+Whether it removed the DWM composition frame cannot be seen from inside the
+process at all — that difference only shows up on camera, and it is the main
+reason the windowed and fullscreen runs both need filming.
 
 ## What the first measurement showed
 

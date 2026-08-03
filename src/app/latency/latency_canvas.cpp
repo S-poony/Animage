@@ -269,6 +269,7 @@ void LatencyCanvas::rebuildHud() {
     lines << QStringLiteral("Neither is the answer. Film the pen tip and the screen at 120 fps");
     lines << QStringLiteral("or more and count frames. Pass: under 25 ms.");
     lines << QString();
+    lines << QStringLiteral("M camera mode (on-screen clock, for filming)");
     lines << QStringLiteral("C clear   H hud   X crosshair   S report   F fullscreen   Q quit");
 
     QFont font(QStringLiteral("Consolas"));
@@ -306,6 +307,49 @@ void LatencyCanvas::rebuildHud() {
     hud_built_ns_ = clock_.nsecsElapsed();
 }
 
+// The problem with counting frames in a video is that you have to know what the
+// camera was doing. Phones relabel their slow-motion rate freely and often do
+// not report it at all.
+//
+// So put the clock on the screen instead. These digits are a real timestamp,
+// not a frame counter: read them in the frame where the pen tip reaches a spot,
+// read them again in the frame where ink appears there, subtract. The camera's
+// frame rate never enters the arithmetic.
+//
+// Resolution is still one display refresh, because that is how often the digits
+// can change. On a 60 Hz panel that is about 17 ms of granularity.
+void LatencyCanvas::paintCameraClock(QPainter& painter) {
+    const qint64 elapsed_ms = clock_.elapsed();
+
+    QFont digits(QStringLiteral("Consolas"));
+    digits.setPointSizeF(64.0);
+    digits.setBold(true);
+    digits.setStyleHint(QFont::Monospace);
+    painter.setFont(digits);
+
+    const QFontMetrics metrics(digits);
+    const QString text = QStringLiteral("%1").arg(elapsed_ms % 10000, 4, 10, QLatin1Char('0'));
+    const int block = metrics.height();
+
+    if (clock_rect_.isEmpty()) {
+        clock_rect_ = QRect(24, 24, metrics.horizontalAdvance(QStringLiteral("0000")) + block + 36,
+                            block + 24);
+    }
+
+    painter.fillRect(clock_rect_, Qt::black);
+    painter.setPen(QColor(255, 255, 255));
+    painter.drawText(clock_rect_.adjusted(18, 12, 0, 0), Qt::AlignLeft | Qt::AlignTop, text);
+
+    // A square that flips every refresh. Digits smear when the exposure is
+    // long; a block that is simply light or dark survives that, and it makes a
+    // skipped frame obvious.
+    const QRect flip(clock_rect_.right() - block - 12, clock_rect_.top() + 12, block, block);
+    painter.fillRect(flip, ((elapsed_ms / 8) % 2) ? QColor(255, 255, 255) : QColor(40, 40, 40));
+
+    // Keep repainting so the clock keeps ticking when the pen is still.
+    update(clock_rect_);
+}
+
 void LatencyCanvas::paintEvent(QPaintEvent* event) {
     const qint64 now = clock_.nsecsElapsed();
     if (pending_newest_ns_ >= 0) {
@@ -327,6 +371,11 @@ void LatencyCanvas::paintEvent(QPaintEvent* event) {
     // The gap between the physical pen tip and this crosshair while the pen is
     // moving steadily is the latency, made visible. It is the cheapest estimate
     // available without a camera.
+    if (camera_mode_) {
+        paintCameraClock(painter);
+        return;  // nothing else on screen: overlays are easy to mistake for ink
+    }
+
     if (show_crosshair_ && cursor_valid_ && dirty.intersects(crosshairRect(cursor_))) {
         painter.setRenderHint(QPainter::Antialiasing, true);
         QPen pen(QColor(255, 64, 64));
@@ -369,6 +418,11 @@ void LatencyCanvas::printReport() const {
 void LatencyCanvas::keyPressEvent(QKeyEvent* event) {
     switch (event->key()) {
         case Qt::Key_C: clear(); break;
+        case Qt::Key_M:
+            camera_mode_ = !camera_mode_;
+            clock_rect_ = QRect();
+            update();
+            break;
         case Qt::Key_H: show_hud_ = !show_hud_; update(); break;
         case Qt::Key_X: show_crosshair_ = !show_crosshair_; update(); break;
         case Qt::Key_S: printReport(); break;

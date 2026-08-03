@@ -52,6 +52,7 @@ private:
     void moveCursorTo(const QPointF& position);
     bool handleAsMouse(QMouseEvent* event);
     void rebuildHud();
+    void paintCameraClock(QPainter& painter);
     Stats latencyStats(const std::deque<double>& samples) const;
     double eventRateHz() const;
     QRect crosshairRect(const QPointF& centre) const;
@@ -94,4 +95,9 @@ private:
 
     bool show_hud_ = true;
     bool show_crosshair_ = true;
+
+    // Camera mode puts a running millisecond clock on screen so that footage
+    // can be read without knowing the camera's frame rate.
+    bool camera_mode_ = false;
+    QRect clock_rect_;
 };
