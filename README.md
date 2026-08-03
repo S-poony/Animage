@@ -52,8 +52,16 @@ Then run the CMake commands above from a UCRT64 shell.
 | Path | Contents |
 |---|---|
 | `src/core/` | Data model, tiles, undo, colour. Pure C++20, no Qt. |
+| `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests for the core. |
 | `docs/fr/` | Original design documents. |
+
+## Measuring pen latency
+
+M0 is the gate before everything else, and it needs a human with a camera.
+Build and run `animage_m0_latency`, then follow
+[docs/m0-latency.md](docs/m0-latency.md). Pass is under 25 ms, pen tip to
+photons — not the number the HUD shows.
 
 ## Licence
 
