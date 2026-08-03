@@ -94,14 +94,8 @@ std::size_t TimelineWidget::slotAt(int x) const {
 
 std::pair<std::size_t, std::size_t> TimelineWidget::runAt(std::size_t slot) const {
     const Timeline* line = timeline();
-    if (!line || slot >= line->slots.size()) return {slot, slot};
-
-    const ImageId id = line->slots[slot];
-    std::size_t first = slot;
-    while (first > 0 && line->slots[first - 1] == id) --first;
-    std::size_t last = slot;
-    while (last + 1 < line->slots.size() && line->slots[last + 1] == id) ++last;
-    return {first, last};
+    if (!line) return {slot, slot};
+    return line->runBounds(slot);
 }
 
 bool TimelineWidget::isOnRunEdge(int x, std::size_t* run_start) const {

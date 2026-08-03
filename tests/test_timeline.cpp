@@ -214,6 +214,38 @@ void clearingALayerLeavesOtherDrawingsAlone() {
     CHECK_NEAR(restored->pixel(20, 20).a, 1.0, 1e-2);
 }
 
+// "After this drawing" has to mean after the whole hold. Landing a new drawing
+// in the middle of a ten-frame hold splits it in two, which is never what was
+// meant by pressing insert.
+void runBoundsCoverTheWholeHold() {
+    TEST("run bounds cover the whole hold");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.timeline, 0);
+    f.doc.extendExposure(f.timeline, 0, 9);  // a held for 10
+    const ImageId b = f.doc.insertImage(f.timeline, 10);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});
+
+    // From anywhere inside the hold, the same bounds.
+    for (std::size_t slot = 0; slot < 10; ++slot) {
+        const auto [first, last] = f.tl().runBounds(slot);
+        CHECK_EQ(first, std::size_t{0});
+        CHECK_EQ(last, std::size_t{9});
+    }
+    const auto [first, last] = f.tl().runBounds(10);
+    CHECK_EQ(first, std::size_t{10});
+    CHECK_EQ(last, std::size_t{10});
+
+    // Inserting after the hold leaves it unbroken.
+    const std::size_t after = f.tl().runBounds(4).second + 1;
+    CHECK_EQ(after, std::size_t{10});
+    const ImageId inserted = f.doc.insertImage(f.timeline, after);
+
+    CHECK_EQ(f.tl().exposureOf(a), std::size_t{10});
+    for (std::size_t slot = 0; slot < 10; ++slot) CHECK_EQ(f.tl().imageAtSlot(slot), a);
+    CHECK_EQ(f.tl().imageAtSlot(10), inserted);
+    CHECK_EQ(f.tl().imageAtSlot(11), b);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -233,6 +265,7 @@ int main() {
     std::printf("timeline:\n");
     deletingADrawingTakesEveryFrameOfIt();
     clearingALayerLeavesOtherDrawingsAlone();
+    runBoundsCoverTheWholeHold();
     layerNamesStayUnique();
     stretchingExposureIsOneUndoStep();
     holdingCostsNothing();

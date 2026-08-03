@@ -78,9 +78,22 @@ MainWindow::MainWindow() {
     canvas_->setFocus();
 }
 
+MainWindow::~MainWindow() {
+    // The filter is installed on the application, which outlives this window.
+    // Removing it here rather than letting ~QObject do it keeps it from seeing
+    // events while the children it forwards to are already being destroyed.
+    qApp->removeEventFilter(this);
+}
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;
     if (!key_event || !canvas_) return QMainWindow::eventFilter(watched, event);
+
+    // An application-wide filter also sees the events this filter itself sends.
+    // Without this line, forwarding to the canvas re-enters here immediately
+    // and recurses until the stack runs out -- pressing Z did nothing at all
+    // and then killed the process.
+    if (watched == canvas_) return QMainWindow::eventFilter(watched, event);
 
     auto* key = static_cast<QKeyEvent*>(event);
     if (key->key() != Qt::Key_Space && key->key() != Qt::Key_Z) {
@@ -439,19 +452,31 @@ void MainWindow::stepDrawing(int direction) {
         static_cast<std::size_t>(std::distance(timeline->slots.begin(), it)));
 }
 
+// After a drawing means after the whole hold. Landing a new drawing in the
+// middle of a ten-frame hold splits it in two, which is never what was meant.
+std::size_t MainWindow::slotAfterCurrentDrawing() const {
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline || timeline->slots.empty()) return 0;
+    return timeline->runBounds(timeline_widget_->currentSlot()).second + 1;
+}
+
 void MainWindow::insertInterval() {
     stopPlayback();
-    doc_.insertImage(timeline_, timeline_widget_->currentSlot() + 1);
+    const std::size_t at = slotAfterCurrentDrawing();
+    doc_.insertImage(timeline_, at);
     timeline_widget_->refresh();
-    timeline_widget_->setCurrentSlot(timeline_widget_->currentSlot() + 1);
+    timeline_widget_->setCurrentSlot(at);
     refreshEverything();
 }
 
 void MainWindow::duplicateDrawing() {
     stopPlayback();
-    doc_.duplicateImage(timeline_, timeline_widget_->currentSlot());
+    const std::size_t at = slotAfterCurrentDrawing();
+    // duplicateImage inserts just after the slot it is given, so hand it the
+    // last frame of the hold.
+    doc_.duplicateImage(timeline_, at > 0 ? at - 1 : 0);
     timeline_widget_->refresh();
-    timeline_widget_->setCurrentSlot(timeline_widget_->currentSlot() + 1);
+    timeline_widget_->setCurrentSlot(at);
     refreshEverything();
 }
 

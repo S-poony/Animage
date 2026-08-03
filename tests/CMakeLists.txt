@@ -10,3 +10,12 @@ animage_test(test_model)
 animage_test(test_timeline)
 animage_test(test_undo)
 animage_test(test_color)
+
+# Interface tests need Qt, and run offscreen so they work on a build machine
+# with no display.
+if(TARGET animage_ui)
+  add_executable(test_canvas test_canvas.cpp)
+  target_link_libraries(test_canvas PRIVATE animage_ui)
+  target_include_directories(test_canvas PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_canvas COMMAND test_canvas -platform offscreen)
+endif()

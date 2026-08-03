@@ -67,6 +67,10 @@ public:
     // Everything drawn changed underneath us: undo, layer visibility, opacity.
     void refreshAll();
 
+    // Entries in the composite cache. Exposed so a test can assert this tracks
+    // the size of the window rather than the size of the visible image area.
+    long long cacheEntryCount() const;
+
 Q_SIGNALS:
     void viewChanged();
     void documentChanged();

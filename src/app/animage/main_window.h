@@ -25,6 +25,7 @@ class MainWindow : public QMainWindow {
 
 public:
     MainWindow();
+    ~MainWindow() override;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -59,6 +60,7 @@ private:
     void onSlotChanged(std::size_t slot);
     void stepFrame(int delta);
     void stepDrawing(int direction);
+    std::size_t slotAfterCurrentDrawing() const;
     void insertInterval();
     void duplicateDrawing();
     void deleteDrawing();

@@ -62,6 +62,20 @@ struct Timeline {
         return static_cast<std::size_t>(std::count(slots.begin(), slots.end(), id));
     }
 
+    // First and last slot of the unbroken run of identical ImageIds around
+    // `slot` -- that is, the frames over which this drawing is held. Anything
+    // that means "after this drawing" has to mean after the whole hold, not
+    // after the frame the playhead happens to be on.
+    std::pair<std::size_t, std::size_t> runBounds(std::size_t slot) const {
+        if (slot >= slots.size()) return {slot, slot};
+        const ImageId id = slots[slot];
+        std::size_t first = slot;
+        while (first > 0 && slots[first - 1] == id) --first;
+        std::size_t last = slot;
+        while (last + 1 < slots.size() && slots[last + 1] == id) ++last;
+        return {first, last};
+    }
+
     // Distinct ImageIds walking outwards from `slot`, nearest first. An image
     // held for five frames counts once, which is what onion skin wants.
     std::vector<ImageId> distinctNeighbours(std::size_t slot, int count, int direction) const;

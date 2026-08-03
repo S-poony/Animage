@@ -226,9 +226,37 @@ PixelRect CanvasWidget::visibleImageRect() const {
     return {x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
 }
 
+long long CanvasWidget::cacheEntryCount() const {
+    return static_cast<long long>(display_.width()) * display_.height();
+}
+
 void CanvasWidget::ensureCacheCoversView() {
     const PixelRect wanted = visibleImageRect();
-    const int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
+
+    // Everything allocated here -- the cache, the onion buffer, the scratch the
+    // compositor writes into -- is sized from this, so it has to be bounded by
+    // the window rather than by how much of the image the window can see. At
+    // 51% zoom a maximised window covers four times its own area in image
+    // pixels, and sizing from that asked for a quarter of a gigabyte.
+    const long long viewport = std::max<long long>(1, static_cast<long long>(width()) * height());
+    const long long budget = std::max<long long>(2'000'000, viewport * 2);
+
+    int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
+    int margin = kCacheMargin;
+    PixelRect padded{};
+    for (;;) {
+        padded = {wanted.x - margin * step, wanted.y - margin * step,
+                  wanted.width + 2 * margin * step, wanted.height + 2 * margin * step};
+        const long long entries = static_cast<long long>((padded.width + step - 1) / step) *
+                                  ((padded.height + step - 1) / step);
+        if (entries <= budget) break;
+        // Give up the margin before giving up resolution.
+        if (margin > 0) {
+            margin /= 2;
+            continue;
+        }
+        ++step;
+    }
 
     // Panning inside the cached margin, or zooming in, needs no new composite
     // at all -- the cache already holds those pixels and the blit just samples
@@ -244,9 +272,7 @@ void CanvasWidget::ensureCacheCoversView() {
     }
 
     cache_step_ = step;
-    cached_region_ = {wanted.x - kCacheMargin * step, wanted.y - kCacheMargin * step,
-                      wanted.width + 2 * kCacheMargin * step,
-                      wanted.height + 2 * kCacheMargin * step};
+    cached_region_ = padded;
 
     display_ = QImage((cached_region_.width + step - 1) / step,
                       (cached_region_.height + step - 1) / step, QImage::Format_RGB32);
