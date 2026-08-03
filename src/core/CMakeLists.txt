@@ -5,6 +5,8 @@ add_library(animage_core
   command.cpp
   compositor.cpp
   document.cpp
+  gridflow.cpp
+  lazybrush.cpp
   timeline.cpp
 )
 

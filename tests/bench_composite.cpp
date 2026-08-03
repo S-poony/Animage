@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "brush.h"
+#include "lazybrush.h"
 #include "compositor.h"
 #include "document.h"
 
@@ -120,6 +121,52 @@ int main() {
             const double timed = timeComposites(doc, timeline, image, region, step, 10);
             std::printf("    step %2d (zoom %5.2f)  %7.2f ms\n", step, 1.0 / step, timed);
         }
+    }
+
+    // LazyBrush. The plan's answer to interactivity is to solve at half or
+    // quarter resolution while the scribble is being drawn and at full size
+    // once the pen lifts, so what matters is where resolution stops being
+    // affordable.
+    std::printf("\nLazyBrush: three boxed regions on a background, each wall gapped\n");
+    for (int side : {128, 256, 512, 1024}) {
+        LazyBrushProblem problem;
+        problem.width = side;
+        problem.height = side;
+        problem.intensity.assign(static_cast<std::size_t>(side) * side, 1.0f);
+        problem.seeds.assign(static_cast<std::size_t>(side) * side, -1);
+        problem.colour_count = 4;
+        problem.hard.assign(4, 0);
+
+        const auto line = [&](int x, int y) {
+            if (x < 0 || y < 0 || x >= side || y >= side) return;
+            problem.intensity[static_cast<std::size_t>(y) * side + x] = 0.0f;
+        };
+        for (int box = 0; box < 3; ++box) {
+            const int left = side / 8 + box * side / 4;
+            const int top = side / 4;
+            const int w = side / 6;
+            const int h = side / 2;
+            for (int x = 0; x <= w; ++x) {
+                line(left + x, top);
+                if (x < w / 2 || x > w / 2 + 3) line(left + x, top + h);  // a gap
+            }
+            for (int y = 0; y <= h; ++y) {
+                line(left, top + y);
+                line(left + w, top + y);
+            }
+            for (int y = -2; y <= 2; ++y) {
+                for (int x = -2; x <= 2; ++x) {
+                    problem.seeds[static_cast<std::size_t>(top + h / 2 + y) * side + left +
+                                  w / 2 + x] = box + 1;
+                }
+            }
+        }
+        for (int x = 0; x < side; ++x) problem.seeds[static_cast<std::size_t>(2) * side + x] = 0;
+
+        const auto start = Clock::now();
+        const LazyBrushResult solved = solveLazyBrush(problem);
+        const double timed = milliseconds(start, Clock::now());
+        std::printf("    %4dx%-4d  %9.1f ms   (%d cuts)\n", side, side, timed, solved.cuts);
     }
 
     std::printf("\nA frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.\n");

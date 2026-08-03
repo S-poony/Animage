@@ -6,6 +6,7 @@ function(animage_test name)
 endfunction()
 
 animage_test(test_brush)
+animage_test(test_lazybrush)
 animage_test(test_model)
 animage_test(test_timeline)
 animage_test(test_undo)
