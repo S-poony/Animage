@@ -178,6 +178,9 @@ void CanvasWidget::refreshCtgFills() {
     CtgSettings settings;
     for (const Layer& layer : timeline->layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
+        // Nothing to solve for a layer showing its scribbles: the fill would be
+        // computed and then not drawn.
+        if (layer.show_scribbles) continue;
         ctgFill(doc_, timeline_, image_, layer.id, settings);
     }
 }

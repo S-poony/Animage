@@ -126,7 +126,22 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
     region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
               region.height + 2 * kTileSize};
 
-    const int step = std::max(1, settings.downscale);
+    // The solve is bounded, whatever it is asked for. A max-flow over a region
+    // grows faster than the region does -- roughly 1.3 s for a megapixel -- and
+    // it runs where the interface is waiting, so an unbounded one on a large
+    // drawing does not take a while, it stops the program. Coarser is a visible
+    // cost; frozen is not a cost, it is a failure.
+    //
+    // The blockiness this causes on a big drawing is the reason to solve on a
+    // background thread and refine, which is the proper fix and is not here.
+    constexpr long long kSolveBudget = 512 * 512;
+    int step = std::max(1, settings.downscale);
+    while (static_cast<long long>((region.width + step - 1) / step) *
+               ((region.height + step - 1) / step) >
+           kSolveBudget) {
+        ++step;
+    }
+
     LazyBrushProblem problem;
     problem.width = (region.width + step - 1) / step;
     problem.height = (region.height + step - 1) / step;

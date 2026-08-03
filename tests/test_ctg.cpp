@@ -2,6 +2,8 @@
 //
 // The CTG layer: scribbles in, fill out, and the fill is never what is stored.
 
+#include <chrono>
+
 #include "brush.h"
 #include "compositor.h"
 #include "ctg.h"
@@ -279,10 +281,39 @@ void oneScribbleAloneLabelsEverything() {
     CHECK_NEAR(fillAt(both, 130, 215).b, 1.0, 0.02);
 }
 
+// However large the drawing, the solve stays bounded. It runs where the
+// interface is waiting, and a max-flow over a megapixel takes over a second --
+// so on a big canvas an unbounded one does not take a while, it stops the
+// program.
+void theSolveStaysBoundedOnALargeDrawing() {
+    TEST("the solve stays bounded however large the drawing");
+    Fixture f;
+
+    // Line art spread far enough that the region is several megapixels.
+    f.drawGappedBox(f.ink, 100, 100, 2600, 2000, 1300, 1400);
+    f.stroke(f.colour, 800, 900, 1400, 900, 20.0f, 1.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 40, 40, 2700, 40, 20.0f, 0.0f, 0.0f, 1.0f);
+
+    const auto started = std::chrono::steady_clock::now();
+    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+    CHECK(fill.valid);
+    CHECK(fill.region.width > 2000);   // the region really is large
+    CHECK(seconds < 2.0);              // generous; an unbounded solve is far worse
+
+    // And it is still correct, only coarser: deep inside the box is the inside
+    // colour, and up by the outside scribble is the outside one.
+    CHECK_NEAR(fillAt(fill, 1200, 1500).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 1200, 70).b, 1.0, 0.02);
+}
+
 }  // namespace
 
 int main() {
     std::printf("ctg:\n");
+    theSolveStaysBoundedOnALargeDrawing();
     oneScribbleAloneLabelsEverything();
     aScribbleFillsItsRegion();
     theLayerStoresScribblesNotTheFill();

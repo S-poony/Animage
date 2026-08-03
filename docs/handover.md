@@ -81,6 +81,14 @@ bug meant the result was never drawn; fixing the repaint made it obvious. The
 solve now happens once, when the pen lifts, and the scribble itself is shown
 during the stroke.
 
+**The solve runs where the interface is waiting, so it is capped.** A max-flow
+grows faster than its region — about 1.3 s for a megapixel — and on a large
+drawing an unbounded one does not take a while, it stops the program. The
+resolution is now reduced until the solve fits in roughly 512x512 whatever it
+was asked for. That is a real loss of quality on a big canvas, and the honest
+fix is to solve on a background thread and refine, which nobody has written yet.
+It is the first thing to do after saving if colouring is being used seriously.
+
 **Nothing was measured until it had been "optimised" three times.** Every lag
 complaint traced to one operation — flattening the visible region — which had
 never been timed. It was 27 ms for four layers, against a 16.7 ms frame. Two
@@ -142,7 +150,12 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    drawing overrides from there. This is also most of the plan's "onion fill"
    hypothesis, which the layer model makes nearly free and which the notes
    expect to be the selling point.
-3. **GPU compositing**, if `bench_composite` says it is worth it at real
+3. **Solve the CTG fill off the interface thread.** It is capped at about
+   512x512 today purely so it cannot freeze the program, which costs real
+   quality on a large drawing. Solving in the background, coarse first and
+   refining, removes both the cap and the wait. The copy-on-write tiles already
+   make the snapshot a background thread would need almost free.
+4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
 
 ## Two things to be careful of
