@@ -655,21 +655,29 @@ void CanvasWidget::fitToDrawing() {
     Q_EMIT viewChanged();
 }
 
+// Space and Z are accepted here whether or not they are auto-repeats. That
+// looks like a detail and is not: an ignored key propagates to the parent
+// widget, where the application-wide filter sees it again and forwards it back
+// here, which propagates again. Holding either key past the auto-repeat delay
+// used to recurse until the stack ran out -- a crash a few seconds into every
+// pan and every zoom.
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
-    if (event->isAutoRepeat()) {
-        QWidget::keyPressEvent(event);
-        return;
-    }
     switch (event->key()) {
         case Qt::Key_Space:
-            space_held_ = true;
-            if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::OpenHandCursor);
+            if (!event->isAutoRepeat()) {
+                space_held_ = true;
+                if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::OpenHandCursor);
+            }
+            event->accept();
             return;
         case Qt::Key_Z:
             // Held, not toggled: a zoom you have to switch back out of costs
             // more attention than the zoom is worth.
-            zoom_key_held_ = true;
-            if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::SizeHorCursor);
+            if (!event->isAutoRepeat()) {
+                zoom_key_held_ = true;
+                if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::SizeHorCursor);
+            }
+            event->accept();
             return;
         default: break;
     }
@@ -677,22 +685,24 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
 }
 
 void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
-    if (event->isAutoRepeat()) {
-        QWidget::keyReleaseEvent(event);
-        return;
-    }
     switch (event->key()) {
         case Qt::Key_Space:
-            space_held_ = false;
-            if (!panning_ && !zooming_ && !sizing_) {
-                setCursor(zoom_key_held_ ? Qt::SizeHorCursor : Qt::CrossCursor);
+            if (!event->isAutoRepeat()) {
+                space_held_ = false;
+                if (!panning_ && !zooming_ && !sizing_) {
+                    setCursor(zoom_key_held_ ? Qt::SizeHorCursor : Qt::CrossCursor);
+                }
             }
+            event->accept();
             return;
         case Qt::Key_Z:
-            zoom_key_held_ = false;
-            if (!panning_ && !zooming_ && !sizing_) {
-                setCursor(space_held_ ? Qt::OpenHandCursor : Qt::CrossCursor);
+            if (!event->isAutoRepeat()) {
+                zoom_key_held_ = false;
+                if (!panning_ && !zooming_ && !sizing_) {
+                    setCursor(space_held_ ? Qt::OpenHandCursor : Qt::CrossCursor);
+                }
             }
+            event->accept();
             return;
         default: break;
     }

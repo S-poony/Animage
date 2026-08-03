@@ -98,5 +98,6 @@ private:
     std::size_t playback_start_slot_ = 0;
 
     bool updating_list_ = false;
+    bool forwarding_key_ = false;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;
 };

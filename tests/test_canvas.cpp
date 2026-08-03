@@ -178,6 +178,20 @@ void heldKeysDoNotRecurse() {
             QCoreApplication::sendEvent(elsewhere, &press);
             QCoreApplication::sendEvent(elsewhere, &release);
         }
+
+        // Holding the key past the auto-repeat delay is what actually crashed.
+        // An auto-repeat that is not accepted propagates to the parent, where
+        // this same filter sees it again and sends it back.
+        for (int i = 0; i < 200; ++i) {
+            QKeyEvent repeat(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
+            QCoreApplication::sendEvent(elsewhere, &repeat);
+        }
+        for (int i = 0; i < 200; ++i) {
+            QKeyEvent repeat(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
+            QCoreApplication::sendEvent(window.findChild<CanvasWidget*>(), &repeat);
+        }
+        QKeyEvent final_release(QEvent::KeyRelease, key, Qt::NoModifier);
+        QCoreApplication::sendEvent(elsewhere, &final_release);
     }
 
     // Ctrl+Z must still reach the shortcut rather than being swallowed.

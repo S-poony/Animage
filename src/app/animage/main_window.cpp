@@ -89,11 +89,15 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;
     if (!key_event || !canvas_) return QMainWindow::eventFilter(watched, event);
 
-    // An application-wide filter also sees the events this filter itself sends.
-    // Without this line, forwarding to the canvas re-enters here immediately
-    // and recurses until the stack runs out -- pressing Z did nothing at all
-    // and then killed the process.
-    if (watched == canvas_) return QMainWindow::eventFilter(watched, event);
+    // An application-wide filter also sees the events this filter itself sends,
+    // and it sees them again when an unaccepted key propagates to a parent
+    // widget. Either route leads straight back here, so the guard has to be a
+    // re-entrancy flag rather than a check on the receiver: watching for
+    // `watched == canvas_` alone missed the propagation route and recursed
+    // until the stack ran out.
+    if (forwarding_key_ || watched == canvas_) {
+        return QMainWindow::eventFilter(watched, event);
+    }
 
     auto* key = static_cast<QKeyEvent*>(event);
     if (key->key() != Qt::Key_Space && key->key() != Qt::Key_Z) {
@@ -104,7 +108,9 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         return QMainWindow::eventFilter(watched, event);
     }
 
+    forwarding_key_ = true;
     QCoreApplication::sendEvent(canvas_, key);
+    forwarding_key_ = false;
     return true;
 }
 
