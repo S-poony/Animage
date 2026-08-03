@@ -5,6 +5,7 @@ function(animage_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+animage_test(test_brush)
 animage_test(test_model)
 animage_test(test_undo)
 animage_test(test_color)

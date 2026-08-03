@@ -1,7 +1,9 @@
 add_library(animage_core
+  brush.cpp
   cel.cpp
   color.cpp
   command.cpp
+  compositor.cpp
   document.cpp
   timeline.cpp
 )
