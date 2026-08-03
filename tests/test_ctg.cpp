@@ -250,36 +250,40 @@ void theCompositorShowsTheFillNotTheScribbles() {
     CHECK_NEAR(frame.pixel(130, 60).a, 1.0, 0.05);
 }
 
-// One scribble should fill one shape. Without an implicit background the solver
-// has nothing to cut against, labels the whole canvas, and filling a shape means
-// scribbling twice -- once for the shape and once for the world outside it.
-void oneScribbleFillsOneShape() {
-    TEST("one scribble fills one shape and leaves the rest alone");
+// One scribble is not enough, and that is the honest behaviour rather than a
+// bug. With nothing to be cut against, the solver has no reason to stop
+// anywhere and labels everything it can reach.
+//
+// An implicit background at the rim was tried so that one scribble could mean
+// one shape. It was removed: no strength works. Weak enough to lose to a real
+// scribble is weak enough for a gap in the line to defeat; strong enough to
+// hold a gapped shape is strong enough to overrule the scribble the user drew.
+void oneScribbleAloneLabelsEverything() {
+    TEST("one scribble alone labels everything it can reach");
     Fixture f;
     f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
-
-    // Only the inside is scribbled. Nothing marks the background.
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
 
     const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
     CHECK(fill.valid);
     CHECK_EQ(fill.colours, 1);
 
-    // The shape is filled, well away from the scribble itself.
+    // Inside and outside alike: there is no boundary to prefer.
     CHECK_NEAR(fillAt(fill, 130, 160).r, 1.0, 0.02);
-    CHECK_NEAR(fillAt(fill, 80, 90).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 130, 215).r, 1.0, 0.02);
 
-    // And the world outside it is untouched, including just past the gap.
-    CHECK_NEAR(fillAt(fill, 130, 215).a, 0.0, 1e-3);
-    CHECK_NEAR(fillAt(fill, 20, 20).a, 0.0, 1e-3);
-    CHECK_NEAR(fillAt(fill, 240, 220).a, 0.0, 1e-3);
+    // Add the second scribble and the boundary appears, gap and all.
+    f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
+    const CtgFill& both = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    CHECK_NEAR(fillAt(both, 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 130, 215).b, 1.0, 0.02);
 }
 
 }  // namespace
 
 int main() {
     std::printf("ctg:\n");
-    oneScribbleFillsOneShape();
+    oneScribbleAloneLabelsEverything();
     aScribbleFillsItsRegion();
     theLayerStoresScribblesNotTheFill();
     editingAScribbleRecoloursTheWholeRegion();

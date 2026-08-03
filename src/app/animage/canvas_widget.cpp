@@ -166,14 +166,39 @@ void CanvasWidget::refreshCtgFills() {
     const Timeline* timeline = doc_.scene().findTimeline(timeline_);
     if (!timeline || image_ == kNoId) return;
 
-    CtgSettings settings;
-    // Coarse while the pen is down, exact once it lifts. A blocky fill that
-    // keeps up is worth more mid-stroke than an exact one that does not.
-    settings.downscale = stroking_ ? 4 : 1;
+    // Not while a scribble is being drawn. Every dab bumps the cel's revision,
+    // so solving whenever the fill looks stale meant a max-flow per dab -- tens
+    // of them a second, each one hundreds of milliseconds. The scribble itself
+    // is shown instead, and the solve happens once, when the pen lifts.
+    //
+    // This cost was always there; it only became visible when the repaint bug
+    // was fixed, because until then the result was never drawn.
+    if (scribbling_) return;
 
+    CtgSettings settings;
     for (const Layer& layer : timeline->layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
         ctgFill(doc_, timeline_, image_, layer.id, settings);
+    }
+}
+
+// While a scribble is being drawn its layer shows the marks rather than the
+// fill, so the pen leaves something visible without a solve behind it. A view
+// flag, so it is set directly and never recorded: undo has no business
+// restoring what you were looking at.
+void CanvasWidget::setScribblePreview(LayerId layer_id, bool previewing) {
+    Timeline* timeline = doc_.mutableScene().findTimeline(timeline_);
+    if (!timeline) return;
+    Layer* layer = timeline->findLayer(layer_id);
+    if (!layer || layer->kind != LayerKind::Ctg) return;
+
+    if (previewing) {
+        scribble_preview_layer_ = layer_id;
+        scribble_preview_was_showing_ = layer->show_scribbles;
+        layer->show_scribbles = true;
+    } else {
+        layer->show_scribbles = scribble_preview_was_showing_;
+        scribble_preview_layer_ = kNoId;
     }
 }
 
@@ -463,6 +488,7 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
     last_image_point_ = image_point;
     last_pressure_ = pressure;
     scribbling_ = layer->kind == LayerKind::Ctg;
+    if (scribbling_) setScribblePreview(active_layer_, true);
 
     // A scribble changes the fill across the whole region, not just where the
     // pen went, so there is nothing useful to mark dirty. Repainting only the
@@ -534,6 +560,9 @@ void CanvasWidget::endStroke() {
     // has to be rebuilt and redrawn even though nothing else changed.
     if (scribbling_) {
         scribbling_ = false;
+        setScribblePreview(scribble_preview_layer_, false);
+        // The pen lifting is what triggers the solve, so the fill has to be
+        // rebuilt and redrawn even though nothing else has changed.
         refreshAll();
     }
     Q_EMIT documentChanged();

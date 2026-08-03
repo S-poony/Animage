@@ -133,11 +133,21 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
     problem.intensity = ctgBarrier(doc, timeline, image, layer->ctg_sources, region, step);
     problem.seeds.assign(static_cast<std::size_t>(problem.width) * problem.height, -1);
 
-    // Read the scribbles off the cel, one label per distinct colour. Label 0 is
-    // reserved for an implicit background, decided on below.
+    // Read the scribbles off the cel, one label per distinct colour.
+    //
+    // Nothing is seeded that the user did not draw. An implicit background at
+    // the rim was tried, so that one scribble could fill one shape rather than
+    // needing a second scribble for the world outside it -- and it was removed.
+    // Its strength could not be made to work: weak enough to lose to a real
+    // scribble is weak enough for a gap in the line to defeat, and strong
+    // enough to hold a gapped shape is strong enough to overrule the scribble
+    // the user actually drew. Making it conditional on there being one colour
+    // only moved the surprise to the moment a second colour appeared.
+    //
+    // Two scribbles it is: one for the shape, one for what surrounds it. That
+    // is a real cost and it is the honest one.
     std::unordered_map<std::uint32_t, int> index_of;
     std::vector<std::uint32_t> palette;
-    palette.push_back(0);  // reserved; nothing is ever drawn for it
 
     for (int y = 0; y < problem.height; ++y) {
         for (int x = 0; x < problem.width; ++x) {
@@ -154,47 +164,15 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
         }
     }
 
-    // With one colour there is nothing to cut against, so the solver labels
-    // everything and filling one shape would mean scribbling twice: once for
-    // the shape and once for the world outside it. An implicit background round
-    // the rim gives it an opponent, and one scribble means one shape.
-    //
-    // Only with one colour, though. Past that the drawing is being labelled
-    // deliberately, and an implicit background would be a competitor nobody
-    // asked for -- it would win regions the user had scribbled themselves.
-    // Strength cannot decide this: weak enough to lose to a real scribble is
-    // weak enough for a gap in the line to defeat, and strong enough to hold a
-    // gapped shape is strong enough to outvote the scribble.
-    const bool use_implicit_background = palette.size() == 2;
-    if (use_implicit_background) {
-        for (int x = 0; x < problem.width; ++x) {
-            const std::size_t top = static_cast<std::size_t>(x);
-            const std::size_t bottom =
-                static_cast<std::size_t>(problem.height - 1) * problem.width + x;
-            if (problem.seeds[top] < 0) problem.seeds[top] = 0;
-            if (problem.seeds[bottom] < 0) problem.seeds[bottom] = 0;
-        }
-        for (int y = 0; y < problem.height; ++y) {
-            const std::size_t left = static_cast<std::size_t>(y) * problem.width;
-            const std::size_t right = left + problem.width - 1;
-            if (problem.seeds[left] < 0) problem.seeds[left] = 0;
-            if (problem.seeds[right] < 0) problem.seeds[right] = 0;
-        }
-    }
-
     cached = CtgFill{};
     cached.region = region;
     cached.inputs = inputs;
     cached.valid = true;
-    cached.colours = static_cast<int>(palette.size()) - 1;  // not counting the rim
-    if (palette.size() <= 1) return cached;
+    cached.colours = static_cast<int>(palette.size());
+    if (palette.empty()) return cached;
 
     problem.colour_count = static_cast<int>(palette.size());
     problem.hard.assign(palette.size(), 0);
-    // Hard, so that a gap in the line cannot let the fill out past it. A soft
-    // background would be severed wherever the outline is broken, which is
-    // exactly the case this layer exists to survive.
-    if (use_implicit_background) problem.hard[0] = 1;
 
     const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush);
 
@@ -210,7 +188,7 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
 
             const int label =
                 solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
-            if (label <= 0) continue;  // unlabelled, or the implicit background
+            if (label < 0) continue;  // nothing reached this pixel
 
             const int px = region.x + x;
             const int py = region.y + y;

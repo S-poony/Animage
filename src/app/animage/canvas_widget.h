@@ -99,6 +99,7 @@ private:
     void repaintImageRect(const animage::PixelRect& region);
     void rebuildOnion();
     void refreshCtgFills();
+    void setScribblePreview(animage::LayerId layer, bool previewing);
 
     void beginStroke(const QPointF& image_point, float pressure);
     void extendStroke(const QPointF& image_point, float pressure);
@@ -151,6 +152,8 @@ private:
 
     bool stroking_ = false;
     bool scribbling_ = false;  // the stroke is on a CTG layer
+    animage::LayerId scribble_preview_layer_ = animage::kNoId;
+    bool scribble_preview_was_showing_ = false;
     QPointF last_image_point_;
     float last_pressure_ = 1.0f;
 

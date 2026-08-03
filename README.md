@@ -92,12 +92,13 @@ same drawing still showing, not a thing of their own, and they travel with it.
 **Colour layers.** "Add colour layer" makes a layer that holds scribbles rather
 than colour. There is no scribble tool: scrawl roughly inside a region with the
 ordinary brush and the whole region takes that colour, gaps in the line art
-included. What is stored is the scrawl, not the fill, so moving a scribble
+included. It takes two scribbles to fill one shape — one for the shape and one
+for what surrounds it — because a lone scribble has nothing to be cut against. What is stored is the scrawl, not the fill, so moving a scribble
 recolours the region and redrawing the line art re-cuts it.
 
 Every ordinary layer becomes a barrier for it automatically. Cutting against a
-rough as well as a clean closes gaps that leak from either alone. "Show
-scribbles" looks at the marks instead of the fill.
+rough as well as a clean closes gaps that leak from either alone. The second box beside a
+colour layer's visibility shows the marks instead of the fill.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the timeline rather than to the image, which is the point of

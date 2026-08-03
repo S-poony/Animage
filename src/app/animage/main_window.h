@@ -43,7 +43,7 @@ private:
     void addLayer();
     void addColourLayer();
     void removeCurrentLayer();
-    void toggleShowScribbles();
+    void setShowScribbles(animage::LayerId layer, bool showing);
     void moveCurrentLayer(int delta);
     void onLayerSelected();
     void onLayerItemChanged(QListWidgetItem* item);

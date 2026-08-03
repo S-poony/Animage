@@ -64,6 +64,23 @@ took four, and was answered in one round trip once `crash_report.cpp` existed.
 The lesson is written into the commits because it will happen again: after the
 second wrong theory, stop and instrument.
 
+**An implicit background was tried and removed.** A single scribble has nothing
+to be cut against, so it labels everything — meaning filling one shape needs a
+second scribble for the world outside it. Seeding a background round the rim
+fixes that, and no strength for it works: weak enough to lose to a real scribble
+is weak enough for a gap in the line to defeat, and strong enough to hold a
+gapped shape is strong enough to overrule the scribble the user drew. Making it
+conditional on there being exactly one colour only moved the surprise to the
+moment a second colour appeared. The user preferred two scribbles to any of it.
+Do not re-add it without solving that tension properly.
+
+**Solving on a stale cache is not the same as solving when asked.** Every dab
+bumps the cel's revision, so regenerating a CTG fill whenever it looked stale
+meant a max-flow per dab. The cost was invisible for a while because a separate
+bug meant the result was never drawn; fixing the repaint made it obvious. The
+solve now happens once, when the pen lifts, and the scribble itself is shown
+during the stroke.
+
 **Nothing was measured until it had been "optimised" three times.** Every lag
 complaint traced to one operation — flattening the visible region — which had
 never been timed. It was 27 ms for four layers, against a 16.7 ms frame. Two
@@ -125,14 +142,7 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    drawing overrides from there. This is also most of the plan's "onion fill"
    hypothesis, which the layer model makes nearly free and which the notes
    expect to be the selling point.
-3. **The implicit background is a compromise and should be revisited.** A single
-   scribble has nothing to be cut against, so a hard background is seeded round
-   the rim — but only when exactly one colour has been scribbled. Strength
-   cannot decide it: weak enough to lose to a real scribble is weak enough for a
-   gap in the line to defeat, and strong enough to hold a gapped shape is strong
-   enough to outvote the scribble. The conditional rule is predictable but it is
-   a rule, not a principle. See `ctg.cpp`.
-4. **GPU compositing**, if `bench_composite` says it is worth it at real
+3. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
 
 ## Two things to be careful of

@@ -321,12 +321,6 @@ void MainWindow::buildLayerPanel() {
                        "Scrawl roughly inside a region with the ordinary brush and the\n"
                        "whole region takes that colour, gaps in the line art included."));
 
-    auto* scribbles = panelButton(QStringLiteral("Show scribbles"),
-                                  &MainWindow::toggleShowScribbles);
-    scribbles->setToolTip(
-        QStringLiteral("Look at the scribbles on a colour layer instead of the fill.\n"
-                       "Changes nothing about the drawing, only what is shown."));
-
     panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
     panelButton(QStringLiteral("Move up"), [this] { moveCurrentLayer(-1); });
     panelButton(QStringLiteral("Move down"), [this] { moveCurrentLayer(1); });
@@ -635,15 +629,37 @@ void MainWindow::rebuildLayerList() {
         const Layer& layer = timeline->layers[i];
         QString label = QString::fromStdString(layer.name);
         if (layer.kind == LayerKind::Ctg) {
-            label += layer.show_scribbles ? QStringLiteral("   [scribbles]")
-                                          : QStringLiteral("   [colour, %1 source%2]")
-                                                .arg(layer.ctg_sources.size())
-                                                .arg(layer.ctg_sources.size() == 1 ? "" : "s");
+            label += QStringLiteral("   [colour, %1 source%2]")
+                         .arg(layer.ctg_sources.size())
+                         .arg(layer.ctg_sources.size() == 1 ? "" : "s");
         }
         auto* item = new QListWidgetItem(label, layer_list_);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
         if (layer.id == active) active_row = static_cast<int>(i);
+
+        // A colour layer gets a second box beside the visibility one: show the
+        // scribbles rather than the fill. Same size, same place, because it is
+        // the same kind of thing -- a switch about what you are looking at.
+        if (layer.kind != LayerKind::Ctg) continue;
+
+        auto* row = new QWidget(layer_list_);
+        auto* row_layout = new QHBoxLayout(row);
+        row_layout->setContentsMargins(0, 0, 6, 0);
+        row_layout->addStretch(1);
+
+        auto* scribbles = new QCheckBox(row);
+        scribbles->setChecked(layer.show_scribbles);
+        scribbles->setFocusPolicy(Qt::NoFocus);
+        scribbles->setToolTip(
+            QStringLiteral("Show the scribbles instead of the fill.\n"
+                           "Changes nothing about the drawing, only what is shown."));
+        const LayerId id = layer.id;
+        connect(scribbles, &QCheckBox::toggled, this,
+                [this, id](bool on) { setShowScribbles(id, on); });
+        row_layout->addWidget(scribbles);
+
+        layer_list_->setItemWidget(item, row);
     }
     layer_list_->setCurrentRow(active_row);
     updating_list_ = false;
@@ -785,14 +801,16 @@ std::string MainWindow::nextColourLayerName() const {
     }
 }
 
-void MainWindow::toggleShowScribbles() {
-    Layer* layer = currentLayer();
-    if (!layer || layer->kind != LayerKind::Ctg) return;
+void MainWindow::setShowScribbles(LayerId layer_id, bool showing) {
+    if (updating_list_) return;
+    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
+    if (!timeline) return;
+    const Layer* layer = timeline->findLayer(layer_id);
+    if (!layer || layer->show_scribbles == showing) return;
 
     Layer updated = *layer;
-    updated.show_scribbles = !updated.show_scribbles;
-    doc_.updateLayer(timeline_, updated.id, updated);
-    rebuildLayerList();
+    updated.show_scribbles = showing;
+    doc_.updateLayer(timeline_, layer_id, updated);
     canvas_->refreshAll();
 }
 
