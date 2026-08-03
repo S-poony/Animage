@@ -9,6 +9,7 @@
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
@@ -56,6 +57,11 @@ MainWindow::MainWindow() {
     buildStatusBar();
     rebuildLayerList();
 
+    connect(canvas_, &CanvasWidget::brushSizeChanged, this, [this](double radius) {
+        if (!radius_) return;
+        const QSignalBlocker block(radius_);
+        radius_->setValue(radius);
+    });
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
@@ -63,7 +69,30 @@ MainWindow::MainWindow() {
     });
     syncStatus();
 
+    // Space and Z are held modifiers for panning and zooming, not shortcuts, so
+    // QAction cannot express them. Without this filter they stop working the
+    // moment anything else takes focus -- clicking a checkbox was enough -- and
+    // worse, Space then operates whatever widget it landed on.
+    qApp->installEventFilter(this);
+
     canvas_->setFocus();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;
+    if (!key_event || !canvas_) return QMainWindow::eventFilter(watched, event);
+
+    auto* key = static_cast<QKeyEvent*>(event);
+    if (key->key() != Qt::Key_Space && key->key() != Qt::Key_Z) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+    // Ctrl+Z and friends are shortcuts and must be left alone.
+    if (key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    QCoreApplication::sendEvent(canvas_, key);
+    return true;
 }
 
 void MainWindow::buildActions() {
@@ -126,7 +155,6 @@ void MainWindow::buildActions() {
     const std::pair<const char*, CanvasWidget::Background> options[] = {
         {"Paper (white)", CanvasWidget::Background::White},
         {"Transparency (checker)", CanvasWidget::Background::Checker},
-        {"Light table (black)", CanvasWidget::Background::Black},
     };
     for (const auto& [label, mode] : options) {
         QAction* action = view->addAction(QString::fromUtf8(label));
@@ -314,21 +342,14 @@ void MainWindow::buildTimelinePanel() {
 
     row->addSpacing(16);
     row->addWidget(new QLabel(QStringLiteral("Onion"), controls));
-    onion_before_ = new QSpinBox(controls);
-    onion_before_->setRange(0, 5);
-    onion_before_->setPrefix(QStringLiteral("-"));
-    onion_before_->setToolTip(QStringLiteral("Drawings shown before this one"));
-    onion_before_->setFocusPolicy(Qt::NoFocus);
-    connect(onion_before_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
-    row->addWidget(onion_before_);
-
-    onion_after_ = new QSpinBox(controls);
-    onion_after_->setRange(0, 5);
-    onion_after_->setPrefix(QStringLiteral("+"));
-    onion_after_->setToolTip(QStringLiteral("Drawings shown after this one"));
-    onion_after_->setFocusPolicy(Qt::NoFocus);
-    connect(onion_after_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
-    row->addWidget(onion_after_);
+    // One number either side. Asymmetric onion skin is a real thing but a rare
+    // one, and making it the default meant two controls to set every time.
+    onion_ = new QSpinBox(controls);
+    onion_->setRange(0, 5);
+    onion_->setToolTip(QStringLiteral("Drawings shown either side of this one"));
+    onion_->setFocusPolicy(Qt::NoFocus);
+    connect(onion_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
+    row->addWidget(onion_);
 
     row->addStretch(1);
     layout->addWidget(controls);
@@ -534,8 +555,8 @@ void MainWindow::onPlaybackTick() {
 
 void MainWindow::onOnionChanged() {
     CanvasWidget::OnionSettings settings = canvas_->onion();
-    settings.before = onion_before_->value();
-    settings.after = onion_after_->value();
+    settings.before = onion_->value();
+    settings.after = onion_->value();
     canvas_->setOnion(settings);
 }
 

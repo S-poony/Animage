@@ -50,15 +50,22 @@ class Compositor {
 public:
     // `region` is in image coordinates; the result fills the framebuffer from
     // its top-left corner. Layers composite in list order, index 0 on top.
+    //
+    // `step` samples every nth image pixel, producing a framebuffer that many
+    // times smaller. It exists so that zooming out does not ask for a buffer
+    // the size of the visible image area: at 10% zoom a viewport covers a
+    // hundred times more image pixels than it has screen pixels, and there is
+    // no point flattening detail nobody can see. Point sampling, so thin lines
+    // do shimmer when zoomed far out.
     void composite(const Document& doc, TimelineId timeline, ImageId image,
-                   const PixelRect& region, Framebuffer& out) const;
+                   const PixelRect& region, Framebuffer& out, int step = 1) const;
 
     // Same, for an arbitrary set of layers in the order given, topmost first.
     // The CTG layer will need this to flatten several line-art layers into one
     // barrier, and onion skin needs it to draw a neighbouring image alone.
     void compositeLayers(const Document& doc, TimelineId timeline, ImageId image,
                          const std::vector<LayerId>& layers, const PixelRect& region,
-                         Framebuffer& out) const;
+                         Framebuffer& out, int step = 1) const;
 };
 
 // The bounding box of everything drawn on an image, in pixels, or an empty rect

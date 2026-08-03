@@ -2,6 +2,7 @@
 #include "timeline_widget.h"
 
 #include <QFontMetrics>
+#include <QPalette>
 #include <QMouseEvent>
 #include <QPainter>
 #include <algorithm>
@@ -15,12 +16,31 @@ constexpr int kRulerHeight = 18;
 constexpr int kStripHeight = 64;
 constexpr int kEdgeGrab = 5;
 
-const QColor kBackground(38, 38, 42);
-const QColor kCell(70, 72, 80);
-const QColor kCellHeld(56, 58, 64);
-const QColor kCurrent(235, 180, 60);
-const QColor kText(230, 230, 230);
-const QColor kRuler(52, 52, 58);
+// Taken from the widget's palette rather than hardcoded, so the timeline
+// belongs to the same application as everything above it -- and follows a dark
+// theme too, if the system asks for one.
+struct Palette {
+    QColor background, ruler, cell, cell_held, outline, tick, text, current, current_text;
+};
+
+Palette paletteFor(const QWidget& widget) {
+    const QPalette& source = widget.palette();
+    const QColor window = source.color(QPalette::Window);
+    const QColor text = source.color(QPalette::WindowText);
+    const bool dark = window.lightness() < 128;
+
+    Palette p;
+    p.background = dark ? window.lighter(115) : window.darker(108);
+    p.ruler = dark ? window.lighter(135) : window.darker(118);
+    p.cell = source.color(QPalette::Base);
+    p.cell_held = dark ? p.cell.lighter(115) : p.cell.darker(106);
+    p.outline = dark ? window.lighter(180) : window.darker(140);
+    p.tick = text;
+    p.text = text;
+    p.current = source.color(QPalette::Highlight);
+    p.current_text = source.color(QPalette::HighlightedText);
+    return p;
+}
 
 }  // namespace
 
@@ -118,9 +138,11 @@ std::vector<int> TimelineWidget::drawingNumbers() const {
 }
 
 void TimelineWidget::paintEvent(QPaintEvent*) {
+    const Palette colours = paletteFor(*this);
+
     QPainter painter(this);
-    painter.fillRect(rect(), kBackground);
-    painter.fillRect(QRect(0, 0, width(), kRulerHeight), kRuler);
+    painter.fillRect(rect(), colours.background);
+    painter.fillRect(QRect(0, 0, width(), kRulerHeight), colours.ruler);
 
     const Timeline* line = timeline();
     if (!line) return;
@@ -136,24 +158,23 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         const bool held = i > 0 && line->slots[i - 1] == line->slots[i];
         const QRect cell(x, kRulerHeight + 2, kCellWidth - 1, kStripHeight - kRulerHeight - 8);
 
-        painter.fillRect(cell, held ? kCellHeld : kCell);
+        painter.fillRect(cell, held ? colours.cell_held : colours.cell);
 
         if (held) {
             // A held drawing is one block with a tail, not a repeated cell.
-            painter.setPen(QPen(QColor(120, 122, 132), 1));
+            painter.setPen(QPen(colours.outline, 1));
             painter.drawLine(cell.center().x(), cell.top() + 3, cell.center().x(),
                              cell.bottom() - 3);
         } else {
-            painter.setPen(QPen(QColor(150, 152, 162), 1));
+            painter.setPen(QPen(colours.outline, 1));
             painter.drawRect(cell.adjusted(0, 0, -1, -1));
-            painter.setPen(kText);
-            const QString label = QString::number(numbers[i]);
-            painter.drawText(cell, Qt::AlignCenter, label);
+            painter.setPen(colours.text);
+            painter.drawText(cell, Qt::AlignCenter, QString::number(numbers[i]));
         }
 
         // Frame ruler every five, as on an exposure sheet.
         if ((i % 5) == 0) {
-            painter.setPen(QColor(165, 165, 175));
+            painter.setPen(colours.tick);
             painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
                              QString::number(i + 1));
         }
@@ -161,12 +182,12 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
 
     if (current_slot_ < line->slots.size()) {
         const int x = static_cast<int>(current_slot_) * kCellWidth;
-        painter.setPen(QPen(kCurrent, 2));
+        painter.setPen(QPen(colours.current, 2));
         painter.drawRect(QRect(x, kRulerHeight + 1, kCellWidth - 1,
                               kStripHeight - kRulerHeight - 6));
         // Playhead in the ruler, so the scrub band shows where you are.
-        painter.fillRect(QRect(x, 0, kCellWidth - 1, kRulerHeight), kCurrent);
-        painter.setPen(QColor(30, 30, 30));
+        painter.fillRect(QRect(x, 0, kCellWidth - 1, kRulerHeight), colours.current);
+        painter.setPen(colours.current_text);
         painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
                          QString::number(current_slot_ + 1));
     }

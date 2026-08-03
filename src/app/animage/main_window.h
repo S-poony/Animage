@@ -26,6 +26,9 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow();
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     void buildActions();
     void buildLayerPanel();
@@ -82,8 +85,7 @@ private:
     QLabel* status_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
     QCheckBox* pressure_opacity_ = nullptr;
-    QSpinBox* onion_before_ = nullptr;
-    QSpinBox* onion_after_ = nullptr;
+    QSpinBox* onion_ = nullptr;
     QAction* play_action_ = nullptr;
     QPushButton* play_button_ = nullptr;
     QAction* brush_action_ = nullptr;

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace animage {
 
@@ -43,7 +44,7 @@ inline std::uint16_t floatToHalfBits(float f) {
     return static_cast<std::uint16_t>(sign);  // underflows to signed zero
 }
 
-inline float halfBitsToFloat(std::uint16_t h) {
+inline float halfBitsToFloatComputed(std::uint16_t h) {
     const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
     const std::uint32_t exp = (h >> 10) & 0x1fu;
     std::uint32_t mant = h & 0x03ffu;
@@ -71,6 +72,27 @@ inline float halfBitsToFloat(std::uint16_t h) {
     std::memcpy(&f, &out, sizeof f);
     return f;
 }
+
+namespace detail {
+
+// All 65536 half values, precomputed. Decoding costs a load instead of a
+// branchy bit-twiddle, and every composited pixel decodes four of them, so this
+// is the difference between a viewport flatten costing a frame and costing
+// several. 256 kB, built once.
+inline const float* halfToFloatTable() {
+    static const std::vector<float> table = [] {
+        std::vector<float> values(65536);
+        for (std::uint32_t i = 0; i < 65536; ++i) {
+            values[i] = halfBitsToFloatComputed(static_cast<std::uint16_t>(i));
+        }
+        return values;
+    }();
+    return table.data();
+}
+
+}  // namespace detail
+
+inline float halfBitsToFloat(std::uint16_t h) { return detail::halfToFloatTable()[h]; }
 
 struct Half {
     std::uint16_t bits = 0;

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cmath>
+#include <cstdint>
 
 #include "brush.h"
+#include "half.h"
 #include "compositor.h"
 #include "testing.h"
 
@@ -292,10 +294,68 @@ void compositorWorksLeftOfTheOrigin() {
     CHECK_NEAR(frame.pixel(5, 5).r, 1.0, 1e-2);
 }
 
+// Zoomed out, the compositor samples every nth pixel so the buffer tracks the
+// size of the window rather than the visible image area. The sampled path is
+// separate code from the run-length one and has to agree with it.
+void sampledCompositingMatchesTheFullResolutionPath() {
+    TEST("sampled compositing agrees with full resolution");
+    Fixture f;
+    BrushSettings settings = opaqueBlack();
+    settings.radius = 30.0f;
+    settings.r = 1.0f;
+    Brush brush(settings);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        brush.begin(f.doc, f.timeline, f.image, f.layer, {100.0f, 100.0f, 1.0f});
+        brush.extend({300.0f, 260.0f, 1.0f});
+        brush.end();
+    }
+
+    const PixelRect region{0, 0, 400, 400};
+    Compositor compositor;
+    Framebuffer full;
+    Framebuffer sampled;
+    compositor.composite(f.doc, f.timeline, f.image, region, full, 1);
+    compositor.composite(f.doc, f.timeline, f.image, region, sampled, 4);
+
+    CHECK_EQ(full.width(), 400);
+    CHECK_EQ(sampled.width(), 100);
+    CHECK_EQ(sampled.height(), 100);
+
+    // Every sampled entry must equal the full-resolution pixel it stands for.
+    for (int y = 0; y < sampled.height(); ++y) {
+        for (int x = 0; x < sampled.width(); ++x) {
+            const Rgba a = sampled.pixel(x, y);
+            const Rgba b = full.pixel(x * 4, y * 4);
+            CHECK_NEAR(a.a, b.a, 1e-4);
+            CHECK_NEAR(a.r, b.r, 1e-4);
+        }
+    }
+}
+
+// The half-float decode became a lookup table. It has to still be the same
+// function it replaced, for every one of the 65536 possible values.
+void halfLookupMatchesTheComputation() {
+    TEST("the half-float table agrees with the computation");
+    for (std::uint32_t bits = 0; bits < 65536; ++bits) {
+        const auto h = static_cast<std::uint16_t>(bits);
+        const float table = halfBitsToFloat(h);
+        const float computed = halfBitsToFloatComputed(h);
+        if (std::isnan(table)) {
+            CHECK(std::isnan(computed));
+            continue;
+        }
+        CHECK_EQ(table, computed);
+    }
+}
+
 }  // namespace
 
 int main() {
     std::printf("brush:\n");
+    sampledCompositingMatchesTheFullResolutionPath();
+    halfLookupMatchesTheComputation();
     strokeLaysDownInk();
     spacingIsIndependentOfEventRate();
     pressureChangesWidth();

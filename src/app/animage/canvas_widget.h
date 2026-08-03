@@ -20,7 +20,7 @@ class CanvasWidget : public QWidget {
     Q_OBJECT
 
 public:
-    enum class Background { White, Checker, Black };
+    enum class Background { White, Checker };
 
     // Onion skin counts distinct drawings, not slots: a drawing held for five
     // frames is one neighbour, not five. That falls out of the model rather
@@ -70,6 +70,7 @@ public:
 Q_SIGNALS:
     void viewChanged();
     void documentChanged();
+    void brushSizeChanged(double radius);
 
 protected:
     void tabletEvent(QTabletEvent* event) override;
@@ -121,6 +122,10 @@ private:
     // coordinates at one image pixel per entry.
     QImage display_;
     animage::PixelRect cached_region_;
+    // Image pixels per cached entry. 1 while zoomed in; larger when zoomed out,
+    // so the cache tracks the size of the window rather than the size of the
+    // visible image area.
+    int cache_step_ = 1;
 
     // Accumulated between paints. Empty width means nothing is pending.
     animage::PixelRect pending_dirty_;
@@ -145,6 +150,10 @@ private:
     bool space_held_ = false;
     QPointF pan_anchor_widget_;
     QPointF pan_anchor_image_;
+
+    bool sizing_ = false;
+    QPointF size_anchor_widget_;
+    float radius_at_press_ = 1.0f;
 
     bool zooming_ = false;
     bool zoom_key_held_ = false;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "canvas_widget.h"
 
+#include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -22,6 +23,9 @@ constexpr double kMinZoom = 0.05;
 constexpr double kMaxZoom = 32.0;
 constexpr int kCheckerSize = 8;
 constexpr double kScrubbyZoomPerPixel = 0.006;
+constexpr double kSizeDragPerPixel = 0.012;
+// Cached beyond the viewport, so a pan of a few pixels does not recomposite.
+constexpr int kCacheMargin = 192;
 
 // Linear to sRGB through a lookup table. The conversion is per pixel of the
 // viewport on every recomposite, and std::pow in that loop is measurable.
@@ -58,6 +62,12 @@ PixelRect intersect(const PixelRect& a, const PixelRect& b) {
     const int y1 = std::min(a.y + a.height, b.y + b.height);
     if (x1 <= x0 || y1 <= y0) return {};
     return {x0, y0, x1 - x0, y1 - y0};
+}
+
+bool contains(const PixelRect& outer, const PixelRect& inner) {
+    return inner.x >= outer.x && inner.y >= outer.y &&
+           inner.x + inner.width <= outer.x + outer.width &&
+           inner.y + inner.height <= outer.y + outer.height;
 }
 
 PixelRect unite(const PixelRect& a, const PixelRect& b) {
@@ -151,7 +161,8 @@ void CanvasWidget::rebuildOnion() {
     const Timeline* timeline = doc_.scene().findTimeline(timeline_);
     if (!timeline || cached_region_.isEmpty()) return;
 
-    onion_.resize(cached_region_.width, cached_region_.height);
+    onion_.resize((cached_region_.width + cache_step_ - 1) / cache_step_,
+                  (cached_region_.height + cache_step_ - 1) / cache_step_);
 
     struct Ghost {
         ImageId image;
@@ -179,7 +190,8 @@ void CanvasWidget::rebuildOnion() {
 
     Framebuffer ghost_frame;
     for (const Ghost& ghost : ghosts) {
-        compositor_.composite(doc_, timeline_, ghost.image, cached_region_, ghost_frame);
+        compositor_.composite(doc_, timeline_, ghost.image, cached_region_, ghost_frame,
+                              cache_step_);
         for (int y = 0; y < onion_.height(); ++y) {
             const Rgba* source = ghost_frame.row(y);
             Rgba* destination = onion_.row(y);
@@ -216,14 +228,28 @@ PixelRect CanvasWidget::visibleImageRect() const {
 
 void CanvasWidget::ensureCacheCoversView() {
     const PixelRect wanted = visibleImageRect();
-    if (wanted.x == cached_region_.x && wanted.y == cached_region_.y &&
-        wanted.width == cached_region_.width && wanted.height == cached_region_.height &&
-        !display_.isNull()) {
-        return;
+    const int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
+
+    // Panning inside the cached margin, or zooming in, needs no new composite
+    // at all -- the cache already holds those pixels and the blit just samples
+    // a different part of it. Recompositing on every mouse move was what made
+    // navigation feel heavy.
+    if (!display_.isNull() && step == cache_step_ && contains(cached_region_, wanted)) {
+        const long long cached_area =
+            static_cast<long long>(cached_region_.width) * cached_region_.height;
+        const long long wanted_area = static_cast<long long>(wanted.width) * wanted.height;
+        // Unless the cache has become far larger than the view needs, which
+        // happens after zooming a long way in and would waste the memory.
+        if (cached_area <= wanted_area * 4) return;
     }
 
-    cached_region_ = wanted;
-    display_ = QImage(wanted.width, wanted.height, QImage::Format_RGB32);
+    cache_step_ = step;
+    cached_region_ = {wanted.x - kCacheMargin * step, wanted.y - kCacheMargin * step,
+                      wanted.width + 2 * kCacheMargin * step,
+                      wanted.height + 2 * kCacheMargin * step};
+
+    display_ = QImage((cached_region_.width + step - 1) / step,
+                      (cached_region_.height + step - 1) / step, QImage::Format_RGB32);
     rebuildOnion();
     dirty_everything_ = true;
 }
@@ -243,22 +269,35 @@ void CanvasWidget::markDirty(const PixelRect& region) {
 void CanvasWidget::refreshRegion(const PixelRect& region) {
     if (display_.isNull() || timeline_ == kNoId || image_ == kNoId) return;
 
-    const PixelRect area = intersect(region, cached_region_);
+    PixelRect area = intersect(region, cached_region_);
     if (area.isEmpty()) return;
 
-    compositor_.composite(doc_, timeline_, image_, area, scratch_);
+    // Snap to the sampling grid so cache entries line up with image pixels.
+    const int step = cache_step_;
+    if (step > 1) {
+        const int dx = (area.x - cached_region_.x) % step;
+        const int dy = (area.y - cached_region_.y) % step;
+        area = {area.x - dx, area.y - dy, area.width + dx + step, area.height + dy + step};
+        area = intersect(area, cached_region_);
+        if (area.isEmpty()) return;
+    }
+
+    compositor_.composite(doc_, timeline_, image_, area, scratch_, step);
 
     const bool checker = background_ == Background::Checker;
-    const float flat = (background_ == Background::Black) ? 0.0f : 1.0f;
+    const float flat = 1.0f;
 
-    for (int y = 0; y < area.height; ++y) {
+    for (int y = 0; y < scratch_.height(); ++y) {
         const Rgba* source = scratch_.row(y);
-        const int image_y = area.y + y;
-        auto* destination =
-            reinterpret_cast<QRgb*>(display_.scanLine(image_y - cached_region_.y));
+        const int image_y = area.y + y * step;
+        const int row = (image_y - cached_region_.y) / step;
+        if (row < 0 || row >= display_.height()) continue;
+        auto* destination = reinterpret_cast<QRgb*>(display_.scanLine(row));
 
-        for (int x = 0; x < area.width; ++x) {
-            const int image_x = area.x + x;
+        for (int x = 0; x < scratch_.width(); ++x) {
+            const int image_x = area.x + x * step;
+            const int column = (image_x - cached_region_.x) / step;
+            if (column < 0 || column >= display_.width()) continue;
             float background = flat;
             if (checker) {
                 const bool light = (((image_x / kCheckerSize) + (image_y / kCheckerSize)) & 1) == 0;
@@ -267,10 +306,8 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
 
             // Paper, then the onion skin over it, then the drawing over that.
             Rgba base{background, background, background, 1.0f};
-            if (!onion_.isEmpty()) {
-                const Rgba ghost =
-                    onion_.row(image_y - cached_region_.y)[image_x - cached_region_.x];
-                base = over(ghost, base);
+            if (!onion_.isEmpty() && row < onion_.height() && column < onion_.width()) {
+                base = over(onion_.row(row)[column], base);
             }
 
             const Rgba& pixel = source[x];
@@ -279,8 +316,7 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
             const float g = pixel.g + base.g * keep;
             const float b = pixel.b + base.b * keep;
 
-            destination[image_x - cached_region_.x] =
-                qRgb(toSrgbByte(r), toSrgbByte(g), toSrgbByte(b));
+            destination[column] = qRgb(toSrgbByte(r), toSrgbByte(g), toSrgbByte(b));
         }
     }
 }
@@ -325,7 +361,8 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     const QPointF origin = widgetFromImage({static_cast<double>(cached_region_.x),
                                             static_cast<double>(cached_region_.y)});
-    const QRectF target(origin, QSizeF(cached_region_.width * zoom_, cached_region_.height * zoom_));
+    const QRectF target(origin, QSizeF(display_.width() * cache_step_ * zoom_,
+                                       display_.height() * cache_step_ * zoom_));
     painter.drawImage(target, display_);
 }
 
@@ -406,6 +443,17 @@ void CanvasWidget::endStroke() {
 // --- navigation ----------------------------------------------------------
 
 bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton button) {
+    // Alt and the right button, dragged sideways, resizes the brush without
+    // leaving the drawing -- the gesture Photoshop and Krita already taught
+    // everyone's hands.
+    if (button == Qt::RightButton &&
+        (QGuiApplication::keyboardModifiers() & Qt::AltModifier)) {
+        sizing_ = true;
+        size_anchor_widget_ = widget_point;
+        radius_at_press_ = brushSettings().radius;
+        setCursor(Qt::SizeHorCursor);
+        return true;
+    }
     if (zoom_key_held_) {
         zooming_ = true;
         zoom_anchor_widget_ = widget_point;
@@ -424,6 +472,14 @@ bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton 
 }
 
 bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
+    if (sizing_) {
+        const double dx = widget_point.x() - size_anchor_widget_.x();
+        const float radius = static_cast<float>(
+            std::clamp(radius_at_press_ * std::exp(dx * kSizeDragPerPixel), 0.5, 400.0));
+        brushSettings().radius = radius;
+        Q_EMIT brushSizeChanged(radius);
+        return true;
+    }
     if (zooming_) {
         // Scrubby zoom: drag right to come in, left to go out, about the point
         // the drag started from.
@@ -444,9 +500,10 @@ bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
 }
 
 void CanvasWidget::endNavigation() {
-    if (!panning_ && !zooming_) return;
+    if (!panning_ && !zooming_ && !sizing_) return;
     panning_ = false;
     zooming_ = false;
+    sizing_ = false;
     setCursor(zoom_key_held_  ? Qt::SizeHorCursor
               : space_held_   ? Qt::OpenHandCursor
                               : Qt::CrossCursor);
@@ -463,11 +520,11 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     if (event->type() == QEvent::TabletPress && beginNavigation(widget_point, Qt::LeftButton)) {
         return;
     }
-    if ((panning_ || zooming_) && event->type() == QEvent::TabletMove) {
+    if ((panning_ || zooming_ || sizing_) && event->type() == QEvent::TabletMove) {
         continueNavigation(widget_point);
         return;
     }
-    if ((panning_ || zooming_) && event->type() == QEvent::TabletRelease) {
+    if ((panning_ || zooming_ || sizing_) && event->type() == QEvent::TabletRelease) {
         endNavigation();
         return;
     }
@@ -510,7 +567,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (panning_ || zooming_) {
+    if (panning_ || zooming_ || sizing_) {
         endNavigation();
         return;
     }
@@ -574,13 +631,13 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     switch (event->key()) {
         case Qt::Key_Space:
             space_held_ = true;
-            if (!panning_ && !zooming_) setCursor(Qt::OpenHandCursor);
+            if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::OpenHandCursor);
             return;
         case Qt::Key_Z:
             // Held, not toggled: a zoom you have to switch back out of costs
             // more attention than the zoom is worth.
             zoom_key_held_ = true;
-            if (!panning_ && !zooming_) setCursor(Qt::SizeHorCursor);
+            if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::SizeHorCursor);
             return;
         default: break;
     }
@@ -595,13 +652,15 @@ void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
     switch (event->key()) {
         case Qt::Key_Space:
             space_held_ = false;
-            if (!panning_ && !zooming_) setCursor(zoom_key_held_ ? Qt::SizeHorCursor
-                                                                 : Qt::CrossCursor);
+            if (!panning_ && !zooming_ && !sizing_) {
+                setCursor(zoom_key_held_ ? Qt::SizeHorCursor : Qt::CrossCursor);
+            }
             return;
         case Qt::Key_Z:
             zoom_key_held_ = false;
-            if (!panning_ && !zooming_) setCursor(space_held_ ? Qt::OpenHandCursor
-                                                              : Qt::CrossCursor);
+            if (!panning_ && !zooming_ && !sizing_) {
+                setCursor(space_held_ ? Qt::OpenHandCursor : Qt::CrossCursor);
+            }
             return;
         default: break;
     }

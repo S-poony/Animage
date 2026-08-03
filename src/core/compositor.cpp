@@ -11,6 +11,41 @@ namespace {
 
 // One layer over what is already in the framebuffer. Both sides are
 // premultiplied, so this is a multiply-add and nothing else.
+void blendLayerSampled(const Cel& cel, const Layer& layer, const PixelRect& region, int step,
+                       Framebuffer& out) {
+    const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
+    if (layer_opacity <= 0.0f) return;
+
+    const TileGrid& grid = cel.tiles();
+    if (grid.empty()) return;
+
+    // Sampled path: the run-length walk below cannot help when consecutive
+    // outputs are not consecutive image pixels, so this stays deliberately
+    // simple. It only runs when zoomed out, where the buffer is small.
+    for (int y = 0; y < out.height(); ++y) {
+        const int image_y = region.y + y * step;
+        Rgba* destination = out.row(y);
+        const int tile_y = tileCoordFor(0, image_y).y;
+        const int local_y = tileLocal(image_y);
+
+        for (int x = 0; x < out.width(); ++x) {
+            const int image_x = region.x + x * step;
+            const TileRef tile = grid.find({tileCoordFor(image_x, 0).x, tile_y});
+            if (!tile) continue;
+
+            Rgba source = tile->pixel(tileLocal(image_x), local_y);
+            if (source.a <= 0.0f) continue;
+            if (layer_opacity < 1.0f) {
+                source.r *= layer_opacity;
+                source.g *= layer_opacity;
+                source.b *= layer_opacity;
+                source.a *= layer_opacity;
+            }
+            destination[x] = over(source, destination[x]);
+        }
+    }
+}
+
 void blendLayerOver(const Cel& cel, const Layer& layer, const PixelRect& region,
                     Framebuffer& out) {
     const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
@@ -71,7 +106,7 @@ void Framebuffer::resize(int width, int height) {
 void Framebuffer::clear() { std::fill(pixels_.begin(), pixels_.end(), Rgba{}); }
 
 void Compositor::composite(const Document& doc, TimelineId timeline_id, ImageId image_id,
-                           const PixelRect& region, Framebuffer& out) const {
+                           const PixelRect& region, Framebuffer& out, int step) const {
     const Timeline* timeline = doc.scene().findTimeline(timeline_id);
     if (!timeline) {
         out.clear();
@@ -82,13 +117,14 @@ void Compositor::composite(const Document& doc, TimelineId timeline_id, ImageId 
     layers.reserve(timeline->layers.size());
     for (const Layer& layer : timeline->layers) layers.push_back(layer.id);
 
-    compositeLayers(doc, timeline_id, image_id, layers, region, out);
+    compositeLayers(doc, timeline_id, image_id, layers, region, out, step);
 }
 
 void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, ImageId image_id,
                                  const std::vector<LayerId>& layers, const PixelRect& region,
-                                 Framebuffer& out) const {
-    out.resize(region.width, region.height);
+                                 Framebuffer& out, int step) const {
+    step = std::max(1, step);
+    out.resize((region.width + step - 1) / step, (region.height + step - 1) / step);
     if (out.isEmpty()) return;
     out.clear();
 
@@ -106,7 +142,11 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
         const Cel* cel = doc.cel(image->celFor(*it));
         if (!cel) continue;  // no cel means the layer is empty here
 
-        blendLayerOver(*cel, *layer, region, out);
+        if (step == 1) {
+            blendLayerOver(*cel, *layer, region, out);
+        } else {
+            blendLayerSampled(*cel, *layer, region, step, out);
+        }
     }
 }
 
