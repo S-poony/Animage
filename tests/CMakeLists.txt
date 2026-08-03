@@ -11,6 +11,10 @@ animage_test(test_timeline)
 animage_test(test_undo)
 animage_test(test_color)
 
+# A stopwatch rather than a test, so it is built but not run by ctest.
+add_executable(bench_composite bench_composite.cpp)
+target_link_libraries(bench_composite PRIVATE animage::core)
+
 # Interface tests need Qt, and run offscreen so they work on a build machine
 # with no display.
 if(TARGET animage_ui)

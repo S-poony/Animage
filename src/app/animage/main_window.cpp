@@ -213,7 +213,11 @@ void MainWindow::buildActions() {
     radius_->setDecimals(1);
     radius_->setSingleStep(1.0);
     radius_->setValue(canvas_->brushSettings().radius);
+    // ClickFocus, not the default WheelFocus: scrolling over the toolbar on the
+    // way somewhere else should not hand it the keyboard.
+    radius_->setFocusPolicy(Qt::ClickFocus);
     connect(radius_, &QDoubleSpinBox::valueChanged, this, &MainWindow::setBrushRadius);
+    connect(radius_, &QDoubleSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
     tools->addWidget(radius_);
 
     // [ and ] are what every drawing program uses; not having them is jarring.
@@ -254,6 +258,16 @@ void MainWindow::buildActions() {
     colour_swatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #888;"));
     connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseColour);
     tools->addWidget(colour_swatch_);
+
+    tools->addSeparator();
+    // This acts on the drawing in front of you, not on the layer as a whole, so
+    // it belongs with the drawing tools rather than in the layer panel.
+    auto* clear = new QPushButton(QStringLiteral("Clear"), this);
+    clear->setToolTip(QStringLiteral("Empty the current layer on this drawing only.\n"
+                                     "Other drawings keep theirs."));
+    clear->setFocusPolicy(Qt::NoFocus);
+    connect(clear, &QPushButton::clicked, this, &MainWindow::clearCurrentLayer);
+    tools->addWidget(clear);
 }
 
 void MainWindow::buildLayerPanel() {
@@ -297,10 +311,6 @@ void MainWindow::buildLayerPanel() {
         return b;
     };
 
-    auto* clear = panelButton(QStringLiteral("Clear this drawing's layer"),
-                              &MainWindow::clearCurrentLayer);
-    clear->setToolTip(QStringLiteral("Empty the current layer on the current drawing only.\n"
-                                     "Other drawings keep theirs."));
 
     auto* add = panelButton(QStringLiteral("Add layer"), &MainWindow::addLayer);
     (void)add;
@@ -366,8 +376,9 @@ void MainWindow::buildTimelinePanel() {
     onion_ = new QSpinBox(controls);
     onion_->setRange(0, 5);
     onion_->setToolTip(QStringLiteral("Drawings shown either side of this one"));
-    onion_->setFocusPolicy(Qt::NoFocus);
+    onion_->setFocusPolicy(Qt::ClickFocus);
     connect(onion_, &QSpinBox::valueChanged, this, &MainWindow::onOnionChanged);
+    connect(onion_, &QSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
     row->addWidget(onion_);
 
     row->addStretch(1);

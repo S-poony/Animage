@@ -8,6 +8,9 @@
 #include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QDoubleSpinBox>
+#include <QPointingDevice>
+#include <QTabletEvent>
 #include <QWheelEvent>
 #include <cmath>
 
@@ -350,11 +353,61 @@ void wheelZoomGestureSurvives() {
     CHECK(canvas->zoom() > 0.0);
 }
 
+// Clicking a spin box in the toolbar hands it the keyboard, and its line edit
+// then swallows plain letters as text -- so B and E stop switching tool. Going
+// back to the canvas has to take the keyboard back, and it has to do so for the
+// pen as well as the mouse: Qt gives click-focus for mouse presses but not for
+// tablet presses, which is exactly the case an artist hits.
+void touchingTheCanvasTakesTheKeyboardBack() {
+    TEST("drawing on the canvas takes focus back from a spin box");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    auto* spin = window.findChild<QDoubleSpinBox*>();
+    CHECK(canvas != nullptr);
+    CHECK(spin != nullptr);
+    if (!canvas || !spin) return;
+
+    spin->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(spin->hasFocus());
+
+    sendMouse(canvas, QEvent::MouseButtonPress, QPointF(400, 300), Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonRelease, QPointF(400, 300), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK(canvas->hasFocus());
+
+    // And again with the pen, which is the path that was actually broken.
+    spin->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(spin->hasFocus());
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+    const QPointF at(500, 350);
+    QTabletEvent press(QEvent::TabletPress, &stylus, at, canvas->mapToGlobal(at), 1.0, 0, 0, 0,
+                       0, 0, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(canvas, &press);
+    QTabletEvent release(QEvent::TabletRelease, &stylus, at, canvas->mapToGlobal(at), 0.0, 0, 0,
+                         0, 0, 0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::sendEvent(canvas, &release);
+    QCoreApplication::processEvents();
+    CHECK(canvas->hasFocus());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    touchingTheCanvasTakesTheKeyboardBack();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();

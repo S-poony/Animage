@@ -3,59 +3,33 @@
 
 #include <algorithm>
 #include <limits>
+#include <thread>
 
 #include "color.h"
 
 namespace animage {
 namespace {
 
-// One layer over what is already in the framebuffer. Both sides are
-// premultiplied, so this is a multiply-add and nothing else.
-void blendLayerSampled(const Cel& cel, const Layer& layer, const PixelRect& region, int step,
-                       Framebuffer& out) {
+// One layer over the rows [y_begin, y_end) of what is already in the
+// framebuffer. Both sides are premultiplied, so this is a multiply-add and
+// nothing else.
+//
+// The alpha byte pair is tested before anything is decoded. Line art is mostly
+// empty, and a fully transparent premultiplied pixel contributes nothing, so
+// skipping on a single 16-bit compare avoids four table lookups and a blend for
+// the large majority of pixels.
+void blendLayerRows(const Cel& cel, const Layer& layer, const PixelRect& region, int step,
+                    int y_begin, int y_end, Framebuffer& out) {
     const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
     if (layer_opacity <= 0.0f) return;
 
     const TileGrid& grid = cel.tiles();
     if (grid.empty()) return;
 
-    // Sampled path: the run-length walk below cannot help when consecutive
-    // outputs are not consecutive image pixels, so this stays deliberately
-    // simple. It only runs when zoomed out, where the buffer is small.
-    for (int y = 0; y < out.height(); ++y) {
+    const bool faded = layer_opacity < 1.0f;
+
+    for (int y = y_begin; y < y_end; ++y) {
         const int image_y = region.y + y * step;
-        Rgba* destination = out.row(y);
-        const int tile_y = tileCoordFor(0, image_y).y;
-        const int local_y = tileLocal(image_y);
-
-        for (int x = 0; x < out.width(); ++x) {
-            const int image_x = region.x + x * step;
-            const TileRef tile = grid.find({tileCoordFor(image_x, 0).x, tile_y});
-            if (!tile) continue;
-
-            Rgba source = tile->pixel(tileLocal(image_x), local_y);
-            if (source.a <= 0.0f) continue;
-            if (layer_opacity < 1.0f) {
-                source.r *= layer_opacity;
-                source.g *= layer_opacity;
-                source.b *= layer_opacity;
-                source.a *= layer_opacity;
-            }
-            destination[x] = over(source, destination[x]);
-        }
-    }
-}
-
-void blendLayerOver(const Cel& cel, const Layer& layer, const PixelRect& region,
-                    Framebuffer& out) {
-    const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
-    if (layer_opacity <= 0.0f) return;
-
-    const TileGrid& grid = cel.tiles();
-    if (grid.empty()) return;
-
-    for (int y = 0; y < out.height(); ++y) {
-        const int image_y = region.y + y;
         Rgba* destination = out.row(y);
 
         // The tile row does not change across a scanline, so the lookup is
@@ -65,10 +39,13 @@ void blendLayerOver(const Cel& cel, const Layer& layer, const PixelRect& region,
 
         int x = 0;
         while (x < out.width()) {
-            const int image_x = region.x + x;
+            const int image_x = region.x + x * step;
             const int tile_x = tileCoordFor(image_x, 0).x;
             const int local_x = tileLocal(image_x);
-            const int run = std::min(out.width() - x, kTileSize - local_x);
+
+            // With a sampling step, consecutive outputs are not consecutive
+            // image pixels, so a run cannot span more than one of them.
+            const int run = (step == 1) ? std::min(out.width() - x, kTileSize - local_x) : 1;
 
             const TileRef tile = grid.find({tile_x, tile_y});
             if (!tile) {
@@ -76,13 +53,15 @@ void blendLayerOver(const Cel& cel, const Layer& layer, const PixelRect& region,
                 continue;  // absent tile is transparent, so nothing to blend
             }
 
+            const Half* pixels =
+                tile->rgba.data() + (static_cast<std::size_t>(local_y) * kTileSize + local_x) * 4;
+
             for (int i = 0; i < run; ++i) {
-                Rgba source = tile->pixel(local_x + i, local_y);
-                if (source.a <= 0.0f && source.r <= 0.0f && source.g <= 0.0f &&
-                    source.b <= 0.0f) {
-                    continue;
-                }
-                if (layer_opacity < 1.0f) {
+                const Half* p = pixels + static_cast<std::size_t>(i) * 4;
+                if (p[3].bits == 0) continue;  // nothing here
+
+                Rgba source{p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat()};
+                if (faded) {
                     source.r *= layer_opacity;
                     source.g *= layer_opacity;
                     source.b *= layer_opacity;
@@ -93,6 +72,20 @@ void blendLayerOver(const Cel& cel, const Layer& layer, const PixelRect& region,
             x += run;
         }
     }
+}
+
+}  // namespace
+
+namespace {
+
+// Threads cost about as much to start as a small band costs to composite, so
+// only spread work that is worth spreading.
+int chooseWorkerCount(int rows, std::size_t layers) {
+    const long long work = static_cast<long long>(rows) * static_cast<long long>(layers);
+    if (work < 512) return 1;
+    const unsigned hardware = std::thread::hardware_concurrency();
+    const int available = static_cast<int>(hardware ? hardware : 1u);
+    return std::clamp(std::min(available, rows / 32), 1, 8);
 }
 
 }  // namespace
@@ -134,20 +127,50 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     if (!image) return;
 
     // Bottom upwards: each layer goes over the accumulated result, and the
-    // list is topmost first.
+    // list is topmost first. Resolved once, before any threads start.
+    struct Pass {
+        const Cel* cel;
+        const Layer* layer;
+    };
+    std::vector<Pass> passes;
+    passes.reserve(layers.size());
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
         const Layer* layer = timeline->findLayer(*it);
         if (!layer || !layer->visible) continue;
-
         const Cel* cel = doc.cel(image->celFor(*it));
         if (!cel) continue;  // no cel means the layer is empty here
-
-        if (step == 1) {
-            blendLayerOver(*cel, *layer, region, out);
-        } else {
-            blendLayerSampled(*cel, *layer, region, step, out);
-        }
+        passes.push_back({cel, layer});
     }
+    if (passes.empty()) return;
+
+    // Split by rows rather than by layer: each band is independent, so no
+    // synchronisation is needed anywhere, and a band does all of its layers
+    // while its part of the framebuffer is still in cache.
+    const int rows = out.height();
+    const int workers = chooseWorkerCount(rows, passes.size());
+
+    const auto run_band = [&](int y_begin, int y_end) {
+        for (const Pass& pass : passes) {
+            blendLayerRows(*pass.cel, *pass.layer, region, step, y_begin, y_end, out);
+        }
+    };
+
+    if (workers <= 1) {
+        run_band(0, rows);
+        return;
+    }
+
+    const int band = (rows + workers - 1) / workers;
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<std::size_t>(workers) - 1);
+    for (int w = 1; w < workers; ++w) {
+        const int y_begin = std::min(rows, w * band);
+        const int y_end = std::min(rows, y_begin + band);
+        if (y_begin >= y_end) break;
+        pool.emplace_back(run_band, y_begin, y_end);
+    }
+    run_band(0, std::min(rows, band));  // this thread takes the first band
+    for (std::thread& worker : pool) worker.join();
 }
 
 PixelRect imageBounds(const Document& doc, TimelineId timeline_id, ImageId image_id) {

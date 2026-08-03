@@ -24,8 +24,11 @@ constexpr double kMaxZoom = 32.0;
 constexpr int kCheckerSize = 8;
 constexpr double kScrubbyZoomPerPixel = 0.006;
 constexpr double kSizeDragPerPixel = 0.012;
-// Cached beyond the viewport, so a pan of a few pixels does not recomposite.
-constexpr int kCacheMargin = 192;
+// Cached beyond the viewport, so a small pan does not recomposite. Measured
+// rather than guessed: at 192 the padding more than doubled the cost of every
+// full refresh -- every frame change, every opacity tick -- to buy free panning
+// nobody had asked for. 64 keeps most of the benefit for a third of the price.
+constexpr int kCacheMargin = 64;
 
 // Linear to sRGB through a lookup table. The conversion is per pixel of the
 // viewport on every recomposite, and std::pow in that loop is measurable.
@@ -547,6 +550,12 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     event->accept();
     ++tablet_events_seen_;
 
+    // Qt gives click-focus for a mouse press but not for a tablet press, so an
+    // artist who has touched a spin box in the toolbar never gets the keyboard
+    // back by drawing -- and the spin box's line edit then eats B and E as text
+    // rather than letting them switch tool. Taken explicitly, for both devices.
+    if (event->type() == QEvent::TabletPress) setFocus(Qt::MouseFocusReason);
+
     const QPointF widget_point = event->position();
 
     if (event->type() == QEvent::TabletPress && beginNavigation(widget_point, Qt::LeftButton)) {
@@ -586,6 +595,7 @@ bool CanvasWidget::eventIsSynthesisedFromPen(QMouseEvent* event) const {
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
+    setFocus(Qt::MouseFocusReason);
     if (beginNavigation(event->position(), event->button())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
