@@ -26,6 +26,9 @@ through M4 of [the plan](docs/fr/plan-de-prototype.md) exist, M5 does not.
 If you are picking this up, read [docs/handover.md](docs/handover.md) first: it
 records what was built, where it deliberately departs from the plan, and the
 mistakes that cost the most time.
+[docs/scribbles-through-time.md](docs/scribbles-through-time.md) designs the next
+piece of colouring — carrying scribbles from drawing to drawing, and moving them
+with the animation.
 
 ## Design documents
 

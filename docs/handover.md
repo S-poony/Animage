@@ -212,12 +212,14 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    and should never be written. The canvas rectangle exists now
    (`Scene::canvas()`), so export has a size to write; before it, every frame
    would have come out as its own bounding box and no two the same.
-2. **Scribbles through time.** Raised in testing and the right instinct: a CTG
-   cel with no scribbles should fall back to the nearest earlier drawing's,
-   rather than being empty. Colour once, carry forward, and a new scribble on a
-   drawing overrides from there. This is also most of the plan's "onion fill"
-   hypothesis, which the layer model makes nearly free and which the notes
-   expect to be the selling point.
+2. **Scribbles through time.** A CTG cel with no scribbles should fall back to
+   the nearest earlier drawing's rather than being empty: colour once, carry
+   forward, and a new scribble overrides from there. This is also most of the
+   plan's "onion fill" hypothesis, which the layer model makes nearly free and
+   which the notes expect to be the selling point. Designed out in
+   [scribbles-through-time.md](scribbles-through-time.md), together with the
+   harder half — scribbles that move to follow the animation. The carry-forward
+   is small and is not blocked by anything; the motion needs item 3 first.
 3. **Solve the CTG fill off the interface thread.** It is capped at about
    512x512 today purely so it cannot freeze the program, which costs real
    quality on a large drawing. Solving in the background, coarse first and
