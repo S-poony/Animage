@@ -1,4 +1,4 @@
-set(CMAKE_AUTOMOC ON)
+﻿set(CMAKE_AUTOMOC ON)
 
 # M0: the latency harness. Deliberately standalone -- it links nothing of ours,
 # so it measures Qt and the driver rather than our code.
@@ -26,6 +26,8 @@ add_library(animage_ui STATIC
   animage/timeline_widget.h
   animage/scene_settings_dialog.cpp
   animage/scene_settings_dialog.h
+  animage/project_files.cpp
+  animage/project_files.h
   animage/crash_report.cpp
   animage/crash_report.h
 )

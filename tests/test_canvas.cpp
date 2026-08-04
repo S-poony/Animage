@@ -18,6 +18,10 @@
 #include <QWheelEvent>
 #include <cmath>
 
+#include <QDir>
+#include <QFileInfo>
+#include <QTemporaryDir>
+#include <QFile>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QHeaderView>
@@ -28,7 +32,9 @@
 #include "canvas_widget.h"
 #include "main_window.h"
 #include "document.h"
+#include "project_files.h"
 #include "scene_settings_dialog.h"
+#include "serialise.h"
 #include "testing.h"
 
 using namespace animage;
@@ -840,6 +846,209 @@ void theFillWaitsForTheStrokeToFinish() {
     CHECK_EQ(doc.ctgFillFor(track, image, colour)->inputs, resolved);
 }
 
+// --- saving ----------------------------------------------------------------
+
+// A document with pixels in it, so the round trip has something to lose.
+Document buildDrawnScene() {
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId first = doc.insertImage(track, 0);
+    doc.extendExposure(track, 0, 2);
+    const ImageId second = doc.insertImage(track, 3);
+
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto stroke = [&](ImageId image, LayerId layer, float x0, float y0, float x1, float y1,
+                            float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings s;
+        s.radius = 9.0f;
+        s.pressure_affects_opacity = false;
+        s.r = r; s.g = g; s.b = b; s.a = 1.0f;
+        Brush brush(s);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+
+    stroke(first, ink, 100, 100, 400, 260, 0, 0, 0);
+    stroke(first, colour, 180, 150, 300, 200, 0.9f, 0.3f, 0.05f);
+    // Well away from the origin and negative, because the drawing surface has
+    // no edges and tile coordinates are signed.
+    stroke(second, ink, -600, -400, -300, -150, 0, 0, 0);
+
+    doc.setCanvasSize(1280, 720);
+    doc.setFramerate(12);
+    return doc;
+}
+
+float alphaAt(const Document& doc, TrackId track, ImageId image, LayerId layer, int x, int y) {
+    const Cel* cel = doc.celAt(track, image, layer);
+    return cel ? cel->pixel(x, y).a : -1.0f;
+}
+
+void aProjectSurvivesSavingAndLoading() {
+    TEST("a project comes back from disk with its pixels intact");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+
+    const Document original = buildDrawnScene();
+    QString error;
+    CHECK(project::save(original, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // The layout is part of the promise: a folder somebody can look inside.
+    CHECK(QFileInfo::exists(folder + QStringLiteral("/scene.json")));
+    CHECK(QFileInfo::exists(folder + QStringLiteral("/cels")));
+    CHECK(QDir(folder + QStringLiteral("/cels")).entryList(QDir::Files).size() >= 3);
+
+    Document loaded;
+    CHECK(project::load(loaded, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // Structure.
+    CHECK_EQ(loaded.scene().framerate, 12);
+    CHECK_EQ(loaded.scene().width, 1280);
+    CHECK_EQ(writeSceneJson(loaded), writeSceneJson(original));
+
+    // And the pixels, bit for bit, on both drawings and both layers.
+    const TrackId track = loaded.scene().tracks.front().id;
+    const Track& before = original.scene().tracks.front();
+    std::size_t compared = 0;
+    std::size_t differing = 0;
+    for (const auto& [image_id, image] : before.images) {
+        for (const Layer& layer : before.layers) {
+            const Cel* was = original.celAt(before.id, image_id, layer.id);
+            const Cel* now = loaded.celAt(track, image_id, layer.id);
+            if (!was) continue;
+            CHECK(now != nullptr);
+            if (!now) continue;
+            for (const TileCoord& coord : was->tiles().coords()) {
+                const TileRef a = was->tiles().find(coord);
+                const TileRef b = now->tiles().find(coord);
+                if (!b) {
+                    // A tile a dab touched without covering anything is dropped
+                    // on the way out, deliberately: absent and transparent are
+                    // the same thing in the model. Any other absence is a loss.
+                    if (!a->isFullyTransparent()) ++differing;
+                    continue;
+                }
+                ++compared;
+                for (std::size_t i = 0; i < a->rgba.size(); ++i) {
+                    if (a->rgba[i].bits != b->rgba[i].bits) ++differing;
+                }
+            }
+        }
+    }
+    CHECK(compared > 0);
+    CHECK_EQ(differing, std::size_t{0});
+
+    // A tile a long way into negative coordinates came back too.
+    CHECK(alphaAt(loaded, track, before.slots.back(), before.layers.front().id, -450, -275) > 0.0f);
+}
+
+// A save that dies part way through must not take the last good one with it.
+void aFailedSaveLeavesTheOldProjectAlone() {
+    TEST("a save that cannot finish leaves the previous project untouched");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+
+    const Document first = buildDrawnScene();
+    CHECK(project::save(first, folder, nullptr));
+    QFile scene(folder + QStringLiteral("/scene.json"));
+    CHECK(scene.open(QIODevice::ReadOnly));
+    const QByteArray original_bytes = scene.readAll();
+    scene.close();
+
+    // Saving over it with somewhere unwritable underneath: the scratch folder
+    // is made inside the target's parent, so a read-only parent stops it.
+    Document second = buildDrawnScene();
+    second.setFramerate(30);
+    QString error;
+    CHECK_EQ(project::save(second, QStringLiteral("\0invalid"), &error), false);
+    CHECK(!error.isEmpty());
+
+    // The first save is exactly as it was.
+    CHECK(scene.open(QIODevice::ReadOnly));
+    CHECK_EQ(scene.readAll() == original_bytes, true);
+    scene.close();
+
+    // And no scratch folders were left lying about.
+    const QStringList leftovers =
+        QDir(scratch.path()).entryList(QStringList() << QStringLiteral("*.saving-*")
+                                                     << QStringLiteral("*.replaced-*"),
+                                       QDir::Dirs);
+    CHECK_EQ(leftovers.size(), 0);
+}
+
+void abrokenProjectDoesNotReplaceTheOpenOne() {
+    TEST("a project that will not open leaves the open one alone");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    Document open_document = buildDrawnScene();
+    open_document.setFramerate(25);
+    const std::string before = writeSceneJson(open_document);
+
+    // No such folder.
+    QString error;
+    CHECK_EQ(project::load(open_document, scratch.filePath(QStringLiteral("absent")), &error),
+             false);
+    CHECK(!error.isEmpty());
+    CHECK_EQ(writeSceneJson(open_document), before);
+
+    // A cel file corrupted after the fact. This is the case that matters: the
+    // scene reads, so a careless loader would have replaced the document before
+    // finding out the pixels were rubbish.
+    const QStringList cels = QDir(folder + QStringLiteral("/cels")).entryList(QDir::Files);
+    CHECK(!cels.isEmpty());
+    if (!cels.isEmpty()) {
+        QFile broken(folder + QStringLiteral("/cels/") + cels.first());
+        CHECK(broken.open(QIODevice::WriteOnly));
+        broken.write("ANIMCELZ and then nonsense");
+        broken.close();
+
+        CHECK_EQ(project::load(open_document, folder, &error), false);
+        CHECK(!error.isEmpty());
+        CHECK_EQ(writeSceneJson(open_document), before);
+        CHECK_EQ(open_document.scene().framerate, 25);
+    }
+}
+
+void savingTwiceWritesTheSameBytes() {
+    TEST("saving an unchanged document twice writes identical files");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const Document doc = buildDrawnScene();
+
+    const QString a = scratch.filePath(QStringLiteral("a.animage"));
+    const QString b = scratch.filePath(QStringLiteral("b.animage"));
+    CHECK(project::save(doc, a, nullptr));
+    CHECK(project::save(doc, b, nullptr));
+
+    const QStringList files = QDir(a + QStringLiteral("/cels")).entryList(QDir::Files);
+    CHECK(!files.isEmpty());
+    for (const QString& name : files) {
+        QFile one(a + QStringLiteral("/cels/") + name);
+        QFile two(b + QStringLiteral("/cels/") + name);
+        CHECK(one.open(QIODevice::ReadOnly));
+        CHECK(two.open(QIODevice::ReadOnly));
+        // Byte-identical, so a backup tool or a diff can tell what actually
+        // changed between two saves.
+        CHECK_EQ(one.readAll() == two.readAll(), true);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -853,6 +1062,10 @@ int main(int argc, char** argv) {
     theScribbleBoxCanBeClicked();
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
+    aProjectSurvivesSavingAndLoading();
+    aFailedSaveLeavesTheOldProjectAlone();
+    abrokenProjectDoesNotReplaceTheOpenOne();
+    savingTwiceWritesTheSameBytes();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();
