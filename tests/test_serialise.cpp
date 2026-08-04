@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // scene.json: the structure of a document, without its pixels. The pixels are
 // the application's half of saving and are tested elsewhere.
@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <string>
 
+#include "celfile.h"
 #include "json.h"
 #include "serialise.h"
 #include "testing.h"
@@ -294,6 +295,146 @@ void asharedCelStaysShared() {
     CHECK_EQ(cels.size(), std::size_t{1});
 }
 
+// --- cel pixels ------------------------------------------------------------
+
+TileRef makeTile(const std::vector<std::pair<std::size_t, float>>& samples) {
+    auto tile = std::make_shared<Tile>();
+    for (const auto& [index, value] : samples) tile->rgba[index] = Half(value);
+    return tile;
+}
+
+// The whole reason the format is ours: every bit comes back.
+void celPixelsSurviveExactly() {
+    TEST("every half-float a cel can hold survives the round trip exactly");
+    TileGrid grid;
+
+    // Values chosen to break a 16-bit integer format: the smallest subnormal,
+    // things far below one integer step, a value above one, and the awkward
+    // fractions in between.
+    const float awkward[] = {0.0f,       5.96e-8f,  1e-6f,     1.0f / 3.0f, 0.1f,
+                             0.5f,       0.95f,     1.0f,      2.5f,        65504.0f};
+    auto tile = std::make_shared<Tile>();
+    for (std::size_t i = 0; i < std::size(awkward); ++i) {
+        tile->rgba[i] = Half(awkward[i]);
+    }
+    tile->rgba[400] = Half(1.0f);  // so the tile is not transparent
+    grid.set({0, 0}, tile);
+
+    // And a tile a long way from the origin, in both directions, because the
+    // drawing surface has no edges and the coordinates are signed.
+    grid.set({-7, 3}, makeTile({{0, 0.25f}, {3, 1.0f}}));
+    grid.set({12, -40}, makeTile({{1, 0.75f}, {3, 0.5f}}));
+
+    const std::vector<std::uint8_t> bytes = encodeCel(grid);
+    TileGrid back;
+    std::string error;
+    CHECK(decodeCel(bytes, back, &error));
+    CHECK_EQ(error, std::string());
+
+    CHECK_EQ(back.tileCount(), grid.tileCount());
+    for (const TileCoord& coord : grid.coords()) {
+        const TileRef before = grid.find(coord);
+        const TileRef after = back.find(coord);
+        CHECK(after != nullptr);
+        if (!after) continue;
+        // Bit for bit, not nearly: this is the claim. Counted as one check per
+        // tile rather than one per sample, because sixty-five thousand identical
+        // assertions tell you nothing extra and drown the suite's tally.
+        std::size_t differing = 0;
+        for (std::size_t i = 0; i < before->rgba.size(); ++i) {
+            if (after->rgba[i].bits != before->rgba[i].bits) ++differing;
+        }
+        CHECK_EQ(differing, std::size_t{0});
+    }
+}
+
+void anEmptyCelIsAnEmptyFile() {
+    TEST("an empty cel writes a header and nothing else");
+    TileGrid empty;
+    const std::vector<std::uint8_t> bytes = encodeCel(empty);
+    CHECK_EQ(bytes.size(), std::size_t{24});
+
+    CelFileInfo info;
+    CHECK(readCelFileInfo(bytes, info));
+    CHECK_EQ(info.tile_count, std::size_t{0});
+
+    TileGrid back;
+    CHECK(decodeCel(bytes, back));
+    CHECK(back.empty());
+}
+
+// Absent and transparent mean the same thing in the model, and the file must
+// not be able to smuggle in a difference. An erased stroke leaves cleared tiles
+// behind, and writing them would grow the file every time somebody rubbed
+// something out.
+void transparentTilesAreNotWritten() {
+    TEST("fully transparent tiles are dropped rather than stored");
+    TileGrid grid;
+    grid.set({0, 0}, makeTile({{3, 1.0f}}));       // has coverage
+    grid.set({1, 0}, std::make_shared<Tile>());    // cleared by an eraser
+    CHECK_EQ(grid.tileCount(), std::size_t{2});
+
+    const std::vector<std::uint8_t> bytes = encodeCel(grid);
+    CelFileInfo info;
+    CHECK(readCelFileInfo(bytes, info));
+    CHECK_EQ(info.tile_count, std::size_t{1});
+
+    TileGrid back;
+    CHECK(decodeCel(bytes, back));
+    CHECK_EQ(back.tileCount(), std::size_t{1});
+    CHECK(back.find({1, 0}) == nullptr);
+}
+
+void celBytesAreStable() {
+    TEST("the same cel encodes to the same bytes twice");
+    TileGrid grid;
+    // Inserted in an order that a hash will not preserve.
+    grid.set({5, 5}, makeTile({{3, 1.0f}}));
+    grid.set({-2, 9}, makeTile({{3, 0.5f}}));
+    grid.set({0, 0}, makeTile({{3, 0.25f}}));
+    grid.set({5, -5}, makeTile({{3, 0.75f}}));
+
+    TileGrid other;
+    other.set({0, 0}, makeTile({{3, 0.25f}}));
+    other.set({5, -5}, makeTile({{3, 0.75f}}));
+    other.set({-2, 9}, makeTile({{3, 0.5f}}));
+    other.set({5, 5}, makeTile({{3, 1.0f}}));
+
+    // Same tiles, different insertion order, identical file. Without this a save
+    // rewrites every cel whether or not anything changed.
+    CHECK(encodeCel(grid) == encodeCel(other));
+}
+
+void acorruptCelIsRefused() {
+    TEST("a corrupt cel file is refused rather than half-read");
+    TileGrid grid;
+    grid.set({0, 0}, makeTile({{3, 1.0f}}));
+    const std::vector<std::uint8_t> good = encodeCel(grid);
+
+    const auto refused = [](std::vector<std::uint8_t> bytes, const char* because) {
+        TileGrid out;
+        std::string error;
+        CHECK_EQ(decodeCel(bytes, out, &error), false);
+        CHECK(error.find(because) != std::string::npos);
+        CHECK(out.empty());  // untouched
+    };
+
+    refused({}, "too short");
+    refused(std::vector<std::uint8_t>(24, 0), "wrong magic");
+
+    // A tile count that says there is far more here than there is. This is the
+    // one that matters: taken on trust it is a request to allocate a terabyte.
+    std::vector<std::uint8_t> lying = good;
+    lying[20] = 0xff;
+    lying[21] = 0xff;
+    refused(lying, "truncated");
+
+    // Truncated in the middle of the pixels.
+    std::vector<std::uint8_t> cut = good;
+    cut.resize(cut.size() - 100);
+    refused(cut, "truncated");
+}
+
 }  // namespace
 
 int main() {
@@ -306,5 +447,10 @@ int main() {
     loadingForgetsTheHistory();
     abadFileLeavesTheDocumentAlone();
     asharedCelStaysShared();
+    celPixelsSurviveExactly();
+    anEmptyCelIsAnEmptyFile();
+    transparentTilesAreNotWritten();
+    celBytesAreStable();
+    acorruptCelIsRefused();
     return testing::summarise("serialise");
 }
