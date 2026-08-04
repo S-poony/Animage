@@ -1,4 +1,4 @@
-﻿function(animage_test name)
+function(animage_test name)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE animage::core)
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -25,4 +25,8 @@ if(TARGET animage_ui)
   target_link_libraries(test_canvas PRIVATE animage_ui)
   target_include_directories(test_canvas PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_canvas COMMAND test_canvas -platform offscreen)
+
+  # A stopwatch, like bench_composite: built, never run by ctest.
+  add_executable(bench_save bench_save.cpp)
+  target_link_libraries(bench_save PRIVATE animage_ui)
 endif()

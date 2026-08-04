@@ -42,6 +42,16 @@ copy-on-write tiles make a snapshot for a render thread nearly free.
 user's call and it is a better design than the plan sketches. A CTG layer is
 the mode: draw on it with the ordinary brush and what you draw is a scribble.
 
+**Cels are not saved as PNG.** The plan says a PNG per cel; a 16-bit PNG cannot
+hold a half-float. Half spends its precision relatively — finely near zero,
+coarsely near one — while integers are evenly spaced, so of the 15362 half values
+in [0,1] a 16-bit image keeps 7169, and some non-zero values quantise to zero.
+sRGB-encoding first keeps 10871, which is better and still lossy. A save that
+loses pixels is not a save. The format is ours instead, storing the same bits the
+tiles hold — see `celfile.h`, which documents the layout so a drawing is
+recoverable with nothing but zlib. PNG remains the right thing for *export*,
+where a conversion is expected and the destination is another program.
+
 **Pen prediction is ruled out permanently.** Not deferred — refused. It hides
 latency rather than removing it, and pays with accuracy at the ends of strokes.
 Do not propose it.

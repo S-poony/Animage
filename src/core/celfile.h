@@ -28,22 +28,31 @@ namespace animage {
 // zlib stream can recover a drawing from it with the layout below in hand, which
 // is the price of not using a format other programs already read.
 //
-//   offset  0   "ANIMCEL1"                    magic and format version
+//   offset  0   "ANIMCEL2"                    magic and format version
 //           8   uint32  tile size in pixels   128; a change is detectable
 //          12   uint32  channels              4, RGBA
 //          16   uint32  sample format         0 = IEEE binary16, little-endian
 //          20   uint32  tile count
 //          24   int32 x, int32 y  per tile    where each tile sits, in tiles
-//         ...   tile count * 128 * 128 * 4 * uint16
+//         ...   per tile, in the same order:
+//                 128 * (uint16 begin, uint16 end)   the occupied span of each
+//                                                    row; begin == end is empty
+//                 then (end - begin) * 4 * uint16 for each row, in row order
 //
 // Pixels are premultiplied and in linear light, exactly as they are in memory.
-// Tiles are written in a fixed order so that saving an unchanged drawing twice
-// produces identical bytes.
+// Anything outside a row's span is transparent. Tiles are written in a fixed
+// order so that saving an unchanged drawing twice produces identical bytes.
 //
-// Compression is not here. Deflating this is the caller's business, because
-// `core` has no external dependencies and a compressor is one; uncompressed, a
-// tile is 128 KB and a shot would run to gigabytes, so the caller should not
-// skip it.
+// Only the occupied span of each row is stored, and that is the difference
+// between a usable save and an unusable one. A three-pixel line crossing a
+// 128x128 tile leaves it 99% empty, so writing tiles whole meant handing the
+// compressor 457 MB to produce 3.3 MB -- measured at 92.6% zero bytes, and 2.8
+// seconds to save twenty-four drawings. Spans cost 512 bytes a tile and remove
+// almost all of it. A tile that really is full pays that 512 bytes and nothing
+// else.
+//
+// Compression is still not here. Deflating this is the caller's business,
+// because `core` has no external dependencies and a compressor is one.
 struct CelFileInfo {
     int tile_size = 0;
     int channels = 0;
