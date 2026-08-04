@@ -1,4 +1,4 @@
-add_library(animage_core
+﻿add_library(animage_core
   brush.cpp
   cel.cpp
   color.cpp
@@ -7,7 +7,9 @@ add_library(animage_core
   ctg.cpp
   document.cpp
   gridflow.cpp
+  json.cpp
   lazybrush.cpp
+  serialise.cpp
   track.cpp
 )
 

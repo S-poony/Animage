@@ -120,6 +120,23 @@ public:
     // last image showing it for as long as undo can bring that image back.
     std::size_t collectGarbage();
 
+    // --- loading ---------------------------------------------------------
+
+    // Replaces the document wholesale: the scene, the cels it refers to, and
+    // nothing else. The history goes, because an undo across a file load has
+    // nothing to mean.
+    //
+    // Every cel the scene names is created empty, with its image refcount taken
+    // from the scene rather than trusted from the file, and the id counters
+    // resume past the highest id in it. That last part is not housekeeping: ids
+    // are never reused, and a counter that restarted at one would hand out an
+    // id a loaded cel already answers to.
+    void loadScene(Scene scene);
+
+    // Gives a loaded cel its pixels. Only valid for a cel loadScene created;
+    // false if the id is not one of them.
+    bool setCelTiles(CelId id, TileGrid tiles);
+
     // --- used by Op implementations --------------------------------------
 
     Scene& mutableScene() { return scene_; }

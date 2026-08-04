@@ -51,6 +51,57 @@ void Document::setFramerate(int framerate) {
     scene_.framerate = framerate;
 }
 
+void Document::loadScene(Scene scene) {
+    scene_ = std::move(scene);
+    cels_.clear();
+    ctg_cache_.clear();
+    undo_stack_.clear();
+    redo_stack_.clear();
+    pending_ = Command{};
+    command_depth_ = 0;
+    journal_.take();
+
+    std::uint64_t highest_track = 0;
+    std::uint64_t highest_layer = 0;
+    std::uint64_t highest_image = 0;
+    std::uint64_t highest_cel = 0;
+
+    for (const Track& track : scene_.tracks) {
+        highest_track = std::max(highest_track, track.id);
+        for (const Layer& layer : track.layers) highest_layer = std::max(highest_layer, layer.id);
+
+        for (const auto& [image_id, image] : track.images) {
+            highest_image = std::max(highest_image, image_id);
+            for (const auto& [layer_id, cel_id] : image.cels) {
+                if (cel_id == kNoId) continue;
+                highest_cel = std::max(highest_cel, cel_id);
+                auto found = cels_.find(cel_id);
+                if (found == cels_.end()) {
+                    found = cels_.emplace(cel_id, std::make_shared<Cel>(cel_id)).first;
+                }
+                // Counted from the scene, not read from the file: a refcount
+                // that disagrees with the images is a leak or a crash, and the
+                // images are the thing that is true.
+                found->second->addImageRef();
+            }
+        }
+    }
+
+    cel_ids_.resumeAfter(highest_cel);
+    image_ids_.resumeAfter(highest_image);
+    layer_ids_.resumeAfter(highest_layer);
+    track_ids_.resumeAfter(highest_track);
+}
+
+bool Document::setCelTiles(CelId id, TileGrid tiles) {
+    auto found = cels_.find(id);
+    if (found == cels_.end()) return false;
+    const int refs = found->second->imageRefcount();
+    found->second = std::make_shared<Cel>(id, std::move(tiles));
+    for (int i = 0; i < refs; ++i) found->second->addImageRef();
+    return true;
+}
+
 void Document::setCanvasSize(int width, int height) {
     const int w = std::clamp(width, kMinCanvasSide, kMaxCanvasSide);
     const int h = std::clamp(height, kMinCanvasSide, kMaxCanvasSide);
