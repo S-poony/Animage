@@ -32,15 +32,6 @@ struct CtgSettings {
     // is a coarse pass while the pen is down and a full one when it lifts.
     int downscale = 1;
 
-    // The longest hole in the line art a fill will jump, in *image* pixels.
-    //
-    // The solver counts in cells of whatever grid it was handed, and that grid
-    // is coarser on a big drawing, so a tolerance stated there would mean
-    // different things at different sizes -- the same drawing scanned twice as
-    // large would jump gaps twice as wide. Stated here in image pixels and
-    // divided by the sampling step on the way in, it means one thing.
-    float gap_tolerance_pixels = 32.0f;
-
     LazyBrushOptions lazybrush;
 };
 

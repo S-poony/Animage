@@ -31,21 +31,31 @@ struct LazyBrushOptions {
     // which is what lets you scrawl rather than aim.
     float soft_lambda = 0.95f;
 
-    // The longest gap in the line art the fill will jump, in cells of this
-    // grid. This is the price of the border, and it is the whole of what makes
-    // one scribble fill one shape rather than the picture.
+    // Seed the outermost ring of the grid as background, unseverably.
     //
-    // It is a number with a meaning rather than a knob. Compare two labellings:
-    // colouring everything cuts along the border, for `gap_tolerance` per border
-    // cell -- about `gap_tolerance * K` in total, since K is the perimeter.
-    // Bridging a hole `n` cells wide crosses blank paper, which costs K a cell,
-    // so `n * K`. Bridging is the cheaper of the two exactly when `n <
-    // gap_tolerance`. Hence the name and the unit.
+    // This is what lets one scribble fill one shape. Without an opponent the
+    // solver has no reason to stop anywhere, so a lone scribble labels
+    // everything it can reach; with one, some separating boundary must exist,
+    // and the cut picks the cheapest -- which follows the outline where there is
+    // one and jumps the holes, however wide, because jumping is still cheaper
+    // than any other way of telling the two apart.
     //
-    // Note what it is not: it is not a seed and takes part in no majority. A
-    // background that competed on scribble strength was tried and abandoned --
-    // see the note in solveLazyBrush.
-    float gap_tolerance = 32.0f;
+    // It has to be unseverable. Anything a boundary can *buy* the border with,
+    // however dear, makes "give the colour everything" an available labelling,
+    // and then holes wider than that price are not bridged. A finite border
+    // price is a gap cap exactly equal to it, whatever the price -- so there is
+    // no value to go looking for.
+    //
+    // The gap tolerance it does give is `n < lambda * |S|`: bridging a hole n
+    // cells wide costs n*K, giving the scribble up costs lambda*K per pixel of
+    // it. That is at least what two scribbles give -- they sever whichever of
+    // the two is smaller -- and it is a rule a person can act on, which a hidden
+    // threshold is not: scribble bigger to bridge bigger holes.
+    //
+    // Where the user has scribbled on the ring, their scribble is the seed and
+    // this is not applied; nor is it applied on ink, so an outline crossing the
+    // frame is not fighting a seed laid on top of it.
+    bool implicit_background = true;
 
     // Pencil and other low-contrast art need the line found before it can be
     // used as a barrier. The labelling is still applied to the untouched image.

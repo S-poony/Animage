@@ -118,11 +118,16 @@ included. One scribble fills one shape; what is outside it stays uncoloured unti
 you scribble there too. What is stored is the scrawl, not the fill, so moving a
 scribble recolours the region and redrawing the line art re-cuts it.
 
-Holes in the line are bridged up to a stated width — 32 image pixels by default,
-`CtgSettings::gap_tolerance_pixels` — and past that the fill escapes, which is
-the honest failure rather than a wrong answer: the line has stopped being a
-boundary. That width is the price the cut pays to run along the edge of the
-picture, so it means the same thing whatever the drawing is solved at.
+Holes in the line are bridged however wide they are — the fill follows the ink
+where there is ink and jumps where there is not, so a shape drawn with a fifth of
+its outline missing still fills from one scribble. There is no gap setting to
+tune. What limits it is the size of your scribble: giving a scribble up is what
+the boundary is measured against, so **a bigger scribble bridges a bigger hole**.
+
+The outside of a shape is left uncoloured. Scribbling a colour out there does not
+fill the background — the edge of the picture is background and cannot be
+overruled, so the mark keeps roughly its own pixels. Carry a scribble off the
+edge of the picture and the region it is in fills to that edge.
 
 Every ordinary layer becomes a barrier for it automatically. Cutting against a
 rough as well as a clean closes gaps that leak from either alone. The **Marks**

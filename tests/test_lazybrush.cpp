@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The point of LazyBrush is that it copes with line art a paint bucket cannot:
 // lines with gaps in them. So the tests are mostly drawings with holes.
@@ -364,12 +364,22 @@ void asecondColourDoesNotDisturbTheFirst() {
     CHECK_EQ(pair.labelAt(after, 17, 4), 2);
 }
 
-// A shape running off the edge of the grid is filled up to the edge. It pays
-// the border price along the crop, which has to stay cheaper than shrinking
-// back to the scribble.
-void aCroppedShapeFillsToTheEdge() {
-    TEST("a shape cropped by the edge still fills to the edge");
-    Picture picture({
+// The price of an unseverable rim, stated rather than hidden.
+//
+// A shape running off the edge of the grid is not filled to the edge by a
+// scribble that stops short of it: the rim is background and cannot be bought.
+// Worse than that, where it stops is arbitrary -- cutting across the region at
+// the scribble's edge and cutting against the rim cost exactly the same, so this
+// is the paper's own ambiguity case and the tie goes wherever the label order
+// sends it.
+//
+// The remedy is the ordinary rule, that your seed wins where you seeded:
+// carrying the scribble off the edge fills the region. One gesture, against a
+// second scribble on every shape, which is what this design replaced.
+void aCroppedShapeNeedsTheScribbleCarriedToTheEdge() {
+    TEST("a cropped shape fills to the edge when the scribble is carried there");
+
+    Picture short_of_it({
         "....................",
         "..##################",
         "..#.................",
@@ -379,14 +389,73 @@ void aCroppedShapeFillsToTheEdge() {
         "..##################",
         "....................",
     });
+    const LazyBrushResult stopped = solveLazyBrush(short_of_it.problem);
+    printLabels(short_of_it, stopped);
+    CHECK_EQ(short_of_it.labelAt(stopped, 9, 3), 1);    // around the scribble
+    CHECK_EQ(short_of_it.labelAt(stopped, 19, 3), -1);  // but not out to the crop
+    CHECK_EQ(short_of_it.labelAt(stopped, 15, 3), -1);
+    CHECK_EQ(short_of_it.labelAt(stopped, 0, 3), -1);   // and never outside the box
 
+    Picture carried({
+        "....................",
+        "..##################",
+        "..#.................",
+        "..#.....11111111111.",
+        "..#.....11111111111.",
+        "..#.................",
+        "..##################",
+        "....................",
+    });
+    // The last column is the rim; the scribble reaching it is what displaces the
+    // background there.
+    for (int y = 3; y <= 4; ++y) {
+        carried.problem.seeds[static_cast<std::size_t>(y) * carried.width + 19] = 1;
+    }
+    const LazyBrushResult reaching = solveLazyBrush(carried.problem);
+    printLabels(carried, reaching);
+    CHECK_EQ(carried.labelAt(reaching, 5, 3), 1);
+    CHECK_EQ(carried.labelAt(reaching, 19, 3), 1);  // hard against the cropped edge
+
+    // Rows the scribble did not itself reach fill to one cell short of the rim,
+    // because that cell is the background seed. The application never shows it:
+    // the ring is scaffolding for the solve, and the fill is read from one cell
+    // inside it -- see the label extension in ctg.cpp.
+    CHECK_EQ(carried.labelAt(reaching, 18, 5), 1);
+    CHECK_EQ(carried.labelAt(reaching, 19, 5), -1);
+    CHECK_EQ(carried.labelAt(reaching, 0, 3), -1);
+}
+
+// The test the whole change exists for: a hole big enough to be embarrassing.
+void aBadlyClosedShapeFillsFromOneScribble() {
+    TEST("one scribble fills a shape whose outline is a quarter open");
+    std::vector<std::string> rows(24, std::string(40, '.'));
+    for (int x = 6; x <= 33; ++x) {
+        rows[4][static_cast<std::size_t>(x)] = '#';
+        rows[19][static_cast<std::size_t>(x)] = '#';
+    }
+    for (int y = 4; y <= 19; ++y) {
+        rows[static_cast<std::size_t>(y)][6] = '#';
+        rows[static_cast<std::size_t>(y)][33] = '#';
+    }
+    // Seven cells of a twenty-eight cell wall are simply missing.
+    for (int x = 16; x < 23; ++x) rows[19][static_cast<std::size_t>(x)] = '.';
+    // A scribble of the size a hand makes, nowhere near the hole.
+    for (int y = 10; y <= 13; ++y) {
+        for (int x = 14; x <= 25; ++x) rows[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)] = '1';
+    }
+
+    Picture picture(rows);
     const LazyBrushResult result = solveLazyBrush(picture.problem);
     printLabels(picture, result);
 
-    CHECK_EQ(picture.labelAt(result, 5, 3), 1);
-    CHECK_EQ(picture.labelAt(result, 19, 3), 1);  // hard against the cropped edge
-    CHECK_EQ(picture.labelAt(result, 19, 5), 1);
-    CHECK_EQ(picture.labelAt(result, 0, 3), -1);  // outside the box entirely
+    // The whole interior, corners included, and the strip right beside the hole.
+    for (int y = 5; y <= 18; ++y) {
+        for (int x = 7; x <= 32; ++x) CHECK_EQ(picture.labelAt(result, x, y), 1);
+    }
+    // And nothing out through the hole.
+    CHECK_EQ(picture.labelAt(result, 19, 20), -1);
+    CHECK_EQ(picture.labelAt(result, 19, 23), -1);
+    CHECK_EQ(picture.labelAt(result, 0, 0), -1);
 }
 
 // With no line art at all, a scribble has nothing to be bounded by. What it does
@@ -415,16 +484,11 @@ void aScribbleOnOpenPaperKeepsToItself() {
     printLabels(thin, thin_result);
     for (int label : thin_result.labels) CHECK_EQ(label, -1);
 
-    // Fat: it stays, and with nothing to be bounded by it goes all the way to
-    // the edge. Three prices are on offer -- wrap the scribble at K a cell of
-    // rim, run along the border at the gap tolerance a cell, or give the
-    // scribble up at lambda*K a pixel -- and on blank paper the border is the
-    // cheapest of them.
-    //
-    // That is the honest answer rather than a hole in the design: a scribble
-    // with no line art anywhere near it has no boundary to find. As soon as
-    // there is a line the outline costs about 1 a cell against the border's 32,
-    // and the shape wins by a mile -- which is the case above.
+    // Fat: it stays, and wraps itself. With no line anywhere there is no
+    // cheaper boundary to find, so the cut hugs the scribble -- wrapping costs K
+    // along its rim against lambda*K a pixel to give it up, and a fat scribble
+    // is more area than rim. It cannot reach the edge of the picture: the rim is
+    // unseverable, so no amount of area buys it.
     Picture fat({
         "..............................",
         "..............................",
@@ -443,7 +507,11 @@ void aScribbleOnOpenPaperKeepsToItself() {
     });
     const LazyBrushResult fat_result = solveLazyBrush(fat.problem);
     printLabels(fat, fat_result);
-    for (int label : fat_result.labels) CHECK_EQ(label, 1);
+    CHECK_EQ(fat.labelAt(fat_result, 12, 6), 1);   // its own pixels, kept
+    CHECK_EQ(fat.labelAt(fat_result, 15, 7), 1);
+    CHECK_EQ(fat.labelAt(fat_result, 0, 0), -1);   // and nothing beyond them
+    CHECK_EQ(fat.labelAt(fat_result, 29, 13), -1);
+    CHECK_EQ(fat.labelAt(fat_result, 5, 6), -1);
 
     // Put a line round it and it stops at the line instead, at a fraction of
     // the price. This is the pair that shows the border is priced sensibly:
@@ -472,31 +540,24 @@ void aScribbleOnOpenPaperKeepsToItself() {
     CHECK_EQ(boxed.labelAt(boxed_result, 29, 13), -1);
 }
 
-// The gap tolerance is a number with a meaning, so it gets swept rather than
-// asserted at one point. Below it the fill is held by a gapped line; above it
-// the fill escapes and takes the picture, which is the honest failure mode --
-// the line stopped being a boundary.
-void theGapToleranceIsWhereItSaysItIs() {
-    TEST("the fill holds below the stated gap tolerance and escapes above it");
+// Gap tolerance is no longer a number in the code, so it is measured against the
+// thing it has to beat: two scribbles. The claim the whole design rests on is
+// that one scribble against an unseverable rim bridges at least what two user
+// scribbles bridge on the same drawing.
+//
+// A hard rim needs no special support to set up here -- `hard` already makes a
+// seed infinite -- so the two arrangements are compared through the same solver.
+void oneScribbleBridgesAtLeastWhatTwoDo() {
+    TEST("one scribble bridges at least the gap two scribbles do");
 
-    // A box with room around it, and tall enough that cutting straight across
-    // its middle is not the cheap way out.
-    //
-    // Both matter, and the first version of this test had neither. With the box
-    // close to the edge, colour squirts through the hole as a narrow tongue and
-    // reaches the border, because the tongue's two short sides cost less than
-    // bridging does; with the box short, the cut crosses its interior and
-    // strands the far end rather than going round. Neither has anything to do
-    // with the gap tolerance -- both are the paper's own "shortcut" case, a
-    // scribble thin relative to the holes near it -- and both drown the number
-    // being measured. The real solve keeps a tile of margin around the drawing,
-    // which is the same precaution.
-    constexpr int kWidth = 44;
-    constexpr int kHeight = 34;
-    constexpr int kLeft = 12, kRight = 31, kTop = 8, kBottom = 25;
+    constexpr int kW = 60;
+    constexpr int kH = 40;
+    constexpr int kLeft = 15, kRight = 45, kTop = 10, kBottom = 30;
 
-    const auto held = [&](int gap, float tolerance) {
-        std::vector<std::string> rows(kHeight, std::string(kWidth, '.'));
+    // `half` is half the width of the inside scribble, so its area can be
+    // varied: tolerance is supposed to go as the area of the scribble.
+    const auto build = [&](int gap, int half, bool rim, bool outside) {
+        std::vector<std::string> rows(kH, std::string(kW, '.'));
         for (int x = kLeft; x <= kRight; ++x) {
             rows[kTop][static_cast<std::size_t>(x)] = '#';
             rows[kBottom][static_cast<std::size_t>(x)] = '#';
@@ -505,53 +566,72 @@ void theGapToleranceIsWhereItSaysItIs() {
             rows[static_cast<std::size_t>(y)][kLeft] = '#';
             rows[static_cast<std::size_t>(y)][kRight] = '#';
         }
-        // A hole of `gap` cells in the middle of the bottom wall.
         const int hole = (kLeft + kRight) / 2 - gap / 2;
         for (int i = 0; i < gap; ++i) rows[kBottom][static_cast<std::size_t>(hole + i)] = '.';
-        // A scribble with enough area that giving it up is never the answer.
-        for (int y = 15; y <= 18; ++y) {
-            for (int x = 18; x <= 25; ++x) {
+
+        const int cx = (kLeft + kRight) / 2;
+        const int cy = (kTop + kBottom) / 2;
+        for (int y = cy - 2; y <= cy + 1; ++y) {
+            for (int x = cx - half; x < cx + half; ++x) {
                 rows[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)] = '1';
             }
         }
+        if (rim) {  // the outermost ring, seeded as colour 0
+            for (int x = 0; x < kW; ++x) {
+                rows[0][static_cast<std::size_t>(x)] = '0';
+                rows[kH - 1][static_cast<std::size_t>(x)] = '0';
+            }
+            for (int y = 0; y < kH; ++y) {
+                rows[static_cast<std::size_t>(y)][0] = '0';
+                rows[static_cast<std::size_t>(y)][kW - 1] = '0';
+            }
+        }
+        if (outside) {  // a hand-drawn background mark of the same area
+            for (int y = 3; y <= 6; ++y) {
+                for (int x = 3; x < 3 + 2 * half; ++x) {
+                    rows[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)] = '0';
+                }
+            }
+        }
+        return rows;
+    };
 
-        Picture picture(rows);
+    const auto fills = [&](int gap, int half, bool rim, bool outside) {
+        Picture picture(build(gap, half, rim, outside));
+        if (rim) picture.problem.hard[0] = 1;
         LazyBrushOptions options;
-        options.gap_tolerance = tolerance;
+        // The two-scribble arrangement is what the solver did before there was
+        // a background at all, so it is measured without one. Otherwise both
+        // columns get the rim and the comparison says nothing.
+        options.implicit_background = rim;
         const LazyBrushResult result = solveLazyBrush(picture.problem, options);
-
-        // Held if the box is filled corner to corner and nothing came out of
-        // the hole. A far corner alone is not enough: colour that leaks pools
-        // just under the box long before it crosses the picture.
+        const int hole = (kLeft + kRight) / 2 - gap / 2;
         const bool filled = picture.labelAt(result, kLeft + 1, kTop + 1) == 1 &&
                             picture.labelAt(result, kRight - 1, kBottom - 1) == 1;
-        const bool leaked = picture.labelAt(result, hole, kBottom + 2) == 1 ||
-                            picture.labelAt(result, 0, 0) == 1;
+        const bool leaked = picture.labelAt(result, hole, kBottom + 3) == 1 ||
+                            picture.labelAt(result, 1, kH - 2) == 1;
         return filled && !leaked;
     };
 
-    // For each hole, the smallest whole-cell tolerance that still holds it.
-
-    for (int gap : {2, 4, 6, 8, 10}) {
-        int needed = -1;
-        for (int tolerance = 1; tolerance <= 40 && needed < 0; ++tolerance) {
-            if (held(gap, static_cast<float>(tolerance))) needed = tolerance;
+    const auto widest = [&](int half, bool rim, bool outside) {
+        int found = 0;
+        for (int gap = 1; gap <= kRight - kLeft - 1; ++gap) {
+            if (fills(gap, half, rim, outside)) found = gap;
         }
-        std::printf("      a hole %2d cells wide needs a tolerance of %d\n", gap, needed);
-        // Measured, not derived: the tolerance that holds a hole of n cells is
-        // n + 1, exactly, across the range. So a tolerance of g bridges every
-        // hole narrower than g, which is what the number claims to mean.
-        CHECK_EQ(needed, gap + 1);
+        return found;
+    };
+
+    std::printf("      inside scribble | two scribbles | one, hard rim\n");
+    int previous = 0;
+    for (int half : {2, 4, 6, 8}) {
+        const int two = widest(half, false, true);   // scribble inside and out
+        const int one = widest(half, true, false);   // scribble inside, rim hard
+        std::printf("      %2d x 4 = %2d cells |      %2d       |      %2d\n", 2 * half, 8 * half,
+                    two, one);
+        CHECK(one >= two);      // the claim the design rests on
+        CHECK(one >= previous); // and a bigger scribble never bridges less
+        previous = one;
     }
-
-    // The two ends of the claim, stated plainly: a hole wider than the
-    // tolerance escapes, and the same hole holds once the tolerance exceeds it.
-    CHECK_EQ(held(10, 4.0f), false);
-    CHECK_EQ(held(10, 16.0f), true);
-
-    // Priced at nothing, nothing holds -- which is the behaviour this whole
-    // change replaced.
-    CHECK_EQ(held(2, 0.0f), false);
 }
 
 // Pencil is too low-contrast to act as a barrier directly. The filter finds the
@@ -609,9 +689,10 @@ int main() {
     emptyAndDegenerateInputsAreSafe();
     oneScribbleFillsOneShape();
     asecondColourDoesNotDisturbTheFirst();
-    aCroppedShapeFillsToTheEdge();
+    aCroppedShapeNeedsTheScribbleCarriedToTheEdge();
+    aBadlyClosedShapeFillsFromOneScribble();
     aScribbleOnOpenPaperKeepsToItself();
-    theGapToleranceIsWhereItSaysItIs();
+    oneScribbleBridgesAtLeastWhatTwoDo();
     logPreprocessingSharpensAFaintLine();
     return testing::summarise("lazybrush");
 }

@@ -106,33 +106,46 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
         return k * std::clamp(options.soft_lambda, 0.0f, 1.0f);
     };
 
-    // What it costs a colour to reach the edge of the grid and take everything.
+    // The background: the outermost ring of the grid, seeded unseverably.
     //
-    // This is the background, and it is deliberately not a scribble. A seeded
-    // background was tried and removed, and the reason is worth keeping: the
-    // strength of a soft seed is its area, because severing one costs lambda*K
-    // per pixel and that is exactly what makes the majority rule work. The rim
-    // of an image has an area of its own -- a property of the canvas, not of
-    // anything the user meant -- so feeding it into a comparison that means "how
-    // much did you insist" is a category error. There is no good value for it:
-    // weak enough to lose to a real scribble is weak enough for a gap in the
-    // line to defeat, and strong enough to hold a gapped shape overrules the
-    // scribble that was actually drawn.
+    // A *soft* background at the rim was tried before this and removed, and the
+    // reason it failed says where not to look. The strength of a soft seed is
+    // its area, since severing one costs lambda*K a pixel and that is exactly
+    // what makes the majority rule work -- so a rim seed's authority comes from
+    // the size of the canvas rather than from anything the user meant. Putting
+    // it into a comparison that means "how much did you insist" is a category
+    // error, and the failure was not a bad lambda but lambda existing at all.
     //
-    // So the border is priced in the smoothing term instead. It labels nothing
-    // and can never overrule anybody; it only makes a boundary that runs along
-    // the edge of the grid cost something. That price is the gap tolerance, and
-    // the arithmetic tying the two together is in LazyBrushOptions.
+    // A finite *price* on the border was tried after that, and failed for a
+    // different reason worth recording: any price makes "give the colour
+    // everything" an available labelling costing price * K, against n * K to
+    // bridge a hole n cells wide, so bridging wins only while n is below the
+    // price. A finite border price is a gap cap exactly equal to it. Which is
+    // the one thing this has to avoid.
     //
-    // Clamped to K, which is the perimeter: a tolerance larger than the image
-    // would mean no boundary could ever afford the edge, and on the small grids
-    // in the tests the default would otherwise be most of the picture.
-    const float outside = std::clamp(options.gap_tolerance, 0.0f, k);
+    // Unseverable removes the rim from both comparisons. It never loses on
+    // strength and it can never be bought, so some boundary separating scribble
+    // from rim must exist and the cut simply picks the cheapest -- along the
+    // outline where there is one, across the holes where there is not, at any
+    // width. Gap tolerance is then n < lambda * |S|, which is at least what two
+    // scribbles give.
+    constexpr float kInk = 0.5f;
+    const auto isBackground = [&](std::size_t node) {
+        if (!options.implicit_background) return false;
 
-    const auto onBorder = [&](std::size_t node) {
         const int x = static_cast<int>(node % static_cast<std::size_t>(width));
         const int y = static_cast<int>(node / static_cast<std::size_t>(width));
-        return x == 0 || y == 0 || x == width - 1 || y == height - 1;
+        if (x != 0 && y != 0 && x != width - 1 && y != height - 1) return false;
+
+        // A scribble carried to the edge is the seed there instead. Not a
+        // special case: the ordinary rule that your seed wins on the pixels you
+        // seeded, applied to a seed that happened to be placed automatically.
+        // It is also how a region running off the frame gets filled.
+        if (problem.seeds[node] >= 0) return false;
+
+        // And not on ink, so an outline crossing the frame is not fighting a
+        // seed sitting on top of it.
+        return used[node] > kInk;
     };
 
     // Regions that only one colour has scribbled on need no cut at all: there
@@ -140,12 +153,12 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
     // faster than a general multiway cut, and it is also what finishes the last
     // colour once every other one has been resolved.
     //
-    // A region touching the edge of the grid is never uncontested, because the
-    // background is always there to contest it. Without that the shortcut
-    // swallowed everything: this flood fill walks through line art -- the line
-    // changes edge weights, never connectivity -- so on a fresh drawing the
-    // whole grid is one region, a single colour on it is uncontested, and every
-    // pixel took that colour without a max-flow ever running.
+    // A region reaching the background is never uncontested, because the
+    // background is there to contest it. Without that the shortcut swallowed
+    // everything: this flood fill walks through line art -- the line changes
+    // edge weights, never connectivity -- so on a fresh drawing the whole grid
+    // is one region, a single colour on it is uncontested, and every pixel took
+    // that colour without a max-flow ever running.
     const auto labelUncontestedRegions = [&] {
         std::vector<char> visited(count, 0);
         std::vector<std::size_t> stack;
@@ -164,7 +177,7 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
                 const std::size_t node = stack.back();
                 stack.pop_back();
                 region.push_back(node);
-                if (outside > 0.0f && onBorder(node)) contested = true;
+                if (isBackground(node)) contested = true;
 
                 const int seed = problem.seeds[node];
                 if (seed >= 0 && active[static_cast<std::size_t>(seed)]) {
@@ -236,12 +249,11 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
         for (std::size_t node = 0; node < count; ++node) {
             if (result.labels[node] >= 0) continue;  // already settled
 
-            // The background pulls towards the sink on every border cell,
-            // whatever colour is being solved for and however many colours there
-            // are. Unconditional on purpose: making it depend on the number of
-            // colours was tried, and it only moved the surprise to the moment a
-            // second colour appeared.
-            float sink = (outside > 0.0f && onBorder(node)) ? outside : 0.0f;
+            // The background is a sink for every colour, whichever is being
+            // solved for and however many there are. Unconditional on purpose:
+            // making it depend on the number of colours was tried, and it only
+            // moved the surprise to the moment a second colour appeared.
+            float sink = isBackground(node) ? std::numeric_limits<float>::infinity() : 0.0f;
 
             const int seed = problem.seeds[node];
             if (seed >= 0 && active[static_cast<std::size_t>(seed)]) {

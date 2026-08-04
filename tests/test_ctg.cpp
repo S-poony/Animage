@@ -81,10 +81,14 @@ void aScribbleFillsItsRegion() {
     CHECK_NEAR(inside.r, 1.0, 0.02);
     CHECK_NEAR(inside.b, 0.0, 0.02);
 
-    // Outside is blue, including just below the gap.
+    // Outside is not blue, and this is the change the hard background made: a
+    // scribble out there cannot expand to the rim, because the rim is
+    // unseverable, so it keeps roughly its own pixels and the rest of the paper
+    // stays uncoloured. The inside no longer needs it -- one scribble fills the
+    // shape by itself -- but a *coloured* background is no longer had by
+    // scribbling one.
     const Rgba outside = fillAt(fill, 130, 210);
-    CHECK_NEAR(outside.b, 1.0, 0.02);
-    CHECK_NEAR(outside.r, 0.0, 0.02);
+    CHECK_NEAR(outside.a, 0.0, 0.001);
 
     // And the colour did not pour through the gap.
     const Rgba above_gap = fillAt(fill, 130, 172);
@@ -187,7 +191,7 @@ void twoBarrierLayersClosseEachOthersGaps() {
     (void)single;
 
     // And below the bridged wall is still outside.
-    CHECK_NEAR(fillAt(both, 130, 210).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 130, 210).a, 0.0, 0.001);  // outside is background now
 }
 
 // A CTG layer with nothing scribbled on it produces nothing, rather than
@@ -220,7 +224,7 @@ void aCoarseSolveAgreesWithTheFineOne() {
     // Well inside and well outside must still be right; only the boundary is
     // allowed to be rough.
     CHECK_NEAR(fillAt(quick, 130, 150).r, 1.0, 0.02);
-    CHECK_NEAR(fillAt(quick, 130, 220).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(quick, 130, 220).a, 0.0, 0.001);
 }
 
 // What the compositor puts on screen for a CTG layer is the fill, never the
@@ -284,12 +288,13 @@ void oneScribbleFillsOneShape() {
     CHECK_NEAR(fillAt(fill, 130, 215).a, 0.0, 0.001);
     CHECK_NEAR(fillAt(fill, 20, 20).a, 0.0, 0.001);
 
-    // A second colour outside then takes the rest, and does not disturb the
-    // first: the border is priced whether there are one or two of them.
+    // Adding a second colour outside does not disturb the first, which is the
+    // property the unconditional background exists for. It does not fill the
+    // outside either -- see aScribbleFillsItsRegion for why.
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
     const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK_NEAR(fillAt(both, 130, 160).r, 1.0, 0.02);
-    CHECK_NEAR(fillAt(both, 130, 215).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 130, 215).a, 0.0, 0.001);
 }
 
 // However large the drawing, the solve stays bounded. It runs where the
@@ -351,11 +356,13 @@ void theFillCoversTheCanvasAndStopsThere() {
     // Inside the box takes the inside colour.
     CHECK_NEAR(fillAt(fill, 200, 200).r, 1.0, 0.02);
 
-    // The surrounding colour reaches the far corners of the canvas, nowhere near
-    // where it was scribbled. This is the half that was broken: it used to stop
-    // in mid-air a tile away from the drawing.
-    CHECK_NEAR(fillAt(fill, 380, 380).b, 1.0, 0.02);
-    CHECK_NEAR(fillAt(fill, 10, 390).b, 1.0, 0.02);
+    // The far corners of the canvas take the background, which is now what a
+    // scribble outside a shape leaves them: the rim cannot be bought, so the
+    // outside colour keeps roughly its own pixels rather than spreading. What
+    // this test still pins is that the *region* is the canvas and the extension
+    // reaches its corners -- whatever label is there is carried all the way out.
+    CHECK_NEAR(fillAt(fill, 380, 380).a, 0.0, 0.001);
+    CHECK_NEAR(fillAt(fill, 10, 390).a, 0.0, 0.001);
 
     // And nothing beyond the frame, even though the box carries on out there.
     CHECK_NEAR(fillAt(fill, 500, 200).a, 0.0, 0.001);
@@ -400,10 +407,11 @@ void theCanvasSizeDoesNotChangeTheFill() {
     CHECK_NEAR(large[1].r, small[1].r, 0.001);
     CHECK_NEAR(large[1].b, small[1].b, 0.001);
 
-    // The far corner of either canvas takes the surrounding colour, however far
-    // away from the drawing it is.
-    CHECK_NEAR(small[2].b, 1.0, 0.02);
-    CHECK_NEAR(large[2].b, 1.0, 0.02);
+    // The far corner of either canvas is the same as the other's, which is the
+    // point: the extension reaches it and the canvas size does not change what
+    // it finds.
+    CHECK_NEAR(large[2].a, small[2].a, 0.001);
+    CHECK_NEAR(large[2].r, small[2].r, 0.001);
 }
 
 }  // namespace

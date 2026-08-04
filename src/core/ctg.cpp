@@ -149,8 +149,6 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
     }
     inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
-    inputs = inputs * 31 +
-             static_cast<std::uint64_t>(std::lround(settings.gap_tolerance_pixels * 16.0f));
     // The canvas bounds the solve, so resizing it changes the answer.
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
@@ -263,26 +261,25 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     problem.colour_count = static_cast<int>(palette.size());
     problem.hard.assign(palette.size(), 0);
 
-    // The gap tolerance is stated in image pixels and the solver counts in
-    // cells, so it is converted here, where the step is known. At least one
-    // cell: a tolerance that rounds to nothing would price the border at zero
-    // and put back the behaviour where one scribble takes the whole picture.
-    LazyBrushOptions options = settings.lazybrush;
-    options.gap_tolerance =
-        std::max(1.0f, settings.gap_tolerance_pixels / static_cast<float>(step));
-
-    const LazyBrushResult solved = solveLazyBrush(problem, options);
+    const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush);
 
     // Paint the labels back into tiles, over the whole canvas and at full
     // resolution even when the solve was coarse: a blocky fill is better than
     // none while the pen is moving.
     //
-    // Outside the solved region the lookup is clamped to its border, which
-    // extends the labels across the rest of the picture. See above for why that
-    // is the same answer solving the whole canvas would have given.
+    // Outside the solved region the lookup is clamped inwards, which extends the
+    // labels across the rest of the picture. See above for why that is the same
+    // answer solving the whole canvas would have given.
+    //
+    // Clamped to one cell *inside* the grid rather than to its edge, because the
+    // outermost ring is the background seed. It is scaffolding, not an answer:
+    // sampling it would paint the whole picture beyond the drawing as background
+    // even where a colour had filled right up to it, and would leave a one-cell
+    // seam at the region's edge.
     const auto solvedIndex = [&](int value, int origin, int extent, int limit) {
         const int clamped = std::clamp(value, origin, origin + extent - 1);
-        return std::min((clamped - origin) / step, limit - 1);
+        const int cell = std::min((clamped - origin) / step, limit - 1);
+        return (limit >= 3) ? std::clamp(cell, 1, limit - 2) : cell;
     };
 
     std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;

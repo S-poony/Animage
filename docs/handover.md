@@ -78,14 +78,35 @@ makes the majority rule work — so a rim seed's authority comes from the size o
 the canvas rather than from anything the user meant. There is no good value for
 that knob and there was never going to be one.
 
-The background belongs in the **smoothing** term instead, and that is where it is
-now: a price on any boundary that runs along the edge of the solved grid. It
-seeds nothing, labels nothing and can overrule nobody. The price is the gap
-tolerance in cells — colouring everything costs it per border cell, bridging a
-hole `n` cells wide costs `K` a cell, so bridging wins exactly while `n` is below
-it. Measured, a hole of `n` cells needs a tolerance of `n + 1`. If you find
-yourself choosing a background *strength* again, stop: that is the version that
-failed.
+**A finite border *price* was then tried, and failed differently.** Charging `g`
+per pixel for a boundary running along the edge is attractive — `g` comes out as
+"the longest hole the fill will jump", a specification rather than a knob, and it
+measured exactly: a hole of `n` cells needed `g = n + 1`. That is the flaw. Any
+price makes "give the colour everything" an available labelling costing `g·K`,
+against `n·K` to bridge, so **a finite border price is a gap cap exactly equal to
+it**. It only filled shapes that were nearly closed, which a paint bucket nearly
+does. There is no value that avoids this; do not go looking for one.
+
+**What works is an unseverable rim**, and that is what is there now: the
+outermost ring of the solved grid is a hard background seed. It cannot be bought
+at any price, so *some* boundary separating scribble from rim must exist and the
+cut simply picks the cheapest — along the outline where there is one, across the
+holes where there is not, at any width. Measured against the two-scribble
+arrangement it replaced, one scribble bridges strictly wider holes at every
+scribble size. The tolerance it gives is `n < λ·|S|`: **scribble bigger to bridge
+bigger holes**, which is a rule a person can act on.
+
+Two consequences to know. A user's scribble displaces the rim seed where it is
+drawn — that is the ordinary rule that your seed wins where you seeded, and it is
+how a region running off the frame gets filled. And **scribbling a background
+colour no longer fills the background**: the rim cannot be overruled, so a mark
+out there keeps roughly its own pixels. Colouring the outside now wants an
+explicit background colour on the layer rather than a scribble.
+
+It also got faster, against expectation: `bench_composite` at 512x512 went 152 ms
+(no background) → 417 ms (priced border) → 117 ms (hard rim). More cuts, far
+smaller sub-problems — the paper's largest-first pruning finally has something to
+prune with.
 
 **Solving on a stale cache is not the same as solving when asked.** Every dab
 bumps the cel's revision, so regenerating a CTG fill whenever it looked stale
@@ -93,13 +114,6 @@ meant a max-flow per dab. The cost was invisible for a while because a separate
 bug meant the result was never drawn; fixing the repaint made it obvious. The
 solve now happens once, when the pen lifts, and the scribble itself is shown
 during the stroke.
-
-**Pricing the border made the solve slower, and it was worth it.** The flow now
-has to reach the edge of the grid from every scribble, so its value is much
-larger and there are many more augmenting paths: `bench_composite` went from
-152 ms to 417 ms at 512x512, which is the size the solve is capped at. That is
-paid once, when the pen lifts. It sharpens the case for solving off the interface
-thread rather than weakening it, and it is the number to watch if you try.
 
 **The solve runs where the interface is waiting, so it is capped.** A max-flow
 grows faster than its region — about 1.3 s for a megapixel — and on a large

@@ -108,23 +108,34 @@ de majorité. L'aire du bord est une propriété du canevas, pas de ce que
 l'utilisateur voulait dire : la faire concourir dans le terme de données est une
 erreur de catégorie.
 
-Le fond appartient donc au **terme de lissage**. Chaque pixel du bord de la
-grille résolue porte une arête vers un puits, de poids `g`. Ce puits n'étiquette
-rien et ne peut contredire personne ; il rend seulement payante une frontière qui
-longe le bord.
+Un **prix fini** sur le bord a ensuite été essayé : `g` par pixel pour une
+frontière qui longe le bord. C'est séduisant — `g` sort comme « le plus long trou
+franchissable », une spécification et non un réglage, et ça se mesure exactement
+(un trou de `n` cellules demande `g = n + 1`). **C'est justement le défaut.** Tout
+prix rend disponible l'étiquetage « tout colorier », au coût `g·K`, contre `n·K`
+pour franchir : franchir ne gagne que tant que `n < g`. Un prix fini **est** un
+plafond de tolérance égal à lui-même. Seules les formes presque fermées se
+remplissaient — ce que fait déjà, à peu près, un pot de peinture.
 
-`g` a un sens exact plutôt que d'être un réglage :
+Ce qui marche : le bord est une **graine de fond dure**. L'anneau extérieur de la
+grille résolue est semé en fond, et ce fond est infini — inachetable à tout prix.
+Dès lors *une* frontière séparant le scribble du bord doit exister, et la coupe
+prend simplement la moins chère : le long du trait là où il y en a, à travers les
+trous là où il n'y en a pas, **quelle que soit leur largeur**.
 
-- tout colorier, c'est couper le long du bord : `g × 2(l+h)`, soit `g·K` ;
-- franchir un trou de `n` pixels, c'est traverser du blanc à `K` le pixel : `n·K`.
+La tolérance devient `n < λ·|S|` : franchir un trou de `n` coûte `n·K`, abandonner
+le scribble coûte `λK` par pixel. C'est au moins ce que donnent deux scribbles —
+ils abandonnent le plus petit des deux — et c'est une règle qu'on peut apprendre :
+**scribbler plus gros pour franchir plus large**. Mesuré, un seul scribble
+franchit strictement plus large que deux, à toutes les tailles.
 
-Franchir gagne exactement quand `n < g`. Donc **`g` est le plus long trou que le
-remplissage accepte de franchir, en pixels**. Mesuré : un trou de `n` cellules
-demande une tolérance de `n + 1`.
-
-`g` est exprimé en pixels **image** et divisé par le pas d'échantillonnage au
-moment de résoudre. Sans ça, la même image scannée deux fois plus grande
-franchirait des trous deux fois plus larges.
+Deux conséquences. Le scribble de l'utilisateur **remplace** la graine de fond là
+où il est tracé : c'est la règle ordinaire (votre graine gagne où vous avez semé)
+appliquée à une graine posée automatiquement, et c'est ainsi qu'une zone qui sort
+du cadre se remplit. Et **scribbler un fond ne remplit plus le fond** : le bord
+n'étant pas contestable, une marque au dehors garde à peu près ses propres pixels.
+Colorier l'extérieur demande désormais une couleur de fond explicite sur le
+calque, pas un scribble.
 
 ### Terme de données (les scribbles)
 
