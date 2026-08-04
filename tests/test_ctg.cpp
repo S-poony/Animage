@@ -2,6 +2,7 @@
 //
 // The CTG layer: scribbles in, fill out, and the fill is never what is stored.
 
+#include <array>
 #include <chrono>
 
 #include "brush.h"
@@ -15,20 +16,20 @@ namespace {
 
 struct Fixture {
     Document doc;
-    TimelineId timeline;
+    TrackId track;
     LayerId ink;
     LayerId colour;
     ImageId image;
 
     Fixture() {
-        timeline = doc.addTimeline("main");
-        colour = doc.addLayer(timeline, "colour", 0, LayerKind::Ctg);
-        ink = doc.addLayer(timeline, "ink", 1);
-        image = doc.insertImage(timeline, 0);
+        track = doc.addTrack("main");
+        colour = doc.addLayer(track, "colour", 0, LayerKind::Ctg);
+        ink = doc.addLayer(track, "ink", 1);
+        image = doc.insertImage(track, 0);
 
-        Layer ctg = *doc.scene().findTimeline(timeline)->findLayer(colour);
+        Layer ctg = *doc.scene().findTrack(track)->findLayer(colour);
         ctg.ctg_sources = {ink};
-        doc.updateLayer(timeline, colour, ctg);
+        doc.updateLayer(track, colour, ctg);
     }
 
     void stroke(LayerId layer, float x0, float y0, float x1, float y1, float radius,
@@ -43,7 +44,7 @@ struct Fixture {
         settings.b = b;
         settings.a = 1.0f;
         Brush brush(settings);
-        brush.begin(doc, timeline, image, layer, {x0, y0, 1.0f});
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
         brush.extend({x1, y1, 1.0f});
         brush.end();
     }
@@ -71,7 +72,7 @@ void aScribbleFillsItsRegion() {
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
-    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(fill.valid);
     CHECK_EQ(fill.colours, 2);
 
@@ -99,10 +100,10 @@ void theLayerStoresScribblesNotTheFill() {
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
-    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     const std::size_t filled_tiles = fill.tiles.tileCount();
 
-    const Cel* scribbles = f.doc.celAt(f.timeline, f.image, f.colour);
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
     CHECK(scribbles != nullptr);
 
     // The cel holds only the marks, which cover far less than the fill does.
@@ -121,12 +122,12 @@ void editingAScribbleRecoloursTheWholeRegion() {
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
-    CHECK_NEAR(fillAt(ctgFill(f.doc, f.timeline, f.image, f.colour), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(ctgFill(f.doc, f.track, f.image, f.colour), 130, 160).r, 1.0, 0.02);
 
     // Scribble green over the red one. The region follows.
     f.stroke(f.colour, 100, 110, 150, 110, 8.0f, 0.0f, 1.0f, 0.0f);
 
-    const CtgFill& after = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& after = ctgFill(f.doc, f.track, f.image, f.colour);
     const Rgba inside = fillAt(after, 130, 160);
     CHECK_NEAR(inside.g, 1.0, 0.02);
     CHECK_NEAR(inside.r, 0.0, 0.02);
@@ -140,17 +141,17 @@ void theFillIsCachedUntilSomethingChanges() {
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
-    const std::uint64_t first = ctgFill(f.doc, f.timeline, f.image, f.colour).inputs;
+    const std::uint64_t first = ctgFill(f.doc, f.track, f.image, f.colour).inputs;
     CHECK(first != 0);
-    CHECK_EQ(ctgFill(f.doc, f.timeline, f.image, f.colour).inputs, first);
+    CHECK_EQ(ctgFill(f.doc, f.track, f.image, f.colour).inputs, first);
 
     // Drawing on the line art must invalidate it, not only drawing a scribble.
     f.stroke(f.ink, 130, 178, 138, 178, 2.5f, 0, 0, 0);
-    const std::uint64_t after_ink = ctgFill(f.doc, f.timeline, f.image, f.colour).inputs;
+    const std::uint64_t after_ink = ctgFill(f.doc, f.track, f.image, f.colour).inputs;
     CHECK(after_ink != first);
 
     f.stroke(f.colour, 100, 110, 120, 110, 6.0f, 1.0f, 0.0f, 0.0f);
-    CHECK(ctgFill(f.doc, f.timeline, f.image, f.colour).inputs != after_ink);
+    CHECK(ctgFill(f.doc, f.track, f.image, f.colour).inputs != after_ink);
 }
 
 // Closing the gap on a second layer should stop the leak without touching the
@@ -158,7 +159,7 @@ void theFillIsCachedUntilSomethingChanges() {
 void twoBarrierLayersClosseEachOthersGaps() {
     TEST("a second barrier layer closes the first one's gaps");
     Fixture f;
-    const LayerId rough = f.doc.addLayer(f.timeline, "rough", 2);
+    const LayerId rough = f.doc.addLayer(f.track, "rough", 2);
 
     // The clean line has a wide hole; the rough happens to cross it.
     f.drawGappedBox(f.ink, 60, 60, 200, 180, 110, 150);
@@ -168,15 +169,15 @@ void twoBarrierLayersClosseEachOthersGaps() {
 
     // With only the clean line, a gap that wide lets the boundary through: the
     // pixels right at the hole are contested.
-    const Rgba single = fillAt(ctgFill(f.doc, f.timeline, f.image, f.colour), 130, 176);
+    const Rgba single = fillAt(ctgFill(f.doc, f.track, f.image, f.colour), 130, 176);
 
     // Now add the rough as a second barrier, drawn across the hole.
     f.stroke(rough, 105, 180, 155, 180, 2.5f, 0, 0, 0);
-    Layer ctg = *f.doc.scene().findTimeline(f.timeline)->findLayer(f.colour);
+    Layer ctg = *f.doc.scene().findTrack(f.track)->findLayer(f.colour);
     ctg.ctg_sources = {f.ink, rough};
-    f.doc.updateLayer(f.timeline, f.colour, ctg);
+    f.doc.updateLayer(f.track, f.colour, ctg);
 
-    const CtgFill& both = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
     const Rgba doubled = fillAt(both, 130, 176);
 
     // Whatever the single-source result was, with the gap bridged the pixel
@@ -197,7 +198,7 @@ void noScribblesMeansNoFill() {
     f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
 
     // No cel at all on the colour layer yet.
-    const CtgFill& nothing = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& nothing = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(!nothing.valid);
     CHECK_EQ(nothing.tiles.tileCount(), std::size_t{0});
 }
@@ -213,7 +214,7 @@ void aCoarseSolveAgreesWithTheFineOne() {
 
     CtgSettings coarse;
     coarse.downscale = 4;
-    const CtgFill& quick = ctgFill(f.doc, f.timeline, f.image, f.colour, coarse);
+    const CtgFill& quick = ctgFill(f.doc, f.track, f.image, f.colour, coarse);
     CHECK(quick.valid);
 
     // Well inside and well outside must still be right; only the boundary is
@@ -237,11 +238,11 @@ void theCompositorShowsTheFillNotTheScribbles() {
 
     // Before anything is solved the layer draws nothing at all: compositing is
     // not allowed to start a max-flow behind the caller's back.
-    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
     CHECK_NEAR(frame.pixel(130, 160).a, 0.0, 1e-3);
 
-    ctgFill(f.doc, f.timeline, f.image, f.colour);
-    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    ctgFill(f.doc, f.track, f.image, f.colour);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
 
     // Now the region is filled, at a spot no scribble ever touched.
     const Rgba inside = frame.pixel(130, 160);
@@ -266,7 +267,7 @@ void oneScribbleAloneLabelsEverything() {
     f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
 
-    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(fill.valid);
     CHECK_EQ(fill.colours, 1);
 
@@ -276,7 +277,7 @@ void oneScribbleAloneLabelsEverything() {
 
     // Add the second scribble and the boundary appears, gap and all.
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
-    const CtgFill& both = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK_NEAR(fillAt(both, 130, 160).r, 1.0, 0.02);
     CHECK_NEAR(fillAt(both, 130, 215).b, 1.0, 0.02);
 }
@@ -288,6 +289,10 @@ void oneScribbleAloneLabelsEverything() {
 void theSolveStaysBoundedOnALargeDrawing() {
     TEST("the solve stays bounded however large the drawing");
     Fixture f;
+    // A canvas big enough that it is not what bounds this: the point is that
+    // the solve budget holds even when the picture genuinely is several
+    // megapixels.
+    f.doc.setCanvasSize(3000, 2400);
 
     // Line art spread far enough that the region is several megapixels.
     f.drawGappedBox(f.ink, 100, 100, 2600, 2000, 1300, 1400);
@@ -295,7 +300,7 @@ void theSolveStaysBoundedOnALargeDrawing() {
     f.stroke(f.colour, 40, 40, 2700, 40, 20.0f, 0.0f, 0.0f, 1.0f);
 
     const auto started = std::chrono::steady_clock::now();
-    const CtgFill& fill = ctgFill(f.doc, f.timeline, f.image, f.colour);
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
@@ -309,11 +314,95 @@ void theSolveStaysBoundedOnALargeDrawing() {
     CHECK_NEAR(fillAt(fill, 1200, 70).b, 1.0, 0.02);
 }
 
+// The region solved is the canvas. It used to be the bounding box of every tile
+// anyone had touched, which was wrong at both ends: colour reached out past the
+// frame after a stray stroke, and the colour *around* a shape stopped a tile
+// from the outermost stroke instead of running to the edge of the picture.
+void theFillCoversTheCanvasAndStopsThere() {
+    TEST("the fill covers the canvas and stops at its edge");
+    Fixture f;
+    f.doc.setCanvasSize(400, 400);
+
+    // A box that runs off the right-hand edge of the canvas, coloured inside,
+    // with the surrounding colour scribbled in one corner only.
+    f.drawGappedBox(f.ink, 100, 100, 700, 300, 380, 420);
+    f.stroke(f.colour, 150, 200, 250, 200, 8.0f, 1.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 20, 20, 120, 20, 8.0f, 0.0f, 0.0f, 1.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(fill.valid);
+
+    // Exactly the canvas: nothing outside it, and nothing short of it.
+    CHECK_EQ(fill.region.x, 0);
+    CHECK_EQ(fill.region.y, 0);
+    CHECK_EQ(fill.region.width, 400);
+    CHECK_EQ(fill.region.height, 400);
+
+    // Inside the box takes the inside colour.
+    CHECK_NEAR(fillAt(fill, 200, 200).r, 1.0, 0.02);
+
+    // The surrounding colour reaches the far corners of the canvas, nowhere near
+    // where it was scribbled. This is the half that was broken: it used to stop
+    // in mid-air a tile away from the drawing.
+    CHECK_NEAR(fillAt(fill, 380, 380).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 10, 390).b, 1.0, 0.02);
+
+    // And nothing beyond the frame, even though the box carries on out there.
+    CHECK_NEAR(fillAt(fill, 500, 200).a, 0.0, 0.001);
+
+    // Growing the canvas re-solves rather than serving the old answer from the
+    // cache: the canvas is one of the fill's inputs.
+    f.doc.setCanvasSize(800, 400);
+    const CtgFill& wider = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK_EQ(wider.region.width, 800);
+    CHECK_NEAR(fillAt(wider, 500, 200).r, 1.0, 0.02);
+}
+
+// The solve is over what has been drawn on, and the labels are extended from
+// there to the rest of the canvas. So enlarging the canvas must not coarsen the
+// answer over the drawing, and must not change it at all.
+void theCanvasSizeDoesNotChangeTheFill() {
+    TEST("the same drawing fills the same way on a bigger canvas");
+    const auto fillOn = [](int canvas_w, int canvas_h) {
+        Fixture f;
+        f.doc.setCanvasSize(canvas_w, canvas_h);
+        f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+        f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+        f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
+        const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+        // Sample inside the shape, just inside its outline, and out in the far
+        // corner that only the extension can reach.
+        return std::array<Rgba, 3>{fillAt(fill, 130, 120), fillAt(fill, 66, 66),
+                                   fillAt(fill, canvas_w - 5, canvas_h - 5)};
+    };
+
+    const std::array<Rgba, 3> small = fillOn(320, 260);
+    const std::array<Rgba, 3> large = fillOn(4000, 3000);
+
+    // Inside the shape is the inside colour on both, and identical: the extra
+    // canvas bought no resolution and cost none either.
+    CHECK_NEAR(small[0].r, 1.0, 0.02);
+    CHECK_NEAR(large[0].r, small[0].r, 0.001);
+    CHECK_NEAR(large[0].b, small[0].b, 0.001);
+
+    // And the edge of the shape lands in the same place, which is the part a
+    // coarser solve would have moved.
+    CHECK_NEAR(large[1].r, small[1].r, 0.001);
+    CHECK_NEAR(large[1].b, small[1].b, 0.001);
+
+    // The far corner of either canvas takes the surrounding colour, however far
+    // away from the drawing it is.
+    CHECK_NEAR(small[2].b, 1.0, 0.02);
+    CHECK_NEAR(large[2].b, 1.0, 0.02);
+}
+
 }  // namespace
 
 int main() {
     std::printf("ctg:\n");
     theSolveStaysBoundedOnALargeDrawing();
+    theFillCoversTheCanvasAndStopsThere();
+    theCanvasSizeDoesNotChangeTheFill();
     oneScribbleAloneLabelsEverything();
     aScribbleFillsItsRegion();
     theLayerStoresScribblesNotTheFill();

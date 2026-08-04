@@ -89,6 +89,38 @@ was asked for. That is a real loss of quality on a big canvas, and the honest
 fix is to solve on a background thread and refine, which nobody has written yet.
 It is the first thing to do after saving if colouring is being used seriously.
 
+**A widget on a list row disables that row's own tick.** The show-scribbles box
+was a `QCheckBox` in a widget set on the layer's row with `setItemWidget`. Qt
+treats an index widget as a persistent editor, so it routes the press into the
+widget instead of to the delegate — and the row's *visibility* tick silently
+stopped working, meaning no colour layer could be hidden at all. The panel is
+two real check columns now. If you are tempted to put a control on a row, don't.
+
+**Solving globally and repainting locally is a bug that looks like a feature.**
+A regenerated CTG fill changes colour across whole regions, nowhere near the
+pen. Marking only the stroke's own rectangle dirty left the new fill beside the
+stroke and the old one everywhere else, while hiding and showing the layer
+repainted the lot — so the same operation appeared to have two behaviours. Any
+path that regenerates a fill has to mark everything dirty.
+
+**The per-dab solve came back through the other door.** The guard was "is a
+scribble being drawn", which covers drawing on the colour layer and misses
+drawing on the line art it is cut against — so inking over a filled drawing ran
+a max-flow per dab. The condition is any stroke at all, and the solve belongs at
+the end of it.
+
+**Never point-sample the barrier.** `ctgBarrier` used the compositor's `step`
+argument, which samples every nth pixel. Line art is thin: at a coarse step a
+two-pixel line becomes a dotted line, the barrier acquires holes that are not in
+the drawing, and the fill pours out through its own outline. Composite at full
+resolution and reduce by taking the *most* covered pixel in each block — too
+solid costs a little gap tolerance, too thin costs the whole fill.
+
+**A counter is not a state.** Mouse events promoted from the pen were recognised
+by "has this canvas ever seen a tablet event", which is true forever after the
+first time the pen came near — so touching the tablet once left the mouse unable
+to draw for the rest of the session, silently. It is a time window now.
+
 **Nothing was measured until it had been "optimised" three times.** Every lag
 complaint traced to one operation — flattening the visible region — which had
 never been timed. It was 27 ms for four layers, against a 16.7 ms frame. Two
@@ -143,7 +175,9 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 1. **Saving.** M5, and the largest gap by far. A folder with `scene.json` and a
    PNG per cel, per the plan. A CTG cel saves its scribbles; the fill is derived
-   and should never be written.
+   and should never be written. The canvas rectangle exists now
+   (`Scene::canvas()`), so export has a size to write; before it, every frame
+   would have come out as its own bounding box and no two the same.
 2. **Scribbles through time.** Raised in testing and the right instinct: a CTG
    cel with no scribbles should fall back to the nearest earlier drawing's,
    rather than being empty. Colour once, carry forward, and a new scribble on a
@@ -165,7 +199,12 @@ then undoing a stroke made on a drawing that shared its cel only works because
 of that, and because the history counts as a reference on a cel. Both are
 tested; neither is obvious from reading the code in one place.
 
-**Layers belong to the timeline and timing belongs to the image.** This is the
+**Layers belong to the track and timing belongs to the image.** This is the
 project's central bet and the code depends on it everywhere: adding a layer must
 touch no image, and holding a drawing must allocate nothing. There are tests
 pinning both. If either starts failing, something has misunderstood the model.
+
+**"Track" and "timeline" are not the same word.** A `Track` is one stack of
+layers with its own time; the timeline is the scene's shared time axis and the
+panel that shows it. The struct was called `Timeline` until the two meanings
+were separated — if you find the old name anywhere, it means the track.

@@ -2,12 +2,17 @@
 
 A 2D animation program for hand-drawn work, built around two bets:
 
-**Layers belong to the timeline, timing belongs to the image.** A layer is added
+**Layers belong to the track, timing belongs to the image.** A layer is added
 to every image at once, and an image that is held for three frames holds *all* of
 its layers for three frames. This is deliberately unlike TVPaint and Toon Boom,
 where each layer carries its own exposure — desynchronised exposures are a
 classic source of production bugs. If two things need independent timing, they
-belong in separate timelines.
+belong in separate tracks.
+
+A **track** is one stack of layers with its own time. The **timeline** is the
+scene's shared time axis and the panel that shows it: a scene has several tracks
+and one timeline. (Only one track exists so far — see
+[docs/handover.md](docs/handover.md).)
 
 **A colour layer stores scribbles, not pixels.** The CTG layer is an
 implementation of LazyBrush (Sýkora et al., Eurographics 2009): you scrawl a
@@ -79,10 +84,26 @@ There is no timeline UI and nothing can be saved yet.
 | `[` / `]` | smaller / larger |
 | Wheel | zoom about the pointer |
 | Space-drag, middle-drag | pan |
-| `1` / `0` | actual size / fit the drawing |
+| `1` / `0` | actual size / fit the canvas |
+| `Shift+0` | fit the drawing, including whatever ran off the edge |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
 | `Alt`+right-drag | brush size |
+| `Alt`+click | pick the colour under the pointer (taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
+
+The eyedropper is `Alt`+click on the drawing rather than the colour dialog's
+"pick screen colour", which cannot work with a stylus: Qt routes pen input as a
+tablet event and discards the mouse messages Windows promotes from it, so the
+dialog never hears the click. Sampling the document is better regardless — it
+reads the colour that was stored rather than what the monitor was showing after
+sRGB encoding, the zoom filter and the onion skin.
+
+**The canvas.** The outlined rectangle is what will be exported; everything
+outside it is veiled. You can draw out there and nothing is clipped — roughs run
+off the edge, and the tile model has no edges at all — but what is outside the
+canvas is not in the picture, so a colour fill stops at the frame line. Set the
+size under Edit > Scene settings, as an aspect ratio and a resolution or as a
+width and a height in pixels; each is kept true to the other.
 
 In the timeline: drag the ruler to scrub, drag the right edge of a card to
 change how long the drawing is held, and drag the body of a numbered card to
@@ -90,7 +111,8 @@ reorder it. Held frames carry no number and cannot be picked up -- they are the
 same drawing still showing, not a thing of their own, and they travel with it.
 
 **Colour layers.** "Add colour layer" makes a layer that holds scribbles rather
-than colour. There is no scribble tool: scrawl roughly inside a region with the
+than colour, at the bottom of the pile — it is cut against the line art and
+belongs under it. There is no scribble tool: scrawl roughly inside a region with the
 ordinary brush and the whole region takes that colour, gaps in the line art
 included. It takes two scribbles to fill one shape — one for the shape and one
 for what surrounds it — because a lone scribble has nothing to be cut against. What is stored is the scrawl, not the fill, so moving a scribble
@@ -101,7 +123,7 @@ rough as well as a clean closes gaps that leak from either alone. The second box
 colour layer's visibility shows the marks instead of the fill.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
-Layers belong to the timeline rather than to the image, which is the point of
+Layers belong to the track rather than to the image, which is the point of
 the whole model — with only one image visible that is not yet observable, and
 it becomes so at M3.
 

@@ -179,7 +179,7 @@ et un cache raster invalidé à chaque édition.
 **"Onion fill" — le vrai gain de production.** Le papier montre qu'on peut
 colorier **plusieurs intervalles superposés en une seule passe** : un scribble
 souple assez long couvre le même détail sur 3 ou 4 dessins consécutifs. Vu le
-modèle d'Animage (calques communs à toute la timeline), c'est presque gratuit à
+modèle d'Animage (calques communs à toute la track), c'est presque gratuit à
 implémenter et c'est probablement la fonctionnalité qui fera la différence face à
 TVPaint.
 

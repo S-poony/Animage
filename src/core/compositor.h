@@ -48,13 +48,13 @@ public:
     // hundred times more image pixels than it has screen pixels, and there is
     // no point flattening detail nobody can see. Point sampling, so thin lines
     // do shimmer when zoomed far out.
-    void composite(const Document& doc, TimelineId timeline, ImageId image,
+    void composite(const Document& doc, TrackId track, ImageId image,
                    const PixelRect& region, Framebuffer& out, int step = 1) const;
 
     // Same, for an arbitrary set of layers in the order given, topmost first.
     // The CTG layer will need this to flatten several line-art layers into one
     // barrier, and onion skin needs it to draw a neighbouring image alone.
-    void compositeLayers(const Document& doc, TimelineId timeline, ImageId image,
+    void compositeLayers(const Document& doc, TrackId track, ImageId image,
                          const std::vector<LayerId>& layers, const PixelRect& region,
                          Framebuffer& out, int step = 1) const;
 };
@@ -62,6 +62,6 @@ public:
 // The bounding box of everything drawn on an image, in pixels, or an empty rect
 // if nothing has been drawn. Tile-aligned, since that is what it is derived
 // from.
-PixelRect imageBounds(const Document& doc, TimelineId timeline, ImageId image);
+PixelRect imageBounds(const Document& doc, TrackId track, ImageId image);
 
 }  // namespace animage

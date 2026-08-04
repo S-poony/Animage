@@ -8,7 +8,7 @@ add_library(animage_core
   document.cpp
   gridflow.cpp
   lazybrush.cpp
-  timeline.cpp
+  track.cpp
 )
 
 target_include_directories(animage_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -102,22 +102,22 @@ void Framebuffer::resize(int width, int height) {
 
 void Framebuffer::clear() { std::fill(pixels_.begin(), pixels_.end(), Rgba{}); }
 
-void Compositor::composite(const Document& doc, TimelineId timeline_id, ImageId image_id,
+void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_id,
                            const PixelRect& region, Framebuffer& out, int step) const {
-    const Timeline* timeline = doc.scene().findTimeline(timeline_id);
-    if (!timeline) {
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track) {
         out.clear();
         return;
     }
 
     std::vector<LayerId> layers;
-    layers.reserve(timeline->layers.size());
-    for (const Layer& layer : timeline->layers) layers.push_back(layer.id);
+    layers.reserve(track->layers.size());
+    for (const Layer& layer : track->layers) layers.push_back(layer.id);
 
-    compositeLayers(doc, timeline_id, image_id, layers, region, out, step);
+    compositeLayers(doc, track_id, image_id, layers, region, out, step);
 }
 
-void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, ImageId image_id,
+void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId image_id,
                                  const std::vector<LayerId>& layers, const PixelRect& region,
                                  Framebuffer& out, int step) const {
     step = std::max(1, step);
@@ -125,9 +125,9 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     if (out.isEmpty()) return;
     out.clear();
 
-    const Timeline* timeline = doc.scene().findTimeline(timeline_id);
-    if (!timeline) return;
-    const Image* image = timeline->findImage(image_id);
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track) return;
+    const Image* image = track->findImage(image_id);
     if (!image) return;
 
     // Bottom upwards: each layer goes over the accumulated result, and the
@@ -139,14 +139,14 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     std::vector<Pass> passes;
     passes.reserve(layers.size());
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
-        const Layer* layer = timeline->findLayer(*it);
+        const Layer* layer = track->findLayer(*it);
         if (!layer || !layer->visible) continue;
 
         // A CTG layer shows its regenerated fill, never the scribbles that
         // produced it. If no fill has been built yet the layer simply does not
         // draw -- compositing is not the place to start a max-flow.
         if (layer->kind == LayerKind::Ctg && !layer->show_scribbles) {
-            const CtgFill* fill = doc.ctgFillFor(timeline_id, image_id, *it);
+            const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it);
             if (fill) passes.push_back({&fill->tiles, layer});
             continue;
         }
@@ -187,10 +187,10 @@ void Compositor::compositeLayers(const Document& doc, TimelineId timeline_id, Im
     for (std::thread& worker : pool) worker.join();
 }
 
-PixelRect imageBounds(const Document& doc, TimelineId timeline_id, ImageId image_id) {
-    const Timeline* timeline = doc.scene().findTimeline(timeline_id);
-    if (!timeline) return {};
-    const Image* image = timeline->findImage(image_id);
+PixelRect imageBounds(const Document& doc, TrackId track_id, ImageId image_id) {
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track) return {};
+    const Image* image = track->findImage(image_id);
     if (!image) return {};
 
     int min_x = std::numeric_limits<int>::max();
@@ -199,7 +199,7 @@ PixelRect imageBounds(const Document& doc, TimelineId timeline_id, ImageId image
     int max_y = std::numeric_limits<int>::min();
     bool any = false;
 
-    for (const Layer& layer : timeline->layers) {
+    for (const Layer& layer : track->layers) {
         const Cel* cel = doc.cel(image->celFor(layer.id));
         if (!cel) continue;
         for (const TileCoord& coord : cel->tiles().coords()) {

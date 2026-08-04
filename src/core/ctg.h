@@ -39,7 +39,7 @@ struct CtgSettings {
 // Regenerates the fill if the scribbles or any barrier layer have changed since
 // last time, and returns it. The cache lives in the document, keyed by the
 // scribble cel.
-const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerId layer,
+const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer,
                        const CtgSettings& settings = {});
 
 // Builds the barrier the scribbles are cut against: every source layer of the
@@ -49,7 +49,7 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
 // line-art layer; combining a rough with a clean closes most of the gaps that
 // leak from either alone, which is the one improvement over it the design notes
 // ask for by name.
-std::vector<float> ctgBarrier(const Document& doc, TimelineId timeline, ImageId image,
+std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
                               const std::vector<LayerId>& sources, const PixelRect& region,
                               int step = 1);
 

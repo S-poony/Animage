@@ -25,55 +25,60 @@ public:
 
     // --- structure -------------------------------------------------------
 
-    TimelineId addTimeline(std::string name);
-    void removeTimeline(TimelineId timeline);
+    TrackId addTrack(std::string name);
+    void removeTrack(TrackId track);
     void setFramerate(int framerate);
 
+    // The exported rectangle. Clamped to something sane rather than validated:
+    // a scene with a zero-width canvas has nothing to show and nothing to
+    // write, and there is no reason for the rest of the code to carry the case.
+    void setCanvasSize(int width, int height);
+
     // index 0 is the top of the stack.
-    LayerId addLayer(TimelineId timeline, std::string name, std::size_t index = 0,
+    LayerId addLayer(TrackId track, std::string name, std::size_t index = 0,
                      LayerKind kind = LayerKind::Raster);
-    void removeLayer(TimelineId timeline, LayerId layer);
-    void moveLayer(TimelineId timeline, std::size_t from, std::size_t to);
-    void updateLayer(TimelineId timeline, LayerId layer, const Layer& properties);
+    void removeLayer(TrackId track, LayerId layer);
+    void moveLayer(TrackId track, std::size_t from, std::size_t to);
+    void updateLayer(TrackId track, LayerId layer, const Layer& properties);
 
     // --- time ------------------------------------------------------------
 
     // A new image with no cels, inserted at `slot`. Allocates no tiles.
-    ImageId insertImage(TimelineId timeline, std::size_t slot);
+    ImageId insertImage(TrackId track, std::size_t slot);
 
     // Holds the image already at `slot` for `extra` more frames by repeating
     // its id in the slots list. Touches no cel.
-    void extendExposure(TimelineId timeline, std::size_t slot, int extra);
+    void extendExposure(TrackId track, std::size_t slot, int extra);
 
     // Removes one slot. The Image record survives if other slots still show it,
     // so this shortens a hold rather than deleting the drawing.
-    void removeSlot(TimelineId timeline, std::size_t slot);
+    void removeSlot(TrackId track, std::size_t slot);
 
     // Removes the drawing and every slot showing it, in one command.
-    void removeDrawing(TimelineId timeline, ImageId image);
+    void removeDrawing(TrackId track, ImageId image);
 
     // Moves a drawing, and the whole run of frames it is held over, so that it
-    // starts at `destination` in the timeline as it will be once the drawing
+    // starts at `destination` in the track as it will be once the drawing
     // has been lifted out. Reordering only: no cel is touched.
-    void moveDrawing(TimelineId timeline, ImageId image, std::size_t destination);
+    void moveDrawing(TrackId track, ImageId image, std::size_t destination);
 
     // Deep copy: new ImageId and a new CelId per layer. The tiles themselves
     // are shared until one side is drawn on, so the copy is nearly free but the
     // two images are genuinely independent.
-    ImageId duplicateImage(TimelineId timeline, std::size_t slot);
+    ImageId duplicateImage(TrackId track, std::size_t slot);
 
     // --- pixels ----------------------------------------------------------
 
     const Cel* cel(CelId id) const;
-    const Cel* celAt(TimelineId timeline, ImageId image, LayerId layer) const;
+    const Cel* celAt(TrackId track, ImageId image, LayerId layer) const;
 
     // Returns the cel to draw into, creating it on first use. Must be called
     // inside a command; the lazy creation is recorded so undo removes it.
-    Cel* celForWriting(TimelineId timeline, ImageId image, LayerId layer);
+    Cel* celForWriting(TrackId track, ImageId image, LayerId layer);
 
     // Detaches the cel from this (image, layer). The cel itself survives as
     // long as the history can bring it back.
-    void clearCel(TimelineId timeline, ImageId image, LayerId layer);
+    void clearCel(TrackId track, ImageId image, LayerId layer);
 
     std::size_t celCount() const { return cels_.size(); }
 
@@ -86,7 +91,7 @@ public:
     // The regenerated fill for a CTG layer, or null if it has not been built.
     // Const, so the compositor can draw one but never trigger a solve: the
     // caller decides when it is worth paying for.
-    const CtgFill* ctgFillFor(TimelineId timeline, ImageId image, LayerId layer) const;
+    const CtgFill* ctgFillFor(TrackId track, ImageId image, LayerId layer) const;
     std::size_t totalTileCount() const;
 
     // --- history ---------------------------------------------------------
@@ -133,7 +138,7 @@ private:
     IdGenerator cel_ids_;
     IdGenerator image_ids_;
     IdGenerator layer_ids_;
-    IdGenerator timeline_ids_;
+    IdGenerator track_ids_;
 
     Command pending_;
     int command_depth_ = 0;

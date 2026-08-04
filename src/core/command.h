@@ -9,7 +9,7 @@
 #include "cel.h"
 #include "image.h"
 #include "layer.h"
-#include "timeline.h"
+#include "track.h"
 
 namespace animage {
 
@@ -29,30 +29,30 @@ public:
     virtual void collectCelIds(std::vector<CelId>& out) const { (void)out; }
 };
 
-// Swaps the whole layer list of a timeline. Covers add, remove, reorder and
+// Swaps the whole layer list of a track. Covers add, remove, reorder and
 // property changes in one type. It costs a copy of the layer list, which holds
 // no pixels and is a handful of entries, so adding a layer stays O(layers) --
-// independent of how many images the timeline has.
+// independent of how many images the track has.
 class LayerListOp final : public Op {
 public:
-    LayerListOp(TimelineId timeline, std::vector<Layer> layers)
-        : timeline_(timeline), layers_(std::move(layers)) {}
+    LayerListOp(TrackId track, std::vector<Layer> layers)
+        : track_(track), layers_(std::move(layers)) {}
     void applySwap(Document& doc) override;
 
 private:
-    TimelineId timeline_;
+    TrackId track_;
     std::vector<Layer> layers_;
 };
 
 // Swaps the slots vector: exposure changes, inserts, deletions, reordering.
 class SlotsOp final : public Op {
 public:
-    SlotsOp(TimelineId timeline, std::vector<ImageId> slots)
-        : timeline_(timeline), slots_(std::move(slots)) {}
+    SlotsOp(TrackId track, std::vector<ImageId> slots)
+        : track_(track), slots_(std::move(slots)) {}
     void applySwap(Document& doc) override;
 
 private:
-    TimelineId timeline_;
+    TrackId track_;
     std::vector<ImageId> slots_;
 };
 
@@ -61,13 +61,13 @@ private:
 // fixes up cel refcounts on both sides.
 class ImageOp final : public Op {
 public:
-    ImageOp(TimelineId timeline, ImageId image, std::optional<Image> state)
-        : timeline_(timeline), image_(image), state_(std::move(state)) {}
+    ImageOp(TrackId track, ImageId image, std::optional<Image> state)
+        : track_(track), image_(image), state_(std::move(state)) {}
     void applySwap(Document& doc) override;
     void collectCelIds(std::vector<CelId>& out) const override;
 
 private:
-    TimelineId timeline_;
+    TrackId track_;
     ImageId image_;
     std::optional<Image> state_;
 };
@@ -76,31 +76,31 @@ private:
 // what a layer looks like before the first stroke creates one lazily.
 class CelAssignOp final : public Op {
 public:
-    CelAssignOp(TimelineId timeline, ImageId image, LayerId layer, CelId cel)
-        : timeline_(timeline), image_(image), layer_(layer), cel_(cel) {}
+    CelAssignOp(TrackId track, ImageId image, LayerId layer, CelId cel)
+        : track_(track), image_(image), layer_(layer), cel_(cel) {}
     void applySwap(Document& doc) override;
     void collectCelIds(std::vector<CelId>& out) const override;
 
     CelId cel() const { return cel_; }
 
 private:
-    TimelineId timeline_;
+    TrackId track_;
     ImageId image_;
     LayerId layer_;
     CelId cel_;
 };
 
-// Inserts or extracts a whole timeline at an index.
-class TimelineOp final : public Op {
+// Inserts or extracts a whole track at an index.
+class TrackOp final : public Op {
 public:
-    TimelineOp(std::size_t index, std::optional<Timeline> state)
+    TrackOp(std::size_t index, std::optional<Track> state)
         : index_(index), state_(std::move(state)) {}
     void applySwap(Document& doc) override;
     void collectCelIds(std::vector<CelId>& out) const override;
 
 private:
     std::size_t index_;
-    std::optional<Timeline> state_;
+    std::optional<Track> state_;
 };
 
 class SceneFramerateOp final : public Op {
@@ -110,6 +110,18 @@ public:
 
 private:
     int framerate_;
+};
+
+// The canvas size. Undoable like everything else: resizing the picture is an
+// edit to the scene, and finding out you preferred the old one is normal.
+class SceneCanvasOp final : public Op {
+public:
+    SceneCanvasOp(int width, int height) : width_(width), height_(height) {}
+    void applySwap(Document& doc) override;
+
+private:
+    int width_;
+    int height_;
 };
 
 struct Command {

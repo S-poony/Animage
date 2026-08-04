@@ -101,7 +101,7 @@ inline int tileLocal(int p) {
 }
 
 // A sparse grid. An absent tile is fully transparent, and stays absent: an
-// empty layer on a 500-image timeline costs nothing.
+// empty layer on a 500-image track costs nothing.
 class TileGrid {
 public:
     TileRef find(TileCoord c) const {

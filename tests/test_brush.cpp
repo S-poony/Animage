@@ -14,16 +14,16 @@ namespace {
 
 struct Fixture {
     Document doc;
-    TimelineId timeline;
+    TrackId track;
     LayerId layer;
     ImageId image;
 
     Fixture() {
-        timeline = doc.addTimeline("main");
-        layer = doc.addLayer(timeline, "rough");
-        image = doc.insertImage(timeline, 0);
+        track = doc.addTrack("main");
+        layer = doc.addLayer(track, "rough");
+        image = doc.insertImage(track, 0);
     }
-    const Timeline& tl() const { return *doc.scene().findTimeline(timeline); }
+    const Track& tl() const { return *doc.scene().findTrack(track); }
 };
 
 BrushSettings opaqueBlack() {
@@ -36,9 +36,9 @@ BrushSettings opaqueBlack() {
     return settings;
 }
 
-float alphaAt(const Document& doc, TimelineId timeline, ImageId image, LayerId layer, int x,
+float alphaAt(const Document& doc, TrackId track, ImageId image, LayerId layer, int x,
               int y) {
-    const Cel* cel = doc.celAt(timeline, image, layer);
+    const Cel* cel = doc.celAt(track, image, layer);
     return cel ? cel->pixel(x, y).a : 0.0f;
 }
 
@@ -49,7 +49,7 @@ void strokeLaysDownInk() {
 
     {
         ScopedCommand command(f.doc, "Stroke");
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {100.0f, 100.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {100.0f, 100.0f, 1.0f});
         for (int i = 1; i <= 40; ++i) {
             brush.extend({100.0f + static_cast<float>(i) * 2.0f, 100.0f, 1.0f});
         }
@@ -57,12 +57,12 @@ void strokeLaysDownInk() {
     }
 
     CHECK(brush.dabCount() > 1);
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 100, 100), 1.0, 1e-2);
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 140, 100), 1.0, 1e-2);
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 180, 100), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 100, 100), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 140, 100), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 180, 100), 1.0, 1e-2);
 
     // Well clear of the stroke, nothing.
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 100, 400), 0.0, 1e-3);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 100, 400), 0.0, 1e-3);
 }
 
 // A fast stroke and a slow one over the same path must lay down the same ink.
@@ -75,7 +75,7 @@ void spacingIsIndependentOfEventRate() {
         Fixture f;
         Brush brush(opaqueBlack());
         ScopedCommand command(f.doc, "Stroke");
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {50.0f, 50.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {50.0f, 50.0f, 1.0f});
         const float total = 200.0f;
         for (int i = 1; i <= steps; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(steps);
@@ -101,13 +101,13 @@ void pressureChangesWidth() {
         Brush brush(settings);
         {
             ScopedCommand command(f.doc, "Stroke");
-            brush.begin(f.doc, f.timeline, f.image, f.layer, {200.0f, 200.0f, pressure});
+            brush.begin(f.doc, f.track, f.image, f.layer, {200.0f, 200.0f, pressure});
             brush.extend({260.0f, 200.0f, pressure});
             brush.end();
         }
         int width = 0;
         for (int y = 150; y < 250; ++y) {
-            if (alphaAt(f.doc, f.timeline, f.image, f.layer, 230, y) > 0.5f) ++width;
+            if (alphaAt(f.doc, f.track, f.image, f.layer, 230, y) > 0.5f) ++width;
         }
         return width;
     };
@@ -125,11 +125,11 @@ void eraserRemovesInk() {
     {
         ScopedCommand command(f.doc, "Stroke");
         Brush brush(opaqueBlack());
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {300.0f, 300.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {300.0f, 300.0f, 1.0f});
         brush.extend({360.0f, 300.0f, 1.0f});
         brush.end();
     }
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 330, 300), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 330, 300), 1.0, 1e-2);
 
     {
         ScopedCommand command(f.doc, "Erase");
@@ -137,15 +137,15 @@ void eraserRemovesInk() {
         settings.erase = true;
         settings.radius = 14.0f;
         Brush eraser(settings);
-        eraser.begin(f.doc, f.timeline, f.image, f.layer, {300.0f, 300.0f, 1.0f});
+        eraser.begin(f.doc, f.track, f.image, f.layer, {300.0f, 300.0f, 1.0f});
         eraser.extend({360.0f, 300.0f, 1.0f});
         eraser.end();
     }
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 330, 300), 0.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 330, 300), 0.0, 1e-2);
 
     // And erasing is undoable like anything else.
     CHECK(f.doc.undo());
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 330, 300), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 330, 300), 1.0, 1e-2);
 }
 
 void strokeIsOneUndoStep() {
@@ -156,7 +156,7 @@ void strokeIsOneUndoStep() {
     {
         ScopedCommand command(f.doc, "Stroke");
         Brush brush(opaqueBlack());
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {10.0f, 10.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {10.0f, 10.0f, 1.0f});
         for (int i = 1; i <= 200; ++i) {
             brush.extend({10.0f + static_cast<float>(i), 10.0f + static_cast<float>(i), 1.0f});
         }
@@ -167,9 +167,9 @@ void strokeIsOneUndoStep() {
     CHECK(f.doc.totalTileCount() > 1);  // the stroke crossed several tiles
 
     CHECK(f.doc.undo());
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 100, 100), 0.0, 1e-3);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 100, 100), 0.0, 1e-3);
     CHECK(f.doc.redo());
-    CHECK_NEAR(alphaAt(f.doc, f.timeline, f.image, f.layer, 100, 100), 1.0, 1e-2);
+    CHECK_NEAR(alphaAt(f.doc, f.track, f.image, f.layer, 100, 100), 1.0, 1e-2);
 }
 
 // A dab must not allocate tiles it does not reach. This is the property that
@@ -184,7 +184,7 @@ void strokeAllocatesOnlyTilesItTouches() {
     {
         ScopedCommand command(f.doc, "Dot");
         // Well inside one tile: 64,64 with radius 4 cannot reach a neighbour.
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {64.0f, 64.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {64.0f, 64.0f, 1.0f});
         brush.end();
     }
     CHECK_EQ(f.doc.totalTileCount(), std::size_t{1});
@@ -193,7 +193,7 @@ void strokeAllocatesOnlyTilesItTouches() {
 void compositorRespectsOrderAndOpacity() {
     TEST("the compositor respects layer order, opacity and visibility");
     Fixture f;
-    const LayerId top = f.doc.addLayer(f.timeline, "top", 0);
+    const LayerId top = f.doc.addLayer(f.track, "top", 0);
 
     // Bottom layer red, top layer green, both opaque over the same spot.
     {
@@ -201,7 +201,7 @@ void compositorRespectsOrderAndOpacity() {
         BrushSettings settings = opaqueBlack();
         settings.r = 1.0f;
         Brush brush(settings);
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {500.0f, 500.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {500.0f, 500.0f, 1.0f});
         brush.end();
     }
     {
@@ -209,7 +209,7 @@ void compositorRespectsOrderAndOpacity() {
         BrushSettings settings = opaqueBlack();
         settings.g = 1.0f;
         Brush brush(settings);
-        brush.begin(f.doc, f.timeline, f.image, top, {500.0f, 500.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, top, {500.0f, 500.0f, 1.0f});
         brush.end();
     }
 
@@ -217,7 +217,7 @@ void compositorRespectsOrderAndOpacity() {
     Framebuffer frame;
     const PixelRect region{495, 495, 10, 10};
 
-    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
     Rgba centre = frame.pixel(5, 5);
     CHECK_NEAR(centre.a, 1.0, 1e-2);
     CHECK_NEAR(centre.g, 1.0, 1e-2);  // green is on top
@@ -226,9 +226,9 @@ void compositorRespectsOrderAndOpacity() {
     // Hide the top layer and the red beneath shows through.
     Layer hidden = *f.tl().findLayer(top);
     hidden.visible = false;
-    f.doc.updateLayer(f.timeline, top, hidden);
+    f.doc.updateLayer(f.track, top, hidden);
 
-    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
     centre = frame.pixel(5, 5);
     CHECK_NEAR(centre.r, 1.0, 1e-2);
     CHECK_NEAR(centre.g, 0.0, 1e-2);
@@ -236,9 +236,9 @@ void compositorRespectsOrderAndOpacity() {
     // Half opacity on the only visible layer halves its contribution.
     Layer faded = *f.tl().findLayer(f.layer);
     faded.opacity = 0.5f;
-    f.doc.updateLayer(f.timeline, f.layer, faded);
+    f.doc.updateLayer(f.track, f.layer, faded);
 
-    compositor.composite(f.doc, f.timeline, f.image, region, frame);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
     centre = frame.pixel(5, 5);
     CHECK_NEAR(centre.a, 0.5, 1e-2);
     CHECK_NEAR(centre.r, 0.5, 1e-2);
@@ -250,22 +250,22 @@ void compositorHandlesEmptyAndBounds() {
     Compositor compositor;
     Framebuffer frame;
 
-    compositor.composite(f.doc, f.timeline, f.image, {0, 0, 16, 16}, frame);
+    compositor.composite(f.doc, f.track, f.image, {0, 0, 16, 16}, frame);
     CHECK_EQ(frame.width(), 16);
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) CHECK_NEAR(frame.pixel(x, y).a, 0.0, 1e-6);
     }
 
-    const PixelRect empty = imageBounds(f.doc, f.timeline, f.image);
+    const PixelRect empty = imageBounds(f.doc, f.track, f.image);
     CHECK(empty.isEmpty());
 
     {
         ScopedCommand command(f.doc, "Dot");
         Brush brush(opaqueBlack());
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {200.0f, 300.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {200.0f, 300.0f, 1.0f});
         brush.end();
     }
-    const PixelRect bounds = imageBounds(f.doc, f.timeline, f.image);
+    const PixelRect bounds = imageBounds(f.doc, f.track, f.image);
     CHECK(!bounds.isEmpty());
     CHECK(bounds.x <= 200 && bounds.x + bounds.width > 200);
     CHECK(bounds.y <= 300 && bounds.y + bounds.height > 300);
@@ -283,13 +283,13 @@ void compositorWorksLeftOfTheOrigin() {
         settings.radius = 6.0f;
         settings.r = 1.0f;
         Brush brush(settings);
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {-200.0f, -150.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {-200.0f, -150.0f, 1.0f});
         brush.end();
     }
 
     Compositor compositor;
     Framebuffer frame;
-    compositor.composite(f.doc, f.timeline, f.image, {-205, -155, 10, 10}, frame);
+    compositor.composite(f.doc, f.track, f.image, {-205, -155, 10, 10}, frame);
     CHECK_NEAR(frame.pixel(5, 5).a, 1.0, 1e-2);
     CHECK_NEAR(frame.pixel(5, 5).r, 1.0, 1e-2);
 }
@@ -307,7 +307,7 @@ void sampledCompositingMatchesTheFullResolutionPath() {
 
     {
         ScopedCommand command(f.doc, "Stroke");
-        brush.begin(f.doc, f.timeline, f.image, f.layer, {100.0f, 100.0f, 1.0f});
+        brush.begin(f.doc, f.track, f.image, f.layer, {100.0f, 100.0f, 1.0f});
         brush.extend({300.0f, 260.0f, 1.0f});
         brush.end();
     }
@@ -316,8 +316,8 @@ void sampledCompositingMatchesTheFullResolutionPath() {
     Compositor compositor;
     Framebuffer full;
     Framebuffer sampled;
-    compositor.composite(f.doc, f.timeline, f.image, region, full, 1);
-    compositor.composite(f.doc, f.timeline, f.image, region, sampled, 4);
+    compositor.composite(f.doc, f.track, f.image, region, full, 1);
+    compositor.composite(f.doc, f.track, f.image, region, sampled, 4);
 
     CHECK_EQ(full.width(), 400);
     CHECK_EQ(sampled.width(), 100);

@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QPointF>
 #include <QWidget>
+
+class QPainter;
 
 #include "brush.h"
 #include "compositor.h"
 #include "ctg.h"
 #include "document.h"
 
-// The drawing surface. Shows one image of one timeline, composited, and turns
+// The drawing surface. Shows one image of one track, composited, and turns
 // tablet events into brush strokes.
 //
 // Compositing is deferred: edits mark a region dirty and the flattening happens
@@ -34,7 +37,7 @@ public:
 
     explicit CanvasWidget(animage::Document& document, QWidget* parent = nullptr);
 
-    void setTimeline(animage::TimelineId timeline);
+    void setTrack(animage::TrackId track);
     void setFrame(std::size_t slot);
     std::size_t frame() const { return slot_; }
     animage::ImageId currentImage() const { return image_; }
@@ -48,6 +51,12 @@ public:
     animage::BrushSettings& brushSettings() { return erasing_ ? eraser_settings_ : brush_settings_; }
     void setEraser(bool erasing);
     bool isErasing() const { return erasing_; }
+
+    // Always the brush's colour, never the eraser's. brushSettings() hands back
+    // whichever tool is selected, so setting a colour through it while the
+    // eraser was up wrote it somewhere it means nothing and lost it on the way
+    // back to the brush.
+    void setBrushColour(float r, float g, float b);
 
     void setBackground(Background background);
     Background background() const { return background_; }
@@ -64,6 +73,7 @@ public:
     void setZoom(double zoom, const QPointF& widget_anchor);
     void resetView();
     void fitToDrawing();
+    void fitToCanvas();
 
     // Everything drawn changed underneath us: undo, layer visibility, opacity.
     void refreshAll();
@@ -76,6 +86,8 @@ Q_SIGNALS:
     void viewChanged();
     void documentChanged();
     void brushSizeChanged(double radius);
+    // Linear light, straight rather than premultiplied.
+    void colourPicked(float r, float g, float b);
 
 protected:
     void tabletEvent(QTabletEvent* event) override;
@@ -98,8 +110,12 @@ private:
     void markDirty(const animage::PixelRect& region);
     void repaintImageRect(const animage::PixelRect& region);
     void rebuildOnion();
-    void refreshCtgFills();
+    void fitTo(const animage::PixelRect& bounds);
+    void drawCanvasFrame(QPainter& painter);
+    bool refreshCtgFills();
     void setScribblePreview(animage::LayerId layer, bool previewing);
+
+    bool pickColourAt(const QPointF& image_point);
 
     void beginStroke(const QPointF& image_point, float pressure);
     void extendStroke(const QPointF& image_point, float pressure);
@@ -116,7 +132,7 @@ private:
     animage::Brush brush_;
     animage::Framebuffer scratch_;
 
-    animage::TimelineId timeline_ = animage::kNoId;
+    animage::TrackId track_ = animage::kNoId;
     animage::ImageId image_ = animage::kNoId;
     animage::LayerId active_layer_ = animage::kNoId;
 
@@ -151,6 +167,9 @@ private:
     double zoom_ = 1.0;
 
     bool stroking_ = false;
+    // An eyedropper gesture is in progress. The colour is taken when the button
+    // or the pen comes up, so the pointer can be slid onto the right pixel.
+    bool picking_ = false;
     bool scribbling_ = false;  // the stroke is on a CTG layer
     animage::LayerId scribble_preview_layer_ = animage::kNoId;
     bool scribble_preview_was_showing_ = false;
@@ -172,5 +191,11 @@ private:
     double zoom_at_press_ = 1.0;
 
     Background background_ = Background::White;
-    qint64 tablet_events_seen_ = 0;
+
+    // When the pen was last heard from, used to recognise the mouse events
+    // Windows Ink promotes from it. A count of tablet events was used for this
+    // and could only ever go up, so the first time the pen came near the tablet
+    // the mouse stopped working for the rest of the session.
+    QElapsedTimer clock_;
+    qint64 last_tablet_ms_ = -1;
 };

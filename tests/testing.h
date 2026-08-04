@@ -25,12 +25,21 @@ inline void check(bool ok, const char* file, int line, const char* expr) {
     if (!ok) fail(file, line, std::string("expected: ") + expr);
 }
 
+// std::to_string covers numbers and nothing else, so a failed comparison of two
+// strings would not compile rather than reporting.
+inline std::string describe(const std::string& value) { return "\"" + value + "\""; }
+inline std::string describe(const char* value) { return std::string("\"") + value + "\""; }
+template <typename T>
+std::string describe(const T& value) {
+    return std::to_string(value);
+}
+
 template <typename A, typename B>
 void checkEqual(const A& a, const B& b, const char* file, int line, const char* expr) {
     ++g_checks;
     if (!(a == b)) {
         fail(file, line, std::string("expected equal: ") + expr + "\n    left  = " +
-                             std::to_string(a) + "\n    right = " + std::to_string(b));
+                             describe(a) + "\n    right = " + describe(b));
     }
 }
 

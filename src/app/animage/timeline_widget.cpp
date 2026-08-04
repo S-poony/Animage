@@ -52,15 +52,15 @@ TimelineWidget::TimelineWidget(Document& document, QWidget* parent)
     setFocusPolicy(Qt::ClickFocus);
 }
 
-const Timeline* TimelineWidget::timeline() const { return doc_.scene().findTimeline(timeline_); }
+const Track* TimelineWidget::track() const { return doc_.scene().findTrack(track_); }
 
-void TimelineWidget::setTimeline(TimelineId timeline) {
-    timeline_ = timeline;
+void TimelineWidget::setTrack(TrackId track) {
+    track_ = track;
     refresh();
 }
 
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line || line->slots.empty()) return;
     const std::size_t clamped = std::min(slot, line->slots.size() - 1);
     if (clamped == current_slot_) return;
@@ -70,7 +70,7 @@ void TimelineWidget::setCurrentSlot(std::size_t slot) {
 }
 
 void TimelineWidget::refresh() {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (line && !line->slots.empty() && current_slot_ >= line->slots.size()) {
         current_slot_ = line->slots.size() - 1;
         Q_EMIT currentSlotChanged(current_slot_);
@@ -81,26 +81,26 @@ void TimelineWidget::refresh() {
 }
 
 QSize TimelineWidget::sizeHint() const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     const int frames = static_cast<int>(line ? line->slots.size() : 0);
     return {(frames + 2) * kCellWidth, kStripHeight};
 }
 
 std::size_t TimelineWidget::slotAt(int x) const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line || line->slots.empty()) return 0;
     const int index = std::clamp(x / kCellWidth, 0, static_cast<int>(line->slots.size()) - 1);
     return static_cast<std::size_t>(index);
 }
 
 std::pair<std::size_t, std::size_t> TimelineWidget::runAt(std::size_t slot) const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line) return {slot, slot};
     return line->runBounds(slot);
 }
 
 bool TimelineWidget::isOnRunEdge(int x, std::size_t* run_start) const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line || line->slots.empty()) return false;
 
     const std::size_t slot = slotAt(x);
@@ -115,7 +115,7 @@ bool TimelineWidget::isOnRunEdge(int x, std::size_t* run_start) const {
 // it from position instead meant a drawing renumbered itself the moment it was
 // dragged, which is precisely when you need to know which one you are holding.
 std::vector<int> TimelineWidget::drawingNumbers() const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     std::vector<int> numbers;
     if (!line) return numbers;
 
@@ -134,7 +134,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), colours.background);
     painter.fillRect(QRect(0, 0, width(), kRulerHeight), colours.ruler);
 
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line) return;
 
     const std::vector<int> numbers = drawingNumbers();
@@ -171,7 +171,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     }
 
     if (dragging_ && drop_index_ >= 0) {
-        // Count past the drawing being carried: it is not in the timeline it is
+        // Count past the drawing being carried: it is not in the track it is
         // about to be dropped into.
         int seen = 0;
         int at = static_cast<int>(line->slots.size());
@@ -228,7 +228,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
 
     // Only the numbered card starts a move. Pressing a held frame selects it
     // and nothing more -- there is no separate object there to drag.
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (line && slot < line->slots.size() && runAt(slot).first == slot) {
         may_drag_ = true;
         drag_image_ = line->slots[slot];
@@ -236,10 +236,10 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     }
 }
 
-// Where the drawing would land, counted in the timeline as it will be once the
+// Where the drawing would land, counted in the track as it will be once the
 // drawing has been lifted out of it.
 int TimelineWidget::dropIndexFor(int pointer_x) const {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line || drag_image_ == kNoId) return 0;
 
     const int boundary = (pointer_x + kCellWidth / 2) / kCellWidth;
@@ -295,7 +295,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
     hovering_edge_ = false;
 
-    const Timeline* line = timeline();
+    const Track* line = track();
     const std::size_t slot = slotAt(x);
     const bool on_card = line && slot < line->slots.size() && runAt(slot).first == slot;
     setCursor(on_card ? Qt::OpenHandCursor : Qt::ArrowCursor);
@@ -312,9 +312,9 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
         setCursor(Qt::ArrowCursor);
 
         if (drop >= 0) {
-            doc_.moveDrawing(timeline_, moved, static_cast<std::size_t>(drop));
+            doc_.moveDrawing(track_, moved, static_cast<std::size_t>(drop));
             refresh();
-            const Timeline* line = timeline();
+            const Track* line = track();
             if (line) {
                 auto it = std::find(line->slots.begin(), line->slots.end(), moved);
                 if (it != line->slots.end()) {
@@ -346,7 +346,7 @@ void TimelineWidget::leaveEvent(QEvent*) {
 }
 
 void TimelineWidget::applyStretch(int pointer_x) {
-    const Timeline* line = timeline();
+    const Track* line = track();
     if (!line || stretch_run_start_ >= line->slots.size()) return;
 
     const auto [first, last] = runAt(stretch_run_start_);
@@ -359,10 +359,10 @@ void TimelineWidget::applyStretch(int pointer_x) {
     if (wanted_length == current_length) return;
 
     if (wanted_length > current_length) {
-        doc_.extendExposure(timeline_, first, wanted_length - current_length);
+        doc_.extendExposure(track_, first, wanted_length - current_length);
     } else {
         for (int i = 0; i < current_length - wanted_length; ++i) {
-            doc_.removeSlot(timeline_, first);
+            doc_.removeSlot(track_, first);
         }
     }
 

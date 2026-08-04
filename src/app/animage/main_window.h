@@ -8,8 +8,8 @@
 
 class CanvasWidget;
 class TimelineWidget;
-class QListWidget;
-class QListWidgetItem;
+class QTreeWidget;
+class QTreeWidgetItem;
 class QSlider;
 class QLabel;
 class QDoubleSpinBox;
@@ -19,7 +19,7 @@ class QPushButton;
 class QAction;
 class QTimer;
 
-// M3: the timeline is on screen. One timeline, no saving yet.
+// M3: the timeline is on screen. One track, no saving yet.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -29,6 +29,7 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     void buildActions();
@@ -43,10 +44,9 @@ private:
     void addLayer();
     void addColourLayer();
     void removeCurrentLayer();
-    void setShowScribbles(animage::LayerId layer, bool showing);
     void moveCurrentLayer(int delta);
     void onLayerSelected();
-    void onLayerItemChanged(QListWidgetItem* item);
+    void onLayerItemChanged(QTreeWidgetItem* item, int column);
     void onOpacityChanged(int percent);
     void beginOpacityDrag();
     void endOpacityDrag();
@@ -54,6 +54,9 @@ private:
     std::string nextLayerName() const;
     std::string nextColourLayerName() const;
     void chooseColour();
+    // The one place a colour becomes the brush's, whether it came from the
+    // dialog or from the eyedropper. Linear light, straight.
+    void applyColour(float r, float g, float b);
     void syncToolSettings();
     void setBrushRadius(double radius);
     void nudgeBrushRadius(double factor);
@@ -69,7 +72,7 @@ private:
     void deleteDrawing();
     void extendExposure();
     void shortenExposure();
-    void chooseFramerate();
+    void chooseSceneSettings();
 
     void togglePlayback();
     void stopPlayback();
@@ -80,11 +83,11 @@ private:
     animage::Layer* currentLayer();
 
     animage::Document doc_;
-    animage::TimelineId timeline_ = animage::kNoId;
+    animage::TrackId track_ = animage::kNoId;
 
     CanvasWidget* canvas_ = nullptr;
     TimelineWidget* timeline_widget_ = nullptr;
-    QListWidget* layer_list_ = nullptr;
+    QTreeWidget* layer_list_ = nullptr;
     QSlider* opacity_ = nullptr;
     QDoubleSpinBox* radius_ = nullptr;
     QLabel* status_ = nullptr;
@@ -102,5 +105,6 @@ private:
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;
+    bool framed_once_ = false;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;
 };

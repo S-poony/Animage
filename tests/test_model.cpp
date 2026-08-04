@@ -10,31 +10,31 @@ using namespace animage;
 
 namespace {
 
-void paint(Document& doc, TimelineId timeline, ImageId image, LayerId layer, int px, int py,
+void paint(Document& doc, TrackId track, ImageId image, LayerId layer, int px, int py,
            const Rgba& colour) {
-    Cel* cel = doc.celForWriting(timeline, image, layer);
+    Cel* cel = doc.celForWriting(track, image, layer);
     if (!cel) return;
     Tile* tile = cel->writableTile(tileCoordFor(px, py), doc.journal());
     tile->setPixel(tileLocal(px), tileLocal(py), colour);
 }
 
-Rgba read(const Document& doc, TimelineId timeline, ImageId image, LayerId layer, int px,
+Rgba read(const Document& doc, TrackId track, ImageId image, LayerId layer, int px,
           int py) {
-    const Cel* cel = doc.celAt(timeline, image, layer);
+    const Cel* cel = doc.celAt(track, image, layer);
     return cel ? cel->pixel(px, py) : Rgba{};
 }
 
 struct Fixture {
     Document doc;
-    TimelineId timeline;
+    TrackId track;
     LayerId layer;
 
     Fixture() {
-        timeline = doc.addTimeline("main");
-        layer = doc.addLayer(timeline, "rough");
+        track = doc.addTrack("main");
+        layer = doc.addLayer(track, "rough");
     }
 
-    const Timeline& tl() const { return *doc.scene().findTimeline(timeline); }
+    const Track& tl() const { return *doc.scene().findTrack(track); }
 };
 
 const Rgba kRed{1.0f, 0.0f, 0.0f, 1.0f};
@@ -46,19 +46,19 @@ void exposureSharesOneCel() {
     TEST("drawing on a 3x-exposed image affects all three frames");
     Fixture f;
 
-    const ImageId image = f.doc.insertImage(f.timeline, 0);
-    f.doc.extendExposure(f.timeline, 0, 2);
+    const ImageId image = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 2);
     CHECK_EQ(f.tl().frameCount(), std::size_t{3});
     CHECK_EQ(f.tl().exposureOf(image), std::size_t{3});
     CHECK_EQ(f.tl().images.size(), std::size_t{1});
 
     {
         ScopedCommand command(f.doc, "Stroke");
-        paint(f.doc, f.timeline, image, f.layer, 10, 10, kRed);
+        paint(f.doc, f.track, image, f.layer, 10, 10, kRed);
     }
 
     for (std::size_t slot = 0; slot < 3; ++slot) {
-        const Rgba pixel = read(f.doc, f.timeline, f.tl().imageAtSlot(slot), f.layer, 10, 10);
+        const Rgba pixel = read(f.doc, f.track, f.tl().imageAtSlot(slot), f.layer, 10, 10);
         CHECK_NEAR(pixel.r, 1.0, 1e-3);
         CHECK_NEAR(pixel.a, 1.0, 1e-3);
     }
@@ -74,13 +74,13 @@ void duplicateProducesIndependentCels() {
     TEST("duplicating an image gives independent cels");
     Fixture f;
 
-    const ImageId source = f.doc.insertImage(f.timeline, 0);
+    const ImageId source = f.doc.insertImage(f.track, 0);
     {
         ScopedCommand command(f.doc, "Stroke");
-        paint(f.doc, f.timeline, source, f.layer, 5, 5, kRed);
+        paint(f.doc, f.track, source, f.layer, 5, 5, kRed);
     }
 
-    const ImageId copy = f.doc.duplicateImage(f.timeline, 0);
+    const ImageId copy = f.doc.duplicateImage(f.track, 0);
     CHECK(copy != kNoId);
     CHECK(copy != source);
 
@@ -89,19 +89,19 @@ void duplicateProducesIndependentCels() {
     CHECK(source_cel != copy_cel);
 
     // The copy starts out identical...
-    CHECK_NEAR(read(f.doc, f.timeline, copy, f.layer, 5, 5).r, 1.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, copy, f.layer, 5, 5).r, 1.0, 1e-3);
     // ...and sharing the tile, so duplication is nearly free.
     CHECK_EQ(f.doc.totalTileCount(), std::size_t{2});
 
     {
         ScopedCommand command(f.doc, "Stroke on copy");
-        paint(f.doc, f.timeline, copy, f.layer, 5, 5, kBlue);
+        paint(f.doc, f.track, copy, f.layer, 5, 5, kBlue);
     }
 
-    CHECK_NEAR(read(f.doc, f.timeline, source, f.layer, 5, 5).r, 1.0, 1e-3);
-    CHECK_NEAR(read(f.doc, f.timeline, source, f.layer, 5, 5).b, 0.0, 1e-3);
-    CHECK_NEAR(read(f.doc, f.timeline, copy, f.layer, 5, 5).b, 1.0, 1e-3);
-    CHECK_NEAR(read(f.doc, f.timeline, copy, f.layer, 5, 5).r, 0.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, source, f.layer, 5, 5).r, 1.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, source, f.layer, 5, 5).b, 0.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, copy, f.layer, 5, 5).b, 1.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, copy, f.layer, 5, 5).r, 0.0, 1e-3);
 }
 
 // 3. Adding an interval allocates no tile. Neither does extending exposure.
@@ -109,8 +109,8 @@ void addingIntervalsAllocatesNothing() {
     TEST("adding intervals allocates no tiles");
     Fixture f;
 
-    for (int i = 0; i < 24; ++i) f.doc.insertImage(f.timeline, static_cast<std::size_t>(i));
-    f.doc.extendExposure(f.timeline, 0, 5);
+    for (int i = 0; i < 24; ++i) f.doc.insertImage(f.track, static_cast<std::size_t>(i));
+    f.doc.extendExposure(f.track, 0, 5);
 
     CHECK_EQ(f.tl().frameCount(), std::size_t{29});
     CHECK_EQ(f.tl().images.size(), std::size_t{24});
@@ -118,17 +118,17 @@ void addingIntervalsAllocatesNothing() {
     CHECK_EQ(f.doc.totalTileCount(), std::size_t{0});
 }
 
-// 5. Adding a layer to a 500-image timeline is O(1): it must not touch a single
+// 5. Adding a layer to a 500-image track is O(1): it must not touch a single
 //    Image record. That structural fact is the property, and it is worth
 //    asserting directly rather than timing it.
 void addingLayerTouchesNoImage() {
-    TEST("adding a layer to a 500-image timeline touches no image");
+    TEST("adding a layer to a 500-image track touches no image");
     Fixture f;
 
-    for (int i = 0; i < 500; ++i) f.doc.insertImage(f.timeline, static_cast<std::size_t>(i));
+    for (int i = 0; i < 500; ++i) f.doc.insertImage(f.track, static_cast<std::size_t>(i));
     CHECK_EQ(f.tl().images.size(), std::size_t{500});
 
-    const LayerId clean = f.doc.addLayer(f.timeline, "clean", 0);
+    const LayerId clean = f.doc.addLayer(f.track, "clean", 0);
     CHECK(clean != kNoId);
     CHECK_EQ(f.tl().layers.size(), std::size_t{2});
     CHECK_EQ(f.tl().layers[0].id, clean);  // index 0 is the top of the stack
@@ -146,10 +146,10 @@ void onionSkinCountsDistinctImages() {
     TEST("onion skin counts distinct images, not slots");
     Fixture f;
 
-    const ImageId a = f.doc.insertImage(f.timeline, 0);
-    f.doc.extendExposure(f.timeline, 0, 4);  // a held for 5 frames
-    const ImageId b = f.doc.insertImage(f.timeline, 5);
-    const ImageId c = f.doc.insertImage(f.timeline, 6);
+    const ImageId a = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 4);  // a held for 5 frames
+    const ImageId b = f.doc.insertImage(f.track, 5);
+    const ImageId c = f.doc.insertImage(f.track, 6);
     CHECK_EQ(f.tl().frameCount(), std::size_t{7});
 
     const std::vector<ImageId> back = f.tl().distinctNeighbours(6, 2, -1);
@@ -168,20 +168,20 @@ void removingOneSlotKeepsTheImage() {
     TEST("removing one slot of an exposed image keeps the drawing");
     Fixture f;
 
-    const ImageId image = f.doc.insertImage(f.timeline, 0);
-    f.doc.extendExposure(f.timeline, 0, 2);
+    const ImageId image = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 2);
     {
         ScopedCommand command(f.doc, "Stroke");
-        paint(f.doc, f.timeline, image, f.layer, 3, 3, kRed);
+        paint(f.doc, f.track, image, f.layer, 3, 3, kRed);
     }
 
-    f.doc.removeSlot(f.timeline, 1);
+    f.doc.removeSlot(f.track, 1);
     CHECK_EQ(f.tl().frameCount(), std::size_t{2});
     CHECK(f.tl().findImage(image) != nullptr);
-    CHECK_NEAR(read(f.doc, f.timeline, image, f.layer, 3, 3).r, 1.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 3, 3).r, 1.0, 1e-3);
 
-    f.doc.removeSlot(f.timeline, 0);
-    f.doc.removeSlot(f.timeline, 0);
+    f.doc.removeSlot(f.track, 0);
+    f.doc.removeSlot(f.track, 0);
     CHECK_EQ(f.tl().frameCount(), std::size_t{0});
     CHECK(f.tl().findImage(image) == nullptr);
 }

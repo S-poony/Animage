@@ -8,7 +8,7 @@ namespace animage {
 using CelId = std::uint64_t;
 using ImageId = std::uint64_t;
 using LayerId = std::uint64_t;
-using TimelineId = std::uint64_t;
+using TrackId = std::uint64_t;
 
 inline constexpr std::uint64_t kNoId = 0;
 

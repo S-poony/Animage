@@ -23,9 +23,9 @@ enum class BlendMode {
     Add,
 };
 
-// Properties only. A Layer never holds pixels, and it belongs to the timeline
+// Properties only. A Layer never holds pixels, and it belongs to the track
 // rather than to any one image: adding a layer adds it to every image at once,
-// and changing its opacity changes it for the whole timeline.
+// and changing its opacity changes it for the whole track.
 struct Layer {
     LayerId id = kNoId;
     std::string name;

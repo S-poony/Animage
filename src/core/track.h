@@ -11,11 +11,11 @@
 
 namespace animage {
 
-// Layers are shared by every image in the timeline; `slots` is time. Exposure
+// Layers are shared by every image in the track; `slots` is time. Exposure
 // is the same ImageId appearing in several consecutive slots, so nothing in
 // this file may assume the slots are distinct.
-struct Timeline {
-    TimelineId id = kNoId;
+struct Track {
+    TrackId id = kNoId;
     std::string name;
 
     std::vector<Layer> layers;  // index 0 composites on top
@@ -23,7 +23,7 @@ struct Timeline {
     std::unordered_map<ImageId, Image> images;
 
     // Group-level properties. Not exposed in the prototype UI, but the format
-    // needs them: without a timeline opacity you cannot fade out a character.
+    // needs them: without a track opacity you cannot fade out a character.
     float opacity = 1.0f;
     BlendMode blend = BlendMode::Normal;
     int time_offset = 0;

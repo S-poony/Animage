@@ -38,7 +38,7 @@ struct BrushSettings {
 // The caller must hold an open command for the whole stroke:
 //
 //     ScopedCommand stroke(doc, "Stroke");
-//     brush.begin(doc, timeline, image, layer, first);
+//     brush.begin(doc, track, image, layer, first);
 //     brush.extend(next);
 //     brush.end();
 class Brush {
@@ -49,7 +49,7 @@ public:
     const BrushSettings& settings() const { return settings_; }
     BrushSettings& settings() { return settings_; }
 
-    void begin(Document& doc, TimelineId timeline, ImageId image, LayerId layer,
+    void begin(Document& doc, TrackId track, ImageId image, LayerId layer,
                const StrokePoint& point);
     void extend(const StrokePoint& point);
     void end();

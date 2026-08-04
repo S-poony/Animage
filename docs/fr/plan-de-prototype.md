@@ -1,12 +1,12 @@
 # Animage — Plan de prototype
 
 **Objectif du prototype** : valider les deux paris du projet — le modèle de
-données (calques communs à la timeline, timing porté par l'image) et le calque
+données (calques communs à la track, timing porté par l'image) et le calque
 CTG — sur une seule plateforme, avec une vraie tablette, avant d'écrire du code
 qu'on regrettera.
 
 **Hors périmètre** : mobile, son, export vidéo, modes de fusion, gestion de
-couleur avancée, multi-timeline. Tout ça est reportable sans casser
+couleur avancée, multi-track. Tout ça est reportable sans casser
 l'architecture.
 
 **Cible** : Windows + Linux (macOS gratuit si Qt). Desktop uniquement.
@@ -40,6 +40,7 @@ prototype, quand le modèle de données sera figé et portable.
 using CelId   = uint64_t;   // compteur monotone, JAMAIS réutilisé
 using ImageId = uint64_t;
 using LayerId = uint64_t;
+using TrackId = uint64_t;
 
 enum class LayerKind { Raster, CTG };
 
@@ -53,13 +54,17 @@ struct Layer {                       // propriétés seulement — aucun pixel
     LayerId  ctg_source = 0;         // pour un CTG : le calque de trait servant de barrière
 };
 
-struct Image {                       // une "case" = une colonne de la timeline
+// « Track » = une pile de calques avec son propre temps. « Timeline » ne
+// désigne que l'axe temporel commun à la scène, et le panneau qui l'affiche :
+// une scène a plusieurs Track et une seule timeline.
+
+struct Image {                       // une "case" = une colonne de la track
     ImageId  id;
     QHash<LayerId, CelId> cels;      // sparse : absent = calque vide sur cette image
     std::optional<QColor> marker;
 };
 
-struct Timeline {
+struct Track {
     QVector<Layer>   layers;         // ordre = ordre de composition, index 0 au-dessus
     QVector<ImageId> slots;          // le temps ; exposition = ImageId répété
     QHash<ImageId, Image> images;
@@ -67,9 +72,21 @@ struct Timeline {
 
 struct Scene {
     int framerate = 24;
-    QVector<Timeline> timelines;     // ordre = groupes empilés
+    int width = 1920, height = 1080; // le canevas : le rectangle exporté
+    QVector<Track> tracks;           // ordre = groupes empilés
 };
 ```
+
+**Le canevas.** La surface de dessin n'a pas de bords : les tuiles sont creuses
+et leurs coordonnées sont signées, et c'est voulu — un rough déborde. Mais le
+`Scene` porte quand même un rectangle, le seul du modèle : c'est ce qui définit
+« l'image » — ce que montre le cadre, ce qui borne un remplissage CTG, et ce que
+M5 écrit dans un fichier. Sans lui, chaque image exportée aurait la taille de sa
+propre boîte englobante et deux images ne feraient jamais la même taille.
+
+Le remplissage CTG est donc découpé au canevas : une forme à cheval sur le bord
+est coloriée jusqu'au bord et pas au-delà. Ce qui est hors canevas n'est pas
+dans l'image, donc il n'y a rien à colorier dehors.
 
 **Les trois invariants à tester en permanence :**
 
@@ -107,7 +124,7 @@ struct TileSnapshot { CelId cel; QPoint coord; TileRef old_tile; };
 struct Command {
     QString label;
     QVector<TileSnapshot> tiles;    // pour les opérations de dessin
-    QVector<StructOp>     ops;      // pour les opérations de timeline
+    QVector<StructOp>     ops;      // pour les opérations de track
 };
 ```
 
@@ -239,7 +256,7 @@ Tests qui doivent passer :
 - ajouter un intervalle n'alloue aucune tuile ;
 - supprimer l'image 3 puis annuler un trait fait sur l'image 5 qui lui était liée
   restaure le bon contenu ;
-- ajouter un calque sur une timeline de 500 images est en O(1).
+- ajouter un calque sur une track de 500 images est en O(1).
 
 Ce jalon est le vrai test du modèle de données. S'il est propre ici, tout le
 reste est de la mécanique.
@@ -247,7 +264,7 @@ reste est de la mécanique.
 ### M2 — Dessiner (2-3 semaines)
 
 Un canevas, un pinceau raster avec pression, une gomme, composition GPU des
-calques d'une image. Une seule timeline, pas encore de timeline visible.
+calques d'une image. Une seule track, pas encore de timeline visible.
 
 ### M3 — Animer (3-4 semaines)
 
@@ -263,7 +280,7 @@ L'implémentation LazyBrush ci-dessus, plus les trois hypothèses à tester.
 ### M5 — Sortir (1-2 semaines)
 
 Export séquence PNG 16 bits, un dossier par calque, nomenclature
-`{timeline}_{calque}_{image:04}.png`. Sauvegarde du projet : un dossier avec
+`{track}_{calque}_{image:04}.png`. Sauvegarde du projet : un dossier avec
 `scene.json` + un PNG par cel. Autosave par simple réécriture atomique.
 
 À ce stade, un animateur peut faire un plan complet et l'emmener dans un

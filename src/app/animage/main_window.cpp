@@ -11,8 +11,8 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
+#include <QHeaderView>
 #include <QLabel>
-#include <QListWidget>
 #include <QMenuBar>
 #include <QPixmap>
 #include <QPushButton>
@@ -22,12 +22,15 @@
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
+#include <cmath>
 
 #include "canvas_widget.h"
 #include "color.h"
+#include "scene_settings_dialog.h"
 #include "timeline_widget.h"
 
 using namespace animage;
@@ -36,13 +39,13 @@ MainWindow::MainWindow() {
     setWindowTitle(QStringLiteral("Animage"));
     resize(1400, 900);
 
-    timeline_ = doc_.addTimeline("main");
-    const LayerId first = doc_.addLayer(timeline_, "layer 1");
-    doc_.insertImage(timeline_, 0);
+    track_ = doc_.addTrack("main");
+    const LayerId first = doc_.addLayer(track_, "layer 1");
+    doc_.insertImage(track_, 0);
     doc_.clearHistory();  // an empty scene is the starting point, not an edit
 
     canvas_ = new CanvasWidget(doc_, this);
-    canvas_->setTimeline(timeline_);
+    canvas_->setTrack(track_);
     canvas_->setFrame(0);
     canvas_->setActiveLayer(first);
     setCentralWidget(canvas_);
@@ -62,6 +65,7 @@ MainWindow::MainWindow() {
         const QSignalBlocker block(radius_);
         radius_->setValue(radius);
     });
+    connect(canvas_, &CanvasWidget::colourPicked, this, &MainWindow::applyColour);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
@@ -83,6 +87,22 @@ MainWindow::~MainWindow() {
     // Removing it here rather than letting ~QObject do it keeps it from seeing
     // events while the children it forwards to are already being destroyed.
     qApp->removeEventFilter(this);
+}
+
+// Opened framed on the canvas rather than at one-to-one in a corner of it: the
+// first thing to see is the picture you are making.
+//
+// Queued rather than done here, and certainly not in the constructor. The fit
+// is computed from the size of the canvas widget, and that size is not final
+// until the layout has run and the docks have taken their share: from the
+// constructor it asked for five percent, and from showEvent it was still wide
+// enough to push the right-hand edge of the picture off screen. A zero-delay
+// timer runs once every pending resize has been delivered.
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    if (framed_once_) return;
+    framed_once_ = true;
+    QTimer::singleShot(0, this, [this] { canvas_->fitToCanvas(); });
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -126,10 +146,10 @@ void MainWindow::buildActions() {
     redo_action->setShortcutContext(Qt::ApplicationShortcut);
 
     edit->addSeparator();
-    // The framerate belongs to the scene, not to the timeline: every timeline
-    // in the scene runs at it. Putting the control in the timeline panel said
-    // otherwise.
-    edit->addAction(QStringLiteral("Scene framerate..."), this, &MainWindow::chooseFramerate);
+    // The framerate and the canvas both belong to the scene, not to a track:
+    // every track in the scene runs at one framerate and is composited into one
+    // picture. Putting either in the timeline panel said otherwise.
+    edit->addAction(QStringLiteral("Scene settings..."), this, &MainWindow::chooseSceneSettings);
 
     QMenu* animation = menuBar()->addMenu(QStringLiteral("&Animation"));
     play_action_ = animation->addAction(QStringLiteral("Play"), QKeySequence(Qt::Key_Return), this,
@@ -166,7 +186,12 @@ void MainWindow::buildActions() {
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
     view->addAction(QStringLiteral("Actual size"), QKeySequence(Qt::Key_1), canvas_,
                     &CanvasWidget::resetView);
-    view->addAction(QStringLiteral("Fit drawing"), QKeySequence(Qt::Key_0), canvas_,
+    view->addAction(QStringLiteral("Fit canvas"), QKeySequence(Qt::Key_0), canvas_,
+                    &CanvasWidget::fitToCanvas);
+    // The drawing is not the canvas, and both are worth being able to frame:
+    // one is what you are delivering, the other is everything you have made,
+    // including whatever ran off the edge.
+    view->addAction(QStringLiteral("Fit drawing"), QKeySequence(Qt::SHIFT | Qt::Key_0), canvas_,
                     &CanvasWidget::fitToDrawing);
     view->addSeparator();
 
@@ -253,7 +278,8 @@ void MainWindow::buildActions() {
     // The swatch is a button too: a colour patch is the thing people click.
     colour_swatch_ = new QPushButton(this);
     colour_swatch_->setFixedSize(28, 20);
-    colour_swatch_->setToolTip(QStringLiteral("Brush colour"));
+    colour_swatch_->setToolTip(QStringLiteral("Brush colour.\n"
+                                              "Alt+click on the drawing picks the colour there."));
     colour_swatch_->setCursor(Qt::PointingHandCursor);
     colour_swatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #888;"));
     connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseColour);
@@ -277,14 +303,31 @@ void MainWindow::buildLayerPanel() {
     auto* panel = new QWidget(dock);
     auto* layout = new QVBoxLayout(panel);
 
-    layer_list_ = new QListWidget(panel);
+    // Two columns rather than one, because a colour layer needs two switches:
+    // whether it is shown at all, and whether what is shown is the fill or the
+    // marks that generated it.
+    //
+    // Both are the item's own check indicators. The second one used to be a
+    // QCheckBox in a widget set on the row, and that quietly broke the first
+    // one: an index widget counts as a persistent editor, so the view routes
+    // the press into it instead of to the delegate and the row's own tick stops
+    // responding. A colour layer could not be hidden at all.
+    layer_list_ = new QTreeWidget(panel);
+    layer_list_->setColumnCount(2);
+    layer_list_->setHeaderLabels({QStringLiteral("Layer"), QStringLiteral("Marks")});
+    layer_list_->setRootIsDecorated(false);
+    layer_list_->setUniformRowHeights(true);
+    layer_list_->header()->setStretchLastSection(false);
+    layer_list_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    layer_list_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     // No keyboard focus: Qt would otherwise use Space to toggle the checked
     // item, and Space is worth more as pan than as a visibility toggle you can
     // hit by accident.
     layer_list_->setFocusPolicy(Qt::NoFocus);
     layout->addWidget(layer_list_, 1);
-    connect(layer_list_, &QListWidget::currentRowChanged, this, &MainWindow::onLayerSelected);
-    connect(layer_list_, &QListWidget::itemChanged, this, &MainWindow::onLayerItemChanged);
+    connect(layer_list_, &QTreeWidget::currentItemChanged, this,
+            [this](QTreeWidgetItem*, QTreeWidgetItem*) { onLayerSelected(); });
+    connect(layer_list_, &QTreeWidget::itemChanged, this, &MainWindow::onLayerItemChanged);
 
     auto* opacity_row = new QWidget(panel);
     auto* opacity_layout = new QVBoxLayout(opacity_row);
@@ -391,7 +434,7 @@ void MainWindow::buildTimelinePanel() {
     layout->addWidget(controls);
 
     timeline_widget_ = new TimelineWidget(doc_, panel);
-    timeline_widget_->setTimeline(timeline_);
+    timeline_widget_->setTrack(track_);
     connect(timeline_widget_, &TimelineWidget::currentSlotChanged, this,
             &MainWindow::onSlotChanged);
     connect(timeline_widget_, &TimelineWidget::documentChanged, this,
@@ -416,19 +459,19 @@ void MainWindow::buildStatusBar() {
 
 void MainWindow::syncStatus() {
     if (!status_) return;
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
 
     const std::size_t slot = canvas_->frame();
-    const ImageId image = timeline->imageAtSlot(slot);
+    const ImageId image = track->imageAtSlot(slot);
     status_->setText(
         QStringLiteral("frame %1 / %2   held %3   drawings %4   layers %5   zoom %6%   "
                        "tiles %7   undo %8   %9 fps")
             .arg(slot + 1)
-            .arg(timeline->frameCount())
-            .arg(timeline->exposureOf(image))
-            .arg(timeline->images.size())
-            .arg(timeline->layers.size())
+            .arg(track->frameCount())
+            .arg(track->exposureOf(image))
+            .arg(track->images.size())
+            .arg(track->layers.size())
             .arg(canvas_->zoom() * 100.0, 0, 'f', 0)
             .arg(doc_.totalTileCount())
             .arg(doc_.undoDepth())
@@ -450,10 +493,10 @@ void MainWindow::onSlotChanged(std::size_t slot) {
 }
 
 void MainWindow::stepFrame(int delta) {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.empty()) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->slots.empty()) return;
 
-    const int count = static_cast<int>(timeline->slots.size());
+    const int count = static_cast<int>(track->slots.size());
     int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;
     next = ((next % count) + count) % count;  // wrap, so scrubbing loops
     timeline_widget_->setCurrentSlot(static_cast<std::size_t>(next));
@@ -462,31 +505,31 @@ void MainWindow::stepFrame(int delta) {
 // Moves to the first frame of the previous or next distinct drawing, stepping
 // over held frames rather than through them.
 void MainWindow::stepDrawing(int direction) {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.empty()) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->slots.empty()) return;
 
     const std::vector<ImageId> neighbours =
-        timeline->distinctNeighbours(timeline_widget_->currentSlot(), 1, direction);
+        track->distinctNeighbours(timeline_widget_->currentSlot(), 1, direction);
     if (neighbours.empty()) return;
 
-    auto it = std::find(timeline->slots.begin(), timeline->slots.end(), neighbours[0]);
-    if (it == timeline->slots.end()) return;
+    auto it = std::find(track->slots.begin(), track->slots.end(), neighbours[0]);
+    if (it == track->slots.end()) return;
     timeline_widget_->setCurrentSlot(
-        static_cast<std::size_t>(std::distance(timeline->slots.begin(), it)));
+        static_cast<std::size_t>(std::distance(track->slots.begin(), it)));
 }
 
 // After a drawing means after the whole hold. Landing a new drawing in the
 // middle of a ten-frame hold splits it in two, which is never what was meant.
 std::size_t MainWindow::slotAfterCurrentDrawing() const {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.empty()) return 0;
-    return timeline->runBounds(timeline_widget_->currentSlot()).second + 1;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->slots.empty()) return 0;
+    return track->runBounds(timeline_widget_->currentSlot()).second + 1;
 }
 
 void MainWindow::insertInterval() {
     stopPlayback();
     const std::size_t at = slotAfterCurrentDrawing();
-    doc_.insertImage(timeline_, at);
+    doc_.insertImage(track_, at);
     timeline_widget_->refresh();
     timeline_widget_->setCurrentSlot(at);
     refreshEverything();
@@ -497,7 +540,7 @@ void MainWindow::duplicateDrawing() {
     const std::size_t at = slotAfterCurrentDrawing();
     // duplicateImage inserts just after the slot it is given, so hand it the
     // last frame of the hold.
-    doc_.duplicateImage(timeline_, at > 0 ? at - 1 : 0);
+    doc_.duplicateImage(track_, at > 0 ? at - 1 : 0);
     timeline_widget_->refresh();
     timeline_widget_->setCurrentSlot(at);
     refreshEverything();
@@ -507,31 +550,31 @@ void MainWindow::duplicateDrawing() {
 // different operation and lives on Hold -.
 void MainWindow::deleteDrawing() {
     stopPlayback();
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
 
-    const ImageId image = timeline->imageAtSlot(timeline_widget_->currentSlot());
+    const ImageId image = track->imageAtSlot(timeline_widget_->currentSlot());
     if (image == kNoId) return;
-    if (timeline->exposureOf(image) >= timeline->slots.size()) {
+    if (track->exposureOf(image) >= track->slots.size()) {
         return;  // it is the only drawing; leave something to draw on
     }
 
-    doc_.removeDrawing(timeline_, image);
+    doc_.removeDrawing(track_, image);
     refreshEverything();
 }
 
 void MainWindow::extendExposure() {
-    doc_.extendExposure(timeline_, timeline_widget_->currentSlot(), 1);
+    doc_.extendExposure(track_, timeline_widget_->currentSlot(), 1);
     refreshEverything();
 }
 
 void MainWindow::shortenExposure() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
     const std::size_t slot = timeline_widget_->currentSlot();
-    const ImageId image = timeline->imageAtSlot(slot);
-    if (timeline->exposureOf(image) <= 1) return;  // that would delete the drawing
-    doc_.removeSlot(timeline_, slot);
+    const ImageId image = track->imageAtSlot(slot);
+    if (track->exposureOf(image) <= 1) return;  // that would delete the drawing
+    doc_.removeSlot(track_, slot);
     refreshEverything();
 }
 
@@ -544,12 +587,46 @@ void MainWindow::setFramerate(int fps) {
     syncStatus();
 }
 
-void MainWindow::chooseFramerate() {
-    bool accepted = false;
-    const int fps = QInputDialog::getInt(this, QStringLiteral("Scene framerate"),
-                                         QStringLiteral("Frames per second:"),
-                                         doc_.scene().framerate, 1, 120, 1, &accepted);
-    if (accepted) setFramerate(fps);
+// One command for the pair, so changing both and then changing your mind is one
+// undo rather than two.
+void MainWindow::chooseSceneSettings() {
+    stopPlayback();
+    const int was_framerate = doc_.scene().framerate;
+    const int was_width = doc_.scene().width;
+    const int was_height = doc_.scene().height;
+
+    SceneSettingsDialog dialog(was_framerate, was_width, was_height, this);
+
+    // The preview writes to the scene directly, around the history. Choosing a
+    // resolution means looking at it, and it is not worth an undo entry per
+    // number tried on the way -- so nothing is recorded until the dialog is
+    // accepted, and cancelling puts back exactly what was there.
+    const auto show = [this](int framerate, int width, int height) {
+        Scene& scene = doc_.mutableScene();
+        scene.framerate = framerate;
+        scene.width = width;
+        scene.height = height;
+        canvas_->refreshAll();
+        syncStatus();
+    };
+    connect(&dialog, &SceneSettingsDialog::previewed, this, show);
+
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+
+    // Back to where we started either way, so that accepting records the whole
+    // change as one command rather than recording the difference from whatever
+    // the last preview happened to leave behind.
+    show(was_framerate, was_width, was_height);
+    if (!accepted) return;
+
+    doc_.beginCommand("Scene settings");
+    doc_.setCanvasSize(dialog.canvasWidth(), dialog.canvasHeight());
+    doc_.setFramerate(dialog.framerate());
+    doc_.endCommand();
+
+    // The canvas bounds the colour fills, so they have to be solved again.
+    canvas_->refreshAll();
+    syncStatus();
 }
 
 void MainWindow::togglePlayback() {
@@ -558,8 +635,8 @@ void MainWindow::togglePlayback() {
         return;
     }
 
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.size() < 2) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->slots.size() < 2) return;
 
     playback_start_slot_ = timeline_widget_->currentSlot();
     playback_clock_.start();
@@ -584,8 +661,8 @@ void MainWindow::stopPlayback() {
 // must not make the whole take run slow, which is exactly the thing playback
 // exists to let you judge.
 void MainWindow::onPlaybackTick() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->slots.empty()) {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->slots.empty()) {
         stopPlayback();
         return;
     }
@@ -593,7 +670,7 @@ void MainWindow::onPlaybackTick() {
     const int fps = std::max(1, doc_.scene().framerate);
     const qint64 elapsed = playback_clock_.elapsed();
     const qint64 advanced = elapsed * fps / 1000;
-    const std::size_t count = timeline->slots.size();
+    const std::size_t count = track->slots.size();
     const std::size_t slot =
         (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
 
@@ -609,59 +686,57 @@ void MainWindow::onOnionChanged() {
 }
 
 Layer* MainWindow::currentLayer() {
-    Timeline* timeline = doc_.mutableScene().findTimeline(timeline_);
-    if (!timeline) return nullptr;
-    const int row = layer_list_ ? layer_list_->currentRow() : -1;
-    if (row < 0 || static_cast<std::size_t>(row) >= timeline->layers.size()) return nullptr;
-    return &timeline->layers[static_cast<std::size_t>(row)];
+    Track* track = doc_.mutableScene().findTrack(track_);
+    if (!track) return nullptr;
+    const int row = layer_list_ ? layer_list_->indexOfTopLevelItem(layer_list_->currentItem()) : -1;
+    if (row < 0 || static_cast<std::size_t>(row) >= track->layers.size()) return nullptr;
+    return &track->layers[static_cast<std::size_t>(row)];
 }
 
 void MainWindow::rebuildLayerList() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || !layer_list_) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || !layer_list_) return;
 
     const LayerId active = canvas_->activeLayer();
 
     updating_list_ = true;
     layer_list_->clear();
-    int active_row = 0;
-    for (std::size_t i = 0; i < timeline->layers.size(); ++i) {
-        const Layer& layer = timeline->layers[i];
+    QTreeWidgetItem* active_item = nullptr;
+    for (const Layer& layer : track->layers) {
         QString label = QString::fromStdString(layer.name);
         if (layer.kind == LayerKind::Ctg) {
             label += QStringLiteral("   [colour, %1 source%2]")
                          .arg(layer.ctg_sources.size())
                          .arg(layer.ctg_sources.size() == 1 ? "" : "s");
         }
-        auto* item = new QListWidgetItem(label, layer_list_);
+        auto* item = new QTreeWidgetItem(layer_list_);
+        item->setText(0, label);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
-        if (layer.id == active) active_row = static_cast<int>(i);
+        item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
 
-        // A colour layer gets a second box beside the visibility one: show the
-        // scribbles rather than the fill. Same size, same place, because it is
-        // the same kind of thing -- a switch about what you are looking at.
-        if (layer.kind != LayerKind::Ctg) continue;
-
-        auto* row = new QWidget(layer_list_);
-        auto* row_layout = new QHBoxLayout(row);
-        row_layout->setContentsMargins(0, 0, 6, 0);
-        row_layout->addStretch(1);
-
-        auto* scribbles = new QCheckBox(row);
-        scribbles->setChecked(layer.show_scribbles);
-        scribbles->setFocusPolicy(Qt::NoFocus);
-        scribbles->setToolTip(
-            QStringLiteral("Show the scribbles instead of the fill.\n"
-                           "Changes nothing about the drawing, only what is shown."));
-        const LayerId id = layer.id;
-        connect(scribbles, &QCheckBox::toggled, this,
-                [this, id](bool on) { setShowScribbles(id, on); });
-        row_layout->addWidget(scribbles);
-
-        layer_list_->setItemWidget(item, row);
+        // A colour layer gets a second tick: show the scribbles rather than the
+        // fill. Only a colour layer has one -- an item draws an indicator only
+        // in a column that has been given a check state, so the other rows
+        // leave that column empty.
+        if (layer.kind == LayerKind::Ctg) {
+            item->setCheckState(1, layer.show_scribbles ? Qt::Checked : Qt::Unchecked);
+            item->setToolTip(1, QStringLiteral(
+                                    "Show the scribbles instead of the fill.\n"
+                                    "Changes nothing about the drawing, only what is shown."));
+        }
+        if (layer.id == active) active_item = item;
     }
-    layer_list_->setCurrentRow(active_row);
+    if (!active_item && layer_list_->topLevelItemCount() > 0) {
+        active_item = layer_list_->topLevelItem(0);
+    }
+    layer_list_->setCurrentItem(active_item);
+
+    // The second column only means something to a colour layer, so it only
+    // appears once there is one. A headed, empty column beside a stack of
+    // ordinary layers is a question the panel cannot answer.
+    const bool any_colour = std::any_of(track->layers.begin(), track->layers.end(),
+                                        [](const Layer& l) { return l.kind == LayerKind::Ctg; });
+    layer_list_->setColumnHidden(1, !any_colour);
     updating_list_ = false;
 
     onLayerSelected();
@@ -678,17 +753,25 @@ void MainWindow::onLayerSelected() {
     }
 }
 
-void MainWindow::onLayerItemChanged(QListWidgetItem* item) {
+void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {
     if (updating_list_ || !item) return;
-    Timeline* timeline = doc_.mutableScene().findTimeline(timeline_);
-    if (!timeline) return;
+    Track* track = doc_.mutableScene().findTrack(track_);
+    if (!track) return;
 
-    const int row = layer_list_->row(item);
-    if (row < 0 || static_cast<std::size_t>(row) >= timeline->layers.size()) return;
+    const int row = layer_list_->indexOfTopLevelItem(item);
+    if (row < 0 || static_cast<std::size_t>(row) >= track->layers.size()) return;
 
-    Layer updated = timeline->layers[static_cast<std::size_t>(row)];
-    updated.visible = item->checkState() == Qt::Checked;
-    doc_.updateLayer(timeline_, updated.id, updated);
+    Layer updated = track->layers[static_cast<std::size_t>(row)];
+    if (column == 0) {
+        updated.visible = item->checkState(0) == Qt::Checked;
+    } else if (column == 1 && updated.kind == LayerKind::Ctg) {
+        // What you are looking at, not what is on the layer. Recorded like any
+        // other layer property so it survives a rebuild of the panel.
+        updated.show_scribbles = item->checkState(1) == Qt::Checked;
+    } else {
+        return;
+    }
+    doc_.updateLayer(track_, updated.id, updated);
 
     canvas_->refreshAll();
     syncStatus();
@@ -706,7 +789,7 @@ void MainWindow::onOpacityChanged(int percent) {
     if (!layer) return;
     Layer updated = *layer;
     updated.opacity = static_cast<float>(percent) / 100.0f;
-    doc_.updateLayer(timeline_, updated.id, updated);
+    doc_.updateLayer(track_, updated.id, updated);
     // refreshAll only marks the cache dirty; the composite happens once, in the
     // next paint. Doing it here meant one full-viewport flatten per slider tick.
     canvas_->refreshAll();
@@ -716,7 +799,7 @@ void MainWindow::clearCurrentLayer() {
     stopPlayback();
     Layer* layer = currentLayer();
     if (!layer) return;
-    doc_.clearCel(timeline_, canvas_->currentImage(), layer->id);
+    doc_.clearCel(track_, canvas_->currentImage(), layer->id);
     canvas_->refreshAll();
     syncStatus();
 }
@@ -724,13 +807,13 @@ void MainWindow::clearCurrentLayer() {
 // The lowest unused "layer N". Reusing a number after a deletion would give
 // two layers the same name, which makes the panel ambiguous.
 std::string MainWindow::nextLayerName() const {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return "layer 1";
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return "layer 1";
 
     for (std::size_t n = 1;; ++n) {
         const std::string candidate = "layer " + std::to_string(n);
         const bool taken = std::any_of(
-            timeline->layers.begin(), timeline->layers.end(),
+            track->layers.begin(), track->layers.end(),
             [&](const Layer& l) { return l.name == candidate; });
         if (!taken) return candidate;
     }
@@ -749,11 +832,12 @@ void MainWindow::syncToolSettings() {
 }
 
 void MainWindow::addLayer() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
 
-    const int row = layer_list_ ? std::max(0, layer_list_->currentRow()) : 0;
-    const LayerId created = doc_.addLayer(timeline_, nextLayerName(),
+    const int row =
+        layer_list_ ? std::max(0, layer_list_->indexOfTopLevelItem(layer_list_->currentItem())) : 0;
+    const LayerId created = doc_.addLayer(track_, nextLayerName(),
                                           static_cast<std::size_t>(row));
     canvas_->setActiveLayer(created);
     rebuildLayerList();
@@ -763,24 +847,28 @@ void MainWindow::addLayer() {
 // Every raster layer becomes a barrier by default. Cutting against the rough as
 // well as the clean closes gaps that leak from either alone, and there is no
 // good reason to make someone ask for that.
+//
+// It goes to the bottom of the pile rather than above the selected layer, which
+// is where an ordinary layer goes. A colour layer is cut against the line art
+// and belongs underneath it: created on top, the flat it generates covers the
+// very drawing that produced it.
 void MainWindow::addColourLayer() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
 
-    const int row = layer_list_ ? std::max(0, layer_list_->currentRow()) : 0;
+    const std::size_t bottom = track->layers.size();
 
     doc_.beginCommand("Add colour layer");
     const LayerId created =
-        doc_.addLayer(timeline_, nextColourLayerName(), static_cast<std::size_t>(row),
-                      LayerKind::Ctg);
+        doc_.addLayer(track_, nextColourLayerName(), bottom, LayerKind::Ctg);
 
-    const Timeline* after = doc_.scene().findTimeline(timeline_);
+    const Track* after = doc_.scene().findTrack(track_);
     if (after) {
         Layer settings = *after->findLayer(created);
         for (const Layer& layer : after->layers) {
             if (layer.kind == LayerKind::Raster) settings.ctg_sources.push_back(layer.id);
         }
-        doc_.updateLayer(timeline_, created, settings);
+        doc_.updateLayer(track_, created, settings);
     }
     doc_.endCommand();
 
@@ -790,54 +878,41 @@ void MainWindow::addColourLayer() {
 }
 
 std::string MainWindow::nextColourLayerName() const {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return "colour 1";
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return "colour 1";
     for (std::size_t n = 1;; ++n) {
         const std::string candidate = "colour " + std::to_string(n);
         const bool taken =
-            std::any_of(timeline->layers.begin(), timeline->layers.end(),
+            std::any_of(track->layers.begin(), track->layers.end(),
                         [&](const Layer& l) { return l.name == candidate; });
         if (!taken) return candidate;
     }
 }
 
-void MainWindow::setShowScribbles(LayerId layer_id, bool showing) {
-    if (updating_list_) return;
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
-    const Layer* layer = timeline->findLayer(layer_id);
-    if (!layer || layer->show_scribbles == showing) return;
-
-    Layer updated = *layer;
-    updated.show_scribbles = showing;
-    doc_.updateLayer(timeline_, layer_id, updated);
-    canvas_->refreshAll();
-}
-
 void MainWindow::removeCurrentLayer() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || timeline->layers.size() <= 1) return;  // never leave nothing to draw on
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->layers.size() <= 1) return;  // never leave nothing to draw on
     Layer* layer = currentLayer();
     if (!layer) return;
 
-    doc_.removeLayer(timeline_, layer->id);
-    const Timeline* after = doc_.scene().findTimeline(timeline_);
+    doc_.removeLayer(track_, layer->id);
+    const Track* after = doc_.scene().findTrack(track_);
     if (after && !after->layers.empty()) canvas_->setActiveLayer(after->layers.front().id);
     rebuildLayerList();
     canvas_->refreshAll();
 }
 
 void MainWindow::moveCurrentLayer(int delta) {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || !layer_list_) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || !layer_list_) return;
 
-    const int from = layer_list_->currentRow();
+    const int from = layer_list_->indexOfTopLevelItem(layer_list_->currentItem());
     const int to = from + delta;
-    if (from < 0 || to < 0 || static_cast<std::size_t>(to) >= timeline->layers.size()) return;
+    if (from < 0 || to < 0 || static_cast<std::size_t>(to) >= track->layers.size()) return;
 
-    doc_.moveLayer(timeline_, static_cast<std::size_t>(from), static_cast<std::size_t>(to));
+    doc_.moveLayer(track_, static_cast<std::size_t>(from), static_cast<std::size_t>(to));
     rebuildLayerList();
-    layer_list_->setCurrentRow(to);
+    layer_list_->setCurrentItem(layer_list_->topLevelItem(to));
     canvas_->refreshAll();
 }
 
@@ -848,17 +923,24 @@ void MainWindow::chooseColour() {
     const QColor chosen = QColorDialog::getColor(initial, this, QStringLiteral("Brush colour"));
     if (!chosen.isValid()) return;
 
-    colour_r_ = srgbToLinear(static_cast<float>(chosen.redF()));
-    colour_g_ = srgbToLinear(static_cast<float>(chosen.greenF()));
-    colour_b_ = srgbToLinear(static_cast<float>(chosen.blueF()));
+    applyColour(srgbToLinear(static_cast<float>(chosen.redF())),
+                srgbToLinear(static_cast<float>(chosen.greenF())),
+                srgbToLinear(static_cast<float>(chosen.blueF())));
+}
 
-    BrushSettings& settings = canvas_->brushSettings();
-    settings.r = colour_r_;
-    settings.g = colour_g_;
-    settings.b = colour_b_;
+void MainWindow::applyColour(float r, float g, float b) {
+    colour_r_ = r;
+    colour_g_ = g;
+    colour_b_ = b;
+    canvas_->setBrushColour(r, g, b);
 
+    if (!colour_swatch_) return;
+    const auto shown = [](float linear) {
+        return static_cast<qreal>(std::clamp(linearToSrgb(linear), 0.0f, 1.0f));
+    };
+    const QColor swatch = QColor::fromRgbF(shown(r), shown(g), shown(b));
     colour_swatch_->setStyleSheet(
-        QStringLiteral("background:%1;border:1px solid #888;").arg(chosen.name()));
+        QStringLiteral("background:%1;border:1px solid #888;").arg(swatch.name()));
 }
 
 void MainWindow::setBrushRadius(double radius) {

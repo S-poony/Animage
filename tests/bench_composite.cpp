@@ -27,7 +27,7 @@ double milliseconds(Clock::time_point start, Clock::time_point end) {
 
 // Something like a real drawing: strokes spread over the whole viewport rather
 // than one dot, so the tiles actually exist and have to be walked.
-void scribble(Document& doc, TimelineId timeline, ImageId image, LayerId layer, int strokes,
+void scribble(Document& doc, TrackId track, ImageId image, LayerId layer, int strokes,
               int width, int height, unsigned seed) {
     ScopedCommand command(doc, "Scribble");
     BrushSettings settings;
@@ -44,7 +44,7 @@ void scribble(Document& doc, TimelineId timeline, ImageId image, LayerId layer, 
     for (int s = 0; s < strokes; ++s) {
         const float x0 = static_cast<float>(next() * width);
         const float y0 = static_cast<float>(next() * height);
-        brush.begin(doc, timeline, image, layer, {x0, y0, 1.0f});
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
         for (int i = 0; i < 18; ++i) {
             brush.extend({static_cast<float>(x0 + (next() - 0.5) * 260),
                           static_cast<float>(y0 + (next() - 0.5) * 260), 1.0f});
@@ -53,16 +53,16 @@ void scribble(Document& doc, TimelineId timeline, ImageId image, LayerId layer, 
     }
 }
 
-double timeComposites(const Document& doc, TimelineId timeline, ImageId image,
+double timeComposites(const Document& doc, TrackId track, ImageId image,
                       const PixelRect& region, int step, int repeats) {
     Compositor compositor;
     Framebuffer frame;
     // One outside the timing, so the buffer is already allocated.
-    compositor.composite(doc, timeline, image, region, frame, step);
+    compositor.composite(doc, track, image, region, frame, step);
 
     const auto start = Clock::now();
     for (int i = 0; i < repeats; ++i) {
-        compositor.composite(doc, timeline, image, region, frame, step);
+        compositor.composite(doc, track, image, region, frame, step);
     }
     return milliseconds(start, Clock::now()) / repeats;
 }
@@ -78,16 +78,16 @@ int main() {
 
     for (int layers = 1; layers <= 4; ++layers) {
         Document doc;
-        const TimelineId timeline = doc.addTimeline("main");
-        const ImageId image = doc.insertImage(timeline, 0);
+        const TrackId track = doc.addTrack("main");
+        const ImageId image = doc.insertImage(track, 0);
         for (int i = 0; i < layers; ++i) {
-            const LayerId layer = doc.addLayer(timeline, "layer " + std::to_string(i + 1));
-            scribble(doc, timeline, image, layer, 90, kViewportWidth, kViewportHeight,
+            const LayerId layer = doc.addLayer(track, "layer " + std::to_string(i + 1));
+            scribble(doc, track, image, layer, 90, kViewportWidth, kViewportHeight,
                      0x9e37u + i * 7919u);
         }
 
         const PixelRect viewport{0, 0, kViewportWidth, kViewportHeight};
-        const double bare = timeComposites(doc, timeline, image, viewport, 1, 20);
+        const double bare = timeComposites(doc, track, image, viewport, 1, 20);
 
         std::printf("%d layer%s  %6zu tiles\n", layers, layers == 1 ? " " : "s",
                     doc.totalTileCount());
@@ -98,7 +98,7 @@ int main() {
         for (int margin : {kMargin, 192}) {
             const PixelRect padded{-margin, -margin, kViewportWidth + 2 * margin,
                                    kViewportHeight + 2 * margin};
-            const double timed = timeComposites(doc, timeline, image, padded, 1, 20);
+            const double timed = timeComposites(doc, track, image, padded, 1, 20);
             std::printf("    margin %3d px    %7.2f ms   (%.2fx)\n", margin, timed,
                         timed / bare);
         }
@@ -109,16 +109,16 @@ int main() {
     std::printf("\nzoomed out, 4 layers over a wide drawing\n");
     {
         Document doc;
-        const TimelineId timeline = doc.addTimeline("main");
-        const ImageId image = doc.insertImage(timeline, 0);
+        const TrackId track = doc.addTrack("main");
+        const ImageId image = doc.insertImage(track, 0);
         for (int i = 0; i < 4; ++i) {
-            const LayerId layer = doc.addLayer(timeline, "layer " + std::to_string(i + 1));
-            scribble(doc, timeline, image, layer, 240, kViewportWidth * 6, kViewportHeight * 6,
+            const LayerId layer = doc.addLayer(track, "layer " + std::to_string(i + 1));
+            scribble(doc, track, image, layer, 240, kViewportWidth * 6, kViewportHeight * 6,
                      0x51edu + i * 7919u);
         }
         for (int step : {1, 2, 5, 10, 20}) {
             const PixelRect region{0, 0, kViewportWidth * step, kViewportHeight * step};
-            const double timed = timeComposites(doc, timeline, image, region, step, 10);
+            const double timed = timeComposites(doc, track, image, region, step, 10);
             std::printf("    step %2d (zoom %5.2f)  %7.2f ms\n", step, 1.0 / step, timed);
         }
     }

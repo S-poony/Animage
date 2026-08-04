@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "canvas_widget.h"
 
+#include <QApplication>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointingDevice>
 #include <QResizeEvent>
 #include <QTabletEvent>
@@ -29,6 +31,9 @@ constexpr double kSizeDragPerPixel = 0.012;
 // full refresh -- every frame change, every opacity tick -- to buy free panning
 // nobody had asked for. 64 keeps most of the benefit for a third of the price.
 constexpr int kCacheMargin = 64;
+// How long after a tablet event a mouse event is still assumed to have been
+// promoted from it by the platform rather than produced by a real mouse.
+constexpr qint64 kPenMouseWindowMs = 250;
 
 // Linear to sRGB through a lookup table. The conversion is per pixel of the
 // viewport on every recomposite, and std::pow in that loop is measurable.
@@ -105,20 +110,22 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     eraser_settings_.hardness = 0.85f;
     eraser_settings_.pressure_affects_opacity = false;
     eraser_settings_.erase = true;
+
+    clock_.start();
 }
 
-void CanvasWidget::setTimeline(TimelineId timeline) {
-    timeline_ = timeline;
+void CanvasWidget::setTrack(TrackId track) {
+    track_ = track;
     setFrame(slot_);
 }
 
 void CanvasWidget::setFrame(std::size_t slot) {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
 
-    slot_ = std::min(slot, timeline->slots.empty() ? std::size_t{0}
-                                                   : timeline->slots.size() - 1);
-    const ImageId next = timeline->imageAtSlot(slot_);
+    slot_ = std::min(slot, track->slots.empty() ? std::size_t{0}
+                                                   : track->slots.size() - 1);
+    const ImageId next = track->imageAtSlot(slot_);
     const bool changed = next != image_;
     image_ = next;
 
@@ -129,7 +136,7 @@ void CanvasWidget::setFrame(std::size_t slot) {
 
     // Marked, not rebuilt. Holding an arrow key produces frame changes faster
     // than a rebuild takes, and rebuilding on each one let the queue run away:
-    // the timeline carried on moving for a while after the key came up.
+    // the playhead carried on moving for a while after the key came up.
     onion_dirty_ = true;
     refreshAll();
 }
@@ -137,6 +144,12 @@ void CanvasWidget::setFrame(std::size_t slot) {
 void CanvasWidget::setActiveLayer(LayerId layer) { active_layer_ = layer; }
 
 void CanvasWidget::setEraser(bool erasing) { erasing_ = erasing; }
+
+void CanvasWidget::setBrushColour(float r, float g, float b) {
+    brush_settings_.r = r;
+    brush_settings_.g = g;
+    brush_settings_.b = b;
+}
 
 void CanvasWidget::setBackground(Background background) {
     background_ = background;
@@ -156,33 +169,48 @@ void CanvasWidget::setPlaying(bool playing) {
     refreshAll();
 }
 
-// Rebuilds any CTG fill whose scribbles or line art have moved. Regenerating is
-// skipped entirely when nothing has changed, so this is a few comparisons in
-// the common case; the cost only appears when there is something new to solve.
+// Rebuilds any CTG fill whose scribbles or line art have moved, and says
+// whether any of them actually changed. Regenerating is skipped entirely when
+// nothing has, so this is a few comparisons in the common case; the cost only
+// appears when there is something new to solve.
 //
 // Done here rather than inside the compositor on purpose: a max-flow is not
 // something a paint should be able to start by accident.
-void CanvasWidget::refreshCtgFills() {
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || image_ == kNoId) return;
+bool CanvasWidget::refreshCtgFills() {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || image_ == kNoId) return false;
 
-    // Not while a scribble is being drawn. Every dab bumps the cel's revision,
-    // so solving whenever the fill looks stale meant a max-flow per dab -- tens
-    // of them a second, each one hundreds of milliseconds. The scribble itself
-    // is shown instead, and the solve happens once, when the pen lifts.
+    // Never during a stroke, whichever layer is being drawn on. Every dab bumps
+    // the cel's revision, so solving whenever a fill looked stale meant a
+    // max-flow per dab -- tens of them a second, each one hundreds of
+    // milliseconds.
     //
-    // This cost was always there; it only became visible when the repaint bug
-    // was fixed, because until then the result was never drawn.
-    if (scribbling_) return;
+    // This used to test for a scribble in progress, which covered drawing on the
+    // colour layer and missed drawing on the line art it is cut against. Inking
+    // over a filled drawing therefore re-solved on every dab, and it is the same
+    // trap either way: the solve belongs at the end of the stroke.
+    if (stroking_) return false;
 
+    bool changed = false;
     CtgSettings settings;
-    for (const Layer& layer : timeline->layers) {
+    for (const Layer& layer : track->layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
         // Nothing to solve for a layer showing its scribbles: the fill would be
         // computed and then not drawn.
         if (layer.show_scribbles) continue;
-        ctgFill(doc_, timeline_, image_, layer.id, settings);
+
+        // What the cached fill was keyed on before asking for it. If that moves,
+        // the whole fill has been regenerated and the whole of it has to be
+        // redrawn -- a new fill changes colour across entire regions, nowhere
+        // near wherever the pen happened to be.
+        const CtgFill* previous = doc_.ctgFillFor(track_, image_, layer.id);
+        const bool existed = previous != nullptr;
+        const std::uint64_t was = existed ? previous->inputs : 0;
+
+        const CtgFill& fill = ctgFill(doc_, track_, image_, layer.id, settings);
+        if (!existed || fill.inputs != was) changed = true;
     }
+    return changed;
 }
 
 // While a scribble is being drawn its layer shows the marks rather than the
@@ -190,9 +218,9 @@ void CanvasWidget::refreshCtgFills() {
 // flag, so it is set directly and never recorded: undo has no business
 // restoring what you were looking at.
 void CanvasWidget::setScribblePreview(LayerId layer_id, bool previewing) {
-    Timeline* timeline = doc_.mutableScene().findTimeline(timeline_);
-    if (!timeline) return;
-    Layer* layer = timeline->findLayer(layer_id);
+    Track* track = doc_.mutableScene().findTrack(track_);
+    if (!track) return;
+    Layer* layer = track->findLayer(layer_id);
     if (!layer || layer->kind != LayerKind::Ctg) return;
 
     if (previewing) {
@@ -210,11 +238,11 @@ void CanvasWidget::setScribblePreview(LayerId layer_id, bool previewing) {
 // already reads without being told.
 void CanvasWidget::rebuildOnion() {
     onion_.resize(0, 0);
-    if (playing_ || timeline_ == kNoId) return;
+    if (playing_ || track_ == kNoId) return;
     if (onion_settings_.before <= 0 && onion_settings_.after <= 0) return;
 
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    if (!timeline || cached_region_.isEmpty()) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || cached_region_.isEmpty()) return;
 
     onion_.resize((cached_region_.width + cache_step_ - 1) / cache_step_,
                   (cached_region_.height + cache_step_ - 1) / cache_step_);
@@ -229,7 +257,7 @@ void CanvasWidget::rebuildOnion() {
     const auto collect = [&](int count, int direction, float r, float g, float b) {
         if (count <= 0) return;
         const std::vector<ImageId> neighbours =
-            timeline->distinctNeighbours(slot_, count, direction);
+            track->distinctNeighbours(slot_, count, direction);
         for (std::size_t i = 0; i < neighbours.size(); ++i) {
             const float falloff =
                 static_cast<float>(count - static_cast<int>(i)) / static_cast<float>(count);
@@ -245,7 +273,7 @@ void CanvasWidget::rebuildOnion() {
 
     Framebuffer ghost_frame;
     for (const Ghost& ghost : ghosts) {
-        compositor_.composite(doc_, timeline_, ghost.image, cached_region_, ghost_frame,
+        compositor_.composite(doc_, track_, ghost.image, cached_region_, ghost_frame,
                               cache_step_);
         for (int y = 0; y < onion_.height(); ++y) {
             const Rgba* source = ghost_frame.row(y);
@@ -354,7 +382,7 @@ void CanvasWidget::markDirty(const PixelRect& region) {
 // Composites `region` and writes it into the cached sRGB image. This is the
 // only place the linear working space becomes display pixels.
 void CanvasWidget::refreshRegion(const PixelRect& region) {
-    if (display_.isNull() || timeline_ == kNoId || image_ == kNoId) return;
+    if (display_.isNull() || track_ == kNoId || image_ == kNoId) return;
 
     PixelRect area = intersect(region, cached_region_);
     if (area.isEmpty()) return;
@@ -369,7 +397,7 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
         if (area.isEmpty()) return;
     }
 
-    compositor_.composite(doc_, timeline_, image_, area, scratch_, step);
+    compositor_.composite(doc_, track_, image_, area, scratch_, step);
 
     const bool checker = background_ == Background::Checker;
     const float flat = 1.0f;
@@ -427,7 +455,12 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     // All the compositing for this frame happens here, once, however many
     // edits arrived since the last paint.
-    refreshCtgFills();
+    //
+    // A regenerated fill repaints everything. It is not an edit to the pixels
+    // under the pen: a colour boundary can move anywhere in the picture, so
+    // repainting only what was marked dirty left the new fill showing beside the
+    // stroke and the old one everywhere else.
+    if (refreshCtgFills()) dirty_everything_ = true;
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;
@@ -457,15 +490,88 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     const QRectF target(origin, QSizeF(display_.width() * cache_step_ * zoom_,
                                        display_.height() * cache_step_ * zoom_));
     painter.drawImage(target, display_);
+
+    drawCanvasFrame(painter);
+}
+
+// The canvas: the rectangle that will be exported, outlined, with everything
+// outside it veiled.
+//
+// Drawing outside stays allowed and is not discouraged -- roughs run off the
+// edge, and a surface with no edges is the point of the tile model. But the
+// picture has a boundary, and until it was drawn there was no way to know where
+// it was: the only rectangle on screen was the region a colour fill happened to
+// solve, which looked like a canvas and was not one.
+void CanvasWidget::drawCanvasFrame(QPainter& painter) {
+    const PixelRect canvas = doc_.scene().canvas();
+    if (canvas.isEmpty()) return;
+
+    const QPointF top_left = widgetFromImage({static_cast<double>(canvas.x),
+                                              static_cast<double>(canvas.y)});
+    const QPointF bottom_right =
+        widgetFromImage({static_cast<double>(canvas.x + canvas.width),
+                         static_cast<double>(canvas.y + canvas.height)});
+    const QRectF frame(top_left, bottom_right);
+
+    // Odd-even filling, so the inner rectangle punches a hole in the outer one
+    // and the veil covers everything except the picture.
+    QPainterPath outside;
+    outside.addRect(QRectF(rect()));
+    outside.addRect(frame);
+
+    painter.save();
+    painter.setPen(Qt::NoPen);
+    painter.fillPath(outside, QColor(28, 28, 32, 150));
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(150, 150, 160), 1.0));
+    painter.drawRect(frame);
+    painter.restore();
+}
+
+// --- picking -------------------------------------------------------------
+
+// Samples the flattened drawing under the pointer, in the space it is stored
+// in, and hands the colour to whoever is listening.
+//
+// This is the eyedropper, and it is here rather than on the colour dialog's
+// "pick screen colour" for a reason that is not a matter of taste. That picker
+// only ever hears about mouse buttons, and on Windows a pen produces none it can
+// hear: Qt routes pen input as a tablet event and then discards the legacy mouse
+// messages Windows promotes from it, so the click never arrives however the
+// canvas behaves. Hence colours could be picked with a mouse and not with a pen.
+//
+// Sampling the document is the better answer regardless. The screen picker reads
+// back what the monitor was showing -- after sRGB encoding to eight bits, after
+// the zoom filter, with the onion skin and the paper mixed into it -- and calls
+// the result the colour you drew with. This reads the colour that was stored.
+//
+// The paper is not part of the drawing, so an empty pixel has nothing to pick
+// and the brush is left alone rather than being set to white.
+bool CanvasWidget::pickColourAt(const QPointF& image_point) {
+    if (track_ == kNoId || image_ == kNoId) return false;
+
+    const PixelRect one{static_cast<int>(std::floor(image_point.x())),
+                        static_cast<int>(std::floor(image_point.y())), 1, 1};
+    Framebuffer sample;
+    compositor_.composite(doc_, track_, image_, one, sample, 1);
+    if (sample.isEmpty()) return false;
+
+    // A CTG layer contributes the fill it last generated, which is what is on
+    // screen and so what picking from it should mean.
+    const Rgba pixel = sample.pixel(0, 0);
+    if (pixel.a < 0.01f) return false;
+
+    Q_EMIT colourPicked(pixel.r / pixel.a, pixel.g / pixel.a, pixel.b / pixel.a);
+    return true;
 }
 
 // --- strokes -------------------------------------------------------------
 
 void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
-    if (timeline_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
+    if (track_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
 
-    const Timeline* timeline = doc_.scene().findTimeline(timeline_);
-    const Layer* layer = timeline ? timeline->findLayer(active_layer_) : nullptr;
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
     if (!layer || layer->locked || !layer->visible) return;
 
     BrushSettings settings = (stylus_eraser_ || erasing_) ? eraser_settings_ : brush_settings_;
@@ -484,7 +590,7 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
     doc_.beginCommand(settings.erase ? "Erase" : "Stroke");
     stroking_ = true;
 
-    brush_.begin(doc_, timeline_, image_, active_layer_,
+    brush_.begin(doc_, track_, image_, active_layer_,
                  {static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
                   pressure});
 
@@ -547,7 +653,7 @@ void CanvasWidget::rebindStrokeToCurrentImage() {
         doc_.endCommand();
         return;
     }
-    brush_.begin(doc_, timeline_, image_, active_layer_,
+    brush_.begin(doc_, track_, image_, active_layer_,
                  {static_cast<float>(last_image_point_.x()),
                   static_cast<float>(last_image_point_.y()), last_pressure_});
 }
@@ -559,15 +665,16 @@ void CanvasWidget::endStroke() {
     stroking_ = false;
     stylus_eraser_ = false;
 
-    // The pen lifting is what triggers the full-resolution solve, so the fill
-    // has to be rebuilt and redrawn even though nothing else changed.
     if (scribbling_) {
         scribbling_ = false;
         setScribblePreview(scribble_preview_layer_, false);
-        // The pen lifting is what triggers the solve, so the fill has to be
-        // rebuilt and redrawn even though nothing else has changed.
-        refreshAll();
     }
+
+    // The pen lifting is what triggers the solve, so the fill has to be rebuilt
+    // and redrawn even though nothing else has changed. That holds whichever
+    // layer was drawn on: a stroke on the line art moves the boundary a colour
+    // is cut against just as surely as a scribble does.
+    refreshAll();
     Q_EMIT documentChanged();
 }
 
@@ -643,8 +750,18 @@ void CanvasWidget::endNavigation() {
 // --- input ---------------------------------------------------------------
 
 void CanvasWidget::tabletEvent(QTabletEvent* event) {
+    // Qt drops mouse events aimed at a window a modal dialog has blocked. It
+    // does not do the same for tablet events, which are delivered by hit test
+    // and arrive here regardless -- so the pen drew on the canvas behind an
+    // open dialog, and took the keyboard focus off it on the way in. Leave the
+    // event alone: whatever is modal has a better claim on the pen than we do.
+    if (QApplication::activeModalWidget()) {
+        event->ignore();
+        return;
+    }
+
     event->accept();
-    ++tablet_events_seen_;
+    last_tablet_ms_ = clock_.elapsed();
 
     // Qt gives click-focus for a mouse press but not for a tablet press, so an
     // artist who has touched a spin box in the toolbar never gets the keyboard
@@ -666,6 +783,25 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         return;
     }
 
+    // Alt and the tip picks the colour under it, the gesture every drawing
+    // program already taught everyone's hands. Nothing is drawn and no command
+    // is opened: picking a colour is not an edit.
+    //
+    // Taken when the pen lifts rather than when it lands, so the pen can be slid
+    // onto the exact pixel while it is down. Landing a nib precisely is the hard
+    // part; sliding it once it is on the tablet is not.
+    if (event->type() == QEvent::TabletPress && (event->modifiers() & Qt::AltModifier)) {
+        picking_ = true;
+        return;
+    }
+    if (picking_) {
+        if (event->type() == QEvent::TabletRelease) {
+            picking_ = false;
+            pickColourAt(imageFromWidget(widget_point));
+        }
+        return;  // no stroke, whatever happened to Alt in the meantime
+    }
+
     const QPointingDevice* device = event->pointingDevice();
     if (event->type() == QEvent::TabletPress && device) {
         stylus_eraser_ = device->pointerType() == QPointingDevice::PointerType::Eraser;
@@ -684,10 +820,23 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     }
 }
 
-// Windows Ink synthesises a mouse event for every pen event. Acting on those
-// would draw the stroke a second time at an invented pressure.
+// Windows Ink promotes every pen event to a mouse event as well. Acting on
+// those would draw the stroke a second time at an invented pressure.
+//
+// The question is "did a pen produce this event", so the device is asked first.
+// It does not always say -- a promoted event arrives claiming to be the mouse --
+// so the fallback is how long ago the pen was last heard from. That used to be
+// "has this canvas ever seen a tablet event", which is true forever afterwards:
+// touching the tablet once left the mouse unable to draw for the rest of the
+// session, with nothing on screen to say why.
+//
+// The window only has to outlast the promotion, which follows its pen event
+// immediately. No hand puts down a pen and clicks a mouse inside a quarter of a
+// second, so nothing real is caught by it.
 bool CanvasWidget::eventIsSynthesisedFromPen(QMouseEvent* event) const {
-    return comesFromAStylus(event->pointingDevice()) || tablet_events_seen_ > 0;
+    if (comesFromAStylus(event->pointingDevice())) return true;
+    if (last_tablet_ms_ < 0) return false;
+    return clock_.elapsed() - last_tablet_ms_ < kPenMouseWindowMs;
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
@@ -695,6 +844,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     if (beginNavigation(event->position(), event->button())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
+    if (event->modifiers() & Qt::AltModifier) {
+        picking_ = true;  // taken on release, so the pointer can be adjusted
+        return;
+    }
     beginStroke(imageFromWidget(event->position()), 1.0f);
 }
 
@@ -710,6 +863,11 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     if (eventIsSynthesisedFromPen(event)) return;
+    if (picking_) {
+        picking_ = false;
+        pickColourAt(imageFromWidget(event->position()));
+        return;
+    }
     endStroke();
 }
 
@@ -743,8 +901,11 @@ void CanvasWidget::resetView() {
     Q_EMIT viewChanged();
 }
 
-void CanvasWidget::fitToDrawing() {
-    const PixelRect bounds = imageBounds(doc_, timeline_, image_);
+void CanvasWidget::fitToCanvas() { fitTo(doc_.scene().canvas()); }
+
+void CanvasWidget::fitToDrawing() { fitTo(imageBounds(doc_, track_, image_)); }
+
+void CanvasWidget::fitTo(const PixelRect& bounds) {
     if (bounds.isEmpty() || width() <= 0 || height() <= 0) {
         resetView();
         return;

@@ -9,14 +9,14 @@
 
 namespace animage {
 
-// One column of the timeline. Holds no pixels: it maps each layer to the cel
+// One column of the track. Holds no pixels: it maps each layer to the cel
 // that carries that layer's drawing for this image.
 struct Image {
     ImageId id = kNoId;
 
     // The number an animator would write on the paper. Assigned when the
     // drawing is made and kept for life: a drawing that renumbers itself when
-    // the timing changes cannot be talked about, and reordering the timeline is
+    // the timing changes cannot be talked about, and reordering the track is
     // exactly when you most need to know which one you are holding.
     int number = 0;
 

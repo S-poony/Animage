@@ -6,9 +6,14 @@
 
 #include "document.h"
 
-// The timeline in time: one strip of slots. There is no row per layer, and
-// that absence is the whole point of the model -- timing belongs to the image,
-// so every layer of a drawing is held for exactly as long as the drawing is.
+// The timeline: the shared time axis, showing one track as a strip of slots.
+// There is no row per layer, and that absence is the whole point of the model --
+// timing belongs to the image, so every layer of a drawing is held for exactly
+// as long as the drawing is.
+//
+// One track for now. When there are several they become rows here, under a
+// single playhead: the timeline is the scene's, the track is one stack of
+// layers in it.
 //
 // A drawing held over several frames is one block with a tail, not several
 // identical cells, because that is what it is: the same ImageId repeated.
@@ -18,7 +23,7 @@ class TimelineWidget : public QWidget {
 public:
     explicit TimelineWidget(animage::Document& document, QWidget* parent = nullptr);
 
-    void setTimeline(animage::TimelineId timeline);
+    void setTrack(animage::TrackId track);
     void setCurrentSlot(std::size_t slot);
     std::size_t currentSlot() const { return current_slot_; }
 
@@ -38,7 +43,7 @@ protected:
     void leaveEvent(QEvent* event) override;
 
 private:
-    const animage::Timeline* timeline() const;
+    const animage::Track* track() const;
 
     std::size_t slotAt(int x) const;
     // First and last slot of the run of identical ImageIds containing `slot`.
@@ -49,7 +54,7 @@ private:
     int dropIndexFor(int pointer_x) const;
 
     animage::Document& doc_;
-    animage::TimelineId timeline_ = animage::kNoId;
+    animage::TrackId track_ = animage::kNoId;
     std::size_t current_slot_ = 0;
 
     bool stretching_ = false;

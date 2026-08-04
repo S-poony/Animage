@@ -25,13 +25,6 @@ std::uint32_t quantise(const Rgba& premultiplied) {
            channel(premultiplied.b);
 }
 
-Rgba unquantise(std::uint32_t key) {
-    const float r = static_cast<float>((key >> 16) & 0xff) / 255.0f;
-    const float g = static_cast<float>((key >> 8) & 0xff) / 255.0f;
-    const float b = static_cast<float>(key & 0xff) / 255.0f;
-    return {r, g, b, 1.0f};  // premultiplied by an alpha of one
-}
-
 PixelRect uniteRects(const PixelRect& a, const PixelRect& b) {
     if (a.isEmpty()) return b;
     if (b.isEmpty()) return a;
@@ -39,6 +32,15 @@ PixelRect uniteRects(const PixelRect& a, const PixelRect& b) {
     const int y0 = std::min(a.y, b.y);
     const int x1 = std::max(a.x + a.width, b.x + b.width);
     const int y1 = std::max(a.y + a.height, b.y + b.height);
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
+PixelRect intersectRects(const PixelRect& a, const PixelRect& b) {
+    const int x0 = std::max(a.x, b.x);
+    const int y0 = std::max(a.y, b.y);
+    const int x1 = std::min(a.x + a.width, b.x + b.width);
+    const int y1 = std::min(a.y + a.height, b.y + b.height);
+    if (x1 <= x0 || y1 <= y0) return {};
     return {x0, y0, x1 - x0, y1 - y0};
 }
 
@@ -51,9 +53,16 @@ PixelRect celBounds(const Cel& cel) {
     return bounds;
 }
 
+Rgba unquantise(std::uint32_t key) {
+    const float r = static_cast<float>((key >> 16) & 0xff) / 255.0f;
+    const float g = static_cast<float>((key >> 8) & 0xff) / 255.0f;
+    const float b = static_cast<float>(key & 0xff) / 255.0f;
+    return {r, g, b, 1.0f};  // premultiplied by an alpha of one
+}
+
 }  // namespace
 
-std::vector<float> ctgBarrier(const Document& doc, TimelineId timeline, ImageId image,
+std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
                               const std::vector<LayerId>& sources, const PixelRect& region,
                               int step) {
     step = std::max(1, step);
@@ -64,29 +73,63 @@ std::vector<float> ctgBarrier(const Document& doc, TimelineId timeline, ImageId 
                                  1.0f);
     if (width <= 0 || height <= 0 || sources.empty()) return intensity;
 
+    // Sampled at full resolution and reduced, never point-sampled.
+    //
+    // The compositor can sample every nth pixel itself, and using that here was
+    // a bug that hid until the solve region became the whole canvas and the step
+    // grew: line art is thin, and a two-pixel line looked at every sixth pixel
+    // is a dotted line. The barrier then had holes that were not in the drawing,
+    // and the fill poured out through its own outline.
+    //
+    // The reduction takes the *most* covered pixel in each block, so a line
+    // passing anywhere through a block still stops a cut there. That bias is the
+    // right one: a barrier that is slightly too solid loses a little gap
+    // tolerance, and one that is slightly too thin loses the whole fill.
     Compositor compositor;
-    Framebuffer flattened;
-    compositor.compositeLayers(doc, timeline, image, sources, region, flattened, step);
+    Framebuffer band;
 
-    // Coverage is what stops a cut, so the barrier is one minus alpha: solid
-    // ink reads as 0, bare paper as 1, and the antialiased rim of a stroke
-    // reads as the grey in between -- which is the whole reason the boundary
-    // can be placed inside the line rather than beside it.
-    for (int y = 0; y < std::min(height, flattened.height()); ++y) {
-        const Rgba* row = flattened.row(y);
-        for (int x = 0; x < std::min(width, flattened.width()); ++x) {
-            intensity[static_cast<std::size_t>(y) * width + x] =
-                std::clamp(1.0f - row[x].a, 0.0f, 1.0f);
+    // A few coarse rows at a time, so the full-resolution buffer stays small
+    // whatever the canvas is. At one point this was the whole region at once,
+    // which for a 3000x2400 canvas is a hundred megabytes of framebuffer.
+    constexpr int kBandRows = 32;
+    for (int y0 = 0; y0 < height; y0 += kBandRows) {
+        const int rows = std::min(kBandRows, height - y0);
+        const PixelRect strip{region.x, region.y + y0 * step, region.width,
+                              std::min(rows * step, region.height - y0 * step)};
+        if (strip.height <= 0) break;
+
+        compositor.compositeLayers(doc, track, image, sources, strip, band, 1);
+
+        for (int y = 0; y < rows; ++y) {
+            float* out = intensity.data() + static_cast<std::size_t>(y0 + y) * width;
+            for (int sub = 0; sub < step; ++sub) {
+                const int row = y * step + sub;
+                if (row >= band.height()) break;
+                const Rgba* source = band.row(row);
+
+                for (int x = 0; x < width; ++x) {
+                    const int from = x * step;
+                    const int to = std::min(from + step, band.width());
+                    float covered = 0.0f;
+                    for (int i = from; i < to; ++i) covered = std::max(covered, source[i].a);
+                    // Coverage is what stops a cut, so the barrier is one minus
+                    // alpha: solid ink reads as 0, bare paper as 1, and the
+                    // antialiased rim of a stroke reads as the grey between --
+                    // which is the whole reason the boundary can be placed
+                    // inside the line rather than beside it.
+                    out[x] = std::min(out[x], std::clamp(1.0f - covered, 0.0f, 1.0f));
+                }
+            }
         }
     }
     return intensity;
 }
 
-const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerId layer_id,
+const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer_id,
                        const CtgSettings& settings) {
     static const CtgFill kNothing;
 
-    const Timeline* line = doc.scene().findTimeline(timeline);
+    const Track* line = doc.scene().findTrack(track);
     if (!line) return kNothing;
     const Layer* layer = line->findLayer(layer_id);
     if (!layer || layer->kind != LayerKind::Ctg) return kNothing;
@@ -106,25 +149,54 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
         inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
     }
     inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
+    // The canvas bounds the solve, so resizing it changes the answer.
+    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
+    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
 
     CtgFill& cached = doc.ctgCache()[scribble_id];
     if (cached.valid && cached.inputs == inputs) return cached;
 
-    // Solve over the scribbles and the line art together, with a little room
-    // around them: a region can only be bounded by something that is drawn.
+    // Two rectangles, and the difference between them is where the resolution
+    // comes from.
+    //
+    // `filled` is the canvas: the whole picture takes a colour, and nothing
+    // outside the picture does. `region` is only the part worth solving -- what
+    // has been drawn on, plus a tile of margin -- and the labels are extended
+    // outwards from it to cover the rest.
+    //
+    // The extension is exact rather than an approximation. Outside the drawn
+    // area there is, by definition, no line art, so everything out there is one
+    // connected stretch of blank paper: a cut cannot pass through it and it can
+    // only take one label. Whatever label reaches the edge of the solved region
+    // is therefore the label of everything beyond that edge, and clamping the
+    // lookup at the region's border is exactly that answer.
+    //
+    // Solving the canvas directly instead was correct and wasteful: the cap
+    // below is on the number of cells, so paying for empty paper is paid for in
+    // resolution over the drawing. A small drawing on a 1080p canvas was solved
+    // at a third of full size when it could be solved at full size.
+    const PixelRect filled = doc.scene().canvas();
+    if (filled.isEmpty()) {
+        cached = CtgFill{};
+        cached.inputs = inputs;
+        cached.valid = true;
+        return cached;
+    }
+
     PixelRect region = celBounds(*scribbles);
     for (LayerId source : layer->ctg_sources) {
         const Cel* cel = doc.cel(record->celFor(source));
         if (cel) region = uniteRects(region, celBounds(*cel));
     }
+    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
+              region.height + 2 * kTileSize};
+    region = intersectRects(region, filled);
     if (region.isEmpty()) {
         cached = CtgFill{};
         cached.inputs = inputs;
         cached.valid = true;
         return cached;
     }
-    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
-              region.height + 2 * kTileSize};
 
     // The solve is bounded, whatever it is asked for. A max-flow over a region
     // grows faster than the region does -- roughly 1.3 s for a megapixel -- and
@@ -145,7 +217,7 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
     LazyBrushProblem problem;
     problem.width = (region.width + step - 1) / step;
     problem.height = (region.height + step - 1) / step;
-    problem.intensity = ctgBarrier(doc, timeline, image, layer->ctg_sources, region, step);
+    problem.intensity = ctgBarrier(doc, track, image, layer->ctg_sources, region, step);
     problem.seeds.assign(static_cast<std::size_t>(problem.width) * problem.height, -1);
 
     // Read the scribbles off the cel, one label per distinct colour.
@@ -180,7 +252,7 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
     }
 
     cached = CtgFill{};
-    cached.region = region;
+    cached.region = filled;
     cached.inputs = inputs;
     cached.valid = true;
     cached.colours = static_cast<int>(palette.size());
@@ -191,22 +263,30 @@ const CtgFill& ctgFill(Document& doc, TimelineId timeline, ImageId image, LayerI
 
     const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush);
 
-    // Paint the labels back into tiles, at full resolution even when the solve
-    // was coarse: a blocky fill is better than none while the pen is moving.
+    // Paint the labels back into tiles, over the whole canvas and at full
+    // resolution even when the solve was coarse: a blocky fill is better than
+    // none while the pen is moving.
+    //
+    // Outside the solved region the lookup is clamped to its border, which
+    // extends the labels across the rest of the picture. See above for why that
+    // is the same answer solving the whole canvas would have given.
+    const auto solvedIndex = [&](int value, int origin, int extent, int limit) {
+        const int clamped = std::clamp(value, origin, origin + extent - 1);
+        return std::min((clamped - origin) / step, limit - 1);
+    };
+
     std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;
-    for (int y = 0; y < region.height; ++y) {
-        const int solved_y = y / step;
-        if (solved_y >= problem.height) continue;
-        for (int x = 0; x < region.width; ++x) {
-            const int solved_x = x / step;
-            if (solved_x >= problem.width) continue;
+    for (int y = 0; y < filled.height; ++y) {
+        const int py = filled.y + y;
+        const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
+        for (int x = 0; x < filled.width; ++x) {
+            const int px = filled.x + x;
+            const int solved_x = solvedIndex(px, region.x, region.width, problem.width);
 
             const int label =
                 solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
             if (label < 0) continue;  // nothing reached this pixel
 
-            const int px = region.x + x;
-            const int py = region.y + y;
             const TileCoord coord = tileCoordFor(px, py);
             const std::uint64_t key =
                 (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |

@@ -96,10 +96,10 @@ void Brush::stamp(float cx, float cy, float radius, float flow) {
     ++dabs_;
 }
 
-void Brush::begin(Document& doc, TimelineId timeline, ImageId image, LayerId layer,
+void Brush::begin(Document& doc, TrackId track, ImageId image, LayerId layer,
                   const StrokePoint& point) {
     doc_ = &doc;
-    cel_ = doc.celForWriting(timeline, image, layer);
+    cel_ = doc.celForWriting(track, image, layer);
     if (!cel_) {
         active_ = false;
         return;
