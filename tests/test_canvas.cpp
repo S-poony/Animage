@@ -1049,6 +1049,65 @@ void savingTwiceWritesTheSameBytes() {
     }
 }
 
+// Saving and opening through the window, rather than through project::save
+// directly: the part that has gone wrong before is not the file, it is the
+// canvas and the panels still holding ids from the document that was replaced.
+void theFileMenuSavesAndOpens() {
+    TEST("saving and opening through the window rebinds everything");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QAction* open = nullptr;
+    QAction* save = nullptr;
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("&Open...")) open = action;
+        if (action->text() == QStringLiteral("&Save")) save = action;
+    }
+    CHECK(open != nullptr);
+    CHECK(save != nullptr);
+
+    // The window starts on a scene of its own, and the title says so.
+    CHECK(window.windowTitle().startsWith(QStringLiteral("Untitled")));
+
+    // Loading through the same path the menu uses.
+    auto* canvas = window.findChild<CanvasWidget*>();
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(canvas != nullptr);
+    CHECK(layers != nullptr);
+    if (!canvas || !layers) return;
+
+    const int before_layers = layers->topLevelItemCount();
+    QString error;
+    CHECK(window.openProjectAt(folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    QCoreApplication::processEvents();
+
+    // The panel followed the new document rather than the old one's ids.
+    CHECK_EQ(layers->topLevelItemCount(), 2);
+    CHECK(before_layers != layers->topLevelItemCount());
+    CHECK_EQ(window.windowTitle().toStdString(), std::string("shot.animage - Animage"));
+
+    // And the canvas is pointing at a drawing that exists in it.
+    CHECK(canvas->currentImage() != kNoId);
+    CHECK(!canvas->grab().toImage().isNull());
+
+    // Drawing marks the title, saving clears it.
+    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    save->trigger();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1066,6 +1125,7 @@ int main(int argc, char** argv) {
     aFailedSaveLeavesTheOldProjectAlone();
     abrokenProjectDoesNotReplaceTheOpenOne();
     savingTwiceWritesTheSameBytes();
+    theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();

@@ -27,6 +27,12 @@ public:
     MainWindow();
     ~MainWindow() override;
 
+    // Opens a project by path. What the menu item does once it has asked where,
+    // and the way a test drives it: what has gone wrong here before is not the
+    // file but the canvas and the panels still holding ids from the document
+    // that was just replaced.
+    bool openProjectAt(const QString& folder, QString* error = nullptr);
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void showEvent(QShowEvent* event) override;
@@ -74,6 +80,15 @@ private:
     void shortenExposure();
     void chooseSceneSettings();
 
+    void openProject();
+    void saveProject();
+    void saveProjectAs();
+    bool saveTo(const QString& folder);
+    // Points everything at the document that was just loaded: the canvas, the
+    // timeline and the layer panel all hold ids from the old one.
+    void afterProjectLoaded();
+    void updateTitle();
+
     void togglePlayback();
     void stopPlayback();
     void onPlaybackTick();
@@ -102,6 +117,13 @@ private:
     QTimer* playback_timer_ = nullptr;
     QElapsedTimer playback_clock_;
     std::size_t playback_start_slot_ = 0;
+
+    // Empty until the project has been saved somewhere. `saved_undo_depth_` is
+    // where the history stood when it was last written, which is a cheap and
+    // honest test for "changed since": undoing back to it counts as unchanged,
+    // because it is.
+    QString project_folder_;
+    std::size_t saved_undo_depth_ = 0;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;

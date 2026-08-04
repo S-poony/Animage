@@ -7,6 +7,9 @@
 #include <QColorDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -29,6 +32,7 @@
 #include <cmath>
 
 #include "canvas_widget.h"
+#include "project_files.h"
 #include "color.h"
 #include "scene_settings_dialog.h"
 #include "timeline_widget.h"
@@ -71,6 +75,7 @@ MainWindow::MainWindow() {
         timeline_widget_->refresh();
         syncStatus();
     });
+    setWindowTitle(QStringLiteral("Untitled - Animage"));
     syncStatus();
 
     // Space and Z are held modifiers for panning and zooming, not shortcuts, so
@@ -135,6 +140,21 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::buildActions() {
+    QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
+    file->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
+                    &MainWindow::openProject);
+    file->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
+                    &MainWindow::saveProject);
+    file->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs, this,
+                    &MainWindow::saveProjectAs);
+    file->addSeparator();
+    // Visible and disabled, because a menu that grows an item later tells you
+    // less than one that says what is coming.
+    QAction* exporting = file->addAction(QStringLiteral("&Export sequence..."));
+    exporting->setEnabled(false);
+    exporting->setToolTip(QStringLiteral("Not built yet"));
+    for (QAction* action : file->actions()) action->setShortcutContext(Qt::ApplicationShortcut);
+
     QMenu* edit = menuBar()->addMenu(QStringLiteral("&Edit"));
     QAction* undo_action = edit->addAction(QStringLiteral("&Undo"), QKeySequence::Undo, this,
                                            &MainWindow::undo);
@@ -452,12 +472,111 @@ void MainWindow::buildTimelinePanel() {
     addDockWidget(Qt::BottomDockWidgetArea, dock);
 }
 
+// --- files ---------------------------------------------------------------
+
+void MainWindow::updateTitle() {
+    const QString name = project_folder_.isEmpty()
+                             ? QStringLiteral("Untitled")
+                             : QFileInfo(project_folder_).fileName();
+    const bool changed = doc_.undoDepth() != saved_undo_depth_;
+    setWindowTitle(QStringLiteral("%1%2 - Animage").arg(name, changed ? QStringLiteral("*")
+                                                                     : QString()));
+}
+
+void MainWindow::openProject() {
+    stopPlayback();
+    const QString folder = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Open project"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (folder.isEmpty()) return;
+
+    QString error;
+    if (!openProjectAt(folder, &error)) {
+        // The open document is untouched -- project::load builds a new one and
+        // only swaps it in once every cel has come back -- so this is a plain
+        // refusal and nothing has been lost.
+        QMessageBox::warning(this, QStringLiteral("Cannot open that project"), error);
+    }
+}
+
+bool MainWindow::openProjectAt(const QString& folder, QString* error) {
+    if (!project::load(doc_, folder, error)) return false;
+    project_folder_ = folder;
+    afterProjectLoaded();
+    return true;
+}
+
+void MainWindow::afterProjectLoaded() {
+    const Scene& scene = doc_.scene();
+    track_ = scene.tracks.empty() ? kNoId : scene.tracks.front().id;
+
+    canvas_->setTrack(track_);
+    timeline_widget_->setTrack(track_);
+    timeline_widget_->setCurrentSlot(0);
+    canvas_->setFrame(0);
+
+    const Track* track = doc_.scene().findTrack(track_);
+    if (track && !track->layers.empty()) canvas_->setActiveLayer(track->layers.front().id);
+
+    rebuildLayerList();
+    timeline_widget_->refresh();
+    canvas_->refreshAll();
+    canvas_->fitToCanvas();
+
+    saved_undo_depth_ = doc_.undoDepth();
+    syncStatus();
+    updateTitle();
+}
+
+bool MainWindow::saveTo(const QString& folder) {
+    QString error;
+    if (!project::save(doc_, folder, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Cannot save"), error);
+        return false;
+    }
+    project_folder_ = folder;
+    saved_undo_depth_ = doc_.undoDepth();
+    updateTitle();
+    statusBar()->showMessage(QStringLiteral("Saved to %1").arg(folder), 4000);
+    return true;
+}
+
+void MainWindow::saveProject() {
+    // A document that has never been saved has nowhere to go, so Save asks --
+    // which is Save As by another name, and the reason it is not a separate
+    // concept internally.
+    if (project_folder_.isEmpty()) {
+        saveProjectAs();
+        return;
+    }
+    saveTo(project_folder_);
+}
+
+void MainWindow::saveProjectAs() {
+    stopPlayback();
+    QString chosen = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save project as"), project_folder_,
+        QStringLiteral("Animage project (*%1)").arg(project::folderSuffix()));
+    if (chosen.isEmpty()) return;
+    if (!chosen.endsWith(project::folderSuffix())) chosen += project::folderSuffix();
+
+    // A project is a folder, and the file dialog has just offered to replace it
+    // as though it were a file. It has not created anything; project::save
+    // builds alongside and swaps, so an existing project is only replaced once
+    // the new one is complete.
+    saveTo(chosen);
+}
+
 void MainWindow::buildStatusBar() {
     status_ = new QLabel(this);
     statusBar()->addWidget(status_);
 }
 
 void MainWindow::syncStatus() {
+    // Every path that changes the document ends up here, which makes it the one
+    // place the title's "changed since saved" mark can be kept honest without
+    // threading a signal through everything.
+    updateTitle();
     if (!status_) return;
     const Track* track = doc_.scene().findTrack(track_);
     if (!track) return;

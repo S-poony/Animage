@@ -20,8 +20,14 @@ rough mark inside a region and a max-flow/min-cut finds the best possible
 boundary, tolerating gaps in the line art. Because only the scribbles are
 stored, the fill regenerates whenever the drawing or the scribble changes.
 
-Status: **prototype**. You can draw, animate and colour; you cannot save. M0
-through M4 of [the plan](docs/fr/plan-de-prototype.md) exist, M5 does not.
+Status: **prototype**. You can draw, animate, colour and save; you cannot export
+yet. M0 through M4 of [the plan](docs/fr/plan-de-prototype.md) exist, M5 is
+under way.
+
+A project is a folder — `scene.json` beside one file per cel — under File ▸
+Open, Save and Save As. Cel pixels are stored losslessly, bit for bit as the
+half-floats they are in memory, because a 16-bit PNG cannot hold one without
+throwing pixels away. See [docs/handover.md](docs/handover.md).
 
 If you are picking this up, read [docs/handover.md](docs/handover.md) first: it
 records what was built, where it deliberately departs from the plan, and the
