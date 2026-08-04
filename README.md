@@ -114,13 +114,19 @@ same drawing still showing, not a thing of their own, and they travel with it.
 than colour, at the bottom of the pile — it is cut against the line art and
 belongs under it. There is no scribble tool: scrawl roughly inside a region with the
 ordinary brush and the whole region takes that colour, gaps in the line art
-included. It takes two scribbles to fill one shape — one for the shape and one
-for what surrounds it — because a lone scribble has nothing to be cut against. What is stored is the scrawl, not the fill, so moving a scribble
-recolours the region and redrawing the line art re-cuts it.
+included. One scribble fills one shape; what is outside it stays uncoloured until
+you scribble there too. What is stored is the scrawl, not the fill, so moving a
+scribble recolours the region and redrawing the line art re-cuts it.
+
+Holes in the line are bridged up to a stated width — 32 image pixels by default,
+`CtgSettings::gap_tolerance_pixels` — and past that the fill escapes, which is
+the honest failure rather than a wrong answer: the line has stopped being a
+boundary. That width is the price the cut pays to run along the edge of the
+picture, so it means the same thing whatever the drawing is solved at.
 
 Every ordinary layer becomes a barrier for it automatically. Cutting against a
-rough as well as a clean closes gaps that leak from either alone. The second box beside a
-colour layer's visibility shows the marks instead of the fill.
+rough as well as a clean closes gaps that leak from either alone. The **Marks**
+column beside a colour layer shows the scribbles instead of the fill.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the track rather than to the image, which is the point of

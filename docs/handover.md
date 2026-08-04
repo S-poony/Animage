@@ -64,15 +64,28 @@ took four, and was answered in one round trip once `crash_report.cpp` existed.
 The lesson is written into the commits because it will happen again: after the
 second wrong theory, stop and instrument.
 
-**An implicit background was tried and removed.** A single scribble has nothing
-to be cut against, so it labels everything — meaning filling one shape needs a
-second scribble for the world outside it. Seeding a background round the rim
-fixes that, and no strength for it works: weak enough to lose to a real scribble
-is weak enough for a gap in the line to defeat, and strong enough to hold a
-gapped shape is strong enough to overrule the scribble the user drew. Making it
-conditional on there being exactly one colour only moved the surprise to the
-moment a second colour appeared. The user preferred two scribbles to any of it.
-Do not re-add it without solving that tension properly.
+**An implicit background as a *seed* was tried and removed — then solved from
+the other side.** A single scribble has nothing to be cut against, so it labelled
+everything, and filling one shape took a second scribble for the world outside
+it. Seeding a background round the rim fixes that and no strength for it works:
+weak enough to lose to a real scribble is weak enough for a gap in the line to
+defeat, and strong enough to hold a gapped shape is strong enough to overrule the
+scribble the user drew.
+
+The reason is worth keeping, because it says where *not* to look. The strength of
+a soft seed is its area — severing one costs `λK` a pixel, which is exactly what
+makes the majority rule work — so a rim seed's authority comes from the size of
+the canvas rather than from anything the user meant. There is no good value for
+that knob and there was never going to be one.
+
+The background belongs in the **smoothing** term instead, and that is where it is
+now: a price on any boundary that runs along the edge of the solved grid. It
+seeds nothing, labels nothing and can overrule nobody. The price is the gap
+tolerance in cells — colouring everything costs it per border cell, bridging a
+hole `n` cells wide costs `K` a cell, so bridging wins exactly while `n` is below
+it. Measured, a hole of `n` cells needs a tolerance of `n + 1`. If you find
+yourself choosing a background *strength* again, stop: that is the version that
+failed.
 
 **Solving on a stale cache is not the same as solving when asked.** Every dab
 bumps the cel's revision, so regenerating a CTG fill whenever it looked stale
@@ -80,6 +93,13 @@ meant a max-flow per dab. The cost was invisible for a while because a separate
 bug meant the result was never drawn; fixing the repaint made it obvious. The
 solve now happens once, when the pen lifts, and the scribble itself is shown
 during the stroke.
+
+**Pricing the border made the solve slower, and it was worth it.** The flow now
+has to reach the edge of the grid from every scribble, so its value is much
+larger and there are many more augmenting paths: `bench_composite` went from
+152 ms to 417 ms at 512x512, which is the size the solve is capped at. That is
+paid once, when the pen lifts. It sharpens the case for solving off the interface
+thread rather than weakening it, and it is the number to watch if you try.
 
 **The solve runs where the interface is waiting, so it is capped.** A max-flow
 grows faster than its region — about 1.3 s for a megapixel — and on a large

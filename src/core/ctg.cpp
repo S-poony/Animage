@@ -149,6 +149,8 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
     }
     inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
+    inputs = inputs * 31 +
+             static_cast<std::uint64_t>(std::lround(settings.gap_tolerance_pixels * 16.0f));
     // The canvas bounds the solve, so resizing it changes the answer.
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
@@ -261,7 +263,15 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     problem.colour_count = static_cast<int>(palette.size());
     problem.hard.assign(palette.size(), 0);
 
-    const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush);
+    // The gap tolerance is stated in image pixels and the solver counts in
+    // cells, so it is converted here, where the step is known. At least one
+    // cell: a tolerance that rounds to nothing would price the border at zero
+    // and put back the behaviour where one scribble takes the whole picture.
+    LazyBrushOptions options = settings.lazybrush;
+    options.gap_tolerance =
+        std::max(1.0f, settings.gap_tolerance_pixels / static_cast<float>(step));
+
+    const LazyBrushResult solved = solveLazyBrush(problem, options);
 
     // Paint the labels back into tiles, over the whole canvas and at full
     // resolution even when the solve was coarse: a blocky fill is better than

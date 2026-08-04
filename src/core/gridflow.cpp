@@ -240,6 +240,19 @@ std::vector<char> GridFlow::solve() {
     active_.clear();
     active_head_ = 0;
     for (std::size_t node = 0; node < count_; ++node) {
+        // A node pulled both ways passes the smaller of the two straight
+        // through, so it comes off both sides. It shifts the value of the flow
+        // by a constant and leaves the cut where it was.
+        //
+        // Nothing had both until the border was given a price, and then the
+        // branch below would have made such a node a pure source and quietly
+        // ignored its sink capacity altogether.
+        const float shared = std::min(source_capacity_[node], sink_capacity_[node]);
+        if (shared > 0.0f) {
+            source_capacity_[node] -= shared;
+            sink_capacity_[node] -= shared;
+        }
+
         if (source_capacity_[node] > 0.0f) {
             tree_[node] = Tree::Source;
             parent_[node] = kTerminal;

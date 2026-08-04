@@ -106,10 +106,46 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
         return k * std::clamp(options.soft_lambda, 0.0f, 1.0f);
     };
 
+    // What it costs a colour to reach the edge of the grid and take everything.
+    //
+    // This is the background, and it is deliberately not a scribble. A seeded
+    // background was tried and removed, and the reason is worth keeping: the
+    // strength of a soft seed is its area, because severing one costs lambda*K
+    // per pixel and that is exactly what makes the majority rule work. The rim
+    // of an image has an area of its own -- a property of the canvas, not of
+    // anything the user meant -- so feeding it into a comparison that means "how
+    // much did you insist" is a category error. There is no good value for it:
+    // weak enough to lose to a real scribble is weak enough for a gap in the
+    // line to defeat, and strong enough to hold a gapped shape overrules the
+    // scribble that was actually drawn.
+    //
+    // So the border is priced in the smoothing term instead. It labels nothing
+    // and can never overrule anybody; it only makes a boundary that runs along
+    // the edge of the grid cost something. That price is the gap tolerance, and
+    // the arithmetic tying the two together is in LazyBrushOptions.
+    //
+    // Clamped to K, which is the perimeter: a tolerance larger than the image
+    // would mean no boundary could ever afford the edge, and on the small grids
+    // in the tests the default would otherwise be most of the picture.
+    const float outside = std::clamp(options.gap_tolerance, 0.0f, k);
+
+    const auto onBorder = [&](std::size_t node) {
+        const int x = static_cast<int>(node % static_cast<std::size_t>(width));
+        const int y = static_cast<int>(node / static_cast<std::size_t>(width));
+        return x == 0 || y == 0 || x == width - 1 || y == height - 1;
+    };
+
     // Regions that only one colour has scribbled on need no cut at all: there
     // is nothing to cut against. Doing these first is most of why this is
     // faster than a general multiway cut, and it is also what finishes the last
     // colour once every other one has been resolved.
+    //
+    // A region touching the edge of the grid is never uncontested, because the
+    // background is always there to contest it. Without that the shortcut
+    // swallowed everything: this flood fill walks through line art -- the line
+    // changes edge weights, never connectivity -- so on a fresh drawing the
+    // whole grid is one region, a single colour on it is uncontested, and every
+    // pixel took that colour without a max-flow ever running.
     const auto labelUncontestedRegions = [&] {
         std::vector<char> visited(count, 0);
         std::vector<std::size_t> stack;
@@ -128,6 +164,7 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
                 const std::size_t node = stack.back();
                 stack.pop_back();
                 region.push_back(node);
+                if (outside > 0.0f && onBorder(node)) contested = true;
 
                 const int seed = problem.seeds[node];
                 if (seed >= 0 && active[static_cast<std::size_t>(seed)]) {
@@ -199,15 +236,25 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
         for (std::size_t node = 0; node < count; ++node) {
             if (result.labels[node] >= 0) continue;  // already settled
 
+            // The background pulls towards the sink on every border cell,
+            // whatever colour is being solved for and however many colours there
+            // are. Unconditional on purpose: making it depend on the number of
+            // colours was tried, and it only moved the surprise to the moment a
+            // second colour appeared.
+            float sink = (outside > 0.0f && onBorder(node)) ? outside : 0.0f;
+
             const int seed = problem.seeds[node];
             if (seed >= 0 && active[static_cast<std::size_t>(seed)]) {
                 if (seed == chosen) {
                     flow.setSource(node, terminalCapacity(seed));
                     any_source = true;
                 } else {
-                    flow.setSink(node, terminalCapacity(seed));
-                    any_sink = true;
+                    sink += terminalCapacity(seed);
                 }
+            }
+            if (sink > 0.0f) {
+                flow.setSink(node, sink);
+                any_sink = true;
             }
 
             const int x = static_cast<int>(node % static_cast<std::size_t>(width));

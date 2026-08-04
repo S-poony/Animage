@@ -31,6 +31,22 @@ struct LazyBrushOptions {
     // which is what lets you scrawl rather than aim.
     float soft_lambda = 0.95f;
 
+    // The longest gap in the line art the fill will jump, in cells of this
+    // grid. This is the price of the border, and it is the whole of what makes
+    // one scribble fill one shape rather than the picture.
+    //
+    // It is a number with a meaning rather than a knob. Compare two labellings:
+    // colouring everything cuts along the border, for `gap_tolerance` per border
+    // cell -- about `gap_tolerance * K` in total, since K is the perimeter.
+    // Bridging a hole `n` cells wide crosses blank paper, which costs K a cell,
+    // so `n * K`. Bridging is the cheaper of the two exactly when `n <
+    // gap_tolerance`. Hence the name and the unit.
+    //
+    // Note what it is not: it is not a seed and takes part in no majority. A
+    // background that competed on scribble strength was tried and abandoned --
+    // see the note in solveLazyBrush.
+    float gap_tolerance = 32.0f;
+
     // Pencil and other low-contrast art need the line found before it can be
     // used as a barrier. The labelling is still applied to the untouched image.
     bool preprocess_with_log = false;

@@ -90,6 +90,42 @@ l'intérieur des régions devient blanc quelle que soit son intensité d'origine
 le contraste des traits est renforcé. Le résultat de l'étiquetage s'applique
 ensuite sur l'image **non modifiée**.
 
+### Le fond : un prix, pas une graine
+
+> Ajouté après implémentation. Le papier laisse ouverte la question du « dehors »
+> et notre première tentative s'est trompée de terme d'énergie.
+
+Un scribble seul n'a rien contre quoi être coupé : il étiquette tout. Remplir une
+forme demandait donc **deux** scribbles, un pour la forme et un pour le monde
+autour. Semer un fond au bord de l'image règle ça et **aucune force ne
+fonctionne** : assez faible pour céder à un vrai scribble, c'est assez faible
+pour qu'un trou dans le trait l'emporte ; assez forte pour tenir une forme
+trouée, c'est assez forte pour contredire le scribble que l'utilisateur a tracé.
+
+La raison est instructive. La force d'une graine souple, c'est son **aire** —
+la sévérer coûte `λK` par pixel, et c'est exactement ce qui fait marcher la règle
+de majorité. L'aire du bord est une propriété du canevas, pas de ce que
+l'utilisateur voulait dire : la faire concourir dans le terme de données est une
+erreur de catégorie.
+
+Le fond appartient donc au **terme de lissage**. Chaque pixel du bord de la
+grille résolue porte une arête vers un puits, de poids `g`. Ce puits n'étiquette
+rien et ne peut contredire personne ; il rend seulement payante une frontière qui
+longe le bord.
+
+`g` a un sens exact plutôt que d'être un réglage :
+
+- tout colorier, c'est couper le long du bord : `g × 2(l+h)`, soit `g·K` ;
+- franchir un trou de `n` pixels, c'est traverser du blanc à `K` le pixel : `n·K`.
+
+Franchir gagne exactement quand `n < g`. Donc **`g` est le plus long trou que le
+remplissage accepte de franchir, en pixels**. Mesuré : un trou de `n` cellules
+demande une tolérance de `n + 1`.
+
+`g` est exprimé en pixels **image** et divisé par le pas d'échantillonnage au
+moment de résoudre. Sans ça, la même image scannée deux fois plus grande
+franchirait des trous deux fois plus larges.
+
 ### Terme de données (les scribbles)
 
 ```

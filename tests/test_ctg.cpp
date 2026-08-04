@@ -253,16 +253,18 @@ void theCompositorShowsTheFillNotTheScribbles() {
     CHECK_NEAR(frame.pixel(130, 60).a, 1.0, 0.05);
 }
 
-// One scribble is not enough, and that is the honest behaviour rather than a
-// bug. With nothing to be cut against, the solver has no reason to stop
-// anywhere and labels everything it can reach.
+// One scribble is enough. It did not used to be: with nothing to be cut
+// against, the solver had no reason to stop anywhere and labelled everything it
+// could reach, so filling one shape took two scribbles -- one for the shape and
+// one for the world outside it.
 //
-// An implicit background at the rim was tried so that one scribble could mean
-// one shape. It was removed: no strength works. Weak enough to lose to a real
-// scribble is weak enough for a gap in the line to defeat; strong enough to
-// hold a gapped shape is strong enough to overrule the scribble the user drew.
-void oneScribbleAloneLabelsEverything() {
-    TEST("one scribble alone labels everything it can reach");
+// A background *seeded* at the rim was tried first and removed, and the reason
+// it failed is worth keeping: the strength of a soft seed is its area, so a rim
+// seed's authority came from the size of the canvas rather than from anything
+// the user meant. The border is priced in the smoothing term instead, where it
+// labels nothing and can overrule nobody. See LazyBrushOptions::gap_tolerance.
+void oneScribbleFillsOneShape() {
+    TEST("one scribble fills the shape it is in, gap and all");
     Fixture f;
     f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
     f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
@@ -271,11 +273,19 @@ void oneScribbleAloneLabelsEverything() {
     CHECK(fill.valid);
     CHECK_EQ(fill.colours, 1);
 
-    // Inside and outside alike: there is no boundary to prefer.
+    // Inside the box is filled, including the far corners and the stretch
+    // beside the twenty-pixel hole in its bottom wall -- the hole is inside the
+    // gap tolerance, so the boundary bridges it.
     CHECK_NEAR(fillAt(fill, 130, 160).r, 1.0, 0.02);
-    CHECK_NEAR(fillAt(fill, 130, 215).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 70, 70).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 190, 170).r, 1.0, 0.02);
 
-    // Add the second scribble and the boundary appears, gap and all.
+    // Outside is not, and no second scribble was needed to say so.
+    CHECK_NEAR(fillAt(fill, 130, 215).a, 0.0, 0.001);
+    CHECK_NEAR(fillAt(fill, 20, 20).a, 0.0, 0.001);
+
+    // A second colour outside then takes the rest, and does not disturb the
+    // first: the border is priced whether there are one or two of them.
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
     const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK_NEAR(fillAt(both, 130, 160).r, 1.0, 0.02);
@@ -403,7 +413,7 @@ int main() {
     theSolveStaysBoundedOnALargeDrawing();
     theFillCoversTheCanvasAndStopsThere();
     theCanvasSizeDoesNotChangeTheFill();
-    oneScribbleAloneLabelsEverything();
+    oneScribbleFillsOneShape();
     aScribbleFillsItsRegion();
     theLayerStoresScribblesNotTheFill();
     editingAScribbleRecoloursTheWholeRegion();
