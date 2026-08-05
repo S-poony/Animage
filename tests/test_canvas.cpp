@@ -28,6 +28,8 @@
 #include <QFile>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QGroupBox>
+#include <QListWidget>
 #include <QHeaderView>
 #include <QSlider>
 #include <QStyle>
@@ -1891,6 +1893,108 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
     CHECK(!colourRowText().startsWith(QStringLiteral("⚠")));
 }
 
+// The colour-layer settings, which are the only way to reach carrying and its
+// direction from the interface.
+void theColourLayerBoxEditsWhatTheLayerDoes() {
+    TEST("the colour layer box is there for colour layers and edits them");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QGroupBox* box = nullptr;
+    for (QGroupBox* candidate : window.findChildren<QGroupBox*>()) {
+        if (candidate->title().contains(QStringLiteral("Colour layer"))) box = candidate;
+    }
+    CHECK(box != nullptr);
+    if (!box) return;
+
+    QPushButton* add_layer = nullptr;
+    QPushButton* add_colour = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add layer")) add_layer = button;
+        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
+    }
+    CHECK(add_layer != nullptr);
+    CHECK(add_colour != nullptr);
+    if (!add_layer || !add_colour) return;
+
+    // A fresh document has one raster layer, so there is nothing to configure.
+    CHECK(!box->isVisible());
+
+    add_layer->click();
+    add_colour->click();
+    QCoreApplication::processEvents();
+    CHECK(box->isVisible());
+
+    auto* sources = box->findChild<QListWidget*>();
+    auto* direction = box->findChild<QComboBox*>();
+    QCheckBox* carry = nullptr;
+    QCheckBox* follow = nullptr;
+    for (QCheckBox* candidate : box->findChildren<QCheckBox*>()) {
+        if (candidate->text().contains(QStringLiteral("Carry"))) carry = candidate;
+        if (candidate->text().contains(QStringLiteral("Move"))) follow = candidate;
+    }
+    CHECK(sources != nullptr);
+    CHECK(direction != nullptr);
+    CHECK(carry != nullptr);
+    CHECK(follow != nullptr);
+    if (!sources || !direction || !carry || !follow) return;
+
+    // Both raster layers offered and both taken, since both were visible when
+    // the colour layer was made. The colour layer is not offered against
+    // itself: a flat has no edges to cut along.
+    CHECK_EQ(sources->count(), 2);
+    for (int row = 0; row < sources->count(); ++row) {
+        CHECK_EQ(sources->item(row)->checkState(), Qt::Checked);
+        CHECK(!sources->item(row)->text().contains(QStringLiteral("colour")));
+    }
+
+    // Part 2 is not built, and the control says so rather than looking live.
+    CHECK(!follow->isEnabled());
+
+    // Carrying is on by default and the direction goes with it; turning it off
+    // leaves the choice visible but meaningless, so it greys.
+    CHECK(carry->isChecked());
+    CHECK(direction->isEnabled());
+    carry->setChecked(false);
+    QCoreApplication::processEvents();
+    CHECK(!direction->isEnabled());
+    carry->setChecked(true);
+    QCoreApplication::processEvents();
+    CHECK(direction->isEnabled());
+
+    // Unticking a source really reaches the layer. Read back through the row's
+    // tooltip, which counts them, rather than through the document: what is
+    // being tested is that the panel and the model agree.
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(layers != nullptr);
+    if (!layers) return;
+    const auto colourTip = [&] {
+        for (int row = 0; row < layers->topLevelItemCount(); ++row) {
+            if (layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
+                return layers->topLevelItem(row)->toolTip(0);
+            }
+        }
+        return QString();
+    };
+    CHECK(colourTip().contains(QStringLiteral("2 layers")));
+
+    sources->item(0)->setCheckState(Qt::Unchecked);
+    QCoreApplication::processEvents();
+    CHECK(colourTip().contains(QStringLiteral("1 layer")));
+
+    // And stepping onto a raster layer takes the whole box away again.
+    for (int row = 0; row < layers->topLevelItemCount(); ++row) {
+        if (!layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
+            layers->setCurrentItem(layers->topLevelItem(row));
+            break;
+        }
+    }
+    QCoreApplication::processEvents();
+    CHECK(!box->isVisible());
+}
+
 // Transparency is a colour on a colour layer and nothing anywhere else. On a
 // raster layer it would be a stroke of negative light -- pixels no filter, no
 // export and no file format can make sense of -- so the state has to be
@@ -2072,6 +2176,7 @@ int main(int argc, char** argv) {
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
     aStrandedCarriedMarkIsFlaggedInThePanel();
+    theColourLayerBoxEditsWhatTheLayerDoes();
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();

@@ -8,8 +8,11 @@
 #include <QColorDialog>
 #include <QDialogButtonBox>
 #include <QDockWidget>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QGroupBox>
+#include <QListWidget>
 #include <QProgressDialog>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -413,6 +416,71 @@ void MainWindow::buildLayerPanel() {
     connect(layer_list_, &QTreeWidget::currentItemChanged, this,
             [this](QTreeWidgetItem*, QTreeWidgetItem*) { onLayerSelected(); });
     connect(layer_list_, &QTreeWidget::itemChanged, this, &MainWindow::onLayerItemChanged);
+
+    // Everything a colour layer has that an ordinary one does not, in one box
+    // that is simply absent the rest of the time. A group of controls greyed
+    // out on every layer but one is a permanent question about a layer you may
+    // not even have.
+    colour_settings_ = new QGroupBox(QStringLiteral("Colour layer"), panel);
+    auto* colour_layout = new QVBoxLayout(colour_settings_);
+    colour_layout->setContentsMargins(6, 4, 6, 6);
+    colour_layout->setSpacing(4);
+
+    colour_layout->addWidget(new QLabel(QStringLiteral("Cut against"), colour_settings_));
+    ctg_sources_ = new QListWidget(colour_settings_);
+    ctg_sources_->setMaximumHeight(90);
+    ctg_sources_->setFocusPolicy(Qt::NoFocus);
+    ctg_sources_->setToolTip(
+        QStringLiteral("The line art this layer's fill stops at.\n"
+                       "More than one is normal: cutting against a rough as well as a\n"
+                       "clean closes gaps that leak from either alone."));
+    connect(ctg_sources_, &QListWidget::itemChanged, this, &MainWindow::onCtgSourcesChanged);
+    colour_layout->addWidget(ctg_sources_);
+
+    ctg_inherit_ = new QCheckBox(QStringLiteral("Carry marks to drawings with none"),
+                                 colour_settings_);
+    ctg_inherit_->setFocusPolicy(Qt::NoFocus);
+    ctg_inherit_->setToolTip(
+        QStringLiteral("Colour the first drawing of a run and the run is coloured.\n"
+                       "A drawing you scribble on takes over from there.\n"
+                       "Off, a drawing with no marks of its own is simply empty."));
+    connect(ctg_inherit_, &QCheckBox::toggled, this, &MainWindow::onCtgSettingChanged);
+    colour_layout->addWidget(ctg_inherit_);
+
+    auto* direction_row = new QWidget(colour_settings_);
+    auto* direction_layout = new QHBoxLayout(direction_row);
+    direction_layout->setContentsMargins(16, 0, 0, 0);
+    direction_layout->addWidget(new QLabel(QStringLiteral("Carry"), direction_row));
+    ctg_direction_ = new QComboBox(direction_row);
+    ctg_direction_->addItem(QStringLiteral("forwards"));
+    ctg_direction_->addItem(QStringLiteral("backwards"));
+    ctg_direction_->setFocusPolicy(Qt::NoFocus);
+    ctg_direction_->setToolTip(
+        QStringLiteral("Forwards: a drawing shows the nearest earlier drawing's marks.\n"
+                       "Backwards: the nearest later one's -- for colouring the drawing\n"
+                       "you have in front of you and having it apply to the run before it."));
+    connect(ctg_direction_, &QComboBox::currentIndexChanged, this,
+            [this](int) { onCtgSettingChanged(); });
+    direction_layout->addWidget(ctg_direction_, 1);
+    colour_layout->addWidget(direction_row);
+
+    // Present, stored, saved, and read by nothing. Part 2 of the design notes
+    // is not built and needs the solve off the interface thread first. Shown
+    // disabled and saying so, rather than left out: the setting is real and it
+    // is where it will be, and a control that looks live and does nothing is
+    // the one thing worse than a control that says it is not ready.
+    ctg_follow_ = new QCheckBox(QStringLiteral("Move marks to follow the drawing"),
+                                colour_settings_);
+    ctg_follow_->setFocusPolicy(Qt::NoFocus);
+    ctg_follow_->setEnabled(false);
+    ctg_follow_->setToolTip(
+        QStringLiteral("Not built yet.\n"
+                       "Carried marks stay where they were drawn. Moving them to follow\n"
+                       "the animation is designed in docs/scribbles-through-time.md and\n"
+                       "waits on the fill being solved off the interface thread."));
+    colour_layout->addWidget(ctg_follow_);
+
+    layout->addWidget(colour_settings_);
 
     auto* opacity_row = new QWidget(panel);
     auto* opacity_layout = new QVBoxLayout(opacity_row);
@@ -1124,6 +1192,90 @@ void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, Image
     item->setToolTip(0, tip);
 }
 
+// Fills the colour-layer box from the layer in hand, or hides it.
+//
+// Sources are listed as every raster layer in the track with a tick against the
+// ones this layer cuts against, rather than as the ids it happens to hold: a
+// layer that has since been deleted simply stops being offered, and one added
+// afterwards can be ticked without the set having to be rebuilt from scratch.
+void MainWindow::syncColourLayerPanel() {
+    if (!colour_settings_) return;
+
+    const Layer* layer = currentLayer();
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!layer || !track || layer->kind != LayerKind::Ctg) {
+        colour_settings_->setVisible(false);
+        return;
+    }
+    colour_settings_->setVisible(true);
+
+    updating_colour_panel_ = true;
+    ctg_sources_->clear();
+    for (const Layer& other : track->layers) {
+        if (other.kind != LayerKind::Raster) continue;  // a flat has no edges to cut along
+        auto* item = new QListWidgetItem(QString::fromStdString(other.name), ctg_sources_);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(other.id));
+        const bool used = std::find(layer->ctg_sources.begin(), layer->ctg_sources.end(),
+                                    other.id) != layer->ctg_sources.end();
+        item->setCheckState(used ? Qt::Checked : Qt::Unchecked);
+    }
+
+    ctg_inherit_->setChecked(layer->ctg_inherit);
+    ctg_direction_->setCurrentIndex(layer->ctg_direction == CtgDirection::Backward ? 1 : 0);
+    ctg_follow_->setChecked(layer->ctg_follow_motion);
+
+    // Both of these are about what gets carried, so neither means anything
+    // while nothing is. Greyed rather than hidden, so the shape of the choice
+    // stays visible: this is what you would be choosing if you turned it on.
+    ctg_direction_->setEnabled(layer->ctg_inherit);
+    updating_colour_panel_ = false;
+}
+
+void MainWindow::onCtgSourcesChanged() {
+    if (updating_colour_panel_) return;
+    Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Ctg) return;
+
+    Layer updated = *layer;
+    updated.ctg_sources.clear();
+    for (int row = 0; row < ctg_sources_->count(); ++row) {
+        const QListWidgetItem* item = ctg_sources_->item(row);
+        if (item->checkState() != Qt::Checked) continue;
+        updated.ctg_sources.push_back(
+            static_cast<LayerId>(item->data(Qt::UserRole).toULongLong()));
+    }
+    doc_.updateLayer(track_, updated.id, updated);
+
+    // The barrier moved, so every fill built from it is wrong. They are keyed on
+    // the source cels' revisions and those have not moved, so nothing would
+    // notice on its own.
+    doc_.ctgCache().clear();
+    canvas_->refreshAll();
+    syncStatus();
+}
+
+void MainWindow::onCtgSettingChanged() {
+    if (updating_colour_panel_) return;
+    Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Ctg) return;
+
+    Layer updated = *layer;
+    updated.ctg_inherit = ctg_inherit_->isChecked();
+    updated.ctg_direction =
+        ctg_direction_->currentIndex() == 1 ? CtgDirection::Backward : CtgDirection::Forward;
+    doc_.updateLayer(track_, updated.id, updated);
+
+    // Which drawing's marks a drawing reads is not part of the fill's key
+    // either -- it is resolved on the way in -- so the same applies.
+    doc_.ctgCache().clear();
+    ctg_direction_->setEnabled(updated.ctg_inherit);
+    canvas_->refreshAll();
+    refreshLayerFlags();
+    timeline_widget_->refresh();
+    syncStatus();
+}
+
 // The rows already exist; only what they report has moved.
 //
 // Deliberately not rebuildLayerList. That clears the tree and builds new items,
@@ -1211,6 +1363,7 @@ void MainWindow::onLayerSelected() {
     } else {
         syncColourControls();
     }
+    syncColourLayerPanel();
 }
 
 void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {

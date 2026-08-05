@@ -19,6 +19,9 @@ class QCheckBox;
 class QPushButton;
 class QAction;
 class QTimer;
+class QGroupBox;
+class QListWidget;
+class QComboBox;
 
 // The application window: canvas, timeline, layers, and the File menu. One
 // track. A project saves, opens, autosaves over itself and exports.
@@ -98,6 +101,11 @@ private:
     void applyColour(float r, float g, float b);
     // What a layer's row says, and the flag on it. Shared by the full rebuild
     // and by the in-place refresh a finished solve triggers.
+    // The colour-layer box: what it is cut against, and what it does with time.
+    void syncColourLayerPanel();
+    void onCtgSourcesChanged();
+    void onCtgSettingChanged();
+
     QString layerLabel(const animage::Layer& layer, animage::ImageId here) const;
     void applyLayerFlag(QTreeWidgetItem* item, const animage::Layer& layer,
                         animage::ImageId here);
@@ -162,6 +170,13 @@ private:
     QLabel* status_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
     QPushButton* transparent_swatch_ = nullptr;
+
+    QGroupBox* colour_settings_ = nullptr;
+    QListWidget* ctg_sources_ = nullptr;
+    QCheckBox* ctg_inherit_ = nullptr;
+    QComboBox* ctg_direction_ = nullptr;
+    QCheckBox* ctg_follow_ = nullptr;
+    bool updating_colour_panel_ = false;
     QCheckBox* pressure_opacity_ = nullptr;
     QSpinBox* onion_ = nullptr;
     QAction* play_action_ = nullptr;
