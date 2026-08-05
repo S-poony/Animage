@@ -44,11 +44,27 @@ PixelRect intersectRects(const PixelRect& a, const PixelRect& b) {
     return {x0, y0, x1 - x0, y1 - y0};
 }
 
+// Where anything has actually been drawn, to the nearest tile.
+//
+// Emptied tiles are skipped, and that is not tidiness. Erasing a mark clears
+// its pixels and leaves the tile in the grid, so bounds taken from tile
+// coordinates alone go on describing a mark that is no longer there -- and this
+// rectangle chooses the solve resolution and where the unseverable rim sits. A
+// stray scribble out in a corner, erased, left the solve permanently coarser
+// than it was before the scribble was ever made: draw, erase, and the drawing
+// does not come back the way it was. Nothing said so, because the region is not
+// something you can see.
+//
+// Cheap enough to do every time: isFullyTransparent stops at the first pixel
+// that is there, tiles that hold something stop immediately, and this runs once
+// per solve against a max-flow costing a hundred milliseconds.
 PixelRect celBounds(const Cel& cel) {
     PixelRect bounds;
     for (const TileCoord& coord : cel.tiles().coords()) {
-        const PixelRect tile{coord.x * kTileSize, coord.y * kTileSize, kTileSize, kTileSize};
-        bounds = uniteRects(bounds, tile);
+        const TileRef tile = cel.tiles().find(coord);
+        if (!tile || tile->isFullyTransparent()) continue;
+        bounds = uniteRects(bounds, {coord.x * kTileSize, coord.y * kTileSize, kTileSize,
+                                     kTileSize});
     }
     return bounds;
 }
@@ -271,6 +287,8 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
 
     CtgFill built;
     built.region = filled;
+    built.solved = region;
+    built.step = step;
     built.inputs = inputs;
     built.valid = true;
     built.colours = static_cast<int>(palette.size());

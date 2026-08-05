@@ -834,6 +834,124 @@ void solvingTwoDrawingsAndComingBackDoesNotResolve() {
     CHECK(s.doc.ctgFillFor(s.track, s.at(2), s.colour) != nullptr);
 }
 
+// --- erasing puts things back ---------------------------------------------
+
+// A stroke on a CTG layer exactly as the canvas makes one: no pressure on
+// opacity, hardness 1, opacity 1, because a scribble is a label and not paint.
+// See CanvasWidget::beginStroke.
+void ctgStroke(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
+               float x1, float y1, float radius, float r, float g, float b, bool erase) {
+    ScopedCommand command(doc, erase ? "Erase" : "Stroke");
+    BrushSettings settings;
+    settings.radius = radius;
+    settings.hardness = 1.0f;
+    settings.opacity = 1.0f;
+    settings.pressure_affects_opacity = false;
+    settings.r = r;
+    settings.g = g;
+    settings.b = b;
+    settings.a = 1.0f;
+    settings.erase = erase;
+    Brush brush(settings);
+    brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+    brush.extend({x1, y1, 1.0f});
+    brush.end();
+}
+
+std::size_t differingPixels(const CtgFill& a, const CtgFill& b, const PixelRect& over) {
+    std::size_t differing = 0;
+    for (int y = over.y; y < over.y + over.height; ++y) {
+        for (int x = over.x; x < over.x + over.width; ++x) {
+            const Rgba p = a.tiles.pixel(x, y);
+            const Rgba q = b.tiles.pixel(x, y);
+            if (std::fabs(p.r - q.r) > 0.01f || std::fabs(p.g - q.g) > 0.01f ||
+                std::fabs(p.b - q.b) > 0.01f || std::fabs(p.a - q.a) > 0.01f) {
+                ++differing;
+            }
+        }
+    }
+    return differing;
+}
+
+bool sameRect(const PixelRect& a, const PixelRect& b) {
+    return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+}
+
+// Erasing a mark has to put the fill back where it was. Adding a scribble
+// changes how the ones already there behave -- that is the whole point of a
+// global min-cut, and it is expected -- but taking it away again has to undo
+// exactly that and nothing more.
+void erasingAScribbleUndoesWhatItDid() {
+    TEST("erasing a scribble puts the fill back as it was");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+
+    ctgStroke(f.doc, f.track, f.image, f.colour, 100, 110, 150, 110, 6.0f, 1, 0, 0, false);
+    const CtgFill before = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    // A second one changes how the first behaves. That much is expected.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 90, 150, 160, 150, 5.0f, 0, 0, 1, false);
+    const CtgFill with_second = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK_EQ(with_second.colours, 2);
+    CHECK(differingPixels(before, with_second, before.region) > 100);
+
+    // Erased by retracing it with the same nib, which is how anybody rubs a
+    // mark out.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 90, 150, 160, 150, 5.0f, 0, 0, 0, true);
+    const CtgFill after = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    CHECK_EQ(after.colours, before.colours);
+    CHECK(sameRect(after.solved, before.solved));
+    CHECK_EQ(after.step, before.step);
+    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+}
+
+// The same question with the erased mark somewhere the line art is not, which
+// is the case that was broken.
+//
+// celBounds was built from tile coordinates alone, and erasing empties a tile
+// without releasing it, so the solve region kept the shape of a mark that was
+// no longer there. The region chooses the solve resolution, so a stray scribble
+// out in a corner -- made and then rubbed out -- left every later solve coarser
+// than it had been before the scribble was ever drawn. Permanently, invisibly,
+// and with nothing on screen to attribute it to.
+//
+// The invariant is asserted on the solve and not only on the pixels, because a
+// coarser solve does not have to move a pixel to be wrong: this very drawing,
+// at step 2 rather than 1, comes out identical. Waiting for the pixels to
+// disagree would have been waiting for a geometry that happened to expose it.
+void erasingAStrayScribbleUndoesWhatItDid() {
+    TEST("erasing a scribble drawn out on its own puts the solve back too");
+    Fixture f;
+    f.doc.setCanvasSize(600, 600);
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+
+    ctgStroke(f.doc, f.track, f.image, f.colour, 100, 110, 150, 110, 6.0f, 1, 0, 0, false);
+    const CtgFill before = ctgFill(f.doc, f.track, f.image, f.colour);
+    const Cel* cel = f.doc.celAt(f.track, f.image, f.colour);
+    const std::size_t tiles_before = cel->tiles().tileCount();
+
+    // A stray mark out in the corner, well away from anything drawn. It really
+    // does coarsen the solve -- that is not the bug, it is the cost of the
+    // drawing being bigger.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 480, 500, 520, 500, 6.0f, 0, 0, 1, false);
+    const CtgFill stray = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(stray.step > before.step);
+    CHECK(cel->tiles().tileCount() > tiles_before);
+
+    // Erased completely, with a wider nib.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 470, 500, 530, 500, 12.0f, 0, 0, 0, true);
+    const CtgFill after = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    // The tiles are still allocated -- that is a separate matter, and the point
+    // is that the solve no longer cares.
+    CHECK(cel->tiles().tileCount() > tiles_before);
+    CHECK_EQ(after.colours, before.colours);
+    CHECK(sameRect(after.solved, before.solved));
+    CHECK_EQ(after.step, before.step);
+    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+}
+
 }  // namespace
 
 int main() {
@@ -864,5 +982,8 @@ int main() {
     onlyAColourLayerInherits();
     addingAColourLayerToALongTrackAllocatesNothing();
     solvingTwoDrawingsAndComingBackDoesNotResolve();
+
+    erasingAScribbleUndoesWhatItDid();
+    erasingAStrayScribbleUndoesWhatItDid();
     return testing::summarise("ctg");
 }

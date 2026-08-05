@@ -19,7 +19,19 @@ namespace animage {
 // pixels in the first place.
 struct CtgFill {
     TileGrid tiles;
-    PixelRect region;  // the area that was solved
+    PixelRect region;  // the area the fill covers: the canvas
+
+    // What was actually solved, and how coarsely. Not the same as `region`:
+    // the solve covers only what has been drawn on and the labels are extended
+    // outwards from it, and it is reduced until it fits the budget.
+    //
+    // Exposed because both are answers in their own right rather than internals
+    // -- the step is the resolution of the result, and the rectangle is what
+    // the drawing is understood to occupy. A test can then say "erasing a mark
+    // put the solve back as it was" exactly, instead of hoping the coarsening
+    // it caused happens to move a pixel.
+    PixelRect solved;
+    int step = 1;
 
     bool valid = false;
     int colours = 0;  // distinct scribble colours found
