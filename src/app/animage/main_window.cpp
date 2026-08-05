@@ -444,6 +444,15 @@ void MainWindow::buildLayerPanel() {
     // out on every layer but one is a permanent question about a layer you may
     // not even have.
     colour_settings_ = new QGroupBox(QStringLiteral("Colour layer"), panel);
+    // Takes the width it is given and asks for none of its own.
+    //
+    // A minimum on the panel was not enough and the measurement said so: the
+    // dock is sized from the panel's *preferred* width, not its minimum, so the
+    // box appearing took it from 274 to 292 and selecting a colour layer shoved
+    // the canvas eighteen pixels sideways. Ignored drops its sizeHint out of
+    // that sum entirely, and the panel's minimum below is what actually
+    // reserves the room.
+    colour_settings_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto* colour_layout = new QVBoxLayout(colour_settings_);
     colour_layout->setContentsMargins(6, 4, 6, 6);
     colour_layout->setSpacing(4);

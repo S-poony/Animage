@@ -1932,10 +1932,29 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     // A fresh document has one raster layer, so there is nothing to configure.
     CHECK(!box->isVisible());
 
+    // The dock must not change width when the box comes and goes, or selecting
+    // a colour layer shoves the canvas sideways every time.
+    //
+    // Measured from before the box has ever appeared. The first version of this
+    // test took its reading *after* the box was showing and then checked the
+    // width did not shrink on the way out -- so it never saw the growth on the
+    // way in, passed, and shipped the bug. A grab forces the layout pass that
+    // makes the reading mean anything.
+    QWidget* dock = box->parentWidget();
+    while (dock && !dock->inherits("QDockWidget")) dock = dock->parentWidget();
+    CHECK(dock != nullptr);
+    if (!dock) return;
+    window.grab();
+    const int settled = dock->width();
+    CHECK(settled > 0);
+
     add_layer->click();
     add_colour->click();
     QCoreApplication::processEvents();
+    window.grab();
+    QCoreApplication::processEvents();
     CHECK(box->isVisible());
+    CHECK_EQ(dock->width(), settled);
 
     auto* sources = box->findChild<QListWidget*>();
     auto* direction = box->findChild<QComboBox*>();
@@ -1998,15 +2017,8 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     QCoreApplication::processEvents();
     CHECK(colourTip().contains(QStringLiteral("1 layer")));
 
-    // And stepping onto a raster layer takes the whole box away again --
-    // without the dock changing width, which would drag the canvas sideways
-    // every time you clicked a colour layer.
-    QWidget* dock = box->parentWidget();
-    while (dock && !dock->inherits("QDockWidget")) dock = dock->parentWidget();
-    CHECK(dock != nullptr);
-    if (!dock) return;
-    const int with_box = dock->width();
-
+    // And stepping onto a raster layer takes the whole box away again, still
+    // without the dock moving.
     for (int row = 0; row < layers->topLevelItemCount(); ++row) {
         if (!layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
             layers->setCurrentItem(layers->topLevelItem(row));
@@ -2014,8 +2026,10 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
         }
     }
     QCoreApplication::processEvents();
+    window.grab();
+    QCoreApplication::processEvents();
     CHECK(!box->isVisible());
-    CHECK_EQ(dock->width(), with_box);
+    CHECK_EQ(dock->width(), settled);
 }
 
 // Transparency is a colour on a colour layer and nothing anywhere else. On a
