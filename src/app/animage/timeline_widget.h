@@ -50,6 +50,15 @@ private:
     std::pair<std::size_t, std::size_t> runAt(std::size_t slot) const;
     bool isOnRunEdge(int x, std::size_t* run_start) const;
     std::vector<int> drawingNumbers() const;
+
+    // What a drawing's colour layers are doing, in the two things the card can
+    // show. See colourStateFor for why the two are known at different times.
+    struct ColourState {
+        bool any = false;      // a colour layer has marks to show here
+        bool carried = false;  // ...and some of them were made on another drawing
+        bool suspect = false;  // ...and a solved fill says one of them filled nothing
+    };
+    ColourState colourStateFor(animage::ImageId image) const;
     void applyStretch(int pointer_x);
     int dropIndexFor(int pointer_x) const;
 

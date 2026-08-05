@@ -543,7 +543,10 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // under the pen: a colour boundary can move anywhere in the picture, so
     // repainting only what was marked dirty left the new fill showing beside the
     // stroke and the old one everywhere else.
-    if (refreshCtgFills()) dirty_everything_ = true;
+    if (refreshCtgFills()) {
+        dirty_everything_ = true;
+        Q_EMIT ctgFillsChanged();
+    }
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;

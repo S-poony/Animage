@@ -22,6 +22,7 @@ constexpr int kDragThreshold = 5;
 // theme too, if the system asks for one.
 struct Palette {
     QColor background, ruler, cell, cell_held, outline, tick, text, current, current_text;
+    QColor carried, flag;
 };
 
 Palette paletteFor(const QWidget& widget) {
@@ -40,6 +41,10 @@ Palette paletteFor(const QWidget& widget) {
     p.text = text;
     p.current = source.color(QPalette::Highlight);
     p.current_text = source.color(QPalette::HighlightedText);
+    // Not from the palette: these two have to mean the same thing in every
+    // theme, and "carried" and "wrong" are not roles a system palette has.
+    p.carried = QColor(0x5b, 0x9c, 0xd6);
+    p.flag = QColor(0xe0, 0x7a, 0x1e);
     return p;
 }
 
@@ -127,6 +132,38 @@ std::vector<int> TimelineWidget::drawingNumbers() const {
     return numbers;
 }
 
+// What to show on one drawing's card about its colour layers.
+//
+// The two halves cost very different things, and that is why they behave
+// differently. Whether the marks were carried is a walk over the slots and
+// costs nothing, so it is known for every drawing always. Whether the fill they
+// produced went wrong needs the fill, and a fill is a max-flow -- so it is
+// reported for the drawings that have one and no others. Compositing is not
+// allowed to start a solve and neither is painting a timeline.
+//
+// The consequence is worth knowing rather than hiding: flags appear on the
+// drawings you have visited, and light up behind you as you play through a
+// shot. Solving the whole track to fill them all in is what Check colour fills
+// is for.
+TimelineWidget::ColourState TimelineWidget::colourStateFor(ImageId image) const {
+    ColourState state;
+    const Track* line = track();
+    if (!line || image == kNoId) return state;
+
+    for (const Layer& layer : line->layers) {
+        if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
+
+        ImageId from = kNoId;
+        if (!doc_.ctgScribblesAt(track_, image, layer.id, &from)) continue;
+        state.any = true;
+        if (from != image) state.carried = true;
+
+        const CtgFill* fill = doc_.ctgFillFor(track_, image, layer.id);
+        if (fill && fill->suspect()) state.suspect = true;
+    }
+    return state;
+}
+
 void TimelineWidget::paintEvent(QPaintEvent*) {
     const Palette colours = paletteFor(*this);
 
@@ -160,6 +197,32 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             painter.drawRect(cell.adjusted(0, 0, -1, -1));
             painter.setPen(colours.text);
             painter.drawText(cell, Qt::AlignCenter, QString::number(numbers[i]));
+
+            // Two marks on the card, on the numbered one only: a held frame is
+            // the same drawing still showing, so it has nothing of its own to
+            // report.
+            //
+            // The feature is invisible when it works -- a carried mark looks
+            // exactly like one you drew -- so the only way to know it is
+            // working is to be told. A bar under the number for colour that was
+            // carried here, and a wedge in the corner for colour that was
+            // carried here and filled nothing when it arrived.
+            const ColourState state = colourStateFor(line->slots[i]);
+            if (state.carried) {
+                painter.fillRect(QRect(cell.left() + 4, cell.bottom() - 4, cell.width() - 8, 2),
+                                 colours.carried);
+            }
+            if (state.suspect) {
+                const int corner = 7;
+                QPolygon wedge;
+                wedge << QPoint(cell.right() - corner, cell.top() + 1)
+                      << QPoint(cell.right() - 1, cell.top() + 1)
+                      << QPoint(cell.right() - 1, cell.top() + corner);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(colours.flag);
+                painter.drawPolygon(wedge);
+                painter.setBrush(Qt::NoBrush);
+            }
         }
 
         // Frame ruler every five, as on an exposure sheet.

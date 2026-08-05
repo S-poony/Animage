@@ -100,6 +100,16 @@ MainWindow::MainWindow() {
         timeline_widget_->refresh();
         syncStatus();
     });
+    // Queued: this arrives from inside the canvas's paint, because that is the
+    // only place a solve is allowed to start. Rebuilding the layer panel
+    // underneath a paint is a way to delete a widget while it is drawing.
+    connect(
+        canvas_, &CanvasWidget::ctgFillsChanged, this,
+        [this] {
+            timeline_widget_->refresh();
+            refreshLayerFlags();
+        },
+        Qt::QueuedConnection);
     setWindowTitle(QStringLiteral("Untitled - Animage"));
     syncStatus();
 
@@ -844,6 +854,11 @@ void MainWindow::refreshEverything() {
 
 void MainWindow::onSlotChanged(std::size_t slot) {
     canvas_->setFrame(slot);
+    // What the panel says about a colour layer is about the drawing you are
+    // standing on, so moving changes it even when no fill is rebuilt. Arriving
+    // at a drawing that was already solved fires nothing at all, and without
+    // this the row went on showing the flag from the drawing you left.
+    refreshLayerFlags();
     syncStatus();
 }
 
@@ -1048,6 +1063,92 @@ Layer* MainWindow::currentLayer() {
     return &track->layers[static_cast<std::size_t>(row)];
 }
 
+// What a row says, including what this layer is doing on the drawing in front
+// of you.
+//
+// On that drawing and no other, which is what makes it belong in the layer
+// panel: the panel says what the layer is doing *now*. The timeline is where
+// the same facts are laid out across time, and walking onto a flagged drawing
+// is what brings its flag in here.
+QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
+    const QString name = QString::fromStdString(layer.name);
+    if (layer.kind != LayerKind::Ctg) return name;
+
+    // A glyph and the name, and everything else in the tooltip. The panel is a
+    // couple of hundred pixels wide, and a row that spells out what it is doing
+    // is a row elided to "..." -- which says less than nothing, because it
+    // hides the very words that were the point.
+    const CtgFill* fill = doc_.ctgFillFor(track_, here, layer.id);
+    if (fill && fill->suspect()) return QStringLiteral("⚠ ") + name;
+
+    ImageId from = kNoId;
+    if (doc_.ctgScribblesAt(track_, here, layer.id, &from) && from != here) {
+        return QStringLiteral("← ") + name;
+    }
+    return name;
+}
+
+void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, ImageId here) {
+    if (layer.kind != LayerKind::Ctg) {
+        item->setForeground(0, QBrush());
+        item->setToolTip(0, QString());
+        return;
+    }
+
+    const Track* track = doc_.scene().findTrack(track_);
+    QString tip = QStringLiteral("A colour layer: it holds scribbles, and the fill is worked\n"
+                                 "out from them and the %1 layer%2 it is cut against.")
+                      .arg(layer.ctg_sources.size())
+                      .arg(layer.ctg_sources.size() == 1 ? "" : "s");
+
+    ImageId from = kNoId;
+    const bool carried =
+        doc_.ctgScribblesAt(track_, here, layer.id, &from) && from != here;
+    if (carried) {
+        const Image* source = track ? track->findImage(from) : nullptr;
+        tip += QStringLiteral("\n\nThe marks here were made on drawing %1 and carried to this\n"
+                              "one. Scribbling here detaches this drawing, and the drawings\n"
+                              "after it follow this one instead.")
+                   .arg(source ? source->number : 0);
+    }
+
+    const CtgFill* fill = doc_.ctgFillFor(track_, here, layer.id);
+    if (fill && fill->suspect()) {
+        tip += QStringLiteral("\n\nThose carried marks fill almost nothing but themselves here,\n"
+                              "so whatever they were meant to colour has moved out from\n"
+                              "under them. Worth a look.");
+        item->setForeground(0, QBrush(QColor(0xe0, 0x7a, 0x1e)));
+    } else {
+        item->setForeground(0, QBrush());
+    }
+    item->setToolTip(0, tip);
+}
+
+// The rows already exist; only what they report has moved.
+//
+// Deliberately not rebuildLayerList. That clears the tree and builds new items,
+// which throws away the selection -- and because a fill is solved inside a
+// paint and reported afterwards, it would delete rows out from under anything
+// still holding one. A test was holding one, and said so by crashing. A solve
+// finishing changes two words and a colour, so it changes two words and a
+// colour.
+void MainWindow::refreshLayerFlags() {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || !layer_list_) return;
+    const ImageId here = canvas_->currentImage();
+
+    const int rows = std::min(layer_list_->topLevelItemCount(),
+                              static_cast<int>(track->layers.size()));
+    updating_list_ = true;
+    for (int row = 0; row < rows; ++row) {
+        const Layer& layer = track->layers[static_cast<std::size_t>(row)];
+        QTreeWidgetItem* item = layer_list_->topLevelItem(row);
+        item->setText(0, layerLabel(layer, here));
+        applyLayerFlag(item, layer, here);
+    }
+    updating_list_ = false;
+}
+
 void MainWindow::rebuildLayerList() {
     const Track* track = doc_.scene().findTrack(track_);
     if (!track || !layer_list_) return;
@@ -1057,15 +1158,10 @@ void MainWindow::rebuildLayerList() {
     updating_list_ = true;
     layer_list_->clear();
     QTreeWidgetItem* active_item = nullptr;
+    const ImageId here = canvas_->currentImage();
     for (const Layer& layer : track->layers) {
-        QString label = QString::fromStdString(layer.name);
-        if (layer.kind == LayerKind::Ctg) {
-            label += QStringLiteral("   [colour, %1 source%2]")
-                         .arg(layer.ctg_sources.size())
-                         .arg(layer.ctg_sources.size() == 1 ? "" : "s");
-        }
         auto* item = new QTreeWidgetItem(layer_list_);
-        item->setText(0, label);
+        item->setText(0, layerLabel(layer, here));
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
 
@@ -1079,6 +1175,7 @@ void MainWindow::rebuildLayerList() {
                                     "Show the scribbles instead of the fill.\n"
                                     "Changes nothing about the drawing, only what is shown."));
         }
+        applyLayerFlag(item, layer, here);
         if (layer.id == active) active_item = item;
     }
     if (!active_item && layer_list_->topLevelItemCount() > 0) {

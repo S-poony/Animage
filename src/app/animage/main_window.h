@@ -96,6 +96,13 @@ private:
     // The one place a colour becomes the brush's, whether it came from the
     // dialog, the eyedropper or the transparent swatch. Linear light, straight.
     void applyColour(float r, float g, float b);
+    // What a layer's row says, and the flag on it. Shared by the full rebuild
+    // and by the in-place refresh a finished solve triggers.
+    QString layerLabel(const animage::Layer& layer, animage::ImageId here) const;
+    void applyLayerFlag(QTreeWidgetItem* item, const animage::Layer& layer,
+                        animage::ImageId here);
+    void refreshLayerFlags();
+
     void syncToolSettings();
     void setBrushRadius(double radius);
     void nudgeBrushRadius(double factor);

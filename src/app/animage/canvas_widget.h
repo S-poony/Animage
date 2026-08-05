@@ -124,6 +124,13 @@ Q_SIGNALS:
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
 
+    // A CTG fill was rebuilt, so anything reporting on one is out of date --
+    // the timeline's flags and the layer panel's. Emitted from inside a paint,
+    // because that is the only place a solve is allowed to start, so it must be
+    // connected queued: rebuilding a panel underneath a paint is how a widget
+    // ends up being deleted while it is drawing itself.
+    void ctgFillsChanged();
+
 protected:
     void tabletEvent(QTabletEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;

@@ -39,6 +39,7 @@
 #include "document.h"
 #include "project_files.h"
 #include "scribble.h"
+#include "timeline_widget.h"
 #include "scene_settings_dialog.h"
 #include "serialise.h"
 #include "testing.h"
@@ -1775,6 +1776,121 @@ void theFileMenuExports() {
     CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
 }
 
+// A shot whose shape sits still for two drawings and then jumps across the
+// frame, so a mark carried from the first drawing ends up stranded on blank
+// paper with nothing to fill.
+animage::Document buildStrandedShot() {
+    using namespace animage;
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId colour = doc.addLayer(track, "colour 1", 0, LayerKind::Ctg);
+    const LayerId ink = doc.addLayer(track, "ink", 1);
+
+    Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+    settings.ctg_sources = {ink};
+    doc.updateLayer(track, colour, settings);
+
+    std::vector<ImageId> images;
+    for (int i = 0; i < 4; ++i) {
+        images.push_back(doc.insertImage(track, static_cast<std::size_t>(i)));
+    }
+
+    const auto line = [&](ImageId image, LayerId layer, float x0, float y0, float x1, float y1,
+                          float radius, float r, float g, float b, bool label) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings s;
+        s.radius = radius;
+        s.hardness = label ? 1.0f : 0.95f;
+        s.opacity = 1.0f;
+        s.pressure_affects_opacity = false;
+        s.r = r;
+        s.g = g;
+        s.b = b;
+        s.a = 1.0f;
+        s.label = label;
+        Brush brush(s);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+
+    const int lefts[4] = {200, 200, 900, 900};
+    for (int i = 0; i < 4; ++i) {
+        const ImageId image = images[static_cast<std::size_t>(i)];
+        const float l = static_cast<float>(lefts[i]);
+        const float r = l + 300.0f;
+        line(image, ink, l, 200, r, 200, 2.5f, 0, 0, 0, false);
+        line(image, ink, l, 200, l, 500, 2.5f, 0, 0, 0, false);
+        line(image, ink, r, 200, r, 500, 2.5f, 0, 0, 0, false);
+        line(image, ink, l, 500, r, 500, 2.5f, 0, 0, 0, false);
+    }
+    line(images[0], colour, 260, 300, 440, 300, 22.0f, 0.9f, 0.2f, 0.2f, true);
+    doc.clearHistory();
+    return doc;
+}
+
+// The flag has to reach the panel, not only exist in the model. It appears on
+// the drawing you are standing on, which is what makes it a layer property:
+// walking onto a flagged drawing brings it in, walking off takes it away.
+void aStrandedCarriedMarkIsFlaggedInThePanel() {
+    TEST("a carried mark that fills nothing is flagged on the layer row");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("stranded.animage"));
+    animage::Document built = buildStrandedShot();
+    CHECK(project::save(built, folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(timeline != nullptr);
+    CHECK(layers != nullptr);
+    if (!timeline || !layers) return;
+
+    const auto colourRowText = [&] {
+        for (int row = 0; row < layers->topLevelItemCount(); ++row) {
+            const QString text = layers->topLevelItem(row)->text(0);
+            if (text.contains(QStringLiteral("colour"))) return text;
+        }
+        return QString();
+    };
+
+    // Standing on each drawing in turn, letting the paint that runs the solve
+    // happen and the queued report that follows it arrive.
+    const auto visit = [&](int slot) {
+        timeline->setCurrentSlot(static_cast<std::size_t>(slot));
+        QCoreApplication::processEvents();
+        window.grab();
+        QCoreApplication::processEvents();
+    };
+
+    // Its own marks: no arrow, no flag.
+    visit(0);
+    CHECK(!colourRowText().startsWith(QStringLiteral("←")));
+    CHECK(!colourRowText().startsWith(QStringLiteral("⚠")));
+
+    // Carried, and the shape has not moved, so it still fills: an arrow and no
+    // flag. This is the case that must stay quiet, or the flag is noise.
+    visit(1);
+    CHECK(colourRowText().startsWith(QStringLiteral("←")));
+
+    // Carried onto a drawing the shape has left: flagged.
+    visit(2);
+    CHECK(colourRowText().startsWith(QStringLiteral("⚠")));
+    visit(3);
+    CHECK(colourRowText().startsWith(QStringLiteral("⚠")));
+
+    // And walking back off it takes the flag away again.
+    visit(1);
+    CHECK(!colourRowText().startsWith(QStringLiteral("⚠")));
+}
+
 // Transparency is a colour on a colour layer and nothing anywhere else. On a
 // raster layer it would be a stroke of negative light -- pixels no filter, no
 // export and no file format can make sense of -- so the state has to be
@@ -1955,6 +2071,7 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
+    aStrandedCarriedMarkIsFlaggedInThePanel();
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
