@@ -36,12 +36,56 @@ struct CtgSettings {
     LazyBrushOptions lazybrush;
 };
 
+// What the whole-track audit solves at.
+//
+// Deliberately coarse. The verdict is "did this mark fill a region or only
+// itself", which is a judgement about areas and survives a blocky answer; the
+// cost is what has to survive being paid once per drawing after every edit. A
+// drawing solved at eight is roughly a sixty-fourth of the grid it would be at
+// one, and the pass is what makes a flag mean "go and look at drawing 34"
+// rather than "you are standing on a bad drawing".
+inline CtgSettings auditSettings() {
+    CtgSettings settings;
+    settings.downscale = 8;
+    return settings;
+}
+
+
+// Everything a fill depends on, worked out without working the fill out.
+struct CtgInputs {
+    std::uint64_t hash = 0;
+    bool valid = false;      // there is a CTG layer here with marks to show
+    bool inherited = false;  // ...and they were made on another drawing
+    const Cel* scribbles = nullptr;
+};
+
+CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerId layer,
+                       const CtgSettings& settings = {});
 
 // Regenerates the fill if the scribbles or any barrier layer have changed since
-// last time, and returns it. The cache lives in the document, keyed by the
-// scribble cel.
+// last time, and returns it. The cache lives in the document, keyed by
+// (drawing, layer).
 const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer,
                        const CtgSettings& settings = {});
+
+// The same solve without the fill. `want_tiles` false stops after the labelling
+// and the verdict, skipping a write per pixel of the canvas -- which is two
+// million of them at 1080p and does not get cheaper when the solve is coarse.
+// Touches no cache, so a coarse pass cannot evict a fine fill somebody is
+// looking at.
+CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer,
+                     const CtgSettings& settings, bool want_tiles);
+
+// Judges every drawing of the track, so the timeline can flag the ones worth
+// looking at without anybody having visited them.
+//
+// This is the whole point of the flag: it says which drawings to go and look at,
+// and a flag that only appears once you have looked at a drawing has told you
+// nothing you did not just find out. Painting a timeline is no more allowed to
+// start a max-flow than compositing is, so the pass is run deliberately, from
+// outside, and cheaply -- coarse by default, keeping only the numbers, and
+// skipping every drawing whose inputs have not moved.
+void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings = auditSettings());
 
 // Builds the barrier the scribbles are cut against: every source layer of the
 // CTG layer, flattened, as intensity where 0 is solid line and 1 is bare paper.

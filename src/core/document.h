@@ -105,6 +105,17 @@ public:
     CtgFillCache& ctgCache() { return ctg_cache_; }
     const CtgFillCache& ctgCache() const { return ctg_cache_; }
 
+    // The whole-track verdicts, one per (drawing, layer). Derived like the
+    // fills and kept for the same reason, but never evicted: they are a few
+    // bytes each and the timeline needs every one of them at once. See
+    // auditCtgFills.
+    using CtgVerdicts = std::unordered_map<CtgKey, CtgVerdict, CtgKeyHash>;
+    CtgVerdicts& ctgVerdicts() { return ctg_verdicts_; }
+    const CtgVerdicts& ctgVerdicts() const { return ctg_verdicts_; }
+
+    // The verdict on one drawing, or null if it has not been judged.
+    const CtgVerdict* ctgVerdictFor(ImageId image, LayerId layer) const;
+
     // The regenerated fill for a CTG layer, or null if it has not been built.
     // Const, so the compositor can draw one but never trigger a solve: the
     // caller decides when it is worth paying for.
@@ -182,6 +193,7 @@ private:
     std::vector<Command> redo_stack_;
 
     CtgFillCache ctg_cache_;
+    CtgVerdicts ctg_verdicts_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

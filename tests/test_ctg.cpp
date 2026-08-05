@@ -1072,6 +1072,91 @@ void carryingCanRunBackwards() {
     CHECK_NEAR(fillAt(s.fillOf(0), 130, 160).r, 1.0, 0.02);  // now the nearest later one
 }
 
+// Carrying both ways fills the gaps between the drawings you have coloured,
+// rather than only what follows them. Whichever coloured drawing is fewer
+// drawings off wins; a tie goes to the earlier one.
+void carryingCanRunBothWays() {
+    TEST("marks can be carried from whichever side is nearer");
+    Sequence s(5);
+    for (int i = 0; i < 5; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+
+    // Coloured at each end, nothing in between.
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);  // red
+    s.stroke(4, s.colour, 120, 110, 150, 110, 6.0f, 0.0f, 0.0f, 1.0f);  // blue
+
+    // Forwards, the whole middle follows the red one.
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(3), 130, 160).r, 1.0, 0.02);
+
+    setCtg(s, true, CtgDirection::Nearest);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);  // one back, three on
+    CHECK_NEAR(fillAt(s.fillOf(3), 130, 160).b, 1.0, 0.02);  // three back, one on
+
+    // Dead centre: two either way, and the earlier one takes it.
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+    CHECK_EQ(s.track_ref().celSourceFor(s.at(2), s.colour, 0), s.at(0));
+
+    // With only one side coloured it reaches the other way rather than giving
+    // up, which is the whole difference from picking a direction.
+    Sequence t(3);
+    for (int i = 0; i < 3; ++i) t.box(i, 60, 60, 200, 180, 120, 140);
+    t.stroke(2, t.colour, 120, 110, 150, 110, 6.0f, 0.0f, 1.0f, 0.0f);
+    setCtg(t, true, CtgDirection::Nearest);
+    CHECK_NEAR(fillAt(t.fillOf(0), 130, 160).g, 1.0, 0.02);
+    CHECK_NEAR(fillAt(t.fillOf(1), 130, 160).g, 1.0, 0.02);
+}
+
+// A flag that only appears once you have looked at a drawing has told you
+// nothing you did not just find out. The whole track has to be judged without
+// anybody visiting it, and cheaply enough to do after every edit.
+void everyDrawingIsJudgedWithoutBeingVisited() {
+    TEST("every drawing is judged without being visited");
+    Sequence s(12);
+    s.doc.setCanvasSize(1920, 1080);
+
+    // The shape sits still for six drawings and then jumps across the frame,
+    // leaving the carried mark stranded from there on.
+    for (int i = 0; i < 12; ++i) {
+        const int left = (i < 6) ? 200 : 1200;
+        s.box(i, left, 200, left + 400, 700, left + 180, left + 220);
+    }
+    s.stroke(0, s.colour, 300, 400, 700, 400, 24.0f, 1.0f, 0.0f, 0.0f);
+
+    // Nothing has been looked at, so nothing is known.
+    CHECK(s.doc.ctgVerdictFor(s.at(7), s.colour) == nullptr);
+
+    const auto started = std::chrono::steady_clock::now();
+    auditCtgFills(s.doc, s.track);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::printf("      [audited 12 drawings of 1920x1080 in %.0f ms]\n", seconds * 1000.0);
+
+    // Judged everywhere, and the judgement is right on both sides of the jump.
+    for (int i = 0; i < 12; ++i) {
+        const CtgVerdict* verdict = s.doc.ctgVerdictFor(s.at(i), s.colour);
+        CHECK(verdict != nullptr);
+        if (!verdict) continue;
+        CHECK_EQ(verdict->inherited, i != 0);
+        CHECK_EQ(verdict->suspect, i >= 6);
+    }
+
+    // It cost nothing to look at, which is the part that has to be true for
+    // this to run after every edit.
+    CHECK(seconds < 1.0);
+
+    // And running it again is nearly free, because nothing moved.
+    const auto again_started = std::chrono::steady_clock::now();
+    auditCtgFills(s.doc, s.track);
+    const double again =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - again_started).count();
+    std::printf("      [re-audited unchanged in %.1f ms]\n", again * 1000.0);
+    CHECK(again < seconds / 4.0);
+
+    // The audit is a separate store and must not have disturbed the fills the
+    // canvas is showing: a coarse pass cannot evict a fine answer.
+    CHECK_EQ(s.doc.ctgCache().size(), std::size_t{0});
+}
+
 // The signal that decides whether the automation gets used or switched off.
 //
 // It has to work with marks that are merely carried, not only with marks that
@@ -1326,6 +1411,8 @@ int main() {
     aMarkOutsideAShapeNearItsWall();
     carryingScribblesCanBeSwitchedOff();
     carryingCanRunBackwards();
+    carryingCanRunBothWays();
+    everyDrawingIsJudgedWithoutBeingVisited();
     aCarriedMarkThatLandsWrongIsFlagged();
     aCarriedMarkThatLandsRightIsNotFlagged();
     confidenceIsMeasuredAgainstTheSolveAndNotTheFill();

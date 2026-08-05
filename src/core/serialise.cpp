@@ -38,11 +38,18 @@ LayerKind kindFromName(const std::string& name) {
 }
 
 const char* directionName(CtgDirection direction) {
-    return direction == CtgDirection::Backward ? "backward" : "forward";
+    switch (direction) {
+        case CtgDirection::Backward: return "backward";
+        case CtgDirection::Nearest: return "nearest";
+        case CtgDirection::Forward: break;
+    }
+    return "forward";
 }
 
 CtgDirection directionFromName(const std::string& name) {
-    return name == "backward" ? CtgDirection::Backward : CtgDirection::Forward;
+    if (name == "backward") return CtgDirection::Backward;
+    if (name == "nearest") return CtgDirection::Nearest;
+    return CtgDirection::Forward;
 }
 
 Json writeColour(const Rgba& colour) {

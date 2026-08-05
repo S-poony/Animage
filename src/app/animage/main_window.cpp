@@ -99,8 +99,21 @@ MainWindow::MainWindow() {
     });
     connect(canvas_, &CanvasWidget::colourPicked, this, &MainWindow::applyColour);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
+    // Judging every drawing is what makes a flag say "go and look at drawing
+    // 34" rather than "you are standing on a bad one". It is cheap -- 67 ms for
+    // twelve 1080p drawings cold, nothing at all when none of them has moved --
+    // but not cheap enough to do per dab, so it waits for the edits to stop.
+    //
+    // Restarting rather than accumulating is the point of the timer: a stroke
+    // is many changes and deserves one audit, at the end.
+    audit_timer_ = new QTimer(this);
+    audit_timer_->setSingleShot(true);
+    audit_timer_->setInterval(250);
+    connect(audit_timer_, &QTimer::timeout, this, &MainWindow::auditColourFills);
+
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
+        audit_timer_->start();
         syncStatus();
     });
     // Queued: this arrives from inside the canvas's paint, because that is the
@@ -389,6 +402,15 @@ void MainWindow::buildLayerPanel() {
     dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
 
     auto* panel = new QWidget(dock);
+    // Wide enough for the colour-layer box before it is there.
+    //
+    // The box appears and disappears as you move between layers, and a dock
+    // that resizes to fit it drags the canvas sideways every time you click a
+    // colour layer -- a lot of movement to pay for a panel. Claiming the width
+    // up front costs a few pixels beside a stack of ordinary layers and nothing
+    // else; the two widest things in the box are told not to ask for more than
+    // this, so nothing inside it can push the number up again.
+    panel->setMinimumWidth(232);
     auto* layout = new QVBoxLayout(panel);
 
     // Two columns rather than one, because a colour layer needs two switches:
@@ -430,6 +452,10 @@ void MainWindow::buildLayerPanel() {
     ctg_sources_ = new QListWidget(colour_settings_);
     ctg_sources_->setMaximumHeight(90);
     ctg_sources_->setFocusPolicy(Qt::NoFocus);
+    // A long layer name must scroll, not widen the dock.
+    ctg_sources_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    ctg_sources_->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    ctg_sources_->setMinimumWidth(0);
     ctg_sources_->setToolTip(
         QStringLiteral("The line art this layer's fill stops at.\n"
                        "More than one is normal: cutting against a rough as well as a\n"
@@ -437,7 +463,7 @@ void MainWindow::buildLayerPanel() {
     connect(ctg_sources_, &QListWidget::itemChanged, this, &MainWindow::onCtgSourcesChanged);
     colour_layout->addWidget(ctg_sources_);
 
-    ctg_inherit_ = new QCheckBox(QStringLiteral("Carry marks to drawings with none"),
+    ctg_inherit_ = new QCheckBox(QStringLiteral("Carry to drawings with none"),
                                  colour_settings_);
     ctg_inherit_->setFocusPolicy(Qt::NoFocus);
     ctg_inherit_->setToolTip(
@@ -454,11 +480,17 @@ void MainWindow::buildLayerPanel() {
     ctg_direction_ = new QComboBox(direction_row);
     ctg_direction_->addItem(QStringLiteral("forwards"));
     ctg_direction_->addItem(QStringLiteral("backwards"));
+    ctg_direction_->addItem(QStringLiteral("both ways"));
     ctg_direction_->setFocusPolicy(Qt::NoFocus);
+    ctg_direction_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    ctg_direction_->setMinimumContentsLength(8);
     ctg_direction_->setToolTip(
         QStringLiteral("Forwards: a drawing shows the nearest earlier drawing's marks.\n"
                        "Backwards: the nearest later one's -- for colouring the drawing\n"
-                       "you have in front of you and having it apply to the run before it."));
+                       "you have in front of you and having it apply to the run before it.\n"
+                       "Both ways: whichever is fewer drawings off, which is what fills the\n"
+                       "gaps between drawings you have coloured rather than only what\n"
+                       "follows them."));
     connect(ctg_direction_, &QComboBox::currentIndexChanged, this,
             [this](int) { onCtgSettingChanged(); });
     direction_layout->addWidget(ctg_direction_, 1);
@@ -469,7 +501,7 @@ void MainWindow::buildLayerPanel() {
     // disabled and saying so, rather than left out: the setting is real and it
     // is where it will be, and a control that looks live and does nothing is
     // the one thing worse than a control that says it is not ready.
-    ctg_follow_ = new QCheckBox(QStringLiteral("Move marks to follow the drawing"),
+    ctg_follow_ = new QCheckBox(QStringLiteral("Move marks with the drawing"),
                                 colour_settings_);
     ctg_follow_->setFocusPolicy(Qt::NoFocus);
     ctg_follow_->setEnabled(false);
@@ -718,6 +750,12 @@ void MainWindow::afterProjectLoaded() {
     canvas_->fitToCanvas();
 
     saved_undo_depth_ = doc_.undoDepth();
+
+    // A project straight off disk has been judged by nobody, and its flags are
+    // exactly what somebody opening a coloured shot wants first: which drawings
+    // to go and look at.
+    auditColourFills();
+
     syncStatus();
     updateTitle();
 }
@@ -1146,8 +1184,8 @@ QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
     // couple of hundred pixels wide, and a row that spells out what it is doing
     // is a row elided to "..." -- which says less than nothing, because it
     // hides the very words that were the point.
-    const CtgFill* fill = doc_.ctgFillFor(track_, here, layer.id);
-    if (fill && fill->suspect()) return QStringLiteral("⚠ ") + name;
+    const CtgVerdict* verdict = doc_.ctgVerdictFor(here, layer.id);
+    if (verdict && verdict->suspect) return QStringLiteral("⚠ ") + name;
 
     ImageId from = kNoId;
     if (doc_.ctgScribblesAt(track_, here, layer.id, &from) && from != here) {
@@ -1180,8 +1218,8 @@ void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, Image
                    .arg(source ? source->number : 0);
     }
 
-    const CtgFill* fill = doc_.ctgFillFor(track_, here, layer.id);
-    if (fill && fill->suspect()) {
+    const CtgVerdict* verdict = doc_.ctgVerdictFor(here, layer.id);
+    if (verdict && verdict->suspect) {
         tip += QStringLiteral("\n\nThose carried marks fill almost nothing but themselves here,\n"
                               "so whatever they were meant to colour has moved out from\n"
                               "under them. Worth a look.");
@@ -1222,7 +1260,9 @@ void MainWindow::syncColourLayerPanel() {
     }
 
     ctg_inherit_->setChecked(layer->ctg_inherit);
-    ctg_direction_->setCurrentIndex(layer->ctg_direction == CtgDirection::Backward ? 1 : 0);
+    ctg_direction_->setCurrentIndex(layer->ctg_direction == CtgDirection::Backward  ? 1
+                                    : layer->ctg_direction == CtgDirection::Nearest ? 2
+                                                                                    : 0);
     ctg_follow_->setChecked(layer->ctg_follow_motion);
 
     // Both of these are about what gets carried, so neither means anything
@@ -1251,7 +1291,9 @@ void MainWindow::onCtgSourcesChanged() {
     // the source cels' revisions and those have not moved, so nothing would
     // notice on its own.
     doc_.ctgCache().clear();
+    doc_.ctgVerdicts().clear();
     canvas_->refreshAll();
+    audit_timer_->start();
     syncStatus();
 }
 
@@ -1262,18 +1304,43 @@ void MainWindow::onCtgSettingChanged() {
 
     Layer updated = *layer;
     updated.ctg_inherit = ctg_inherit_->isChecked();
-    updated.ctg_direction =
-        ctg_direction_->currentIndex() == 1 ? CtgDirection::Backward : CtgDirection::Forward;
+    updated.ctg_direction = ctg_direction_->currentIndex() == 1   ? CtgDirection::Backward
+                            : ctg_direction_->currentIndex() == 2 ? CtgDirection::Nearest
+                                                                  : CtgDirection::Forward;
     doc_.updateLayer(track_, updated.id, updated);
 
     // Which drawing's marks a drawing reads is not part of the fill's key
-    // either -- it is resolved on the way in -- so the same applies.
+    // either -- it is resolved on the way in -- so the same applies, to the
+    // verdicts as much as to the fills.
     doc_.ctgCache().clear();
+    doc_.ctgVerdicts().clear();
     ctg_direction_->setEnabled(updated.ctg_inherit);
     canvas_->refreshAll();
-    refreshLayerFlags();
-    timeline_widget_->refresh();
+    auditColourFills();
     syncStatus();
+}
+
+// Judge every drawing, then show what changed.
+//
+// Public so a test can drive it rather than wait a quarter of a second, for the
+// same reason openProjectAt and onAutosaveTick are.
+void MainWindow::auditColourFills() {
+    audit_timer_->stop();
+    auditCtgFills(doc_, track_);
+    timeline_widget_->refresh();
+    refreshLayerFlags();
+}
+
+bool MainWindow::colourFlagAt(std::size_t slot) const {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || slot >= track->slots.size()) return false;
+
+    for (const Layer& layer : track->layers) {
+        if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
+        const CtgVerdict* verdict = doc_.ctgVerdictFor(track->slots[slot], layer.id);
+        if (verdict && verdict->suspect) return true;
+    }
+    return false;
 }
 
 // The rows already exist; only what they report has moved.

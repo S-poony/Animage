@@ -134,17 +134,16 @@ std::vector<int> TimelineWidget::drawingNumbers() const {
 
 // What to show on one drawing's card about its colour layers.
 //
-// The two halves cost very different things, and that is why they behave
-// differently. Whether the marks were carried is a walk over the slots and
-// costs nothing, so it is known for every drawing always. Whether the fill they
-// produced went wrong needs the fill, and a fill is a max-flow -- so it is
-// reported for the drawings that have one and no others. Compositing is not
-// allowed to start a solve and neither is painting a timeline.
+// Read from the verdicts rather than from the fills, and that is the whole
+// difference between a flag that is useful and one that is not. A fill exists
+// only for a drawing somebody has looked at, so flags taken from fills lit up
+// behind you as you played through a shot -- telling you a drawing was wrong
+// only once you were already looking at it. The verdicts are made for every
+// drawing at once by auditCtgFills, which is run from outside because painting
+// a timeline is no more allowed to start a max-flow than compositing is.
 //
-// The consequence is worth knowing rather than hiding: flags appear on the
-// drawings you have visited, and light up behind you as you play through a
-// shot. Solving the whole track to fill them all in is what Check colour fills
-// is for.
+// Whether the marks were carried is still a walk over the slots and costs
+// nothing, so it does not wait for the audit at all.
 TimelineWidget::ColourState TimelineWidget::colourStateFor(ImageId image) const {
     ColourState state;
     const Track* line = track();
@@ -158,8 +157,8 @@ TimelineWidget::ColourState TimelineWidget::colourStateFor(ImageId image) const 
         state.any = true;
         if (from != image) state.carried = true;
 
-        const CtgFill* fill = doc_.ctgFillFor(track_, image, layer.id);
-        if (fill && fill->suspect()) state.suspect = true;
+        const CtgVerdict* verdict = doc_.ctgVerdictFor(image, layer.id);
+        if (verdict && verdict->suspect) state.suspect = true;
     }
     return state;
 }

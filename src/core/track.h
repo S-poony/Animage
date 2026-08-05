@@ -103,12 +103,19 @@ struct Track {
     // whom, deleting a drawing leaves the ones after it inheriting from
     // whatever now precedes them, and neither touches a cel.
     //
-    // `direction` is -1 to look at earlier drawings and +1 at later ones.
+    // `direction` is -1 to look at earlier drawings, +1 at later ones, and 0 at
+    // both -- taking whichever is fewer distinct drawings away, earlier on a
+    // tie.
     //
     // Nothing here knows about layer kinds. Whether absence means empty or
     // inherited is a decision about the layer, and it is made by the caller;
     // see Document::ctgScribblesAt, which is the only one that should.
     ImageId celSourceFor(ImageId image, LayerId layer, int direction = -1) const;
+
+    // The nearest drawing on one side carrying a cel for this layer, with how
+    // many distinct drawings away it is. Exposed because "which is closer" is
+    // the whole of what carrying both ways has to decide.
+    std::pair<ImageId, int> nearestWithCel(ImageId image, LayerId layer, int direction) const;
 };
 
 }  // namespace animage

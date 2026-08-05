@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctg.h"
 
 #include <algorithm>
@@ -56,6 +56,56 @@ PixelRect celBounds(const Cel& cel) {
 }
 
 }  // namespace
+
+// Everything the answer depends on, without working the answer out.
+//
+// Its own function because three callers need it and only one of them wants the
+// fill: the cache asks "has anything moved" before paying for a solve, and the
+// audit asks the same before paying for a coarse one. A second copy of the rule
+// for what a fill depends on is a stale fill nobody can explain, so there is
+// one.
+CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerId layer_id,
+                       const CtgSettings& settings) {
+    CtgInputs out;
+
+    const Track* line = doc.scene().findTrack(track);
+    if (!line) return out;
+    const Layer* layer = line->findLayer(layer_id);
+    if (!layer || layer->kind != LayerKind::Ctg) return out;
+    const Image* record = line->findImage(image);
+    if (!record) return out;
+
+    ImageId from = kNoId;
+    const Cel* scribbles = doc.ctgScribblesAt(track, image, layer_id, &from);
+    if (!scribbles) return out;
+
+    // Cheaper than hashing the pixels and exact enough: a cel bumps its
+    // revision on every write, so nothing can change without this changing.
+    std::uint64_t inputs = scribbles->revision() * 0x9e3779b97f4a7c15ull;
+
+    // Which cel, and not only how many times it has been written. Inheritance
+    // is the reason: reordering drawings changes the cel a scribble is read
+    // from and touches no revision anywhere, so a key made of revisions alone
+    // would go on serving the colour from the drawing that used to precede
+    // this one. Revisions collide freely -- every cel in a project straight off
+    // disk is at revision 1 -- so this is not a long shot, it is the ordinary
+    // case for a reorder made before anything has been drawn.
+    inputs = inputs * 31 + scribbles->id();
+    for (LayerId source : layer->ctg_sources) {
+        const Cel* cel = doc.cel(record->celFor(source));
+        inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
+    }
+    inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
+    // The canvas bounds the solve, so resizing it changes the answer.
+    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
+    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
+
+    out.hash = inputs;
+    out.valid = true;
+    out.inherited = from != image;
+    out.scribbles = scribbles;
+    return out;
+}
 
 std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
                               const std::vector<LayerId>& sources, const PixelRect& region,
@@ -120,9 +170,9 @@ std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
     return intensity;
 }
 
-const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer_id,
-                       const CtgSettings& settings) {
-    static const CtgFill kNothing;
+CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer_id,
+                     const CtgSettings& settings, bool want_tiles) {
+    const CtgFill kNothing;
 
     const Track* line = doc.scene().findTrack(track);
     if (!line) return kNothing;
@@ -138,38 +188,11 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     // two are always the same moment in time, because layers belong to the
     // track and timing belongs to the image, so "the previous drawing" needs no
     // qualification here the way it would in TVPaint.
-    ImageId scribbles_from = kNoId;
-    const Cel* scribbles = doc.ctgScribblesAt(track, image, layer_id, &scribbles_from);
-    if (!scribbles) return kNothing;
-    const bool inherited = scribbles_from != image;
-
-    // Everything the answer depends on, mixed into one number. Cheaper than
-    // hashing the pixels and exact enough: a cel bumps its revision on every
-    // write, so nothing can change without this changing.
-    std::uint64_t inputs = scribbles->revision() * 0x9e3779b97f4a7c15ull;
-
-    // Which cel, and not only how many times it has been written. Inheritance
-    // is the reason: reordering drawings changes the cel a scribble is read
-    // from and touches no revision anywhere, so a key made of revisions alone
-    // would go on serving the colour from the drawing that used to precede
-    // this one. Revisions collide freely -- every cel in a project straight off
-    // disk is at revision 1 -- so this is not a long shot, it is the ordinary
-    // case for a reorder made before anything has been drawn.
-    inputs = inputs * 31 + scribbles->id();
-    for (LayerId source : layer->ctg_sources) {
-        const Cel* cel = doc.cel(record->celFor(source));
-        inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
-    }
-    inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
-    // The canvas bounds the solve, so resizing it changes the answer.
-    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
-    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
-
-    const CtgKey key{image, layer_id};
-    CtgFillCache& cache = doc.ctgCache();
-    if (const CtgFill* hit = cache.find(key); hit && hit->valid && hit->inputs == inputs) {
-        return *hit;
-    }
+    const CtgInputs depends = ctgInputsFor(doc, track, image, layer_id, settings);
+    if (!depends.valid) return kNothing;
+    const Cel* scribbles = depends.scribbles;
+    const bool inherited = depends.inherited;
+    const std::uint64_t inputs = depends.hash;
 
     // Two rectangles, and the difference between them is where the resolution
     // comes from.
@@ -195,7 +218,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         CtgFill empty;
         empty.inputs = inputs;
         empty.valid = true;
-        return cache.store(key, std::move(empty));
+        return empty;
     }
 
     PixelRect region = celBounds(*scribbles);
@@ -210,7 +233,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         CtgFill empty;
         empty.inputs = inputs;
         empty.valid = true;
-        return cache.store(key, std::move(empty));
+        return empty;
     }
 
     // The solve is bounded, whatever it is asked for. A max-flow over a region
@@ -274,7 +297,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     built.valid = true;
     built.inherited = inherited;
     built.colours = static_cast<int>(palette.size());
-    if (palette.empty()) return cache.store(key, std::move(built));
+    if (palette.empty()) return built;
 
     problem.colour_count = static_cast<int>(palette.size());
     problem.hard.assign(palette.size(), 0);
@@ -325,6 +348,15 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
                                         static_cast<float>(seeded[c]));
         built.spread = std::min(built.spread, static_cast<float>(won[c]) /
                                                   static_cast<float>(seeded[c]));
+    }
+
+    // A caller that only wants the verdict stops here, and that is most of why
+    // the verdict is affordable for a whole track. Everything above is a
+    // max-flow over a grid the size of the solve; everything below is a write
+    // per pixel of the canvas, which on a 1080p frame is two million of them
+    // and does not get cheaper when the solve is made coarse.
+    if (!want_tiles) {
+        return built;
     }
 
     // Paint the labels back into tiles, over the whole canvas and at full
@@ -427,7 +459,77 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
                               static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
         built.tiles.set(coord, std::move(tile));
     }
-    return cache.store(key, std::move(built));
+    return built;
+}
+
+const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer_id,
+                       const CtgSettings& settings) {
+    static const CtgFill kNothing;
+
+    const CtgKey key{image, layer_id};
+    CtgFillCache& cache = doc.ctgCache();
+
+    const CtgInputs depends = ctgInputsFor(doc, track, image, layer_id, settings);
+    if (!depends.valid) return kNothing;
+    if (const CtgFill* hit = cache.find(key); hit && hit->valid && hit->inputs == depends.hash) {
+        return *hit;
+    }
+    return cache.store(key, solveCtgFill(doc, track, image, layer_id, settings, true));
+}
+
+void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
+    const Track* line = doc.scene().findTrack(track);
+    if (!line) return;
+
+    std::vector<LayerId> layers;
+    for (const Layer& layer : line->layers) {
+        if (layer.kind == LayerKind::Ctg && layer.visible) layers.push_back(layer.id);
+    }
+    if (layers.empty()) {
+        doc.ctgVerdicts().clear();
+        return;
+    }
+
+    // Distinct drawings, not frames: a drawing held over five of them is one
+    // solve, and the verdict belongs to the drawing.
+    std::vector<ImageId> drawings;
+    for (ImageId id : line->slots) {
+        if (std::find(drawings.begin(), drawings.end(), id) == drawings.end()) {
+            drawings.push_back(id);
+        }
+    }
+
+    auto& verdicts = doc.ctgVerdicts();
+    std::unordered_map<CtgKey, CtgVerdict, CtgKeyHash> fresh;
+    for (ImageId image : drawings) {
+        for (LayerId layer : layers) {
+            const CtgKey key{image, layer};
+
+            const CtgInputs depends = ctgInputsFor(doc, track, image, layer, settings);
+            if (!depends.valid) continue;  // nothing on this layer here
+
+            // Already judged, and nothing it depends on has moved. This is what
+            // makes running the pass over a whole track after every edit
+            // affordable: one drawing changed, so one drawing is re-judged and
+            // the rest cost a hash apiece.
+            auto known = verdicts.find(key);
+            if (known != verdicts.end() && known->second.inputs == depends.hash) {
+                fresh.emplace(key, known->second);
+                continue;
+            }
+
+            const CtgFill probe = solveCtgFill(doc, track, image, layer, settings, false);
+            if (!probe.valid) continue;
+
+            CtgVerdict verdict;
+            verdict.inputs = probe.inputs;
+            verdict.spread = probe.spread;
+            verdict.inherited = probe.inherited;
+            verdict.suspect = probe.suspect();
+            fresh.emplace(key, verdict);
+        }
+    }
+    verdicts = std::move(fresh);
 }
 
 }  // namespace animage

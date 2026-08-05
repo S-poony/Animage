@@ -125,6 +125,21 @@ struct CtgKeyHash {
     }
 };
 
+// What the whole-track audit keeps about one drawing: the verdict and nothing
+// else.
+//
+// Tiny on purpose, and never evicted. A fill is megabytes and is thrown away
+// when memory is wanted; this is a few bytes and is what the timeline draws
+// from, so it has to survive for every drawing at once. Keeping the summary and
+// discarding the picture is the whole trick that lets a flag mean "go and look
+// at drawing 34".
+struct CtgVerdict {
+    float spread = 0.0f;
+    bool inherited = false;
+    bool suspect = false;
+    std::uint64_t inputs = 0;
+};
+
 // A bounded store of fills, keeping the ones looked at most recently.
 //
 // Bounded because a fill covers the canvas at full resolution: 1920x1080 is 135

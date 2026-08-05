@@ -17,6 +17,7 @@ enum class LayerKind {
 enum class CtgDirection {
     Forward,   // a drawing shows the nearest earlier one's marks
     Backward,  // ...or the nearest later one's
+    Nearest,   // ...or whichever of the two is fewer drawings away
 };
 
 // Only Normal is implemented in the prototype. The rest are here because the
@@ -64,8 +65,12 @@ struct Layer {
     // Forward is how a shot gets coloured and is the default. Backward is for
     // colouring the drawing you have in front of you — often the last of a run,
     // because it is the one you were working on — and having it apply to
-    // everything before it. It is sometimes what you want and never what you
-    // expect, which is why it is chosen rather than guessed at.
+    // everything before it. Nearest takes whichever is closer, which is what
+    // fills the gaps between drawings you have coloured rather than only the
+    // ones after them.
+    //
+    // None of them is guessed at. Reaching in a direction you did not ask for
+    // is sometimes what you want and never what you expect.
     CtgDirection ctg_direction = CtgDirection::Forward;
 
     // Whether carried scribbles are moved to follow the animation rather than

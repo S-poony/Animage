@@ -1863,6 +1863,16 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
         return QString();
     };
 
+    // The whole point of the flag: it says which drawings to go and look at, so
+    // it has to be right about a drawing nobody has looked at. Opening the
+    // project is the only thing that has happened here -- the playhead has
+    // never left the first frame, and drawings 3 and 4 have never been
+    // composited, let alone solved.
+    CHECK(window.colourFlagAt(2));
+    CHECK(window.colourFlagAt(3));
+    CHECK(!window.colourFlagAt(0));
+    CHECK(!window.colourFlagAt(1));
+
     // Standing on each drawing in turn, letting the paint that runs the solve
     // happen and the queued report that follows it arrive.
     const auto visit = [&](int slot) {
@@ -1953,6 +1963,10 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     // Part 2 is not built, and the control says so rather than looking live.
     CHECK(!follow->isEnabled());
 
+    // Three directions, not two: only reaching forwards leaves the drawings
+    // before a coloured one with nothing.
+    CHECK_EQ(direction->count(), 3);
+
     // Carrying is on by default and the direction goes with it; turning it off
     // leaves the choice visible but meaningless, so it greys.
     CHECK(carry->isChecked());
@@ -1984,7 +1998,15 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     QCoreApplication::processEvents();
     CHECK(colourTip().contains(QStringLiteral("1 layer")));
 
-    // And stepping onto a raster layer takes the whole box away again.
+    // And stepping onto a raster layer takes the whole box away again --
+    // without the dock changing width, which would drag the canvas sideways
+    // every time you clicked a colour layer.
+    QWidget* dock = box->parentWidget();
+    while (dock && !dock->inherits("QDockWidget")) dock = dock->parentWidget();
+    CHECK(dock != nullptr);
+    if (!dock) return;
+    const int with_box = dock->width();
+
     for (int row = 0; row < layers->topLevelItemCount(); ++row) {
         if (!layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
             layers->setCurrentItem(layers->topLevelItem(row));
@@ -1993,6 +2015,7 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     }
     QCoreApplication::processEvents();
     CHECK(!box->isVisible());
+    CHECK_EQ(dock->width(), with_box);
 }
 
 // Transparency is a colour on a colour layer and nothing anywhere else. On a

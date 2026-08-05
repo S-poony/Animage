@@ -45,6 +45,16 @@ public:
     // the pen is down or the animation is playing.
     void onAutosaveTick();
 
+    // Judges every drawing's colour fills so the timeline can flag the ones
+    // worth looking at without anybody having visited them. Runs a quarter of a
+    // second after the edits stop; public so a test need not wait.
+    void auditColourFills();
+
+    // Whether the drawing at `slot` is flagged on any colour layer. What the
+    // timeline card draws, and the only way to ask about a drawing without
+    // going there -- which is exactly what a test of this feature must not do.
+    bool colourFlagAt(std::size_t slot) const;
+
     // Writes the sequences to `folder` with a progress dialog over them. What
     // exportSequences does once it knows where; also how a test drives it.
     bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
@@ -171,6 +181,7 @@ private:
     QPushButton* colour_swatch_ = nullptr;
     QPushButton* transparent_swatch_ = nullptr;
 
+    QTimer* audit_timer_ = nullptr;
     QGroupBox* colour_settings_ = nullptr;
     QListWidget* ctg_sources_ = nullptr;
     QCheckBox* ctg_inherit_ = nullptr;

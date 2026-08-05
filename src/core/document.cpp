@@ -55,6 +55,7 @@ void Document::loadScene(Scene scene) {
     scene_ = std::move(scene);
     cels_.clear();
     ctg_cache_.clear();
+    ctg_verdicts_.clear();
     undo_stack_.clear();
     redo_stack_.clear();
     pending_ = Command{};
@@ -360,8 +361,10 @@ const Cel* Document::ctgScribblesAt(TrackId track_id, ImageId image_id, LayerId 
         return own;
     }
 
-    const ImageId from = track->celSourceFor(
-        image_id, layer_id, layer->ctg_direction == CtgDirection::Backward ? +1 : -1);
+    const int direction = (layer->ctg_direction == CtgDirection::Backward)  ? +1
+                          : (layer->ctg_direction == CtgDirection::Nearest) ? 0
+                                                                            : -1;
+    const ImageId from = track->celSourceFor(image_id, layer_id, direction);
     if (from == kNoId) return nullptr;
 
     const Image* record = track->findImage(from);
@@ -423,6 +426,11 @@ void Document::clearCel(TrackId track_id, ImageId image_id, LayerId layer_id) {
 const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id) const {
     const CtgFill* found = ctg_cache_.find(CtgKey{image_id, layer_id});
     return (found && found->valid) ? found : nullptr;
+}
+
+const CtgVerdict* Document::ctgVerdictFor(ImageId image_id, LayerId layer_id) const {
+    auto found = ctg_verdicts_.find(CtgKey{image_id, layer_id});
+    return (found == ctg_verdicts_.end()) ? nullptr : &found->second;
 }
 
 std::size_t Document::totalTileCount() const {
