@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <filesystem>
+#include <system_error>
 
 #include "celfile.h"
 #include "serialise.h"
@@ -93,11 +95,44 @@ bool removeTree(const QString& path) {
     return !dir.exists() || dir.removeRecursively();
 }
 
+std::filesystem::path nativePath(const QString& path) {
+    return std::filesystem::path(path.toStdU16String());
+}
+
+// Puts a cel that has not changed into the folder being built, as a second name
+// for the file already on disk rather than as new bytes. The build-alongside-
+// and-swap that protects an interrupted save wants a complete folder before it
+// swaps, and a link is how one is assembled without paying for what did not
+// move: no bytes are read or written, only a directory entry.
+//
+// Nothing ever writes through the link -- cel files are replaced with QSaveFile,
+// which renames a new file over the name -- so the two folders sharing a file
+// cannot surprise either of them, and the old folder is removed after the swap
+// anyway.
+//
+// A filesystem that will not link gets a copy, and a file that is missing gets
+// `false` so the caller encodes it in full. A save can therefore be slower than
+// it needed to be; it cannot be wrong.
+bool carryForward(const QString& from, const QString& to) {
+    if (!QFileInfo::exists(from)) return false;
+    std::error_code ec;
+    std::filesystem::create_hard_link(nativePath(from), nativePath(to), ec);
+    if (!ec) return true;
+    return QFile::copy(from, to);
+}
+
 }  // namespace
 
 QString folderSuffix() { return QStringLiteral(".animage"); }
 
 bool save(const Document& doc, const QString& folder, QString* error) {
+    // A full save is the incremental one with nothing to carry forward, which
+    // keeps one code path rather than two that must agree about the layout.
+    SaveState nothing;
+    return save(doc, folder, nothing, error);
+}
+
+bool save(const Document& doc, const QString& folder, SaveState& state, QString* error) {
     const QString scratch = scratchFolderFor(folder);
     if (!removeTree(scratch)) {
         if (error) *error = QStringLiteral("cannot clear %1").arg(scratch);
@@ -116,6 +151,14 @@ bool save(const Document& doc, const QString& folder, QString* error) {
         return false;
     };
 
+    // Only a state describing this same folder says anything about the files
+    // in it. Saving somewhere else -- Save As -- has nothing to carry forward
+    // and writes a project that stands on its own.
+    const bool carrying = !state.folder.isEmpty() && state.folder == folder;
+
+    SaveState next;
+    next.folder = folder;
+
     // The pixels first. If one of them fails there is no half-written
     // scene.json pointing at a cel that does not exist.
     for (CelId id : celsReferencedBy(doc)) {
@@ -123,10 +166,23 @@ bool save(const Document& doc, const QString& folder, QString* error) {
         // A referenced cel with nothing in it is normal -- a layer touched and
         // then erased -- and still gets a file, so the manifest and the folder
         // agree about what exists.
+        const std::uint64_t revision = cel ? cel->revision() : 0;
+        const QString name = celFileName(id);
+        next.revisions.emplace(id, revision);
+
+        if (carrying) {
+            const auto seen = state.revisions.find(id);
+            if (seen != state.revisions.end() && seen->second == revision &&
+                carryForward(folder + QStringLiteral("/cels/") + name,
+                             scratch + QStringLiteral("/cels/") + name)) {
+                continue;
+            }
+        }
+
         const TileGrid empty;
         const QByteArray packed = packCel(cel ? cel->tiles() : empty);
         QString why;
-        if (!writeFile(scratch + QStringLiteral("/cels/") + celFileName(id), packed, &why)) {
+        if (!writeFile(scratch + QStringLiteral("/cels/") + name, packed, &why)) {
             return giveUp(why);
         }
     }
@@ -151,6 +207,28 @@ bool save(const Document& doc, const QString& folder, QString* error) {
         return giveUp(QStringLiteral("cannot move the new project into place"));
     }
     if (had_one) removeTree(displaced);
+
+    // Only now, with the folder in place, does what was written become what is
+    // on disk. A save that gave up above leaves the caller's state describing
+    // the project that is still there.
+    state = std::move(next);
+    return true;
+}
+
+bool load(Document& doc, const QString& folder, SaveState& state, QString* error) {
+    if (!load(doc, folder, error)) return false;
+
+    // Read after the load rather than during it: setCelTiles installs a fresh
+    // Cel, so a revision taken while reading would be replaced by the one the
+    // document ends up holding. Every cel here came from its file and has not
+    // been touched since, so the folder is current for all of them.
+    SaveState fresh;
+    fresh.folder = folder;
+    for (CelId id : celsReferencedBy(doc)) {
+        const Cel* cel = doc.cel(id);
+        fresh.revisions.emplace(id, cel ? cel->revision() : 0);
+    }
+    state = std::move(fresh);
     return true;
 }
 

@@ -4,10 +4,13 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QColorDialog>
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QProgressDialog>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QHBoxLayout>
@@ -32,12 +35,26 @@
 #include <cmath>
 
 #include "canvas_widget.h"
+#include "export_sequence.h"
 #include "project_files.h"
 #include "color.h"
 #include "scene_settings_dialog.h"
 #include "timeline_widget.h"
 
 using namespace animage;
+
+namespace {
+
+// An autosave costs about a tenth of a second on a shot of a hundred drawings
+// now that it only writes the cels that moved, so the interval is chosen for
+// how much work an animator is willing to lose rather than for what it costs.
+constexpr int kAutosaveIntervalMs = 2 * 60 * 1000;
+
+// A stroke and a playback pass are both short. Rather than skip this autosave
+// and wait the whole interval again, look back in a moment.
+constexpr int kAutosaveRetryMs = 5 * 1000;
+
+}  // namespace
 
 MainWindow::MainWindow() {
     setWindowTitle(QStringLiteral("Animage"));
@@ -57,6 +74,13 @@ MainWindow::MainWindow() {
     playback_timer_ = new QTimer(this);
     playback_timer_->setTimerType(Qt::PreciseTimer);
     connect(playback_timer_, &QTimer::timeout, this, &MainWindow::onPlaybackTick);
+
+    // Runs from the start even though an untitled document has nowhere to be
+    // written: the tick is what decides, and it is the only place the rules
+    // about when a save is allowed live.
+    autosave_timer_ = new QTimer(this);
+    connect(autosave_timer_, &QTimer::timeout, this, &MainWindow::onAutosaveTick);
+    autosave_timer_->start(kAutosaveIntervalMs);
 
     buildActions();
     buildLayerPanel();
@@ -141,6 +165,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
 void MainWindow::buildActions() {
     QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
+    file->addAction(QStringLiteral("&New"), QKeySequence::New, this, &MainWindow::newProject);
     file->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
                     &MainWindow::openProject);
     file->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
@@ -148,11 +173,7 @@ void MainWindow::buildActions() {
     file->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs, this,
                     &MainWindow::saveProjectAs);
     file->addSeparator();
-    // Visible and disabled, because a menu that grows an item later tells you
-    // less than one that says what is coming.
-    QAction* exporting = file->addAction(QStringLiteral("&Export sequence..."));
-    exporting->setEnabled(false);
-    exporting->setToolTip(QStringLiteral("Not built yet"));
+    file->addAction(QStringLiteral("&Export sequences..."), this, &MainWindow::exportSequences);
     for (QAction* action : file->actions()) action->setShortcutContext(Qt::ApplicationShortcut);
 
     QMenu* edit = menuBar()->addMenu(QStringLiteral("&Edit"));
@@ -483,8 +504,69 @@ void MainWindow::updateTitle() {
                                                                      : QString()));
 }
 
-void MainWindow::openProject() {
+bool MainWindow::leaveCurrentDocument() {
     stopPlayback();
+    if (doc_.undoDepth() == saved_undo_depth_) return true;  // nothing to lose
+
+    if (!project_folder_.isEmpty()) {
+        QString error;
+        if (project::save(doc_, project_folder_, save_state_, &error)) {
+            saved_undo_depth_ = doc_.undoDepth();
+            updateTitle();
+            return true;
+        }
+        return QMessageBox::warning(
+                   this, QStringLiteral("Cannot save"),
+                   QStringLiteral("%1\n\nGoing on now loses the changes since the last save.")
+                       .arg(error),
+                   QMessageBox::Discard | QMessageBox::Cancel,
+                   QMessageBox::Cancel) == QMessageBox::Discard;
+    }
+
+    // Never saved anywhere, so autosave has had nowhere to write it and this is
+    // the one moment the work can be lost without anybody being told. It is the
+    // reason New waited for autosave rather than arriving with it.
+    const auto choice = QMessageBox::question(
+        this, QStringLiteral("Save this project?"),
+        QStringLiteral("This project has never been saved, so nothing has been written to disk."),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (choice == QMessageBox::Cancel) return false;
+    if (choice == QMessageBox::Discard) return true;
+
+    // Save As can itself be cancelled, or fail, and either way the answer to
+    // "may I leave" is no -- otherwise choosing Save loses the work.
+    saveProjectAs();
+    return doc_.undoDepth() == saved_undo_depth_;
+}
+
+void MainWindow::resetToNewDocument() {
+    // The same three steps the window starts with, and the same clearHistory:
+    // a fresh document that arrives with setup already on the undo stack is a
+    // fresh document you can undo into an invalid one.
+    doc_ = Document();
+    track_ = doc_.addTrack("main");
+    doc_.addLayer(track_, "layer 1");
+    doc_.insertImage(track_, 0);
+    doc_.clearHistory();
+
+    project_folder_.clear();
+    save_state_ = project::SaveState();
+
+    // Everything downstream holds ids from the document that has just gone --
+    // the same rebinding an open needs, for the same reason.
+    afterProjectLoaded();
+}
+
+void MainWindow::newProject() {
+    if (!leaveCurrentDocument()) return;
+    resetToNewDocument();
+    // "Like launching the application, plus the Scene settings dialog opening":
+    // the first question about a new shot is what shape it is.
+    chooseSceneSettings();
+}
+
+void MainWindow::openProject() {
+    if (!leaveCurrentDocument()) return;
     const QString folder = QFileDialog::getExistingDirectory(
         this, QStringLiteral("Open project"), QString(),
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
@@ -500,7 +582,7 @@ void MainWindow::openProject() {
 }
 
 bool MainWindow::openProjectAt(const QString& folder, QString* error) {
-    if (!project::load(doc_, folder, error)) return false;
+    if (!project::load(doc_, folder, save_state_, error)) return false;
     project_folder_ = folder;
     afterProjectLoaded();
     return true;
@@ -528,9 +610,87 @@ void MainWindow::afterProjectLoaded() {
     updateTitle();
 }
 
+void MainWindow::exportSequences() {
+    stopPlayback();
+
+    // What first, then where: the folder dialog is the commitment, and being
+    // asked to commit before knowing what you are committing to is backwards.
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Export sequences"));
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(
+        QStringLiteral("16-bit PNG, over the canvas rectangle.\n"
+                       "Hidden layers are not written."),
+        &dialog));
+
+    auto* per_layer = new QCheckBox(QStringLiteral("One sequence per layer"), &dialog);
+    per_layer->setChecked(true);
+    auto* flattened = new QCheckBox(QStringLiteral("The flattened picture"), &dialog);
+    layout->addWidget(per_layer);
+    layout->addWidget(flattened);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    // Nothing selected is not a thing to export, and it is better to say so by
+    // greying the button than by an error after the folder has been chosen.
+    const auto sync = [&] {
+        buttons->button(QDialogButtonBox::Ok)
+            ->setEnabled(per_layer->isChecked() || flattened->isChecked());
+    };
+    connect(per_layer, &QCheckBox::toggled, &dialog, sync);
+    connect(flattened, &QCheckBox::toggled, &dialog, sync);
+    sync();
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const QString folder = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Export into"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (folder.isEmpty()) return;
+
+    QString error;
+    if (!exportSequencesTo(folder, per_layer->isChecked(), flattened->isChecked(), &error)) {
+        QMessageBox::warning(this, QStringLiteral("Cannot export"), error);
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Exported to %1").arg(folder), 4000);
+}
+
+bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flattened,
+                                   QString* error) {
+    exporting::Options options;
+    options.folder = folder;
+    options.layers = layers;
+    options.flattened = flattened;
+
+    const int total = exporting::fileCount(doc_, options);
+    QProgressDialog progress(QStringLiteral("Exporting %1 frames...").arg(total),
+                             QStringLiteral("Cancel"), 0, std::max(total, 1), this);
+    // Modal to this window, so the pen cannot reach the document while it is
+    // being read frame by frame -- processEvents below is what keeps the
+    // progress bar alive, and it lets everything else in too.
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(500);
+
+    const bool ok = exporting::write(
+        doc_, options,
+        [&progress](int done, int count) {
+            progress.setMaximum(std::max(count, 1));
+            progress.setValue(done);
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        },
+        error);
+    progress.close();
+    return ok;
+}
+
 bool MainWindow::saveTo(const QString& folder) {
     QString error;
-    if (!project::save(doc_, folder, &error)) {
+    if (!project::save(doc_, folder, save_state_, &error)) {
         QMessageBox::warning(this, QStringLiteral("Cannot save"), error);
         return false;
     }
@@ -539,6 +699,48 @@ bool MainWindow::saveTo(const QString& folder) {
     updateTitle();
     statusBar()->showMessage(QStringLiteral("Saved to %1").arg(folder), 4000);
     return true;
+}
+
+void MainWindow::onAutosaveTick() {
+    // An untitled document has nowhere to go. It is not an error and there is
+    // nothing to report: New and Save As are what give it somewhere.
+    if (project_folder_.isEmpty()) return;
+
+    // Nothing has moved since the last write. Undoing back to where the last
+    // save stood counts as unchanged, because it is.
+    if (doc_.undoDepth() == saved_undo_depth_) return;
+
+    // Never in the middle of a stroke or a playback pass: a save is a tenth of
+    // a second, which is invisible between two strokes and a stutter inside one.
+    if ((canvas_ && canvas_->isStroking()) || playback_timer_->isActive()) {
+        autosave_timer_->start(kAutosaveRetryMs);
+        return;
+    }
+
+    QString error;
+    if (!project::save(doc_, project_folder_, save_state_, &error)) {
+        // Deliberately not a dialog. A failing autosave would otherwise
+        // interrupt drawing every two minutes, which is worse than the failure
+        // it is reporting -- and Save still says so properly when asked.
+        statusBar()->showMessage(QStringLiteral("Autosave failed: %1").arg(error), 8000);
+    } else {
+        saved_undo_depth_ = doc_.undoDepth();
+        updateTitle();
+        statusBar()->showMessage(QStringLiteral("Autosaved"), 2000);
+    }
+    autosave_timer_->start(kAutosaveIntervalMs);  // back to the ordinary cadence
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    // Autosave decided that the disk is always current, which means there is
+    // nothing for an unsaved-changes warning to warn about -- and it also means
+    // the last two minutes must not fall off the end. So closing writes rather
+    // than asks, on exactly the same terms as New and Open.
+    if (!leaveCurrentDocument()) {
+        event->ignore();
+        return;
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::saveProject() {

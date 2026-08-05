@@ -28,6 +28,8 @@ add_library(animage_ui STATIC
   animage/scene_settings_dialog.h
   animage/project_files.cpp
   animage/project_files.h
+  animage/export_sequence.cpp
+  animage/export_sequence.h
   animage/crash_report.cpp
   animage/crash_report.h
 )

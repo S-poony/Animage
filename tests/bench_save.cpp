@@ -59,6 +59,25 @@ Document buildShot(int drawings) {
     return doc;
 }
 
+// One dab on one drawing: what an animator does between two autosaves, and the
+// case the incremental save exists for.
+void touchOneCel(Document& doc) {
+    const Track& track = doc.scene().tracks.front();
+    const TrackId track_id = track.id;
+    const LayerId layer = track.layers.front().id;
+    const ImageId image = track.imageAtSlot(0);
+
+    ScopedCommand command(doc, "Stroke");
+    BrushSettings s;
+    s.radius = 4.0f;
+    s.pressure_affects_opacity = false;
+    s.r = 0; s.g = 0; s.b = 0; s.a = 1.0f;
+    Brush brush(s);
+    brush.begin(doc, track_id, image, layer, {200.0f, 200.0f, 1.0f});
+    brush.extend({260.0f, 240.0f, 1.0f});
+    brush.end();
+}
+
 long long folderBytes(const QString& path) {
     long long total = 0;
     QDir dir(path);
@@ -87,12 +106,26 @@ void time(int drawings) {
         return;
     }
 
-    // Again, with nothing changed. This is what autosave would cost every time
-    // it fired, and it is the number that decides whether saving has to learn
-    // which cels actually moved.
+    // Again, with nothing changed and nothing remembered: the whole project
+    // re-encoded, which is what a save cost before it learned which cels moved.
     clock.restart();
     project::save(doc, folder, nullptr);
     const qint64 again = clock.elapsed();
+
+    // And again knowing what is already there. The first of these is what an
+    // autosave costs when the animator has paused, the second what it costs
+    // mid-drawing -- one cel touched out of all of them, which is the shape of
+    // nearly every autosave there will ever be.
+    project::SaveState state;
+    project::save(doc, folder, state, nullptr);
+    clock.restart();
+    project::save(doc, folder, state, nullptr);
+    const qint64 untouched = clock.elapsed();
+
+    touchOneCel(doc);
+    clock.restart();
+    project::save(doc, folder, state, nullptr);
+    const qint64 one_moved = clock.elapsed();
 
     clock.restart();
     Document back;
@@ -101,9 +134,11 @@ void time(int drawings) {
 
     const double megabytes = static_cast<double>(folderBytes(folder)) / (1024.0 * 1024.0);
     const double raw = static_cast<double>(tiles) * 128.0 * 128.0 * 4.0 * 2.0 / (1024.0 * 1024.0);
-    std::printf("  %3d drawings %4zu cels %5zu tiles | save %5lld ms | again %5lld ms | "
-                "open %5lld ms | %7.1f MB on disk from %7.1f MB of tiles\n",
-                drawings, cels, tiles, first, again, opened, megabytes, raw);
+    std::printf("  %3d drawings %4zu cels %5zu tiles | full %5lld ms | again %5lld ms | "
+                "nothing moved %4lld ms | one cel %4lld ms | open %5lld ms | "
+                "%7.1f MB on disk from %7.1f MB of tiles\n",
+                drawings, cels, tiles, first, again, untouched, one_moved, opened, megabytes,
+                raw);
 }
 
 // Where the time actually goes, and how much of it is deflate looking at zeros.
@@ -156,7 +191,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     std::printf("Saving a shot, 1920x1080, line art and a colour layer per drawing:\n");
     for (int drawings : {12, 24, 48, 96}) time(drawings);
-    std::printf("\nAutosave would pay the \"again\" column, every time it fired.\n");
+    std::printf("\nAutosave pays the \"one cel\" column. It used to pay \"again\".\n");
     breakdown();
     return 0;
 }

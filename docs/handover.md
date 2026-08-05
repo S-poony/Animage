@@ -9,9 +9,9 @@ records what happened when it was built.
 
 ## Where it got to
 
-M0 through M4 exist. **M5 is half done: a project saves and opens; nothing
-exports yet.** A session's work survives the window closing, which it did not
-before.
+M0 through M4 exist, and **M5 is done**: a project saves, opens, saves itself,
+starts over and exports. A session's work survives the window closing, which it
+did not before — and now survives not thinking about it at all.
 
 | | |
 |---|---|
@@ -20,7 +20,7 @@ before.
 | M2 | Canvas, pressure brush, eraser, layers. Compositing is on the CPU, not the GPU. |
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
 | M4 | LazyBrush solver and the CTG layer, in the app and usable. |
-| M5 | **Partly.** Save, open and Save As work. No export, no autosave, no New. |
+| M5 | Save, open, Save As, autosave, New, and PNG export. EXR is not written. |
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
 `serialise.h` decides the structure and `celfile.h` the pixels — both in `core`,
@@ -29,6 +29,70 @@ the compressor and the folder around them. Saving builds alongside and swaps at
 the end, so an interrupted save leaves the last good project where it was;
 opening builds a whole document before adopting it, so a project that will not
 open cannot take the open one down with it.
+
+**Saving is incremental, and autosave rests on that.** A cel's revision is
+bumped by every write to it, undo included, so a `project::SaveState` — a folder
+and the revisions written to it — is enough to know which files in that folder
+are still current. The ones that are get carried into the folder being built as
+a hard link rather than as new bytes, which keeps the build-alongside-and-swap
+exactly as it was while paying nothing for the drawings that did not move. On a
+96-drawing shot a save went from 3047 ms to 126 ms with nothing changed and
+140 ms with one drawing touched; a first save and a Save As are unchanged,
+because neither has anything to carry.
+
+The chain is link, then copy, then encode in full, so a filesystem that will not
+link or a file that has gone missing makes a save *slower* and never wrong. That
+matters more than it sounds: the state is a claim about the pixels and never a
+promise about the disk, and a sync client is entitled to move the disk.
+
+Autosave then fires every two minutes, writing over the project, deferred while
+the pen is down or the animation is playing and silent when nothing has moved.
+Closing the window writes too. That was the deliberate choice the plan describes
+and it has the consequence it always had: the disk is always current, so
+"quit without saving to throw away a ruined drawing" is gone, and undo within
+the session is the only way back. The `*` in the title stayed, now meaning
+"not yet autosaved" — it clears itself within two minutes and is the only sign
+that the last few strokes are still only in memory.
+
+One cost is worth writing down because it was raised and accepted rather than
+missed. The swap replaces every directory entry in the project on every save,
+hard links included, so a folder on Google Drive or Dropbox has its whole file
+list touched each time even though almost no bytes changed. What is left of the
+126 ms is exactly that — creating 192 entries and dropping 192 old ones, with no
+pixel work at all. Writing in place instead would touch only the changed files
+and sync far better, at the cost of the guarantee that an interrupted save
+leaves the last good project alone. That trade is open, and the numbers to
+re-argue it are in `bench_save`.
+
+**New, Open and Close all go through one door.** `leaveCurrentDocument` is what
+they call first, and it says the thing autosave implies: a project with a folder
+is simply written, because leaving is not a way to discard. The single case
+autosave cannot cover is a document that has never been saved anywhere — there
+is no folder to write it to — so that is the only case that asks, and it is the
+only place in the program where work can be lost by answering a question wrong.
+New then rebuilds the same document the application starts with, including the
+`clearHistory` that stops a fresh document arriving with three undoable setup
+steps on the stack, and opens Scene settings.
+
+**Export writes 16-bit PNG**, a folder per layer with
+`{track}_{layer}_{frame:04}.png` inside, plus an optional `composite/` of the
+flattened picture, all over the canvas rectangle. Hidden layers are not written
+at all, so the per-layer sequences and the flattened one agree about what the
+shot contains. It is lossy and knowingly so — the arithmetic is in
+`export_sequence.h` — and **EXR is the named next step** rather than a decision
+still open: PNG is right where the destination expects PNG, and the format list
+is easier to add to than the layout is to change.
+
+One thing about export is worth reading before touching it. **A CTG layer's
+fill is a cache, and the canvas only builds it for the frame on screen**,
+because compositing is not allowed to start a max-flow. So a project straight
+off disk has no fills at all, and an export that composited only what was
+cached wrote blank colour sequences and said nothing about it — which is why
+`exporting::write` takes the document by mutable reference and solves what is
+missing. The price is that exporting a coloured shot for the first time pays one
+max-flow per CTG layer per distinct drawing, at the same capped resolution the
+screen gets. Solving off the interface thread, item 3 below, is what removes
+both the cap and that wait.
 
 Since the first build, the model also grew a **canvas**: `Scene::canvas()`, the
 rectangle that will be exported, set under Edit ▸ Scene settings. Before it
@@ -336,7 +400,14 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/tests/bench_composite     # timings, not a test
 ./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
+./build/tests/bench_save          # save, incremental save, open
 ```
+
+`bench_save` reports a full save, a full re-save, an incremental save with
+nothing changed and one with a single drawing touched. The last is what autosave
+actually costs and is the number to watch: if it starts tracking the size of the
+shot rather than the size of the change, something has stopped carrying files
+forward.
 
 `bench_zoom` drives the real `CanvasWidget` across the zoom range and reports,
 per zoom, the step and margin it chose, what a full refresh costs against the
@@ -357,29 +428,12 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **Finish M5**, in this order, because each one wants the last.
-   - **Incremental saving.** A save re-encodes every cel, which is about three
-     seconds for ninety-six drawings whether or not anything changed. Fine when
-     you asked for it; not fine for autosave, which would pay it every time it
-     fired. No format change is needed — cels are separate files and
-     `Cel::revision()` already says which ones moved — but it wants a small piece
-     of per-project state that the window has to hold, so it belongs before
-     autosave rather than after.
-   - **Autosave**, writing into the project folder. That was a deliberate choice
-     and it has a consequence: the disk is then always current, so there is
-     nothing for an unsaved-changes warning to warn about, and "quit without
-     saving to throw away a ruined drawing" stops working. The window title
-     carries a `*` in the meantime, which is the only signal until autosave
-     exists.
-   - **New**, which waits on autosave: discarding an untitled document is only
-     safe to offer once the alternative is not silent loss. It should feel like
-     launching the application, plus the Scene settings dialog opening.
-   - **Export.** A sequence per layer, `{track}_{layer}_{frame:04}`, over the
-     canvas rectangle. One decision is open and is easier made before the dialog
-     exists than after: 16-bit PNG cannot hold a half-float without throwing
-     pixels away — the same arithmetic that decided the save format — so a
-     lossless deliverable means EXR. PNG is still right where the destination
-     expects PNG and a conversion is understood.
+1. **EXR export**, which is the one piece of M5 deliberately left out. 16-bit
+   PNG throws pixels away, so a lossless deliverable needs it; `tinyexr` is a
+   single BSD header and the format list in `export_sequence.h` is where it
+   goes. Everything around it — the layout, the naming, the canvas rectangle,
+   the fill solving, the progress and cancellation — already exists and is
+   tested, so this is a writer and a radio button.
 2. **Scribbles through time.** A CTG cel with no scribbles should fall back to
    the nearest earlier drawing's rather than being empty: colour once, carry
    forward, and a new scribble overrides from there. This is also most of the

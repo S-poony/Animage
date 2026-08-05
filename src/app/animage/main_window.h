@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 #include "document.h"
+#include "project_files.h"
 
 class CanvasWidget;
 class TimelineWidget;
@@ -19,7 +20,8 @@ class QPushButton;
 class QAction;
 class QTimer;
 
-// M3: the timeline is on screen. One track, no saving yet.
+// The application window: canvas, timeline, layers, and the File menu. One
+// track. A project saves, opens, autosaves over itself and exports.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -33,9 +35,25 @@ public:
     // that was just replaced.
     bool openProjectAt(const QString& folder, QString* error = nullptr);
 
+    // What the autosave timer does when it fires. Public for the same reason as
+    // openProjectAt: the interval is two minutes, so a test that waited for it
+    // would not be a test. Writes over the project without asking and without a
+    // dialog if it fails; silent when there is nothing to write; deferred while
+    // the pen is down or the animation is playing.
+    void onAutosaveTick();
+
+    // Writes the sequences to `folder` with a progress dialog over them. What
+    // exportSequences does once it knows where; also how a test drives it.
+    bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
+                           QString* error = nullptr);
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    // Autosave means the disk is meant to be current, so closing flushes rather
+    // than warning: there is no unsaved state to ask about, only state that has
+    // not been written yet.
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     void buildActions();
@@ -80,7 +98,21 @@ private:
     void shortenExposure();
     void chooseSceneSettings();
 
+    void newProject();
+    // Called before anything that replaces or abandons the open document.
+    // Returns false to mean "the user cancelled, do not go".
+    //
+    // A project with a folder is simply written -- autosave already decided the
+    // disk is current, so leaving is not a way to discard. A project without one
+    // is the single case autosave cannot cover, and is the only case that asks.
+    bool leaveCurrentDocument();
+    // The document the application starts with, which is also what New makes.
+    void resetToNewDocument();
     void openProject();
+    // Asks where and what, then writes the sequences with a progress dialog.
+    // Exposed the same way openProjectAt is, for the same reason: a test cannot
+    // answer a file dialog.
+    void exportSequences();
     void saveProject();
     void saveProjectAs();
     bool saveTo(const QString& folder);
@@ -115,6 +147,7 @@ private:
     QAction* eraser_action_ = nullptr;
 
     QTimer* playback_timer_ = nullptr;
+    QTimer* autosave_timer_ = nullptr;
     QElapsedTimer playback_clock_;
     std::size_t playback_start_slot_ = 0;
 
@@ -124,6 +157,12 @@ private:
     // because it is.
     QString project_folder_;
     std::size_t saved_undo_depth_ = 0;
+
+    // What the last save or open put in `project_folder_`, so the next save
+    // only re-encodes the drawings that moved. Held by the window because it
+    // describes this document in that folder and nothing outside the pair
+    // means anything.
+    project::SaveState save_state_;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;

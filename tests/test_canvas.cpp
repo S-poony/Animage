@@ -16,7 +16,11 @@
 #include <QPushButton>
 #include <QTabletEvent>
 #include <QWheelEvent>
+#include <QAbstractButton>
+#include <QMessageBox>
+#include <QTimer>
 #include <cmath>
+#include <map>
 
 #include <QDir>
 #include <QFileInfo>
@@ -30,6 +34,7 @@
 
 #include "brush.h"
 #include "canvas_widget.h"
+#include "export_sequence.h"
 #include "main_window.h"
 #include "document.h"
 #include "project_files.h"
@@ -280,6 +285,51 @@ void clickCheck(QTreeWidget* list, QTreeWidgetItem* item, int column) {
     sendMouse(list->viewport(), QEvent::MouseButtonRelease, QPointF(at), Qt::LeftButton,
               Qt::NoButton);
     QCoreApplication::processEvents();
+}
+
+// Answers the next modal dialog to appear. Armed before the call that raises
+// it, because that call blocks in the dialog's own event loop and nothing in
+// the test runs again until the dialog is gone. Retries rather than firing
+// once: a queued single shot can arrive before the dialog is up, and a test
+// that then waits forever is worse than one that fails.
+void answerNextDialog(QMessageBox::StandardButton button) {
+    auto* timer = new QTimer(qApp);
+    auto* attempts = new int(0);
+    timer->setInterval(10);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, button, attempts] {
+        if (++*attempts > 200) {  // two seconds; the dialog is not coming
+            timer->stop();
+            delete attempts;
+            timer->deleteLater();
+            return;
+        }
+        auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (!box) return;
+        QAbstractButton* pressed = box->button(button);
+        if (!pressed) return;
+        pressed->click();
+        timer->stop();
+        delete attempts;
+        timer->deleteLater();
+    });
+    timer->start();
+}
+
+// The same, for a dialog that is not a message box: dismiss whatever modal
+// window turns up. Used for the Scene settings dialog New raises.
+void dismissNextDialog() {
+    auto* timer = new QTimer(qApp);
+    auto* attempts = new int(0);
+    timer->setInterval(10);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, attempts] {
+        QWidget* modal = QApplication::activeModalWidget();
+        if (!modal && ++*attempts <= 200) return;
+        if (modal) modal->close();
+        timer->stop();
+        delete attempts;
+        timer->deleteLater();
+    });
+    timer->start();
 }
 
 void drawWithMouse(QWidget* canvas, const QPointF& from, const QPointF& to, int steps) {
@@ -893,6 +943,33 @@ float alphaAt(const Document& doc, TrackId track, ImageId image, LayerId layer, 
     return cel ? cel->pixel(x, y).a : -1.0f;
 }
 
+void strokeOn(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
+              float x1, float y1) {
+    ScopedCommand command(doc, "Stroke");
+    BrushSettings s;
+    s.radius = 9.0f;
+    s.pressure_affects_opacity = false;
+    s.r = 0; s.g = 0; s.b = 0; s.a = 1.0f;
+    Brush brush(s);
+    brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+    brush.extend({x1, y1, 1.0f});
+    brush.end();
+}
+
+// Everything a project folder holds, keyed by name, so two of them can be
+// compared without caring which one was written how.
+std::map<QString, QByteArray> projectBytes(const QString& folder) {
+    std::map<QString, QByteArray> out;
+    const QString cels = folder + QStringLiteral("/cels");
+    for (const QString& name : QDir(cels).entryList(QDir::Files)) {
+        QFile file(cels + QStringLiteral("/") + name);
+        if (file.open(QIODevice::ReadOnly)) out[name] = file.readAll();
+    }
+    QFile scene(folder + QStringLiteral("/scene.json"));
+    if (scene.open(QIODevice::ReadOnly)) out[QStringLiteral("scene.json")] = scene.readAll();
+    return out;
+}
+
 void aProjectSurvivesSavingAndLoading() {
     TEST("a project comes back from disk with its pixels intact");
     QTemporaryDir scratch;
@@ -1049,6 +1126,631 @@ void savingTwiceWritesTheSameBytes() {
     }
 }
 
+// The whole point of carrying a cel file forward is that nobody can tell you
+// did. If an incremental save can produce a project a full save would not have,
+// then "cheap" has quietly become "different", and every promise the format
+// makes is only true of one of the two paths.
+void anIncrementalSaveWritesTheSameProject() {
+    TEST("an incremental save writes exactly what a full save would have");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString grown = scratch.filePath(QStringLiteral("grown.animage"));
+    const QString fresh = scratch.filePath(QStringLiteral("fresh.animage"));
+
+    Document doc = buildDrawnScene();
+    const TrackId track = doc.scene().tracks.front().id;
+    const ImageId image = doc.scene().tracks.front().slots.front();
+    const LayerId ink = doc.scene().tracks.front().layers.front().id;
+
+    project::SaveState state;
+    CHECK(project::save(doc, grown, state, nullptr));
+    CHECK_EQ(state.folder.toStdString(), grown.toStdString());
+    CHECK(!state.revisions.empty());
+
+    // One drawing moves. The others do not, and are the ones carried forward.
+    strokeOn(doc, track, image, ink, 500, 480, 620, 560);
+
+    QString error;
+    CHECK(project::save(doc, grown, state, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // The same document written from nothing, as the comparison.
+    CHECK(project::save(doc, fresh, nullptr));
+    CHECK(projectBytes(fresh).size() >= 4);
+    CHECK_EQ(projectBytes(grown) == projectBytes(fresh), true);
+
+    // And it is a project, not merely a folder with matching bytes: the stroke
+    // that arrived after the first save is in it.
+    Document back;
+    CHECK(project::load(back, grown, &error));
+    CHECK(alphaAt(back, back.scene().tracks.front().id, image, ink, 560, 520) > 0.0f);
+}
+
+// The state says what was written; the folder is where it went, and the two can
+// come apart -- a sync client half way through, a file deleted by hand. The
+// state is a hint about the pixels and never a promise about the disk.
+void anIncrementalSaveReplacesWhatWentMissing() {
+    TEST("a cel file that vanished is written again rather than carried forward");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    const QString reference = scratch.filePath(QStringLiteral("reference.animage"));
+
+    const Document doc = buildDrawnScene();
+    project::SaveState state;
+    CHECK(project::save(doc, folder, state, nullptr));
+
+    const QString cels = folder + QStringLiteral("/cels");
+    const QStringList names = QDir(cels).entryList(QDir::Files);
+    CHECK(!names.isEmpty());
+    if (names.isEmpty()) return;
+    CHECK(QFile::remove(cels + QStringLiteral("/") + names.first()));
+
+    // Nothing in the document changed, so every cel is a candidate to be
+    // carried forward -- including the one that is no longer there to carry.
+    QString error;
+    CHECK(project::save(doc, folder, state, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    CHECK(project::save(doc, reference, nullptr));
+    CHECK_EQ(projectBytes(folder) == projectBytes(reference), true);
+
+    Document back;
+    CHECK(project::load(back, folder, &error));
+    CHECK_EQ(writeSceneJson(back), writeSceneJson(doc));
+}
+
+// Save As has to hand back something that stands on its own, so a state
+// describing somewhere else must carry nothing forward at all.
+void savingElsewhereCarriesNothingForward() {
+    TEST("saving to a new folder writes a whole project, not a difference");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString first = scratch.filePath(QStringLiteral("first.animage"));
+    const QString second = scratch.filePath(QStringLiteral("second.animage"));
+
+    const Document doc = buildDrawnScene();
+    project::SaveState state;
+    CHECK(project::save(doc, first, state, nullptr));
+    CHECK(project::save(doc, second, state, nullptr));
+
+    CHECK_EQ(state.folder.toStdString(), second.toStdString());
+    CHECK_EQ(projectBytes(second) == projectBytes(first), true);
+}
+
+// Opening records what is on disk, so the first save after an open is
+// incremental too rather than paying for a project it just finished reading.
+void openingLeavesTheFolderKnown() {
+    TEST("a load records what it read, so the next save carries it forward");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    Document back;
+    project::SaveState state;
+    QString error;
+    CHECK(project::load(back, folder, state, &error));
+    CHECK_EQ(state.folder.toStdString(), folder.toStdString());
+    CHECK_EQ(state.revisions.size(), celsReferencedBy(back).size());
+
+    // Every revision recorded is the one the document is actually holding --
+    // the check the save will make, made here where a mismatch is legible.
+    for (CelId id : celsReferencedBy(back)) {
+        const Cel* cel = back.cel(id);
+        CHECK(cel != nullptr);
+        if (!cel) continue;
+        const auto seen = state.revisions.find(id);
+        CHECK(seen != state.revisions.end());
+        if (seen != state.revisions.end()) CHECK_EQ(seen->second, cel->revision());
+    }
+
+    const QString again = scratch.filePath(QStringLiteral("again.animage"));
+    CHECK(project::save(back, folder, state, &error));
+    CHECK(project::save(back, again, nullptr));
+    CHECK_EQ(projectBytes(folder) == projectBytes(again), true);
+}
+
+// Autosave through the window. The two things worth pinning are that it writes
+// when there is something to write and that it stays entirely out of the way
+// when there is not -- a save that fires every two minutes regardless would put
+// the whole project through a sync client for nothing, forever.
+void autosaveWritesOnlyWhenSomethingMoved() {
+    TEST("autosave writes what changed and does nothing when nothing did");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString error;
+    CHECK(window.openProjectAt(folder, &error));
+    QCoreApplication::processEvents();
+
+    // A deleted cel file is the observable for "did a save happen at all": an
+    // unchanged document produces identical bytes, so comparing them proves
+    // nothing, while a file that is still missing proves nothing was written.
+    const QString cels = folder + QStringLiteral("/cels");
+    const QStringList names = QDir(cels).entryList(QDir::Files);
+    CHECK(!names.isEmpty());
+    if (names.isEmpty()) return;
+    const QString hostage = cels + QStringLiteral("/") + names.first();
+    CHECK(QFile::remove(hostage));
+
+    // Nothing has been drawn since the open, so this must not write.
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(!QFileInfo::exists(hostage));
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // Now it must, without being asked and without a dialog. The file taken
+    // hostage comes back too: it could not be carried forward, so it was
+    // written out in full.
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+    CHECK(QFileInfo::exists(hostage));
+
+    // And what is on disk is a project that opens.
+    Document back;
+    CHECK(project::load(back, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    CHECK(!back.scene().tracks.empty());
+}
+
+// A stroke must never be interrupted by a save: a tenth of a second is nothing
+// between two strokes and a stutter inside one.
+void autosaveWaitsForTheStrokeToFinish() {
+    TEST("autosave defers while the pen is down");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // One finished stroke first, so the document is already owed a save. Without
+    // it the tick would stop at "nothing has moved" -- a stroke only becomes an
+    // undo entry when it ends -- and the deferral would never be reached.
+    drawWithMouse(canvas, QPointF(200, 200), QPointF(260, 240), 4);
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // Now press and move without releasing: a second stroke is open, and this
+    // is the tick that would land in the middle of someone's line.
+    sendMouse(canvas, QEvent::MouseButtonPress, QPointF(300, 300), Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseMove, QPointF(340, 330), Qt::NoButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+    CHECK(canvas->isStroking());
+
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    // Deferred, so the change is still unwritten and the title still says so.
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    sendMouse(canvas, QEvent::MouseButtonRelease, QPointF(340, 330), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK(!canvas->isStroking());
+
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+}
+
+// Closing writes rather than asking, which is the other half of deciding the
+// disk is always current: without it the last two minutes fall off the end.
+void closingWritesTheLastChanges() {
+    TEST("closing the window flushes what autosave had not reached yet");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    {
+        MainWindow window;
+        window.resize(1200, 800);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(window.openProjectAt(folder, nullptr));
+        QCoreApplication::processEvents();
+
+        auto* canvas = window.findChild<CanvasWidget*>();
+        CHECK(canvas != nullptr);
+        if (!canvas) return;
+        drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+        QCoreApplication::processEvents();
+        CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+        // No autosave has fired, so this stroke exists only in memory.
+        CHECK(window.close());
+        QCoreApplication::processEvents();
+    }
+
+    // It is on disk, and the project still opens.
+    Document back;
+    QString error;
+    CHECK(project::load(back, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    CHECK(!back.scene().tracks.empty());
+}
+
+// An untitled document is the one thing autosave cannot protect, because it has
+// nowhere to be written. Leaving it is therefore the only moment in the program
+// where work can go without anybody being told -- so it is the only moment that
+// asks, and Cancel has to actually stop it.
+void leavingAnUntitledDocumentAsksFirst() {
+    TEST("an untitled document with changes is not discarded silently");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // Cancel means stay: the window is still open and the drawing is still here.
+    answerNextDialog(QMessageBox::Cancel);
+    CHECK_EQ(window.close(), false);
+    QCoreApplication::processEvents();
+    CHECK(window.isVisible());
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // Discard means go.
+    answerNextDialog(QMessageBox::Discard);
+    CHECK(window.close());
+    QCoreApplication::processEvents();
+}
+
+// An untitled document with nothing in it is not work, and must not ask.
+void closingAnUntouchedWindowJustCloses() {
+    TEST("closing an untouched window closes it without asking");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+
+    // No dialog is armed, so this hangs rather than fails if one appears.
+    CHECK(window.close());
+    QCoreApplication::processEvents();
+}
+
+// New is "launching the application again": a fresh document, nothing carried
+// over from the last one, and the Scene settings dialog asking what shape the
+// shot is.
+void newProjectStartsOverCleanly() {
+    TEST("New gives a fresh untitled document with no history");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(layers != nullptr);
+    if (!layers) return;
+    CHECK_EQ(layers->topLevelItemCount(), 2);
+
+    QAction* create = nullptr;
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("&New")) create = action;
+    }
+    CHECK(create != nullptr);
+    if (!create) return;
+
+    // The open project is saved and unchanged, so nothing is asked about it --
+    // the only dialog is the Scene settings one New raises on purpose.
+    dismissNextDialog();
+    create->trigger();
+    QCoreApplication::processEvents();
+
+    // Back to what the application starts with.
+    CHECK(window.windowTitle().startsWith(QStringLiteral("Untitled")));
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+    CHECK_EQ(layers->topLevelItemCount(), 1);
+
+    // And with no history: a fresh document you can undo into an invalid one is
+    // the bug screenshots caught the first time round.
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    CHECK(canvas->currentImage() != kNoId);
+
+    // The project it came from is untouched on disk.
+    Document back;
+    CHECK(project::load(back, folder, nullptr));
+    CHECK(back.scene().tracks.front().layers.size() == 2);
+}
+
+// --- export ----------------------------------------------------------------
+
+QByteArray fileBytes(const QString& path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+void exportWritesASequencePerLayer() {
+    TEST("export writes a 16-bit PNG sequence per layer, over the canvas");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc = buildDrawnScene();
+    const std::size_t frames = doc.scene().tracks.front().frameCount();
+    CHECK(frames > 1);
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    options.flattened = true;
+    CHECK_EQ(exporting::fileCount(doc, options), static_cast<int>(frames * 3));
+
+    QString error;
+    CHECK(exporting::write(doc, options, nullptr, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // The layout and the names the specification asks for: a folder per layer,
+    // `{track}_{layer}_{frame:04}.png` inside it, counting from one.
+    const QString ink = QStringLiteral("main_ink");
+    CHECK(QDir(out + QStringLiteral("/") + ink).exists());
+    CHECK(QDir(out + QStringLiteral("/main_colour")).exists());
+    CHECK(QDir(out + QStringLiteral("/composite")).exists());
+    CHECK_EQ(QDir(out + QStringLiteral("/") + ink).entryList(QDir::Files).size(),
+             static_cast<int>(frames));
+
+    const QString first = QStringLiteral("%1/%2/%2_0001.png").arg(out, ink);
+    CHECK(QFileInfo::exists(first));
+
+    const QImage image(first);
+    CHECK(!image.isNull());
+    if (image.isNull()) return;
+    // The canvas rectangle, not the drawing's bounding box: two frames of a
+    // sequence that were different sizes would be useless downstream.
+    CHECK_EQ(image.width(), doc.scene().width);
+    CHECK_EQ(image.height(), doc.scene().height);
+    // 64 bits a pixel is four 16-bit channels, which is the whole point of
+    // choosing the format. An 8-bit PNG here would pass every other check.
+    CHECK_EQ(image.depth(), 64);
+
+    // The ink stroke runs from (100,100) to (400,260), so it is under this
+    // point and nowhere near the far corner.
+    CHECK(image.pixelColor(250, 180).alphaF() > 0.5);
+    CHECK(image.pixelColor(1200, 700).alphaF() < 0.01);
+    // Black ink, not blue: the channels arrive in the order PNG expects.
+    CHECK(image.pixelColor(250, 180).redF() < 0.1);
+    CHECK(image.pixelColor(250, 180).greenF() < 0.1);
+    CHECK(image.pixelColor(250, 180).blueF() < 0.1);
+
+    // The last frame's drawing was made entirely at negative coordinates. The
+    // drawing surface has no edges, but the canvas does, and the canvas is what
+    // gets exported -- so this frame is empty rather than being a picture of
+    // somewhere else, and every frame is the same size.
+    const QImage outside(QStringLiteral("%1/%2/%2_%3.png")
+                             .arg(out, ink, QString::number(frames).rightJustified(
+                                                4, QLatin1Char('0'))));
+    CHECK(!outside.isNull());
+    if (outside.isNull()) return;
+    CHECK_EQ(outside.width(), doc.scene().width);
+    long long anything = 0;
+    for (int y = 0; y < outside.height(); y += 3) {
+        for (int x = 0; x < outside.width(); x += 3) {
+            if (outside.pixelColor(x, y).alphaF() > 0.01) ++anything;
+        }
+    }
+    CHECK_EQ(anything, 0LL);
+}
+
+// The exposure is the model's central bet: one drawing held over three frames
+// is one drawing, and the export has to say so three times.
+void exportRepeatsAHeldDrawing() {
+    TEST("a drawing held over three frames exports as three identical frames");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc = buildDrawnScene();
+    const Track& track = doc.scene().tracks.front();
+    CHECK(track.frameCount() >= 4);
+    if (track.frameCount() < 4) return;
+    // The fixture holds the first drawing over slots 0..2 and puts a second one
+    // at slot 3, which is what makes this test mean anything.
+    CHECK(track.imageAtSlot(0) == track.imageAtSlot(2));
+    CHECK(track.imageAtSlot(0) != track.imageAtSlot(3));
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
+
+    const auto frame = [&](int number) {
+        return fileBytes(QStringLiteral("%1/main_ink/main_ink_%2.png")
+                             .arg(out, QString::number(number).rightJustified(4, QLatin1Char('0'))));
+    };
+    CHECK(!frame(1).isEmpty());
+    CHECK_EQ(frame(1) == frame(2), true);
+    CHECK_EQ(frame(1) == frame(3), true);
+    CHECK_EQ(frame(1) == frame(4), false);
+}
+
+// The one export bug worth having a test of its own. A CTG layer holds
+// scribbles and its fill is a cache, built on demand -- and the canvas only
+// builds it for the frame being looked at, because compositing is not allowed
+// to start a max-flow. So a project straight off disk has no fills at all, and
+// an export that composited only what was cached wrote blank colour sequences
+// and said nothing about it.
+void exportSolvesColourItHasNeverSeen() {
+    TEST("a colour layer exports filled even though nothing ever displayed it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+
+    // Straight off disk, so no fill has ever been built for any frame.
+    Document doc;
+    CHECK(project::load(doc, folder, nullptr));
+    const TrackId track = doc.scene().tracks.front().id;
+    const ImageId first = doc.scene().tracks.front().imageAtSlot(0);
+    const LayerId colour = doc.scene().tracks.front().layers.back().id;
+    CHECK(doc.ctgFillFor(track, first, colour) == nullptr);
+
+    const QString out = scratch.filePath(QStringLiteral("out"));
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
+
+    // It solved rather than skipping.
+    CHECK(doc.ctgFillFor(track, first, colour) != nullptr);
+
+    const QImage image(out + QStringLiteral("/main_colour/main_colour_0001.png"));
+    CHECK(!image.isNull());
+    if (image.isNull()) return;
+
+    // And the frame has colour in it. Counted rather than sampled at a point:
+    // where a fill lands depends on where the line art closes, which is not
+    // something this test should be asserting.
+    //
+    // The number is small on purpose. This fixture's line art is one open
+    // stroke, so it encloses nothing, and against an unseverable rim a scribble
+    // with no shape around it keeps roughly its own pixels -- about 2000 here,
+    // or 129 of these samples. The bug being pinned produced exactly zero.
+    long long covered = 0;
+    for (int y = 0; y < image.height(); y += 4) {
+        for (int x = 0; x < image.width(); x += 4) {
+            if (image.pixelColor(x, y).alphaF() > 0.5) ++covered;
+        }
+    }
+    CHECK(covered > 50);
+}
+
+// Hidden means not in the picture. If the per-layer sequences disagreed with
+// the flattened one about that, reassembling them would not give back the shot.
+void exportLeavesOutHiddenLayers() {
+    TEST("a hidden layer is not exported at all");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc = buildDrawnScene();
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId ink = doc.scene().tracks.front().layers.front().id;
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(ink);
+        settings.visible = false;
+        doc.updateLayer(track, ink, settings);
+    }
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
+
+    CHECK(!QDir(out + QStringLiteral("/main_ink")).exists());
+    CHECK(QDir(out + QStringLiteral("/main_colour")).exists());
+}
+
+// An export of a real shot is hundreds of frames and takes as long as it takes,
+// so stopping has to actually stop.
+void exportCanBeCancelled() {
+    TEST("cancelling an export stops it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc = buildDrawnScene();
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+
+    int seen = 0;
+    QString error;
+    const bool ok = exporting::write(
+        doc, options, [&seen](int done, int) { seen = done; return done < 2; }, &error);
+    CHECK_EQ(ok, false);
+    CHECK(!error.isEmpty());
+    CHECK_EQ(seen, 2);
+
+    // What it had already written is still there. An export is not atomic and
+    // does not claim to be -- half a sequence is visibly half a sequence.
+    CHECK_EQ(QDir(out + QStringLiteral("/main_ink")).entryList(QDir::Files).size(), 2);
+}
+
+// A name is a folder name here, and people call layers things like "rough 2".
+void exportNamesSurviveAwkwardLayerNames() {
+    TEST("layer names that a filesystem would refuse become usable folder names");
+    CHECK_EQ(exporting::sequenceName("main", "ink").toStdString(), std::string("main_ink"));
+    CHECK_EQ(exporting::sequenceName("main", "rough 2").toStdString(),
+             std::string("main_rough_2"));
+    CHECK_EQ(exporting::sequenceName("a/b", "c:d").toStdString(), std::string("a_b_c_d"));
+    CHECK_EQ(exporting::sequenceName("", "").toStdString(), std::string("unnamed_unnamed"));
+}
+
+// Through the window, which is where the progress dialog and the document are.
+void theFileMenuExports() {
+    TEST("exporting through the window writes the sequences");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    // The menu item exists and is enabled, which it was not before M5.
+    QAction* exporter = nullptr;
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("&Export sequences...")) exporter = action;
+    }
+    CHECK(exporter != nullptr);
+    if (!exporter) return;
+    CHECK(exporter->isEnabled());
+
+    QString error;
+    CHECK(window.exportSequencesTo(out, true, true, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    QCoreApplication::processEvents();
+
+    CHECK(QFileInfo::exists(out + QStringLiteral("/main_ink/main_ink_0001.png")));
+    CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
+}
+
 // Saving and opening through the window, rather than through project::save
 // directly: the part that has gone wrong before is not the file, it is the
 // canvas and the panels still holding ids from the document that was replaced.
@@ -1125,6 +1827,23 @@ int main(int argc, char** argv) {
     aFailedSaveLeavesTheOldProjectAlone();
     abrokenProjectDoesNotReplaceTheOpenOne();
     savingTwiceWritesTheSameBytes();
+    anIncrementalSaveWritesTheSameProject();
+    anIncrementalSaveReplacesWhatWentMissing();
+    savingElsewhereCarriesNothingForward();
+    openingLeavesTheFolderKnown();
+    autosaveWritesOnlyWhenSomethingMoved();
+    autosaveWaitsForTheStrokeToFinish();
+    closingWritesTheLastChanges();
+    leavingAnUntitledDocumentAsksFirst();
+    closingAnUntouchedWindowJustCloses();
+    newProjectStartsOverCleanly();
+    exportWritesASequencePerLayer();
+    exportRepeatsAHeldDrawing();
+    exportSolvesColourItHasNeverSeen();
+    exportLeavesOutHiddenLayers();
+    exportCanBeCancelled();
+    exportNamesSurviveAwkwardLayerNames();
+    theFileMenuExports();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();
