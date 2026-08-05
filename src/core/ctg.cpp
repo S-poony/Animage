@@ -138,8 +138,10 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     // two are always the same moment in time, because layers belong to the
     // track and timing belongs to the image, so "the previous drawing" needs no
     // qualification here the way it would in TVPaint.
-    const Cel* scribbles = doc.ctgScribblesAt(track, image, layer_id);
+    ImageId scribbles_from = kNoId;
+    const Cel* scribbles = doc.ctgScribblesAt(track, image, layer_id, &scribbles_from);
     if (!scribbles) return kNothing;
+    const bool inherited = scribbles_from != image;
 
     // Everything the answer depends on, mixed into one number. Cheaper than
     // hashing the pixels and exact enough: a cel bumps its revision on every
@@ -270,6 +272,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     built.step = step;
     built.inputs = inputs;
     built.valid = true;
+    built.inherited = inherited;
     built.colours = static_cast<int>(palette.size());
     if (palette.empty()) return cache.store(key, std::move(built));
 
@@ -277,6 +280,52 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     problem.hard.assign(palette.size(), 0);
 
     const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush);
+
+    // Two numbers about how well each mark landed, both free at solve time and
+    // both taken from the solver's labels rather than the finished fill. That
+    // last part is the trap: a mark wins its own pixels in the fill whatever
+    // the solver decided, so read back off the fill every mark is perfectly
+    // placed, always. What is being asked is whether the *region* agreed, and
+    // only the labelling knows.
+    //
+    // The worst mark is the score in both cases, never the average. One
+    // scribble in the wrong place is a drawing to go and look at however well
+    // the others landed, and averaging is exactly how it would be hidden.
+    //
+    // `confidence` is the fraction of a mark the solver labelled with the
+    // mark's own colour, which is what the design notes propose. It is kept and
+    // it is nearly useless, which is worth writing down so nobody derives it
+    // again: over every case in test_ctg it is exactly 1. A seed is only
+    // overruled when severing it beats isolating it, and that needs a mark
+    // that is almost all edge, so in practice the solver honours what it can
+    // see and this measures the wrong thing.
+    //
+    // `spread` is how much region a mark won for each pixel of itself, and it
+    // is the one that separates. A mark that filled a shape wins many times its
+    // own area; a mark carried onto blank paper wins nothing but itself,
+    // because the cut simply hugs the seed. Measured: 17, 23, 65 and 188 for
+    // marks that landed properly, and exactly 1.00 for one carried off its
+    // shape.
+    std::vector<long long> seeded(palette.size(), 0);
+    std::vector<long long> honoured(palette.size(), 0);
+    for (std::size_t i = 0; i < problem.seeds.size(); ++i) {
+        const int seed = problem.seeds[i];
+        if (seed < 0) continue;
+        ++seeded[static_cast<std::size_t>(seed)];
+        if (solved.labels[i] == seed) ++honoured[static_cast<std::size_t>(seed)];
+    }
+    std::vector<long long> won(palette.size(), 0);
+    for (int label : solved.labels) {
+        if (label >= 0) ++won[static_cast<std::size_t>(label)];
+    }
+    for (std::size_t c = 0; c < palette.size(); ++c) {
+        if (seeded[c] <= 0) continue;
+        built.confidence = std::min(built.confidence,
+                                    static_cast<float>(honoured[c]) /
+                                        static_cast<float>(seeded[c]));
+        built.spread = std::min(built.spread, static_cast<float>(won[c]) /
+                                                  static_cast<float>(seeded[c]));
+    }
 
     // Paint the labels back into tiles, over the whole canvas and at full
     // resolution even when the solve was coarse: a blocky fill is better than

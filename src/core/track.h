@@ -103,10 +103,12 @@ struct Track {
     // whom, deleting a drawing leaves the ones after it inheriting from
     // whatever now precedes them, and neither touches a cel.
     //
+    // `direction` is -1 to look at earlier drawings and +1 at later ones.
+    //
     // Nothing here knows about layer kinds. Whether absence means empty or
     // inherited is a decision about the layer, and it is made by the caller;
     // see Document::ctgScribblesAt, which is the only one that should.
-    ImageId celSourceFor(ImageId image, LayerId layer) const;
+    ImageId celSourceFor(ImageId image, LayerId layer, int direction = -1) const;
 };
 
 }  // namespace animage

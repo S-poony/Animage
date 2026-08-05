@@ -350,7 +350,18 @@ const Cel* Document::ctgScribblesAt(TrackId track_id, ImageId image_id, LayerId 
     const Layer* layer = track->findLayer(layer_id);
     if (!layer || layer->kind != LayerKind::Ctg) return nullptr;
 
-    const ImageId from = track->celSourceFor(image_id, layer_id);
+    // With carrying switched off, absence means what it means everywhere else:
+    // the layer is empty here. The drawing's own cel is still its own.
+    if (!layer->ctg_inherit) {
+        const Image* here = track->findImage(image_id);
+        if (!here) return nullptr;
+        const Cel* own = cel(here->celFor(layer_id));
+        if (own && source) *source = image_id;
+        return own;
+    }
+
+    const ImageId from = track->celSourceFor(
+        image_id, layer_id, layer->ctg_direction == CtgDirection::Backward ? +1 : -1);
     if (from == kNoId) return nullptr;
 
     const Image* record = track->findImage(from);

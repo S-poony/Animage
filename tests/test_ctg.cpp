@@ -953,6 +953,143 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
 }
 
+// --- what a colour layer is allowed to do with time -----------------------
+
+void setCtg(Sequence& s, bool inherit, CtgDirection direction) {
+    Layer layer = *s.doc.scene().findTrack(s.track)->findLayer(s.colour);
+    layer.ctg_inherit = inherit;
+    layer.ctg_direction = direction;
+    s.doc.updateLayer(s.track, s.colour, layer);
+}
+
+// Carrying marks forward is the default and is worth having, and it is not the
+// only way to work: a shot whose design changes every drawing gets nothing from
+// it and has to go looking for the marks it carried. Switched off, absence
+// means what it means on a raster layer.
+void carryingScribblesCanBeSwitchedOff() {
+    TEST("a colour layer can be told not to carry marks at all");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+
+    setCtg(s, false, CtgDirection::Forward);
+    CHECK(!s.fillOf(2).valid);   // empty here means empty
+    CHECK(!s.fillOf(1).valid);
+    CHECK(s.fillOf(0).valid);    // its own marks are still its own
+
+    // And back, without anything having been stored or thrown away: the marks
+    // were never copied anywhere, so there is nothing to undo.
+    setCtg(s, true, CtgDirection::Forward);
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+    CHECK(s.doc.celAt(s.track, s.at(2), s.colour) == nullptr);
+}
+
+// Backward is for colouring the drawing in front of you -- often the last of a
+// run, because it is the one you were working on -- and having it apply to
+// everything before it.
+void carryingCanRunBackwards() {
+    TEST("marks can be carried backwards instead");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(2, s.colour, 120, 110, 150, 110, 6.0f, 0.0f, 0.0f, 1.0f);
+
+    // Forwards, nothing reaches the drawings before it.
+    CHECK(!s.fillOf(0).valid);
+    CHECK(!s.fillOf(1).valid);
+
+    setCtg(s, true, CtgDirection::Backward);
+    CHECK_NEAR(fillAt(s.fillOf(0), 130, 160).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).b, 1.0, 0.02);
+    CHECK_EQ(s.track_ref().celSourceFor(s.at(0), s.colour, +1), s.at(2));
+
+    // Marks of its own still win over anything carried to it, whichever way the
+    // carrying runs.
+    s.stroke(1, s.colour, 120, 110, 150, 110, 7.0f, 1.0f, 0.0f, 0.0f);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(0), 130, 160).r, 1.0, 0.02);  // now the nearest later one
+}
+
+// The signal that decides whether the automation gets used or switched off.
+//
+// It has to work with marks that are merely carried, not only with marks that
+// have been moved to follow the drawing -- carrying a mark unchanged under line
+// art that has moved is exactly how it lands in the wrong place, so this is the
+// state where the flag earns its keep. Nothing moves marks yet; the flag does
+// not wait for it.
+void aCarriedMarkThatLandsWrongIsFlagged() {
+    TEST("a carried mark that lands in the wrong region is flagged");
+    Sequence s(2);
+
+    // The same shape on both drawings, but moved a long way across. A mark
+    // scribbled inside it on the first drawing is outside it on the second.
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    // On the drawing it was made for, it lands where it meant to and is not
+    // flagged -- and would not be flagged even if it did not, because you can
+    // see that one happening.
+    const CtgFill& own = s.fillOf(0);
+    CHECK(own.valid);
+    CHECK(!own.inherited);
+    CHECK(!own.suspect());
+    // It filled a shape many times its own size: 8.3 here, which is the box's
+    // area over the mark's.
+    CHECK(own.spread > 5.0f);
+
+    // Carried to the second, it is out in the open with the shape elsewhere, so
+    // it fills nothing but itself: with no line art to follow, the cut hugs the
+    // seed.
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK(carried.inherited);
+    CHECK(carried.spread < kCtgSpreadFloor);
+    CHECK(carried.suspect());
+
+    // And the signal the design notes propose says nothing at all here, which
+    // is why it is not what the flag rests on.
+    CHECK(carried.confidence > 0.99f);
+}
+
+// The ordinary case has to stay quiet, or the flag is noise.
+void aCarriedMarkThatLandsRightIsNotFlagged() {
+    TEST("a carried mark that lands where it should says nothing");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    for (int i = 0; i < 3; ++i) {
+        const CtgFill& fill = s.fillOf(i);
+        CHECK(fill.valid);
+        CHECK(fill.spread > kCtgSpreadFloor);
+        CHECK(!fill.suspect());
+    }
+    CHECK(s.fillOf(1).inherited);
+    CHECK(!s.fillOf(0).inherited);
+}
+
+// The trap this measurement has: a mark wins its own pixels in the finished
+// fill whatever the solver decided, so reading confidence back off the fill
+// would report every mark as perfectly placed, always.
+void confidenceIsMeasuredAgainstTheSolveAndNotTheFill() {
+    TEST("confidence reads the solver's answer, not the one the mark overrode");
+    Sequence s(2);
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.suspect());
+
+    // Every one of those pixels is nonetheless its own colour in the fill,
+    // which is what makes the fill useless for judging this.
+    const Cel* marks = s.doc.celAt(s.track, s.at(0), s.colour);
+    CHECK(marks != nullptr);
+    CHECK_EQ(scribblePixelsNotHonoured(*marks, carried, nullptr), std::size_t{0});
+}
+
 // --- a mark is a label, and one of the labels is "nothing" ----------------
 
 // Every distinct label on the cel, and the alpha values it uses.
@@ -1124,6 +1261,12 @@ int main() {
 
     erasingAScribbleUndoesWhatItDid();
     erasingAStrayScribbleUndoesWhatItDid();
+
+    carryingScribblesCanBeSwitchedOff();
+    carryingCanRunBackwards();
+    aCarriedMarkThatLandsWrongIsFlagged();
+    aCarriedMarkThatLandsRightIsNotFlagged();
+    confidenceIsMeasuredAgainstTheSolveAndNotTheFill();
 
     aCtgStrokeWritesLabelsAndNotPaint();
     theTransparentScribbleSurvivesTheHalfFloat();

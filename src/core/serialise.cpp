@@ -37,6 +37,14 @@ LayerKind kindFromName(const std::string& name) {
     return name == "ctg" ? LayerKind::Ctg : LayerKind::Raster;
 }
 
+const char* directionName(CtgDirection direction) {
+    return direction == CtgDirection::Backward ? "backward" : "forward";
+}
+
+CtgDirection directionFromName(const std::string& name) {
+    return name == "backward" ? CtgDirection::Backward : CtgDirection::Forward;
+}
+
 Json writeColour(const Rgba& colour) {
     Json out = Json::array();
     out.push(Json::number(colour.r));
@@ -74,6 +82,9 @@ Json writeLayer(const Layer& layer) {
         // layer. It is saved anyway: reopening a file with the marks showing,
         // because that is how you left it, is the least surprising thing.
         out.set("show_scribbles", Json::boolean(layer.show_scribbles));
+        out.set("ctg_inherit", Json::boolean(layer.ctg_inherit));
+        out.set("ctg_direction", Json::text(directionName(layer.ctg_direction)));
+        out.set("ctg_follow_motion", Json::boolean(layer.ctg_follow_motion));
     }
     return out;
 }
@@ -92,6 +103,15 @@ Layer readLayer(const Json& json) {
         layer.ctg_sources.push_back(sources.at(i).asId());
     }
     layer.show_scribbles = json["show_scribbles"].asBool(false);
+    // A project written before carrying existed has none of these keys, and the
+    // defaults are what it behaved as: it had no choice about direction and
+    // nothing moved. Carrying itself defaults on, which does change how such a
+    // project reads -- a drawing with no marks of its own now shows an earlier
+    // drawing's rather than nothing. That is the feature, and it is reversible
+    // from the panel without touching a cel.
+    layer.ctg_inherit = json["ctg_inherit"].asBool(true);
+    layer.ctg_direction = directionFromName(json["ctg_direction"].asText("forward"));
+    layer.ctg_follow_motion = json["ctg_follow_motion"].asBool(false);
     return layer;
 }
 
