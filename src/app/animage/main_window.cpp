@@ -317,35 +317,48 @@ void MainWindow::buildActions() {
     connect(colour_button, &QPushButton::clicked, this, &MainWindow::chooseColour);
     tools->addWidget(colour_button);
 
-    // The swatch is a button too: a colour patch is the thing people click.
-    colour_swatch_ = new QPushButton(this);
-    colour_swatch_->setFixedSize(28, 20);
-    colour_swatch_->setToolTip(QStringLiteral("Brush colour.\n"
-                                              "Alt+click on the drawing picks the colour there."));
-    colour_swatch_->setCursor(Qt::PointingHandCursor);
-    colour_swatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #888;"));
-    connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseColour);
-    tools->addWidget(colour_swatch_);
-
-    // Transparency is a colour on a colour layer, so it belongs in the colour
-    // controls rather than in a mode somewhere else. It cannot go in the colour
-    // dialog, which only knows how to offer colours -- and being a button here
-    // is why the dialog did not have to be replaced to get it.
+    // Two halves of one switch: the colour on the left, no colour on the right,
+    // and whichever is rimmed is what the brush is holding. Adjacent and
+    // unspaced, because two patches with a gap between them are two controls
+    // and these are two positions of one.
     //
-    // Named rather than drawn. The swatch beside it already shows the slash
-    // that means "none" whenever transparency is the colour in hand, and a
-    // second slash next to the first is two identical patches where one is a
-    // readout and one is a control, with nothing to say which. A word says it.
-    transparent_swatch_ = new QPushButton(QStringLiteral("None"), this);
-    transparent_swatch_->setCheckable(true);
+    // Transparency is a colour on a colour layer, so it belongs among the
+    // colours rather than in a mode somewhere else -- and it needs to *look*
+    // like one, which a button saying "None" does not. There is nothing about
+    // that word to say it has anything to do with colour.
+    //
+    // Neither half opens the dialog. Clicking a swatch chooses what it shows,
+    // which is what a swatch does everywhere; changing the colour is what the
+    // Colour... button is for. Having the patch do both meant there was no way
+    // to simply select the colour you could already see.
+    auto* swatches = new QWidget(this);
+    auto* switch_row = new QHBoxLayout(swatches);
+    switch_row->setContentsMargins(0, 0, 0, 0);
+    switch_row->setSpacing(0);
+
+    colour_swatch_ = new QPushButton(swatches);
+    colour_swatch_->setFixedSize(30, 22);
+    colour_swatch_->setFocusPolicy(Qt::NoFocus);
+    colour_swatch_->setCursor(Qt::PointingHandCursor);
+    colour_swatch_->setToolTip(
+        QStringLiteral("Paint with this colour.\n"
+                       "Colour... changes it; Alt+click on the drawing picks one up."));
+    connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseSolidColour);
+    switch_row->addWidget(colour_swatch_);
+
+    transparent_swatch_ = new QPushButton(swatches);
+    transparent_swatch_->setFixedSize(30, 22);
     transparent_swatch_->setFocusPolicy(Qt::NoFocus);
+    transparent_swatch_->setCursor(Qt::PointingHandCursor);
     transparent_swatch_->setToolTip(
-        QStringLiteral("Scribble transparency: no colour here.\n"
+        QStringLiteral("Scribble no colour at all.\n"
                        "Fills the region it wins with nothing, and takes colour\n"
                        "back off the spots it covers.\n"
                        "Colour layers only -- a mark there is a label, not paint."));
     connect(transparent_swatch_, &QPushButton::clicked, this, &MainWindow::chooseTransparent);
-    tools->addWidget(transparent_swatch_);
+    switch_row->addWidget(transparent_swatch_);
+
+    tools->addWidget(swatches);
 
     tools->addSeparator();
     // This acts on the drawing in front of you, not on the layer as a whole, so
@@ -1292,14 +1305,10 @@ bool MainWindow::colourIsTransparent() const {
     return isTransparentScribble(Rgba{colour_r_, colour_g_, colour_b_, 1.0f});
 }
 
-// A toggle, so the way out is the way in. Coming back off it restores the last
-// real colour rather than leaving you to go and find one.
+void MainWindow::chooseSolidColour() { applyColour(solid_r_, solid_g_, solid_b_); }
+
 void MainWindow::chooseTransparent() {
-    if (colourIsTransparent()) {
-        applyColour(solid_r_, solid_g_, solid_b_);
-    } else {
-        applyColour(kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b);
-    }
+    applyColour(kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b);
 }
 
 void MainWindow::applyColour(float r, float g, float b) {
@@ -1318,42 +1327,73 @@ void MainWindow::applyColour(float r, float g, float b) {
         solid_b_ = b;
     }
 
-    if (!colour_swatch_) return;
-    const auto shown = [](float linear) {
-        return static_cast<qreal>(std::clamp(linearToSrgb(linear), 0.0f, 1.0f));
-    };
-
-    if (colourIsTransparent()) {
-        // The slash over nothing that every program uses for "none". A colour
-        // patch cannot show the absence of colour by being some colour.
-        colour_swatch_->setStyleSheet(QStringLiteral(
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 #ffffff, stop:0.44 #ffffff, stop:0.46 #d02020,"
-            "stop:0.54 #d02020, stop:0.56 #ffffff, stop:1 #ffffff);"
-            "border:1px solid #888;"));
-    } else {
-        const QColor swatch = QColor::fromRgbF(shown(r), shown(g), shown(b));
-        colour_swatch_->setStyleSheet(
-            QStringLiteral("background:%1;border:1px solid #888;").arg(swatch.name()));
-    }
     syncColourControls();
 }
 
-// The transparent swatch only means something where a mark is a label. Off a
-// colour layer it is disabled, and if it was the colour in hand on the way out
-// the last real colour comes back -- so "transparent selected on a raster
-// layer" is a state that cannot be arrived at rather than one guarded against
-// at the moment it would do damage.
+namespace {
+
+// The accent a selected swatch is rimmed with, and the edge an unselected one
+// keeps so that the two are the same size.
+constexpr char kAccent[] = "#1fb6a6";
+constexpr char kSwatchEdge[] = "#6a6a6e";
+
+// The slash over nothing that every program uses for "no colour". A patch
+// cannot show the absence of colour by being some colour.
+constexpr char kNoneFill[] =
+    "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+    "stop:0 #ffffff, stop:0.42 #ffffff, stop:0.44 #d02020,"
+    "stop:0.56 #d02020, stop:0.58 #ffffff, stop:1 #ffffff);";
+
+// The same mark, muted, for a layer where it means nothing. Greyed rather than
+// hidden: it is still worth knowing the position is there.
+constexpr char kNoneFillDisabled[] =
+    "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+    "stop:0 #7a7a7e, stop:0.42 #7a7a7e, stop:0.44 #8f6a6a,"
+    "stop:0.56 #8f6a6a, stop:0.58 #7a7a7e, stop:1 #7a7a7e);";
+
+// Named by type on purpose. A stylesheet with no selector applies to the widget
+// *and* to everything it owns, and a tooltip counts -- so a swatch styled
+// `background:#c00` handed its own colour to its tooltip, and the slashed one
+// drew a red streak straight through the text of it. Reported, and it was never
+// intended. `QPushButton { ... }` keeps it on the button.
+QString swatchStyle(const QString& fill, bool selected) {
+    return QStringLiteral("QPushButton { %1 border:2px solid %2; }")
+        .arg(fill, QLatin1String(selected ? kAccent : kSwatchEdge));
+}
+
+}  // namespace
+
+// The switch, in both its positions.
+//
+// The left half always shows the last real colour rather than whatever is in
+// hand, so the control has two visible positions instead of one position and a
+// blank -- with the colour hidden while transparency was chosen there would be
+// nothing to switch back to, only a button to press and hope.
+//
+// The right half only means something where a mark is a label. Off a colour
+// layer it is greyed, and if it was the colour in hand on the way out the last
+// real one comes back, so "transparency selected on a raster layer" is a state
+// that cannot be arrived at rather than one caught at the moment it would do
+// damage.
 void MainWindow::syncColourControls() {
-    if (!transparent_swatch_) return;
+    if (!colour_swatch_ || !transparent_swatch_) return;
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(canvas_->activeLayer()) : nullptr;
     const bool on_colour_layer = layer && layer->kind == LayerKind::Ctg;
+    const bool none_chosen = colourIsTransparent();
+
+    const auto shown = [](float linear) {
+        return static_cast<qreal>(std::clamp(linearToSrgb(linear), 0.0f, 1.0f));
+    };
+    const QColor solid = QColor::fromRgbF(shown(solid_r_), shown(solid_g_), shown(solid_b_));
+    const QString fill = QStringLiteral("background:%1;").arg(solid.name());
+    colour_swatch_->setStyleSheet(swatchStyle(fill, !none_chosen));
 
     transparent_swatch_->setEnabled(on_colour_layer);
-    const QSignalBlocker block(transparent_swatch_);
-    transparent_swatch_->setChecked(on_colour_layer && colourIsTransparent());
+    transparent_swatch_->setStyleSheet(
+        swatchStyle(QLatin1String(on_colour_layer ? kNoneFill : kNoneFillDisabled),
+                    on_colour_layer && none_chosen));
 }
 
 void MainWindow::setBrushRadius(double radius) {

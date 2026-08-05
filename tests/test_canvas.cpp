@@ -1786,27 +1786,42 @@ void transparencyIsOfferedOnlyWhereItMeansSomething() {
     window.show();
     QCoreApplication::processEvents();
 
+    // The two halves of the switch carry no text, so they are told apart by
+    // what they say they are for.
     QPushButton* none = nullptr;
+    QPushButton* solid = nullptr;
+    QPushButton* add_colour = nullptr;
     for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("None")) none = button;
+        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
+        if (!button->text().isEmpty()) continue;
+        if (button->toolTip().contains(QStringLiteral("no colour at all"))) none = button;
+        if (button->toolTip().contains(QStringLiteral("Paint with this colour"))) solid = button;
     }
     CHECK(none != nullptr);
-    if (!none) return;
+    CHECK(solid != nullptr);
+    CHECK(add_colour != nullptr);
+    if (!none || !solid || !add_colour) return;
 
     auto* canvas = window.findChild<CanvasWidget*>();
     CHECK(canvas != nullptr);
     if (!canvas) return;
 
+    const auto holdingNothing = [&] {
+        const BrushSettings& s = canvas->brushSettings();
+        return isTransparentScribble(Rgba{s.r, s.g, s.b, 1.0f});
+    };
+
+    // A stylesheet with no type selector applies to the widget *and* to
+    // everything it owns, tooltips included -- so an unscoped `background:`
+    // handed the swatch's own fill to its tooltip, and over the slashed one
+    // that drew a red streak through the text. Asserted rather than eyeballed,
+    // because an offscreen grab does not contain the tooltip to look at.
+    CHECK(solid->styleSheet().startsWith(QStringLiteral("QPushButton {")));
+    CHECK(none->styleSheet().startsWith(QStringLiteral("QPushButton {")));
+
     // A fresh document has one raster layer, so there is nothing to offer.
     CHECK(!none->isEnabled());
-    CHECK(!none->isChecked());
-
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-    }
-    CHECK(add_colour != nullptr);
-    if (!add_colour) return;
+    CHECK(!holdingNothing());
 
     add_colour->click();
     QCoreApplication::processEvents();
@@ -1816,28 +1831,25 @@ void transparencyIsOfferedOnlyWhereItMeansSomething() {
     // standing in for one.
     none->click();
     QCoreApplication::processEvents();
-    const BrushSettings& picked = canvas->brushSettings();
-    CHECK(none->isChecked());
-    CHECK(isTransparentScribble(Rgba{picked.r, picked.g, picked.b, 1.0f}));
+    CHECK(holdingNothing());
 
-    // It is a toggle, so the way out is the way in.
+    // Clicking the colour half chooses the colour, and does not open the
+    // dialog -- which is also why this test can click it at all: a modal would
+    // hang here exactly as it would interrupt somebody drawing.
+    solid->click();
+    QCoreApplication::processEvents();
+    CHECK(!holdingNothing());
+
+    // Only the rimmed half is the one in hand, and only one is ever rimmed.
     none->click();
     QCoreApplication::processEvents();
-    CHECK(!none->isChecked());
-    CHECK(!isTransparentScribble(
-        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
-             1.0f}));
+    CHECK(none->styleSheet().contains(QStringLiteral("#1fb6a6")));
+    CHECK(!solid->styleSheet().contains(QStringLiteral("#1fb6a6")));
 
-    // And stepping off the colour layer with it in hand puts a colour back,
-    // rather than leaving a brush loaded with something a raster layer cannot
-    // hold. This is the path that matters: the button being disabled stops you
-    // choosing it, and this stops you carrying it.
-    none->click();
-    QCoreApplication::processEvents();
-    CHECK(isTransparentScribble(
-        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
-             1.0f}));
-
+    // Stepping off the colour layer with it in hand puts a colour back, rather
+    // than leaving a brush loaded with something a raster layer cannot hold.
+    // This is the path that matters: the half being greyed stops you choosing
+    // it, and this stops you carrying it.
     auto* layers = window.findChild<QTreeWidget*>();
     CHECK(layers != nullptr);
     if (!layers) return;
@@ -1846,10 +1858,8 @@ void transparencyIsOfferedOnlyWhereItMeansSomething() {
     QCoreApplication::processEvents();
 
     CHECK(!none->isEnabled());
-    CHECK(!none->isChecked());
-    CHECK(!isTransparentScribble(
-        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
-             1.0f}));
+    CHECK(!holdingNothing());
+    CHECK(solid->styleSheet().contains(QStringLiteral("#1fb6a6")));
 }
 
 // Saving and opening through the window, rather than through project::save

@@ -85,7 +85,11 @@ private:
     // light. The swatch is disabled off a colour layer and the colour is put
     // back to the last real one on the way out, so the state cannot be reached
     // by wandering into it.
+    // The two positions of the colour switch. Neither opens the dialog: a
+    // swatch chooses what it shows, and Colour... is what changes it.
+    void chooseSolidColour();
     void chooseTransparent();
+
     bool colourIsTransparent() const;
     void syncColourControls();
 
