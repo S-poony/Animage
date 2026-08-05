@@ -1,11 +1,86 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "document.h"
 
 namespace animage {
+
+// How many image pixels one composited entry covers.
+//
+// Fixed point rather than an integer, and that is the whole of issue #11. An
+// integer step cannot follow a continuous zoom, so there was always a zoom at
+// which it doubled -- and a 2x change in sampling density for a 1% change in
+// zoom is what made a stroke crisp on one side of it and jagged on the other.
+// Where that boundary landed was decided by a memory budget rather than by any
+// judgement about resolution, so it also moved with the size of the window.
+//
+// The grid is anchored at the image origin rather than at whatever region is
+// being asked for. That is what lets a partial refresh -- one dab of a brush --
+// land on exactly the entries a full refresh would have produced, and it keeps
+// the sampling phase still under the drawing while the view pans across it.
+class SampleStep {
+public:
+    static constexpr int kFractionBits = 16;
+    static constexpr std::int64_t kOne = std::int64_t{1} << kFractionBits;
+
+    SampleStep() = default;
+
+    // Never below one image pixel per entry: magnifying is the blit's job, and
+    // a cache finer than the drawing would only cost memory to hold detail
+    // that is not there.
+    static SampleStep fromRatio(double image_pixels_per_entry);
+
+    double ratio() const { return static_cast<double>(raw_) / static_cast<double>(kOne); }
+    bool isOne() const { return raw_ == kOne; }
+
+    friend bool operator==(const SampleStep&, const SampleStep&) = default;
+
+    // Where an entry starts, exactly, in 16.16 image pixels. The grid is
+    // continuous -- an entry boundary falls between two image pixels far more
+    // often than on one -- and pretending otherwise is what makes a reduction
+    // ragged: at 1.4 image pixels an entry, rounding the boundaries gives some
+    // entries one pixel and some two, and that alternation is a worse artefact
+    // than the shimmer it was meant to remove.
+    long long entryTop(long long entry) const { return entry * raw_; }
+
+    // The same edge in whole image pixels, for the blit. A run of entries
+    // covers entryEdge(first) to entryEdge(first + count) and *not* the integer
+    // rectangle around it: the two differ by up to a pixel, which stretches the
+    // cache by a part in a thousand over the width of a window and slides a
+    // curve off where the drawing says it is.
+    double entryEdge(long long entry) const {
+        return static_cast<double>(entryTop(entry)) / static_cast<double>(kOne);
+    }
+
+    // The first image pixel belonging to an entry, and the entry an image pixel
+    // starts inside. Inverses: entryAt(entryBegin(e)) == e.
+    int entryBegin(long long entry) const;
+    long long entryAt(int image_coordinate) const;
+
+    // How many entries it takes to cover `extent` image pixels starting at
+    // `origin`, counting the entries that origin and its far end fall inside.
+    int entriesAcross(int origin, int extent) const;
+
+private:
+    explicit SampleStep(std::int64_t raw) : raw_(raw) {}
+    std::int64_t raw_ = kOne;
+};
+
+// Grows a rectangle out to the entry boundaries around it, so that its corners
+// are entries rather than fractions of one. Every region handed to the
+// compositor should be snapped: an entry clipped by the edge of the region is
+// averaged from fewer samples than it covers.
+PixelRect snapToSampleGrid(const SampleStep& step, const PixelRect& region);
+
+// How far apart the image pixels read inside one entry are. A full box filter
+// reads every pixel under the entry, which at 10% zoom is a hundred of them for
+// one entry nobody can see a hundredth of; sampling the block on a lattice
+// bounds that while staying exact wherever it matters. Exposed so a benchmark
+// can reproduce the reduction rather than guess at it.
+int boxSampleStride(const SampleStep& step);
 
 // A block of linear, premultiplied RGBA. This is what the compositor produces
 // and what the display path converts to sRGB at the very last moment.
@@ -42,21 +117,25 @@ public:
     // `region` is in image coordinates; the result fills the framebuffer from
     // its top-left corner. Layers composite in list order, index 0 on top.
     //
-    // `step` samples every nth image pixel, producing a framebuffer that many
-    // times smaller. It exists so that zooming out does not ask for a buffer
-    // the size of the visible image area: at 10% zoom a viewport covers a
-    // hundred times more image pixels than it has screen pixels, and there is
-    // no point flattening detail nobody can see. Point sampling, so thin lines
-    // do shimmer when zoomed far out.
+    // `step` says how many image pixels each entry stands for, so that zooming
+    // out does not ask for a buffer the size of the visible image area: at 10%
+    // zoom a viewport covers a hundred times more image pixels than it has
+    // screen pixels. Each entry is the *average* of the block it covers, which
+    // is the reconstruction a screen pixel wants; taking one pixel of the block
+    // and discarding the rest is what made thin lines shimmer when zoomed out,
+    // and is the same trap the CTG barrier already records from the other end.
+    //
+    // `region` should be snapped to the grid -- see snapToSampleGrid -- or the
+    // entries at its edges are averaged from part of their block.
     void composite(const Document& doc, TrackId track, ImageId image,
-                   const PixelRect& region, Framebuffer& out, int step = 1) const;
+                   const PixelRect& region, Framebuffer& out, SampleStep step = {}) const;
 
     // Same, for an arbitrary set of layers in the order given, topmost first.
     // The CTG layer will need this to flatten several line-art layers into one
     // barrier, and onion skin needs it to draw a neighbouring image alone.
     void compositeLayers(const Document& doc, TrackId track, ImageId image,
                          const std::vector<LayerId>& layers, const PixelRect& region,
-                         Framebuffer& out, int step = 1) const;
+                         Framebuffer& out, SampleStep step = {}) const;
 };
 
 // The bounding box of everything drawn on an image, in pixels, or an empty rect

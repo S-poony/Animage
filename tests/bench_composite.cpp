@@ -54,7 +54,7 @@ void scribble(Document& doc, TrackId track, ImageId image, LayerId layer, int st
 }
 
 double timeComposites(const Document& doc, TrackId track, ImageId image,
-                      const PixelRect& region, int step, int repeats) {
+                      const PixelRect& region, SampleStep step, int repeats) {
     Compositor compositor;
     Framebuffer frame;
     // One outside the timing, so the buffer is already allocated.
@@ -87,7 +87,7 @@ int main() {
         }
 
         const PixelRect viewport{0, 0, kViewportWidth, kViewportHeight};
-        const double bare = timeComposites(doc, track, image, viewport, 1, 20);
+        const double bare = timeComposites(doc, track, image, viewport, {}, 20);
 
         std::printf("%d layer%s  %6zu tiles\n", layers, layers == 1 ? " " : "s",
                     doc.totalTileCount());
@@ -98,14 +98,17 @@ int main() {
         for (int margin : {kMargin, 192}) {
             const PixelRect padded{-margin, -margin, kViewportWidth + 2 * margin,
                                    kViewportHeight + 2 * margin};
-            const double timed = timeComposites(doc, track, image, padded, 1, 20);
+            const double timed = timeComposites(doc, track, image, padded, {}, 20);
             std::printf("    margin %3d px    %7.2f ms   (%.2fx)\n", margin, timed,
                         timed / bare);
         }
     }
 
-    // Zooming out samples every nth pixel over a much wider region. It was
-    // never measured before, and it was the slowest path in the program.
+    // Zooming out reduces a block of image pixels to each entry over a much
+    // wider region. It was never measured before, and it was the slowest path
+    // in the program. The block is averaged rather than point-sampled since
+    // issue #11, so the reading is bounded per entry rather than free -- which
+    // is the price of not shimmering, and worth watching here.
     std::printf("\nzoomed out, 4 layers over a wide drawing\n");
     {
         Document doc;
@@ -116,10 +119,13 @@ int main() {
             scribble(doc, track, image, layer, 240, kViewportWidth * 6, kViewportHeight * 6,
                      0x51edu + i * 7919u);
         }
-        for (int step : {1, 2, 5, 10, 20}) {
-            const PixelRect region{0, 0, kViewportWidth * step, kViewportHeight * step};
+        for (double zoom : {1.0, 0.7, 0.5, 0.2, 0.1, 0.05}) {
+            const SampleStep step = SampleStep::fromRatio(1.0 / zoom);
+            const PixelRect region{0, 0, static_cast<int>(kViewportWidth / zoom),
+                                   static_cast<int>(kViewportHeight / zoom)};
             const double timed = timeComposites(doc, track, image, region, step, 10);
-            std::printf("    step %2d (zoom %5.2f)  %7.2f ms\n", step, 1.0 / step, timed);
+            std::printf("    zoom %5.2f (%5.2f image px an entry, read every %d)  %7.2f ms\n",
+                        zoom, step.ratio(), boxSampleStride(step), timed);
         }
     }
 

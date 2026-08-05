@@ -98,7 +98,7 @@ std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
                               std::min(rows * step, region.height - y0 * step)};
         if (strip.height <= 0) break;
 
-        compositor.compositeLayers(doc, track, image, sources, strip, band, 1);
+        compositor.compositeLayers(doc, track, image, sources, strip, band);
 
         for (int y = 0; y < rows; ++y) {
             float* out = intensity.data() + static_cast<std::size_t>(y0 + y) * width;

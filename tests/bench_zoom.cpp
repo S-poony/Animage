@@ -5,10 +5,15 @@
 // argued about and neither had been timed, so this drives the real
 // CanvasWidget offscreen and reads the answers off it.
 //
+// It is also where issue #11 was settled: holding the cache at one entry per
+// screen pixel instead of per image pixel, so that the sampling ratio follows
+// zoom continuously and the block under an entry is averaged rather than
+// point-sampled. The tables below are what says whether that worked.
+//
 // Three questions, in order:
-//   1. What is cache_step_ actually doing as zoom varies, and where does it
-//      change? That is what decides how much of the drawing survives to the
-//      screen.
+//   1. What is cache_step_ actually doing as zoom varies? That is what decides
+//      how much of the drawing survives to the screen, and it used to jump by
+//      a factor of two at a zoom a memory budget happened to pick.
 //   2. What does a full refresh, a cached repaint and a pan each cost at each
 //      zoom, and how much of that is the compositor rather than everything
 //      round it?
@@ -181,7 +186,7 @@ DragCost timeZoomDrag(CanvasWidget& canvas, double from, int moves = 40) {
 
 // The compositor's own share, on the region and step the canvas settled on.
 double timeCompositeAlone(const Document& doc, TrackId track, ImageId image,
-                          const PixelRect& region, int step, int repeats) {
+                          const PixelRect& region, SampleStep step, int repeats) {
     Compositor compositor;
     Framebuffer frame;
     compositor.composite(doc, track, image, region, frame, step);
@@ -198,7 +203,7 @@ void sweep(const char* title, int layers, int curves, int spread) {
     std::printf("\n%s -- %zu tiles, %d layer%s, widget %dx%d\n", title,
                 fixture.doc.totalTileCount(), layers, layers == 1 ? "" : "s", kCanvasWidth,
                 kCanvasHeight);
-    std::printf("  zoom  step  margin(scr px)   full refresh   composite   "
+    std::printf("  zoom   step  entries  margin(scr px)   full refresh   composite   "
                 "pan: med / worst / stalled    zoom-drag: med / worst\n");
 
     for (double zoom : kZooms) {
@@ -207,8 +212,11 @@ void sweep(const char* title, int layers, int curves, int spread) {
         canvas.setZoom(zoom, QPointF(kCanvasWidth / 2.0, kCanvasHeight / 2.0));
         canvas.grab();  // settle the cache before anything is timed
 
-        const int step = canvas.cacheStep();
+        const SampleStep step = canvas.cacheStep();
         const PixelRect cached = canvas.cachedRegion();
+        // Read here, before the drags below move the view: the whole claim of
+        // issue #11 is that this number stops depending on the zoom.
+        const long long entries = canvas.cacheEntryCount();
 
         std::vector<double> full;
         QElapsedTimer clock;
@@ -233,20 +241,29 @@ void sweep(const char* title, int layers, int curves, int spread) {
         canvas.grab();
         const DragCost zoom_drag = timeZoomDrag(canvas, zoom);
 
-        std::printf("  %4.2f  %4d  %9.0f     %8.2f ms  %8.2f ms   %6.2f /%7.2f /%5.0f%%"
-                    "        %6.2f /%7.2f\n",
-                    zoom, step, margin_screen, median(full), composite, pan.median_ms,
-                    pan.worst_ms, pan.stall_percent, zoom_drag.median_ms, zoom_drag.worst_ms);
+        std::printf("  %4.2f  %5.2f  %6.2fM  %9.0f     %8.2f ms  %8.2f ms   "
+                    "%6.2f /%7.2f /%5.0f%%        %6.2f /%7.2f\n",
+                    zoom, step.ratio(), entries / 1e6, margin_screen,
+                    median(full), composite, pan.median_ms, pan.worst_ms, pan.stall_percent,
+                    zoom_drag.median_ms, zoom_drag.worst_ms);
     }
 }
 
-// Where the cache stops sampling every pixel, for windows of different sizes.
-// If that zoom moves with the window, then the sharpness of a stroke is not a
-// function of the zoom the status bar is showing, and no amount of staring at
-// the zoom percentage will explain it.
-void cliffVersusWindowSize() {
-    std::printf("\nthe zoom at which step goes 1 -> 2, for each window size\n");
-    std::printf("  canvas widget     budget      step becomes 2 below\n");
+// The sampling ratio has to be a function of the zoom the status bar is showing
+// and of nothing else. It used to also be a function of the window size,
+// because a memory budget scaled with the window and the budget was what
+// decided when the integer step doubled: the boundary sat at 50% in an 800x500
+// canvas and 70.7% on anything large, so the same percentage meant different
+// sharpness in different windows. That is exactly why the relationship looked
+// non-linear and unexplainable.
+//
+// Two things are looked for here. The largest jump anywhere in a fine sweep --
+// a step of any size shows up as one -- and whether the answer moves with the
+// window at all.
+void samplingVersusWindowSize() {
+    std::printf("\nimage pixels per cache entry, and how that varies with the window\n");
+    std::printf("  canvas widget     at 40%%   at 60%%   at 68%%   at 72%%   at 100%%   "
+                "largest jump between adjacent zooms\n");
 
     for (auto size : {std::pair{800, 500}, {1100, 640}, {1400, 700}, {1645, 765},
                       {2200, 1200}, {2560, 1400}}) {
@@ -262,34 +279,55 @@ void cliffVersusWindowSize() {
         canvas.setFrame(0);
         canvas.setActiveLayer(layer);
 
-        double cliff = 0.0;
-        for (int i = 0; i <= 600; ++i) {
-            const double zoom = 0.40 + i * 0.001;
+        const auto ratioAt = [&](double zoom) {
             canvas.resetView();
             canvas.setZoom(zoom, QPointF(size.first / 2.0, size.second / 2.0));
             canvas.grab();
-            if (canvas.cacheStep() == 1) { cliff = zoom; break; }
+            return canvas.cacheStep().ratio();
+        };
+
+        double worst_jump = 1.0;
+        double previous = 0.0;
+        for (int i = 0; i <= 700; ++i) {
+            const double ratio = ratioAt(0.30 + i * 0.001);
+            if (previous > 0.0) {
+                worst_jump = std::max(worst_jump, std::max(ratio / previous, previous / ratio));
+            }
+            previous = ratio;
         }
-        std::printf("  %5d x %-5d   %9lld   %20.3f\n", size.first, size.second,
-                    std::max<long long>(2'000'000, 2LL * size.first * size.second), cliff);
+
+        std::printf("  %5d x %-5d   %6.2f   %6.2f   %6.2f   %6.2f   %7.2f   %31.3fx\n",
+                    size.first, size.second, ratioAt(0.40), ratioAt(0.60), ratioAt(0.68),
+                    ratioAt(0.72), ratioAt(1.00), worst_jump);
     }
 }
 
 // --- what the pipeline does to a curve -----------------------------------
+
+// The drawing the resampling experiment works on, in image pixels.
+constexpr int kDrawingSide = 720;
 
 // A circle is the right test shape and a straight line is not: the issue says
 // the jaggedness shows on curves and not on orthogonal edges, which is exactly
 // what a resampling artefact does. Rendered at whatever size is asked for, so
 // the same circle can be produced as a ground truth at the display size and as
 // a document to be resampled.
+//
+// The geometry comes from the drawing scaled by `scale`, not from the size of
+// the image it is being put in, and those are not the same thing: the pipeline
+// covers a fraction of a pixel less than the whole drawing, so its scale is not
+// the round number the image size is. Deriving the truth's geometry from the
+// rounded size instead slid it a third of a pixel away from the pipeline by the
+// far edge, and charged that to the filter.
 QImage circleAt(int side, double scale) {
+    const double extent = kDrawingSide * scale;
     QImage image(side, side, QImage::Format_RGB32);
     image.fill(Qt::white);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(Qt::black, 3.0 * scale));
-    painter.drawEllipse(QRectF(side * 0.1, side * 0.1, side * 0.8, side * 0.8));
+    painter.drawEllipse(QRectF(extent * 0.1, extent * 0.1, extent * 0.8, extent * 0.8));
     return image;
 }
 
@@ -313,92 +351,157 @@ double rmsAgainst(const QImage& a, const QImage& b) {
     return std::sqrt(sum / std::max(1, w * h));
 }
 
-// The cache, as the compositor fills it: every `step`th pixel taken, nothing
-// averaged. blendLayerRows does exactly this -- `local_x + i * step` -- so a
-// step of 2 keeps one pixel in four and discards the rest.
-QImage pointSampled(const QImage& source, int step) {
-    if (step <= 1) return source;
-    const int w = (source.width() + step - 1) / step;
-    const int h = (source.height() + step - 1) / step;
-    QImage out(w, h, QImage::Format_RGB32);
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            out.setPixel(x, y, source.pixel(x * step, y * step));
-        }
-    }
-    return out;
+// How much of image pixel `at` -- standing for the `stride` pixels from there
+// -- falls inside entry `entry`. The compositor's weighting, on the
+// compositor's own grid, so this cannot drift into measuring something else.
+double shareOf(const SampleStep& step, long long entry, int at, int stride, int extent) {
+    const double lower = std::max<double>(at, static_cast<double>(step.entryTop(entry)) /
+                                                  SampleStep::kOne);
+    const double upper = std::min<double>(std::min(at + stride, extent),
+                                          static_cast<double>(step.entryTop(entry + 1)) /
+                                              SampleStep::kOne);
+    return std::max(0.0, upper - lower);
 }
 
-// The same reduction, but averaging the block instead of picking one of it.
-// This is the box filter the compositor does not have.
-QImage boxFiltered(const QImage& source, int step) {
-    if (step <= 1) return source;
-    const int w = (source.width() + step - 1) / step;
-    const int h = (source.height() + step - 1) / step;
+// The cache as the compositor fills it: each entry the weighted mean of the
+// block it covers, read on the same bounded lattice, with a sample that
+// straddles an entry boundary split between the two.
+QImage reduced(const QImage& source, const SampleStep& step, bool weighted) {
+    if (step.isOne()) return source;
+    const int w = step.entriesAcross(0, source.width());
+    const int h = step.entriesAcross(0, source.height());
+    const int stride = boxSampleStride(step);
     QImage out(w, h, QImage::Format_RGB32);
+
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            long long r = 0, g = 0, b = 0, n = 0;
-            for (int dy = 0; dy < step; ++dy) {
-                for (int dx = 0; dx < step; ++dx) {
-                    const int sx = std::min(source.width() - 1, x * step + dx);
-                    const int sy = std::min(source.height() - 1, y * step + dy);
+            double r = 0.0, g = 0.0, b = 0.0, total = 0.0;
+            const int y0 = std::max(0, step.entryBegin(y) - stride);
+            const int x0 = std::max(0, step.entryBegin(x) - stride);
+            for (int sy = (y0 / stride) * stride; sy < source.height(); sy += stride) {
+                const double wy = shareOf(step, y, sy, stride, source.height());
+                if (wy <= 0.0) {
+                    if (sy > step.entryBegin(y + 1)) break;
+                    continue;
+                }
+                for (int sx = (x0 / stride) * stride; sx < source.width(); sx += stride) {
+                    const double wx = shareOf(step, x, sx, stride, source.width());
+                    if (wx <= 0.0) {
+                        if (sx > step.entryBegin(x + 1)) break;
+                        continue;
+                    }
+                    // Unweighted is the reduction with the entry boundaries
+                    // rounded to whole pixels: every sample that touches the
+                    // entry counted equally. It is what a box filter looks like
+                    // before the split is weighted, and it is worth a column.
+                    const double weight = weighted ? wx * wy : 1.0;
                     const QRgb p = source.pixel(sx, sy);
-                    r += qRed(p); g += qGreen(p); b += qBlue(p); ++n;
+                    r += qRed(p) * weight;
+                    g += qGreen(p) * weight;
+                    b += qBlue(p) * weight;
+                    total += weight;
                 }
             }
-            out.setPixel(x, y, qRgb(static_cast<int>(r / n), static_cast<int>(g / n),
-                                    static_cast<int>(b / n)));
+            if (total <= 0.0) { out.setPixel(x, y, source.pixel(0, 0)); continue; }
+            out.setPixel(x, y, qRgb(static_cast<int>(std::lround(r / total)),
+                                    static_cast<int>(std::lround(g / total)),
+                                    static_cast<int>(std::lround(b / total))));
         }
     }
     return out;
 }
 
-// One trip through the canvas's pipeline: sample the drawing into the cache at
+// The same grid, but taking one pixel of the block instead of averaging it.
+// This is what the compositor did before issue #11, and it is the column the
+// filter has to be measured against.
+QImage pointSampled(const QImage& source, const SampleStep& step) {
+    if (step.isOne()) return source;
+    const int w = step.entriesAcross(0, source.width());
+    const int h = step.entriesAcross(0, source.height());
+    QImage out(w, h, QImage::Format_RGB32);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            out.setPixel(x, y, source.pixel(std::min(source.width() - 1, step.entryBegin(x)),
+                                            std::min(source.height() - 1, step.entryBegin(y))));
+        }
+    }
+    return out;
+}
+
+enum class Reduction { Point, UnweightedBox, WeightedBox };
+
+// One trip through the canvas's pipeline: reduce the drawing into the cache at
 // `step`, then blit the cache to the window with the filter the canvas picks.
-QImage throughPipeline(const QImage& drawing, int step, double zoom, bool smooth_blit,
-                       bool box) {
-    const QImage cache = box ? boxFiltered(drawing, step) : pointSampled(drawing, step);
-    const int side = static_cast<int>(std::lround(drawing.width() * zoom));
-    return cache.scaled(side, side, Qt::IgnoreAspectRatio,
-                        smooth_blit ? Qt::SmoothTransformation : Qt::FastTransformation);
+//
+// Screen pixels per image pixel that the pipeline actually applies, which is
+// not quite the zoom asked for. A whole number of entries covers entryEdge(n)
+// image pixels, and the canvas snaps the view so that those entries land on
+// whole screen pixels; both the drawing and the ground truth have to be
+// measured against that rather than against the number in the status bar, or
+// the comparison slides a black curve a fraction of a pixel across white paper
+// and charges the pipeline several RMS for the measurement's own rounding.
+double displayScale(const QImage& drawing, const SampleStep& step, double zoom) {
+    const double covered = step.entryEdge(step.entriesAcross(0, drawing.width()));
+    return std::max(1.0, std::round(covered * zoom)) / covered;
+}
+
+// One trip through the canvas's pipeline: reduce the drawing into the cache at
+// `step`, then blit the cache to the window with the filter the canvas picks.
+// Below 100% zoom that blit is a copy, because an entry is a screen pixel.
+QImage throughPipeline(const QImage& drawing, const SampleStep& step, double scale,
+                       bool smooth_blit, Reduction how) {
+    const QImage cache = (how == Reduction::Point)
+                             ? pointSampled(drawing, step)
+                             : reduced(drawing, step, how == Reduction::WeightedBox);
+    const double covered = step.entryEdge(cache.width()) * scale;
+    const int side = static_cast<int>(std::lround(drawing.width() * scale));
+
+    QImage out(side, side, QImage::Format_RGB32);
+    out.fill(Qt::white);
+    QPainter painter(&out);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth_blit);
+    painter.drawImage(QRectF(0.0, 0.0, covered, covered), cache);
+    painter.end();
+    return out;
 }
 
 void filterExperiment(const char* dump_dir) {
-    constexpr int kSide = 720;
+    constexpr int kSide = kDrawingSide;
     const QImage drawing = circleAt(kSide, 1.0);
 
     std::printf("\nwhat the resampling costs, against drawing the same curve at the display"
                 " size\n");
     std::printf("(RMS level error, 0-255; 0 would mean the pipeline lost nothing)\n");
-    std::printf("  zoom  step  blit filter   as shipped   with a smooth blit   with a box"
-                " filter\n");
+    std::printf("  zoom   step  blit filter   as shipped   point-sampled   box, boundaries"
+                " rounded\n");
 
     // Both the step and the filter are asked of the canvas rather than written
     // down here. A table of what the code used to do is worse than no table:
     // it goes stale silently and then argues with the thing it is measuring.
     Fixture probe(1, 3, 1920);
-    for (double zoom : {0.40, 0.50, 0.60, 0.65, 0.68, 0.70, 0.72, 0.90, 1.00, 1.09, 1.20,
-                        1.50, 2.00, 4.00}) {
+    for (double zoom : {0.40, 0.50, 0.55, 0.60, 0.65, 0.68, 0.70, 0.72, 0.90, 1.00, 1.09,
+                        1.20, 1.50, 2.00, 4.00}) {
         probe.canvas.resetView();
         probe.canvas.setZoom(zoom, QPointF(kCanvasWidth / 2.0, kCanvasHeight / 2.0));
         probe.canvas.grab();
-        const int step = probe.canvas.cacheStep();
-        const bool shipped_smooth = CanvasWidget::blitInterpolatesAt(step * zoom);
+        const SampleStep step = probe.canvas.cacheStep();
+        const bool shipped_smooth = CanvasWidget::blitInterpolatesAt(step.ratio() * zoom);
 
-        const int side = static_cast<int>(std::lround(kSide * zoom));
+        const double scale = displayScale(drawing, step, zoom);
+        const int side = static_cast<int>(std::lround(kSide * scale));
         // Ground truth: the curve drawn at the size it is being displayed at.
-        const QImage truth = circleAt(side, zoom);
+        const QImage truth = circleAt(side, scale);
 
-        const double shipped =
-            rmsAgainst(throughPipeline(drawing, step, zoom, shipped_smooth, false), truth);
-        const double smooth_blit =
-            rmsAgainst(throughPipeline(drawing, step, zoom, true, false), truth);
-        const double boxed =
-            rmsAgainst(throughPipeline(drawing, step, zoom, true, true), truth);
+        const double shipped = rmsAgainst(
+            throughPipeline(drawing, step, scale, shipped_smooth, Reduction::WeightedBox), truth);
+        const double sampled = rmsAgainst(
+            throughPipeline(drawing, step, scale, shipped_smooth, Reduction::Point), truth);
+        const double rounded = rmsAgainst(
+            throughPipeline(drawing, step, scale, shipped_smooth, Reduction::UnweightedBox),
+            truth);
 
-        std::printf("  %4.2f  %4d  %-11s   %8.1f   %17.1f   %16.1f\n", zoom, step,
-                    shipped_smooth ? "smooth" : "nearest", shipped, smooth_blit, boxed);
+        std::printf("  %4.2f  %5.2f  %-11s   %8.1f   %13.1f   %24.1f\n", zoom, step.ratio(),
+                    shipped_smooth ? "smooth" : "nearest", shipped, sampled, rounded);
     }
 
     if (!dump_dir) return;
@@ -447,21 +550,26 @@ void filterExperiment(const char* dump_dir) {
         out.save(QString("%1/%2.png").arg(dump_dir, name));
     };
 
+    const SampleStep one;
     sheet("above-100-percent",
           {{"drawn at 109% (ground truth)",
             crop(circleAt(static_cast<int>(std::lround(kSide * 1.09)), 1.09), 1.09)},
-           {"109% as shipped: nearest-neighbour blit  (RMS 6.0)",
-            crop(throughPipeline(drawing, 1, 1.09, false, false), 1.09)},
-           {"109% with a smooth blit  (RMS 3.4)",
-            crop(throughPipeline(drawing, 1, 1.09, true, false), 1.09)}});
+           {"109% before issue #10: nearest-neighbour blit  (RMS 6.0)",
+            crop(throughPipeline(drawing, one, 1.09, false, Reduction::Point), 1.09)},
+           {"109% as shipped, with a smooth blit  (RMS 3.4)",
+            crop(throughPipeline(drawing, one, 1.09, true, Reduction::Point), 1.09)}});
 
+    // 50% is where the point sample and the average part company most clearly:
+    // two image pixels an entry, so a box filter is the exact reconstruction of
+    // one screen pixel and point sampling throws three quarters of the ink away.
+    const SampleStep half = SampleStep::fromRatio(2.0);
     sheet("across-the-step-cliff",
-          {{"72%, step 1 as shipped  (RMS 2.2)",
-            crop(throughPipeline(drawing, 1, 0.72, true, false), 0.72)},
-           {"70%, step 2 as shipped: every 2nd pixel taken  (RMS 8.9)",
-            crop(throughPipeline(drawing, 2, 0.70, true, false), 0.70)},
-           {"70%, step 2 with the block averaged instead  (RMS 6.1)",
-            crop(throughPipeline(drawing, 2, 0.70, true, true), 0.70)}});
+          {{"drawn at 50% (ground truth)",
+            crop(circleAt(static_cast<int>(std::lround(kSide * 0.50)), 0.50), 0.50)},
+           {"50% before issue #11: every 2nd pixel taken  (RMS 8.6)",
+            crop(throughPipeline(drawing, half, 0.50, true, Reduction::Point), 0.50)},
+           {"50% as shipped, with the block averaged  (RMS 0.1)",
+            crop(throughPipeline(drawing, half, 0.50, true, Reduction::WeightedBox), 0.50)}});
 
     // And the same three zooms through the real widget rather than through a
     // simulation of it. A green build proves nothing about what is on screen;
@@ -497,7 +605,7 @@ void filterExperiment(const char* dump_dir) {
         canvas.setActiveLayer(layer);
 
         std::vector<Strip> strips;
-        for (double zoom : {0.68, 1.00, 1.09}) {
+        for (double zoom : {0.50, 0.68, 1.00, 1.09}) {
             canvas.resetView();
             canvas.setZoom(zoom, QPointF(kCanvasWidth / 2.0, kCanvasHeight / 2.0));
             const QImage shot = canvas.grab().toImage();
@@ -512,10 +620,10 @@ void filterExperiment(const char* dump_dir) {
             const double at_x = (960 + 300 * std::cos(-M_PI / 4) - pan_x) * zoom;
             const double at_y = (540 + 260 * std::sin(-M_PI / 4) - pan_y) * zoom;
             const QRect box(static_cast<int>(at_x) - 75, static_cast<int>(at_y) - 45, 150, 90);
-            strips.push_back({QString("the real canvas at %1%  (step %2, %3 blit)")
+            strips.push_back({QString("the real canvas at %1%  (%2 image px an entry, %3 blit)")
                                   .arg(static_cast<int>(std::lround(zoom * 100)))
-                                  .arg(canvas.cacheStep())
-                                  .arg(CanvasWidget::blitInterpolatesAt(canvas.cacheStep() * zoom)
+                                  .arg(canvas.cacheStep().ratio(), 0, 'f', 2)
+                                  .arg(CanvasWidget::blitInterpolatesAt(canvas.cacheStep().ratio() * zoom)
                                            ? "smooth"
                                            : "nearest"),
                               shot.copy(box).scaled(150 * 4, 90 * 4, Qt::IgnoreAspectRatio,
@@ -534,7 +642,7 @@ int main(int argc, char** argv) {
 
     sweep("a sparse drawing, like the screenshots on the issue", 1, 6, 1920);
     sweep("a full shot: four layers drawn over a wide field", 4, 90, 5000);
-    cliffVersusWindowSize();
+    samplingVersusWindowSize();
     filterExperiment(argc > 1 && argv[argc - 1][0] != '-' ? argv[argc - 1] : nullptr);
 
     std::printf("\nA frame at 60 Hz is 16.7 ms. A pan wants one of these per mouse move.\n");

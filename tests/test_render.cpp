@@ -185,33 +185,147 @@ void panningDoesNotRecompositeOnEveryMove() {
     }
 }
 
-// The fault: `cache_step_` is meant to be floor(1/zoom) -- sample every pixel
-// until there are more image pixels than screen pixels to put them in -- but a
-// memory budget of twice the viewport overrode it at exactly 1/sqrt(2). A
-// stroke was therefore crisp at 72% and visibly jagged at 68%, and the boundary
-// moved with the window size, so the same percentage meant different sharpness
-// in different windows.
+// The fault: the cache was held at one entry per *image* pixel reduced by an
+// integer step, so it grew as viewport/zoom^2 and had to be capped -- and the
+// cap, not any judgement about resolution, decided the zoom at which the step
+// doubled. A stroke was crisp at 72% and jagged at 68% because a memory limit
+// landed between them, and the boundary moved with the window size, so the same
+// percentage meant different sharpness in different windows.
 //
-// 65% is the assertion because 68% is what the issue reported as jagged. If
-// this fails, someone has made the cache cheaper by making drawings coarser.
-void strokesKeepFullResolutionWellBelowSeventyPercent() {
-    TEST("the drawing is sampled at full resolution well below 70% zoom");
+// Held at one entry per *screen* pixel there is no step to jump: the ratio is
+// 1/zoom, continuously. This is the stronger assertion issue #11 asks for --
+// not "full resolution above some zoom", but that sampling density tracks zoom
+// with no jump anywhere and no dependence on the window at all.
+void samplingDensityTracksZoomWithNoStep() {
+    TEST("sampling density tracks zoom continuously, in every window");
 
     for (auto size : {std::pair{800, 500}, {1100, 640}, {1400, 700}, {1645, 765},
                       {2200, 1200}, {2560, 1400}}) {
         Fixture fixture(size.first, size.second);
-        for (double zoom : {0.65, 0.68, 0.70, 0.72, 0.80, 1.00}) {
+        double previous = 0.0;
+        double previous_zoom = 0.0;
+
+        // A fine sweep across the band the issue is about, so a step of any
+        // size has nowhere to hide between two sampled zooms.
+        for (int i = 0; i <= 80; ++i) {
+            const double zoom = 0.30 + i * 0.01;
             fixture.settleAt(zoom);
-            if (fixture.canvas.cacheStep() != 1) {
+            const double ratio = fixture.canvas.cacheStep().ratio();
+
+            // One entry per screen pixel, to within the grid's own rounding.
+            const double wanted = std::max(1.0, 1.0 / zoom);
+            if (std::abs(ratio - wanted) > 0.01) {
                 testing::fail(__FILE__, __LINE__,
-                              "cache is skipping pixels at zoom " + std::to_string(zoom) +
+                              "the cache samples " + std::to_string(ratio) +
+                                  " image pixels an entry at zoom " + std::to_string(zoom) +
                                   " in a " + std::to_string(size.first) + "x" +
-                                  std::to_string(size.second) + " window: step = " +
-                                  std::to_string(fixture.canvas.cacheStep()));
+                                  std::to_string(size.second) + " window, wanted " +
+                                  std::to_string(wanted));
             }
-            CHECK_EQ(fixture.canvas.cacheStep(), 1);
+            CHECK(std::abs(ratio - wanted) <= 0.01);
+
+            // And no jump between adjacent zooms. 1/zoom moves by about 3% per
+            // step of this sweep at its steepest; the fault this replaces
+            // doubled.
+            if (previous > 0.0) {
+                const double jump = std::max(ratio / previous, previous / ratio);
+                if (jump > 1.06) {
+                    testing::fail(__FILE__, __LINE__,
+                                  "sampling density jumped " + std::to_string(jump) +
+                                      "x between zoom " + std::to_string(previous_zoom) +
+                                      " and " + std::to_string(zoom));
+                }
+                CHECK(jump <= 1.06);
+            }
+            previous = ratio;
+            previous_zoom = zoom;
         }
     }
+}
+
+// The other half of the same design: because the cache is addressed in screen
+// pixels, its size stops depending on the zoom. It used to be 2.5M entries at
+// 72% and 100k at 400% -- a 25x swing -- and since a refresh costs about 25 ns
+// an entry, that swing *was* the cost of zooming out. It is also what forced
+// the cap that put the step where it was.
+void theCacheDoesNotGrowAsTheViewZoomsOut() {
+    TEST("the cache stays the size of the window at every zoom");
+    Fixture fixture(1645, 765);
+    const long long viewport = 1645LL * 765;
+
+    for (double zoom : {0.05, 0.10, 0.25, 0.40, 0.50, 0.60, 0.68, 0.72, 0.90, 1.00, 1.09,
+                        2.00, 4.00, 16.0}) {
+        fixture.settleAt(zoom);
+        const long long entries = fixture.canvas.cacheEntryCount();
+        // The viewport plus a 64 screen pixel margin each side is about 1.26x
+        // it; twice leaves room for the rounding out to entry boundaries
+        // without leaving room for a cache that scales with 1/zoom^2.
+        if (entries > viewport * 2) {
+            testing::fail(__FILE__, __LINE__,
+                          "the cache holds " + std::to_string(entries) +
+                              " entries at zoom " + std::to_string(zoom) +
+                              " for a viewport of " + std::to_string(viewport));
+        }
+        CHECK(entries <= viewport * 2);
+    }
+}
+
+// Holding the cache at screen resolution is only worth it if the blit is then a
+// copy. That needs two things: the ratio being exactly 1/zoom, which the sweep
+// above pins, and the view sitting on a whole screen pixel, so that entry
+// boundaries -- at image x = entry/zoom -- land on pixel boundaries.
+//
+// Off that alignment Qt resamples the cache against itself at roughly 1:1,
+// which is pure blur and buys nothing: measured at 4.2 RMS against a curve
+// drawn at display size, where the aligned blit gives 1.7. It is invisible in
+// any structural way, which is exactly why it wants an invariant.
+void theViewSitsOnWholeScreenPixels() {
+    TEST("the view sits on whole screen pixels, so the cache blits one to one");
+    Fixture fixture(1645, 765);
+
+    const auto aligned = [&](const char* what, double zoom) {
+        const QPointF pan = fixture.canvas.pan();
+        for (double along : {pan.x(), pan.y()}) {
+            const double screen = along * zoom;
+            if (std::abs(screen - std::round(screen)) > 1e-6) {
+                testing::fail(__FILE__, __LINE__,
+                              std::string(what) + " left the view off a screen pixel at zoom " +
+                                  std::to_string(zoom) + ": pan * zoom = " +
+                                  std::to_string(screen));
+            }
+            CHECK(std::abs(screen - std::round(screen)) <= 1e-6);
+        }
+    };
+
+    for (double zoom : {0.05, 0.17, 0.33, 0.50, 0.61, 0.68, 0.72, 0.83, 1.00, 1.37, 4.00}) {
+        fixture.settleAt(zoom);
+        aligned("zooming", zoom);
+
+        // And it has to survive a pan, which is where the view actually moves.
+        const QPointF start(fixture.canvas.width() / 2.0, fixture.canvas.height() / 2.0);
+        QMouseEvent press(QEvent::MouseButtonPress, start, start, Qt::MiddleButton,
+                          Qt::MiddleButton, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &press);
+        for (int i = 1; i <= 8; ++i) {
+            // Deliberately fractional: a whole-pixel drag would pass this
+            // without the snapping doing anything.
+            const QPointF at = start + QPointF(i * 7.3, i * 3.9);
+            QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::MiddleButton,
+                             Qt::NoModifier);
+            QApplication::sendEvent(&fixture.canvas, &move);
+            aligned("panning", zoom);
+        }
+        QMouseEvent release(QEvent::MouseButtonRelease, start, start, Qt::MiddleButton,
+                            Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &release);
+    }
+
+    // Fitting sets the view directly rather than moving it, and is the third
+    // way in.
+    fixture.canvas.fitToCanvas();
+    aligned("fitting to the canvas", fixture.canvas.zoom());
+    fixture.canvas.fitToDrawing();
+    aligned("fitting to the drawing", fixture.canvas.zoom());
 }
 
 // The fault: the blit chose its filter on `zoom_ < 1.0`, which is wrong twice
@@ -273,7 +387,7 @@ void theWritebackIsNotTheSlowHalfOfARefresh() {
     Compositor compositor;
     Framebuffer frame;
     const PixelRect cached = fixture.canvas.cachedRegion();
-    const int step = fixture.canvas.cacheStep();
+    const SampleStep step = fixture.canvas.cacheStep();
     compositor.composite(fixture.doc, fixture.track, fixture.image, cached, frame, step);
     std::vector<double> composites;
     for (int i = 0; i < 7; ++i) {
@@ -302,7 +416,9 @@ int main(int argc, char** argv) {
     std::printf("render:\n");
     everyZoomKeepsAMarginToPanInto();
     panningDoesNotRecompositeOnEveryMove();
-    strokesKeepFullResolutionWellBelowSeventyPercent();
+    samplingDensityTracksZoomWithNoStep();
+    theCacheDoesNotGrowAsTheViewZoomsOut();
+    theViewSitsOnWholeScreenPixels();
     theBlitInterpolatesUntilThePixelsAreWorthSeeing();
     theWritebackIsNotTheSlowHalfOfARefresh();
     return testing::summarise("render");

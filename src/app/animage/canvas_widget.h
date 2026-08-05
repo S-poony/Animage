@@ -70,6 +70,10 @@ public:
     bool isStroking() const { return stroking_; }
 
     double zoom() const { return zoom_; }
+    // The image coordinate at the widget's top-left corner. Always on a whole
+    // screen pixel -- see onWholeScreenPixels -- which is what lets the cache
+    // blit one entry to one pixel instead of being resampled against itself.
+    QPointF pan() const { return pan_; }
     void setZoom(double zoom, const QPointF& widget_anchor);
     void resetView();
     void fitToDrawing();
@@ -87,13 +91,18 @@ public:
     // area, is what decides both how much of a stroke survives to the screen
     // and how much a pan costs. Neither could be read from outside, so both
     // were argued about instead of measured. See bench_zoom.
-    int cacheStep() const { return cache_step_; }
+    //
+    // Image pixels per cache entry, and fractional on purpose -- an integer
+    // could not follow a continuous zoom, so there was always a zoom at which
+    // it doubled.
+    animage::SampleStep cacheStep() const { return cache_step_; }
     animage::PixelRect cachedRegion() const { return cached_region_; }
 
-    // The margin the cache will not go below, in screen pixels, and how far
-    // beyond the viewport the cache currently reaches. A pan costs a full
-    // recomposite the moment it runs past this, so when it was allowed to reach
-    // zero every mouse move paid for one.
+    // The margin the cache will not go below, in screen pixels. A pan costs a
+    // full recomposite the moment it runs past the cached region, so when the
+    // margin was allowed to reach zero every mouse move paid for one. Nothing
+    // spends it now that the cache no longer grows as the view zooms out, but
+    // it is what the invariant is asserted against.
     static constexpr int kMinCacheMargin = 32;
 
     // Magnification at which the blit stops interpolating and starts showing
@@ -168,13 +177,14 @@ private:
     bool stylus_eraser_ = false;  // the pen was turned over for this stroke
 
     // The cached composite, in sRGB, covering `cached_region_` in image
-    // coordinates at one image pixel per entry.
+    // coordinates. `cached_region_` is snapped to the sampling grid, so the
+    // image size is exactly the entries the region spans.
     QImage display_;
     animage::PixelRect cached_region_;
-    // Image pixels per cached entry. 1 while zoomed in; larger when zoomed out,
-    // so the cache tracks the size of the window rather than the size of the
-    // visible image area.
-    int cache_step_ = 1;
+    // Image pixels per cached entry: one per *screen* pixel, so 1 while zoomed
+    // in and 1/zoom when zoomed out. That makes the cache the size of the
+    // window whatever the zoom, rather than the size of the visible image area.
+    animage::SampleStep cache_step_;
 
     // Accumulated between paints. Empty width means nothing is pending.
     animage::PixelRect pending_dirty_;

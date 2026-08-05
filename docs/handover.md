@@ -228,6 +228,51 @@ was sized from the visible *image* area, so at 5% zoom it asked for half a
 gigabyte, and its margin was measured in image pixels, so it grew as you zoomed
 in. Both are fixed; the shape of the mistake is worth remembering.
 
+**An integer cannot track a continuous quantity, so it will pick somewhere to
+jump — and something else will pick where.** Issue #10 moved the step boundary
+from 70.7% to 61% and left it there. It was still a boundary: `cache_step_` was
+`floor(1/zoom)`, an integer, so sampling density had to halve discontinuously
+*somewhere*, and because the cache was addressed in image pixels its size grew
+as `viewport/zoom²` and needed a cap — which is what chose the somewhere. Two
+symptoms, one cause, and neither goes away by tuning the cap.
+
+Issue #11 is the fix: hold the cache at one entry per **screen** pixel rather
+than per image pixel. The size then stops depending on zoom (1.59M entries at
+every zoom below 100%, against 2.5M at 72% and 100k at 400%), the ratio is
+`1/zoom` continuously with no cap to override it and no dependence on the
+window, and there is no budget loop left in `ensureCacheCoversView` at all.
+Three things fell out of it that are worth knowing:
+
+- **A box filter on rounded boundaries is worse than the point sampling it
+  replaces.** At 1.4 image pixels an entry, rounding the entry edges to whole
+  pixels gives some entries two pixels and some one, and that alternation
+  measured RMS 10.7 against a curve drawn at display size — where point
+  sampling gave 6.7 and *weighting* the pixel an edge lands inside gives 2.1.
+  The grid has to be continuous (`SampleStep` is 16.16 fixed point) and a
+  sample that straddles a boundary has to be split in proportion. Half a filter
+  is not half as good; it is worse than none.
+- **A screen-resolution cache is only worth having if the blit is a copy.**
+  Entry *e* starts at image `e/zoom`, which lands on a whole screen pixel
+  exactly when `pan * zoom` is whole. Off that, Qt resamples the cache against
+  itself at roughly 1:1 — pure blur, 4.2 RMS against 1.7 — for nothing. The pan
+  is snapped to whole screen pixels now, which costs at most half a pixel of a
+  gesture that was already made in screen pixels.
+- **The measurement rounds too.** Two zooms in `bench_zoom`'s table looked
+  mysteriously worse than their neighbours for a while, and it was the
+  benchmark: a whole number of entries covers a fraction of a pixel less than
+  the whole drawing, and the ground truth could only be drawn at a whole number
+  of pixels, so the two slid a third of a pixel apart and the filter was
+  charged for it. Before believing a number that only some rows are bad at,
+  check what the row does differently.
+
+The price is honest and is in `bench_zoom`: a scrubby zoom below about 62% now
+recomposites on every move rather than only when crossing a step (1.7 ms → 11 ms
+median, still inside a frame), and compositing far out costs more because the
+block is genuinely being read rather than sampled once (at 10% zoom on a dense
+four-layer drawing, 6 ms → 17 ms). Both buy the continuity; the first was
+previously "free" only because you were looking at a cache built for a
+different zoom, which is what jagged meant.
+
 **The max-flow needs its trees kept.** Rebuilding the search trees per
 augmenting path is Edmonds-Karp in disguise: correct, and 214 seconds on a
 megapixel instead of 1.3. And repairing trees has one trap — an orphan that

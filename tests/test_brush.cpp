@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -292,13 +293,33 @@ void compositorWorksLeftOfTheOrigin() {
     compositor.composite(f.doc, f.track, f.image, {-205, -155, 10, 10}, frame);
     CHECK_NEAR(frame.pixel(5, 5).a, 1.0, 1e-2);
     CHECK_NEAR(frame.pixel(5, 5).r, 1.0, 1e-2);
+
+    // And the reducing path, which indexes a grid of its own. Every division in
+    // it has to round towards negative infinity or the entry left of the origin
+    // is named by the one to its right, and the picture tears along x = 0 --
+    // quietly, since nothing else in a test document is over there.
+    const SampleStep half = SampleStep::fromRatio(2.0);
+    const PixelRect around = snapToSampleGrid(half, {-220, -170, 40, 40});
+    Framebuffer reduced;
+    compositor.composite(f.doc, f.track, f.image, around, reduced, half);
+    CHECK_EQ(reduced.width(), 20);
+
+    // The dot's centre, found through the grid rather than counted off by hand.
+    const int column = static_cast<int>(half.entryAt(-200) - half.entryAt(around.x));
+    const int row = static_cast<int>(half.entryAt(-150) - half.entryAt(around.y));
+    CHECK_NEAR(reduced.pixel(column, row).a, 1.0, 1e-2);
+    CHECK_NEAR(reduced.pixel(column, row).r, 1.0, 1e-2);
+    // And nothing has leaked into the far corner.
+    CHECK_NEAR(reduced.pixel(0, 0).a, 0.0, 1e-3);
 }
 
-// Zoomed out, the compositor samples every nth pixel so the buffer tracks the
-// size of the window rather than the visible image area. The sampled path is
-// separate code from the run-length one and has to agree with it.
-void sampledCompositingMatchesTheFullResolutionPath() {
-    TEST("sampled compositing agrees with full resolution");
+// Zoomed out, the compositor reduces a block of image pixels to each entry so
+// the buffer tracks the size of the window rather than the visible image area.
+// The reducing path is separate code from the run-length one, and what it must
+// produce is the *average* of the block: taking one pixel of it and discarding
+// the rest is what made thin lines shimmer when zoomed out (issue #11).
+void sampledCompositingAveragesTheBlockItStandsFor() {
+    TEST("sampled compositing averages the block it stands for");
     Fixture f;
     BrushSettings settings = opaqueBlack();
     settings.radius = 30.0f;
@@ -316,21 +337,105 @@ void sampledCompositingMatchesTheFullResolutionPath() {
     Compositor compositor;
     Framebuffer full;
     Framebuffer sampled;
-    compositor.composite(f.doc, f.track, f.image, region, full, 1);
-    compositor.composite(f.doc, f.track, f.image, region, sampled, 4);
+    compositor.composite(f.doc, f.track, f.image, region, full);
+    // Two image pixels an entry -- 50% zoom, which is where the issue measured
+    // the largest quality loss and where the block filter is exact: the entry
+    // boundaries fall on pixel boundaries, so there is nothing to weight and
+    // the answer is the plain mean of the four.
+    compositor.composite(f.doc, f.track, f.image, region, sampled, SampleStep::fromRatio(2.0));
 
     CHECK_EQ(full.width(), 400);
-    CHECK_EQ(sampled.width(), 100);
-    CHECK_EQ(sampled.height(), 100);
+    CHECK_EQ(sampled.width(), 200);
+    CHECK_EQ(sampled.height(), 200);
 
-    // Every sampled entry must equal the full-resolution pixel it stands for.
+    // A point sample would pass an equality against full.pixel(2x, 2y), and
+    // that is exactly what this is here to rule out.
+    double worst = 0.0;
     for (int y = 0; y < sampled.height(); ++y) {
         for (int x = 0; x < sampled.width(); ++x) {
-            const Rgba a = sampled.pixel(x, y);
-            const Rgba b = full.pixel(x * 4, y * 4);
-            CHECK_NEAR(a.a, b.a, 1e-4);
-            CHECK_NEAR(a.r, b.r, 1e-4);
+            Rgba mean{};
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    const Rgba p = full.pixel(x * 2 + dx, y * 2 + dy);
+                    mean.r += p.r / 4.0f;
+                    mean.g += p.g / 4.0f;
+                    mean.b += p.b / 4.0f;
+                    mean.a += p.a / 4.0f;
+                }
+            }
+            const Rgba got = sampled.pixel(x, y);
+            CHECK_NEAR(got.a, mean.a, 1e-4);
+            CHECK_NEAR(got.r, mean.r, 1e-4);
+            worst = std::max<double>(worst, std::abs(got.a - full.pixel(x * 2, y * 2).a));
         }
+    }
+
+    // And it must actually differ from the point sample somewhere, or the
+    // stroke was too smooth for the test to be measuring anything.
+    CHECK(worst > 0.05);
+}
+
+// Between one and two image pixels an entry -- the band from 100% zoom down to
+// 50% -- an entry boundary lands inside a pixel rather than between two, and
+// what the pixel contributes has to be split in proportion. Rounding the
+// boundary to the nearest pixel instead gives some entries one pixel and some
+// two, and the alternation between them measured worse than the point sampling
+// it replaced: RMS 10.7 against a curve drawn at display size, where the split
+// gives 2.4. See bench_zoom.
+void aFractionalStepSplitsThePixelsItLandsInside() {
+    TEST("a fractional step splits the pixel an entry boundary lands inside");
+    Fixture f;
+    BrushSettings settings = opaqueBlack();
+    settings.radius = 24.0f;
+    settings.r = 1.0f;
+    Brush brush(settings);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        brush.begin(f.doc, f.track, f.image, f.layer, {40.0f, 40.0f, 1.0f});
+        brush.extend({220.0f, 190.0f, 1.0f});
+        brush.end();
+    }
+
+    // Three image pixels for every two entries, so every second boundary falls
+    // half way through a pixel.
+    const PixelRect region{0, 0, 240, 240};
+    Compositor compositor;
+    Framebuffer full;
+    Framebuffer reduced;
+    compositor.composite(f.doc, f.track, f.image, region, full);
+    compositor.composite(f.doc, f.track, f.image, region, reduced, SampleStep::fromRatio(1.5));
+
+    CHECK_EQ(reduced.width(), 160);
+    CHECK_EQ(reduced.height(), 160);
+
+    // Entry 1 covers image x in [1.5, 3.0): half of pixel 1 and all of pixel 2.
+    // Same in y, so it is a weighted mean of a 2x2 corner of the drawing.
+    const auto weightedMean = [&](int x, int y) {
+        const float weights[2] = {0.5f, 1.0f};
+        Rgba mean{};
+        float total = 0.0f;
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                const float weight = weights[dx] * weights[dy];
+                const Rgba p = full.pixel(x + dx, y + dy);
+                mean.r += p.r * weight;
+                mean.a += p.a * weight;
+                total += weight;
+            }
+        }
+        mean.r /= total;
+        mean.a /= total;
+        return mean;
+    };
+
+    // Every entry with an odd index sits at the same phase, so this is the
+    // whole diagonal of them rather than one lucky pixel.
+    for (int i = 1; i < 100; i += 2) {
+        const Rgba mean = weightedMean(i + i / 2, i + i / 2);
+        const Rgba got = reduced.pixel(i, i);
+        CHECK_NEAR(got.a, mean.a, 1e-4);
+        CHECK_NEAR(got.r, mean.r, 1e-4);
     }
 }
 
@@ -354,7 +459,8 @@ void halfLookupMatchesTheComputation() {
 
 int main() {
     std::printf("brush:\n");
-    sampledCompositingMatchesTheFullResolutionPath();
+    sampledCompositingAveragesTheBlockItStandsFor();
+    aFractionalStepSplitsThePixelsItLandsInside();
     halfLookupMatchesTheComputation();
     strokeLaysDownInk();
     spacingIsIndependentOfEventRate();

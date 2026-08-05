@@ -91,6 +91,22 @@ bool contains(const PixelRect& outer, const PixelRect& inner) {
            inner.y + inner.height <= outer.y + outer.height;
 }
 
+// The view, moved to a whole number of screen pixels.
+//
+// This is what makes a screen-resolution cache worth having. Entry e of the
+// cache begins at image x = e/zoom, which lands on a whole screen pixel exactly
+// when pan * zoom is whole -- and then the cache blits one entry to one pixel,
+// a copy rather than a resample. Off that alignment Qt filters the cache
+// against itself at roughly 1:1, which is pure blur: measured at 4.2 RMS
+// against a curve drawn at display size, where the aligned blit gives 1.7.
+//
+// Nothing is given up for it. A pan is a gesture in screen pixels to begin
+// with, and the largest correction this can make is half of one.
+QPointF onWholeScreenPixels(const QPointF& pan, double zoom) {
+    if (zoom <= 0.0) return pan;
+    return {std::round(pan.x() * zoom) / zoom, std::round(pan.y() * zoom) / zoom};
+}
+
 PixelRect unite(const PixelRect& a, const PixelRect& b) {
     if (a.isEmpty()) return b;
     if (b.isEmpty()) return a;
@@ -257,8 +273,8 @@ void CanvasWidget::rebuildOnion() {
     const Track* track = doc_.scene().findTrack(track_);
     if (!track || cached_region_.isEmpty()) return;
 
-    onion_.resize((cached_region_.width + cache_step_ - 1) / cache_step_,
-                  (cached_region_.height + cache_step_ - 1) / cache_step_);
+    onion_.resize(cache_step_.entriesAcross(cached_region_.x, cached_region_.width),
+                  cache_step_.entriesAcross(cached_region_.y, cached_region_.height));
 
     struct Ghost {
         ImageId image;
@@ -329,63 +345,42 @@ long long CanvasWidget::cacheEntryCount() const {
 void CanvasWidget::ensureCacheCoversView() {
     const PixelRect wanted = visibleImageRect();
 
-    // Everything allocated here -- the cache, the onion buffer, the scratch the
-    // compositor writes into -- is sized from this, so it has to be bounded by
-    // the window rather than by how much of the image the window can see. At
-    // 51% zoom a maximised window covers four times its own area in image
-    // pixels, and sizing from that asked for a quarter of a gigabyte.
-    // Three times the viewport, not twice it, and the reason is not a taste for
-    // round numbers. The region wanted at zoom z covers viewport/z^2 image
-    // pixels, so a budget of 2*viewport is exhausted at exactly z = 1/sqrt(2) --
-    // and that, rather than any decision about resolution, is what put a hard
-    // step-1-to-step-2 edge at 70.7% zoom. A stroke was crisp at 72% and jagged
-    // at 68% because a memory limit happened to land between them. Worse, the
-    // edge moved with the window: measured at 50% on an 800x500 canvas, 60% at
-    // 1100x640, 70.7% on anything larger. The same percentage meant different
-    // sharpness in different windows, which is why the relationship looked
-    // non-linear and unexplainable.
+    // One cache entry per screen pixel, never finer than one per image pixel.
     //
-    // At 3x the edge falls to about 61% and the margin survives alongside it.
-    // Sampling every pixel all the way down to 50% -- which is what
-    // floor(1/zoom) below intends, and the honest place for the edge to be --
-    // needs 4.5x, and that much memory is not worth buying at this end. The
-    // real answer is to hold the cache at one entry per *screen* pixel instead
-    // of per image pixel, which makes its size independent of zoom and removes
-    // the edge rather than moving it. That is a change to how the cache is
-    // addressed, and it is the next thing to do here.
-    const long long viewport = std::max<long long>(1, static_cast<long long>(width()) * height());
-    const long long budget = std::max<long long>(2'000'000, viewport * 3);
-
-    int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
+    // This is the whole of issue #11, and it replaces a memory budget that was
+    // making decisions nobody attributed to it. The cache used to be held at
+    // one entry per *image* pixel reduced by an integer step, which forces two
+    // things at once: the size grows as viewport/zoom^2, so it must be capped,
+    // and an integer step cannot follow a continuous zoom, so there must be a
+    // zoom at which it doubles -- with the cap deciding where. A stroke was
+    // crisp at 62% and jagged at 60% because a memory limit landed between
+    // them, and the boundary moved with the window size, so the same percentage
+    // meant different sharpness in different windows.
+    //
+    // Held at one entry per screen pixel, the size is about the viewport at
+    // every zoom, the sampling ratio is 1/zoom and continuous, and reducing a
+    // block to its average becomes what the compositor's loop is already for.
+    // Everything allocated here -- the cache, the onion buffer, the scratch the
+    // compositor writes into -- is now bounded by the window rather than by how
+    // much of the image the window can see. At 5% zoom that used to ask for
+    // half a gigabyte.
+    const SampleStep step = SampleStep::fromRatio(std::max(1.0, 1.0 / zoom_));
 
     // The margin is a fixed number of *screen* pixels, converted to image
     // pixels here. Held in image pixels instead it was 192 at 100% zoom and
     // 6144 at 3200%, so the cache -- and the rectangle the blit has to scale it
-    // into -- grew without bound the further you zoomed in.
-    int margin = std::max(1, static_cast<int>(std::lround(kCacheMargin / zoom_)));
-    const int margin_floor = std::max(1, static_cast<int>(std::lround(kMinCacheMargin / zoom_)));
+    // into -- grew without bound the further you zoomed in. Nothing spends it
+    // any more: it costs the same fraction of a viewport-sized cache whatever
+    // the zoom, so there is no longer a band where a pan recomposited on every
+    // single mouse move.
+    const int margin = std::max(1, static_cast<int>(std::lround(kCacheMargin / zoom_)));
 
-    PixelRect padded{};
-    for (;;) {
-        padded = {wanted.x - margin, wanted.y - margin, wanted.width + 2 * margin,
-                  wanted.height + 2 * margin};
-        const long long entries = static_cast<long long>((padded.width + step - 1) / step) *
-                                  ((padded.height + step - 1) / step);
-        if (entries <= budget) break;
-        // Give up the margin before giving up resolution, but not all of it.
-        // This used to run the margin down to nothing, and between 60% and 72%
-        // zoom that is exactly where it ended up: the cache held the viewport
-        // and not one pixel more, so every mouse move of a pan left it and paid
-        // for a full recomposite. Every move, not one in six -- measured at 18
-        // to 65 ms each, for as long as the hand kept moving. A margin that has
-        // been spent buys nothing back; a step that has been raised costs
-        // sharpness once and is still there to be zoomed past.
-        if (margin > margin_floor) {
-            margin = std::max(margin_floor, margin / 2);
-            continue;
-        }
-        ++step;
-    }
+    // Snapped out to entry boundaries, so that a partial refresh lands on the
+    // same entries a full one would and no entry is averaged from part of its
+    // block.
+    const PixelRect padded =
+        snapToSampleGrid(step, {wanted.x - margin, wanted.y - margin, wanted.width + 2 * margin,
+                                wanted.height + 2 * margin});
 
     // Panning inside the cached margin, or zooming in, needs no new composite
     // at all -- the cache already holds those pixels and the blit just samples
@@ -403,8 +398,8 @@ void CanvasWidget::ensureCacheCoversView() {
     cache_step_ = step;
     cached_region_ = padded;
 
-    display_ = QImage((cached_region_.width + step - 1) / step,
-                      (cached_region_.height + step - 1) / step, QImage::Format_RGB32);
+    display_ = QImage(step.entriesAcross(padded.x, padded.width),
+                      step.entriesAcross(padded.y, padded.height), QImage::Format_RGB32);
     onion_dirty_ = true;
     dirty_everything_ = true;
 }
@@ -427,17 +422,22 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     PixelRect area = intersect(region, cached_region_);
     if (area.isEmpty()) return;
 
-    // Snap to the sampling grid so cache entries line up with image pixels.
-    const int step = cache_step_;
-    if (step > 1) {
-        const int dx = (area.x - cached_region_.x) % step;
-        const int dy = (area.y - cached_region_.y) % step;
-        area = {area.x - dx, area.y - dy, area.width + dx + step, area.height + dy + step};
-        area = intersect(area, cached_region_);
-        if (area.isEmpty()) return;
-    }
+    // Snap out to the sampling grid, so the entries this produces are exactly
+    // the ones a full refresh would have produced. The grid is anchored at the
+    // image origin rather than at the cached region, which is what makes that
+    // true whatever the region happens to be and wherever the view has panned
+    // to; the cached region is snapped too, so intersecting keeps it aligned.
+    area = intersect(snapToSampleGrid(cache_step_, area), cached_region_);
+    if (area.isEmpty()) return;
 
-    compositor_.composite(doc_, track_, image_, area, scratch_, step);
+    compositor_.composite(doc_, track_, image_, area, scratch_, cache_step_);
+
+    // Where this patch of entries sits in the cache.
+    const long long first_column = cache_step_.entryAt(area.x);
+    const long long first_row = cache_step_.entryAt(area.y);
+    const int column_base =
+        static_cast<int>(first_column - cache_step_.entryAt(cached_region_.x));
+    const int row_base = static_cast<int>(first_row - cache_step_.entryAt(cached_region_.y));
 
     const bool checker = background_ == Background::Checker;
     const float flat = 1.0f;
@@ -463,17 +463,20 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     const auto convert_rows = [&](int y_begin, int y_end) {
         for (int y = y_begin; y < y_end; ++y) {
             const Rgba* source = scratch_.row(y);
-            const int image_y = area.y + y * step;
-            const int row = (image_y - cached_region_.y) / step;
+            const int row = row_base + y;
             if (row < 0 || row >= display_.height()) continue;
             auto* destination = reinterpret_cast<QRgb*>(base_line + row * stride);
+            // Only the checker needs to know where the entry sits in the
+            // drawing, and it is the uncommon background, so the mapping back
+            // to image coordinates is paid for only when it is asked for.
+            const int image_y = checker ? cache_step_.entryBegin(first_row + y) : 0;
 
             for (int x = 0; x < scratch_.width(); ++x) {
-                const int image_x = area.x + x * step;
-                const int column = (image_x - cached_region_.x) / step;
+                const int column = column_base + x;
                 if (column < 0 || column >= display_.width()) continue;
                 float background = flat;
                 if (checker) {
+                    const int image_x = cache_step_.entryBegin(first_column + x);
                     const bool light =
                         (((image_x / kCheckerSize) + (image_y / kCheckerSize)) & 1) == 0;
                     background = light ? 1.0f : 0.78f;
@@ -565,9 +568,9 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // being looked at; smooth below that.
     //
     // Two corrections to what this used to be, both measured. The factor the
-    // blit applies is `cache_step_ * zoom_`, not `zoom_`: at step 2 and 70% zoom
-    // it is magnifying the cache by 1.4, not minifying it, so asking about the
-    // zoom asked the wrong question entirely.
+    // blit applies is `cache_step_ * zoom_`, not `zoom_`: with the cache held
+    // at screen resolution that product is 1 at every zoom below 100% and the
+    // zoom itself above, which is the number the question was always about.
     //
     // And the threshold was 1.0, which meant nearest-neighbour from 101%
     // upwards. At 109% that duplicates one pixel column in eleven -- a
@@ -577,13 +580,24 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // inspecting pixels is doing it at 109%; by 300% they are, and there
     // nearest is the honest thing to show.
     painter.setRenderHint(QPainter::SmoothPixmapTransform,
-                          blitInterpolatesAt(cache_step_ * zoom_));
+                          blitInterpolatesAt(cache_step_.ratio() * zoom_));
 
-    const QPointF origin = widgetFromImage({static_cast<double>(cached_region_.x),
-                                            static_cast<double>(cached_region_.y)});
-    const QRectF target(origin, QSizeF(display_.width() * cache_step_ * zoom_,
-                                       display_.height() * cache_step_ * zoom_));
-    painter.drawImage(target, display_);
+    // The rectangle the cached *entries* cover, not the integer rectangle round
+    // them. With a fractional step an entry boundary falls between two image
+    // pixels, so the cached region is up to a pixel wider than the entries in
+    // it actually span -- and blitting into that stretches the cache by a part
+    // in a thousand, which over the width of a window slides a curve a pixel
+    // off where the drawing says it is. Both corners go through the view
+    // transform for the same reason: a size computed from the entry count would
+    // accumulate the same error.
+    const long long first_column = cache_step_.entryAt(cached_region_.x);
+    const long long first_row = cache_step_.entryAt(cached_region_.y);
+    const QPointF origin = widgetFromImage(
+        {cache_step_.entryEdge(first_column), cache_step_.entryEdge(first_row)});
+    const QPointF corner =
+        widgetFromImage({cache_step_.entryEdge(first_column + display_.width()),
+                         cache_step_.entryEdge(first_row + display_.height())});
+    painter.drawImage(QRectF(origin, corner), display_);
 
     drawCanvasFrame(painter);
 }
@@ -647,7 +661,7 @@ bool CanvasWidget::pickColourAt(const QPointF& image_point) {
     const PixelRect one{static_cast<int>(std::floor(image_point.x())),
                         static_cast<int>(std::floor(image_point.y())), 1, 1};
     Framebuffer sample;
-    compositor_.composite(doc_, track_, image_, one, sample, 1);
+    compositor_.composite(doc_, track_, image_, one, sample);
     if (sample.isEmpty()) return false;
 
     // A CTG layer contributes the fill it last generated, which is what is on
@@ -821,8 +835,9 @@ bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
     }
     if (panning_) {
         const QPointF moved = widget_point - pan_anchor_widget_;
-        pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
-                pan_anchor_image_.y() - moved.y() / zoom_};
+        pan_ = onWholeScreenPixels({pan_anchor_image_.x() - moved.x() / zoom_,
+                                    pan_anchor_image_.y() - moved.y() / zoom_},
+                                   zoom_);
         ensureCacheCoversView();
         update();
         Q_EMIT viewChanged();
@@ -973,7 +988,7 @@ void CanvasWidget::setZoom(double zoom, const QPointF& widget_anchor) {
     const QPointF before = imageFromWidget(widget_anchor);
     zoom_ = clamped;
     const QPointF after = imageFromWidget(widget_anchor);
-    pan_ += before - after;
+    pan_ = onWholeScreenPixels(pan_ + (before - after), zoom_);
 
     ensureCacheCoversView();
     update();
@@ -1008,8 +1023,9 @@ void CanvasWidget::fitTo(const PixelRect& bounds) {
     const double scale_x = static_cast<double>(width()) / bounds.width;
     const double scale_y = static_cast<double>(height()) / bounds.height;
     zoom_ = std::clamp(std::min(scale_x, scale_y) * 0.9, kMinZoom, kMaxZoom);
-    pan_ = {bounds.x + bounds.width / 2.0 - width() / (2.0 * zoom_),
-            bounds.y + bounds.height / 2.0 - height() / (2.0 * zoom_)};
+    pan_ = onWholeScreenPixels({bounds.x + bounds.width / 2.0 - width() / (2.0 * zoom_),
+                                bounds.y + bounds.height / 2.0 - height() / (2.0 * zoom_)},
+                               zoom_);
 
     ensureCacheCoversView();
     update();
