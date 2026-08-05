@@ -107,6 +107,74 @@ specification. A `Track` is one stack of layers with its own time; the timeline
 is the scene's shared time axis and the panel that shows it. A scene has several
 tracks and one timeline. If you find the old name anywhere, it meant the track.
 
+## Colour through time
+
+**Part 1 of [scribbles-through-time.md](scribbles-through-time.md) is built.** An
+absent cel on a CTG layer used to mean the layer was empty there; it now means
+*inherited*. Colour the first drawing of a run and the run is coloured, and a
+drawing you scribble on takes over from there. It is resolved at read time by
+walking back over distinct drawings — `Track::celSourceFor`, through
+`Document::ctgScribblesAt`, which is the only place the "absence means inherited"
+policy lives — so reordering and deleting change who inherits from whom for free
+and touch no cel. The first mark on an inheriting drawing copies what it was
+showing and edits the copy, which is why one stroke does not wipe the colour off
+the drawing you were adding to.
+
+It is a per-layer choice, not a fact: carrying can be switched off, and it can
+run forwards, backwards, or to whichever coloured drawing is nearer. Forwards is
+how a shot gets coloured; backwards is for colouring the drawing in front of you
+— often the last of a run, because it is the one you were working on — and both
+ways is what fills the gaps between drawings you have already coloured.
+
+**A mark now wins the pixels it covers, whatever the solver decided.** The
+solver's job is the pixels nobody said anything about, so a scribble is a manual
+touch-up for what the min-cut missed, at no cost to the solver. It has to be over
+the fill rather than under it, and a transparent scribble is what settles that:
+under the fill, "no colour here" would be the one thing hidden. The marks are
+self-effacing — a scribble carries the colour of the label it produces — so
+wherever the fill agreed the override paints what was already there and you see
+only the disagreement.
+
+**Transparency is a label.** It cannot be alpha zero, because alpha zero already
+means nothing was scribbled at all, so it is stored as a pixel that is
+unmistakably present and unmistakably not a colour: opaque, with negative light
+in every channel. A premultiplied colour lives in [0,1], so nothing can produce
+it by accident and no colour is taken from the user to pay for the encoding; half
+stores −1 exactly, so the file format learns nothing. It is a "None" position on
+a two-way switch beside the colour swatch, offered only on a colour layer. The
+alternative was a palette on the layer with the cel storing indices — the cleaner
+model, and where per-colour settings will eventually have to go, but it changes
+what a scribble cel holds and a mistake in it is a migration rather than a
+recompute.
+
+**A mark is written hard now.** Three places said a CTG stroke was a label and
+not paint and the brush blended anyway, so the two only agreed in the middle of a
+stroke; at its rim, and everywhere one colour crossed another, it left pixels
+quantising to a third colour that competed for regions on its own account. See
+`BrushSettings::label`. Two strokes crossing leave two labels, every alpha on the
+cel is exactly 0 or 1, and erasing writes exact zeros.
+
+**Every drawing is judged, so the flags mean something.** After a solve, the
+worst mark's `spread` — how much region it won for each pixel of itself — says
+whether it filled a shape or only itself. `auditCtgFills` runs that over the
+whole track coarsely, keeping a few bytes per drawing and no tiles, in 67 ms for
+twelve 1080p drawings cold and nothing at all when none has moved. It is run a
+quarter of a second after the edits stop, and on opening a project, because a
+flag exists to say *which drawings to go to*: one that appears only once you are
+looking at a drawing has told you nothing you did not just find out.
+
+The flag is raised only for carried marks, and that is the point rather than a
+hedge. A mark disagreeing with the solver on the drawing in front of you is
+something you can watch happen; the same mark carried to the ninety drawings
+after it is not. It does not wait for scribbles that move, which is the right way
+round: carrying a mark unchanged under line art that has moved is precisely how
+it lands wrong.
+
+Of the colour issues, #3, #6 and #7 are done and #8 is half done — the
+transparent colour exists, the non-modal colour panel is deliberately parked. #6
+was built the opposite way round from how it was written, for the transparency
+reason above.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -388,6 +456,89 @@ all tests passed, and the button was simply absent. Screenshots caught it, and
 caught a mis-encoded character and a fresh document with three undoable setup
 steps. Look at the thing.
 
+**A before-and-after test is only a test if "before" is before.** The layer dock
+grew by eighteen pixels when a colour layer was selected, shoving the canvas
+sideways. The test written for it read the width *after* the box was showing and
+then checked it did not shrink on the way out — both readings on the far side of
+the growth, so it asserted that the bug did not un-happen, passed, and shipped
+it. Twice, because the first fix was reported as done on the strength of that
+green test. Measuring a quantity twice on the same side of the event you care
+about will agree with itself perfectly and say nothing. Related: the dock is
+sized from the panel's *preferred* width, so a minimum does not hold it still.
+
+**A cache key made of revisions was going to lie, not thrash.** The CTG fill
+cache was keyed on the cel holding the scribbles, which was a bijection for
+exactly as long as one drawing had one scribble cel. The design notes predicted a
+shared slot would thrash; it would have served wrong fills, because `inputs` is
+mixed from cel revisions and revisions collide freely — **every cel in a project
+straight off disk is at revision 1**. Two drawings inheriting one scribble with
+equally-worn line art would have swapped answers. The key is `(drawing, layer)`,
+and `inputs` names the scribble *cel* and not only its revision, because
+reordering changes which cel is read and moves no revision anywhere.
+
+**A rectangle built from tile coordinates remembers what you erased.**
+`celBounds` took the bounding box of a cel's tiles, and erasing empties a tile
+without releasing it — so the solve region went on describing a mark that was no
+longer there. That rectangle picks the solve resolution, so a stray scribble made
+and rubbed out left every later solve on that drawing permanently coarser than
+before the scribble existed. Invisibly: the region is not something you can see.
+Reported as "erasing does not put the canvas back", and two better-sounding
+theories were measured and dropped first — eraser residue, which the hard label
+write makes impossible, and the largest-first solve order, which is deterministic
+given the same seeds.
+
+**The confidence signal the design notes propose does not work, and the
+measurement is the only thing that says so.** Scoring a mark by the fraction of
+it the solver labelled with the mark's own colour comes out at exactly 1 across
+every case in `test_ctg`: a seed is only overruled when severing it beats
+isolating it, which needs a mark that is nearly all edge. It is kept in
+`CtgFill::confidence` and documented as a dead end so it is not derived a third
+time. What separates is `spread`, and by a wide margin — 8.3, 17, 23, 65, 188 for
+marks that landed properly, 1.82 for the tightest legitimate one, 1.00 for a mark
+carried off its shape. It is not an invented quantity either: a cut that
+encircles the scribble is exactly what `fr/lazybrush-et-calques-ctg.md` §5 calls
+**Raccourcis**, so the flag names a failure the research had already named.
+
+**And both numbers have to come off the solver's labels, never the finished
+fill.** A mark wins its own pixels in the fill whatever the solver decided, so
+read back from the fill every mark is perfectly placed, always. There is a test
+pinning it, because it is the mistake the next person will make.
+
+**A flag read from a cache only reports where you have been.** The timeline's
+flags were taken from `ctgFillFor`, and a fill exists only for a drawing somebody
+has visited — so they lit up behind you as you played through a shot. That is not
+a weaker version of the feature, it is the absence of it: the flag exists to say
+which drawings to go to. The verdicts are a separate, unevictable store precisely
+because the timeline needs all of them at once and the fills it would need are
+megabytes each.
+
+**A Qt stylesheet with no type selector styles the widget's tooltip too.** A
+swatch styled `background:#c00` handed its own colour to its own tooltip, and the
+slashed "no colour" swatch drew a red streak through the text of its. Name the
+type: `QPushButton { ... }`. Reported by the user; an offscreen `grab()` does not
+contain the tooltip, so it cannot be caught by screenshot.
+
+**A queued signal that rebuilds a list deletes rows out from under whoever holds
+one.** Reporting a finished solve by calling `rebuildLayerList` crashed
+`test_canvas`: a solve runs inside a paint, so the report has to be queued, and
+the rebuild clears the tree. Every `QTreeWidgetItem*` had quietly become valid
+only until the next event-loop turn. A finished solve changes two words and a
+colour, so it changes two words and a colour, in place. gdb found it in one run
+after two wrong theories — the same lesson as the two crashes above, learned
+again.
+
+**Look at the thing, and check the harness is looking at it.** A screenshot
+caught the "None" control being a second red-slashed swatch beside the one that
+already showed a red slash — two identical patches, one a readout and one a
+control, with nothing to say which. The same screenshot run had silently failed
+to add the colour layer it was testing, because it looked for a `QAction` where
+the button is a `QPushButton`, so the first two pictures were of nothing at all.
+
+**A test fixture can build a shape that is not the shape you meant.**
+`drawGappedBox` takes the gap as coordinates, and handing it two outside the box
+gives a bottom wall running six hundred pixels past the corner — not a closed
+shape at all. The printed numbers looked perfectly reasonable.
+
 ## How to work on it
 
 Everything in `src/core/` is free of Qt and can be tested headlessly. Everything
@@ -428,27 +579,49 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **EXR export**, which is the one piece of M5 deliberately left out. 16-bit
-   PNG throws pixels away, so a lossless deliverable needs it; `tinyexr` is a
-   single BSD header and the format list in `export_sequence.h` is where it
-   goes. Everything around it — the layout, the naming, the canvas rectangle,
-   the fill solving, the progress and cancellation — already exists and is
-   tested, so this is a writer and a radio button.
-2. **Scribbles through time.** A CTG cel with no scribbles should fall back to
-   the nearest earlier drawing's rather than being empty: colour once, carry
-   forward, and a new scribble overrides from there. This is also most of the
-   plan's "onion fill" hypothesis, which the layer model makes nearly free and
-   which the notes expect to be the selling point. Designed out in
-   [scribbles-through-time.md](scribbles-through-time.md), together with the
-   harder half — scribbles that move to follow the animation. The carry-forward
-   is small and is not blocked by anything; the motion needs item 3 first.
-3. **Solve the CTG fill off the interface thread.** It is capped at about
-   512x512 today purely so it cannot freeze the program, which costs real
-   quality on a large drawing. Solving in the background, coarse first and
-   refining, removes both the cap and the wait. The copy-on-write tiles already
-   make the snapshot a background thread would need almost free.
-4. **GPU compositing**, if `bench_composite` says it is worth it at real
+1. **Solve the CTG fill off the interface thread.** This has moved to the front
+   and grown a second customer. It is capped at about 512x512 today purely so it
+   cannot freeze the program, which costs real quality on a large drawing;
+   solving in the background, coarse first and refining, removes both the cap
+   and the wait. The copy-on-write tiles already make the snapshot a background
+   thread would need almost free. What is new is that `auditCtgFills` now walks
+   the whole track on a timer, on the same thread — cheap today, and the obvious
+   thing to move once there is somewhere to move it to. It is also the
+   prerequisite for item 3.
+2. **EXR export**, the one piece of M5 deliberately left out. 16-bit PNG throws
+   pixels away, so a lossless deliverable needs it; `tinyexr` is a single BSD
+   header and the format list in `export_sequence.h` is where it goes.
+   Everything around it — the layout, the naming, the canvas rectangle, the fill
+   solving, the progress and cancellation — already exists and is tested, so this
+   is a writer and a radio button.
+3. **Scribbles that move**, part 2 of
+   [scribbles-through-time.md](scribbles-through-time.md). Part 1 is built and in
+   use; this is the research half, and it is the setting already sitting disabled
+   in the colour layer box. Read the note there about what the first rung is
+   worth measuring before anything is built. Needs item 1.
+4. **Free the tiles that erasing has emptied.** A tile whose pixels are all
+   cleared stays in the grid forever — it is written to saved projects and
+   counted in memory. `Tile::isFullyTransparent` already exists and `celBounds`
+   already ignores such tiles, so the correctness problem is gone and only the
+   waste is left. The traps are the undo journal, which records tile snapshots
+   by (cel, coord), and the tiles copy-on-write shares between cels.
+5. **A better "wrong region" test than `spread`.** What is flagged today is "this
+   mark filled nothing but itself", which is a fact. What is not caught is a mark
+   landing in the *wrong region of about the right size*, and that is genuinely
+   hard: "wrong" only exists by reference to the drawing the mark came from, so
+   it needs a correspondence between regions on two drawings, which is what item
+   3 would produce. Every proxy tried on paper — area ratio, region overlap —
+   misfires on fast movement, which is exactly when carrying is most likely to be
+   wrong *and* most likely to be right. Do not ship a second flag that cries wolf
+   often enough to teach somebody to ignore both; wait until item 3 gives it
+   something real to check against.
+6. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
+7. **The rest of the open issues**: several tracks (#1, which the timeline and
+   the model are both ready for and no interface exposes), deleting every layer
+   of a drawing (#2), an eraser cursor (#4), brush-resize feedback (#5), a
+   non-modal colour panel (the parked half of #8), and an "overwrite drawings"
+   checkbox (#9).
 
 ## Two things to be careful of
 

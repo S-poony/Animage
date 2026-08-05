@@ -20,9 +20,9 @@ rough mark inside a region and a max-flow/min-cut finds the best possible
 boundary, tolerating gaps in the line art. Because only the scribbles are
 stored, the fill regenerates whenever the drawing or the scribble changes.
 
-Status: **prototype**. You can draw, animate, colour and save; you cannot export
-yet. M0 through M4 of [the plan](docs/fr/plan-de-prototype.md) exist, M5 is
-under way.
+Status: **prototype**. You can draw, animate, colour, save and export. M0 through
+M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG
+and not yet EXR. Colour carries from drawing to drawing — see below.
 
 A project is a folder — `scene.json` beside one file per cel — under File ▸
 Open, Save and Save As. Cel pixels are stored losslessly, bit for bit as the
@@ -32,9 +32,11 @@ throwing pixels away. See [docs/handover.md](docs/handover.md).
 If you are picking this up, read [docs/handover.md](docs/handover.md) first: it
 records what was built, where it deliberately departs from the plan, and the
 mistakes that cost the most time.
-[docs/scribbles-through-time.md](docs/scribbles-through-time.md) designs the next
-piece of colouring — carrying scribbles from drawing to drawing, and moving them
-with the animation.
+[docs/scribbles-through-time.md](docs/scribbles-through-time.md) designs the two
+halves of colouring across time — carrying scribbles from drawing to drawing,
+which is built, and moving them with the animation, which is not. Where building
+the first half contradicted the design, the note keeps the original text and
+marks the correction, which is the interesting part to read.
 
 ## Design documents
 
@@ -83,9 +85,6 @@ Double-click `run-animage.bat`, or:
 cmake --build build --target animage && ./build/src/app/animage
 ```
 
-Currently at M2: one image of one timeline, drawn on with a pressure brush.
-There is no timeline UI and nothing can be saved yet.
-
 | | |
 |---|---|
 | Draw | pen, or left mouse |
@@ -97,7 +96,7 @@ There is no timeline UI and nothing can be saved yet.
 | `Shift+0` | fit the drawing, including whatever ran off the edge |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
 | `Alt`+right-drag | brush size |
-| `Alt`+click | pick the colour under the pointer (taken where you let go) |
+| `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
 
 The eyedropper is `Alt`+click on the drawing rather than the colour dialog's
@@ -138,14 +137,44 @@ fill the background — the edge of the picture is background and cannot be
 overruled, so the mark keeps roughly its own pixels. Carry a scribble off the
 edge of the picture and the region it is in fills to that edge.
 
-Every ordinary layer becomes a barrier for it automatically. Cutting against a
-rough as well as a clean closes gaps that leak from either alone. The **Marks**
-column beside a colour layer shows the scribbles instead of the fill.
+**A scribble wins the pixels it covers**, whatever the solver decided. The
+solver's job is the pixels you said nothing about, so a mark is a manual
+touch-up for anything the fill got wrong — dab on the spot and it takes that
+colour. The marks are invisible wherever the fill agreed with them, because a
+scribble carries the colour of the label it produces, so what you see is the
+disagreement and nothing else.
+
+The **None** swatch beside the colour scribbles *no colour at all*: the region it
+wins is left empty, and the spots it covers have their colour taken back off
+them. It is offered on colour layers only, where a mark is a label rather than
+paint.
+
+**Colour carries from drawing to drawing.** A drawing with no marks of its own
+shows the nearest coloured drawing's, so colouring the first drawing of a run
+colours the run; scribbling on a drawing takes it over from there, and the
+drawings after it follow that one instead. Clearing a drawing's marks puts it
+back to carrying. Nothing is copied and nothing is stored — it is resolved as it
+is read, so reordering and deleting drawings change what follows what for free.
+
+The **Colour layer** box in the layer panel is where this is set: which layers
+the fill is cut against, whether it carries at all, and whether it carries
+forwards, backwards, or to whichever coloured drawing is nearer. Cutting against
+a rough as well as a clean closes gaps that leak from either alone, which is why
+several sources is the default. The **Marks** column shows the scribbles instead
+of the fill.
+
+**The timeline says where the colour went wrong.** A blue bar under a drawing's
+number means its colour was carried there rather than drawn there. An orange
+corner means those carried marks fill almost nothing but themselves — whatever
+they were meant to colour has moved out from under them — and the layer's row
+turns orange with the reason in its tooltip when you go there. Every drawing is
+judged, not just the ones you have looked at: the flag exists to tell you which
+drawings to go to.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
-Layers belong to the track rather than to the image, which is the point of
-the whole model — with only one image visible that is not yet observable, and
-it becomes so at M3.
+Layers belong to the track rather than to the image, which is the point of the
+whole model: adding a layer touches no drawing, and a drawing held over five
+frames holds every one of its layers for those five frames.
 
 ## Measuring pen latency
 

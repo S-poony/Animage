@@ -5,12 +5,16 @@ Design notes for two things, in this order:
 1. **A scribble stays** from one drawing to the next until the user changes it.
 2. **A scribble moves** to follow the animation.
 
-Nothing here is built. Written straight after the single-scribble change, while
-the solver was still in hand, because a good deal of what follows is a
-consequence of decisions already made rather than free choices.
+**Part 1 is built. Part 2 is not.** This document was written straight after the
+single-scribble change, while the solver was still in hand, because a good deal
+of it is a consequence of decisions already made rather than free choices. Where
+building part 1 contradicted it, the original text is kept and the correction is
+marked **Built:** underneath — a design note that quietly agrees with whatever
+happened is no use to anybody reading it before doing part 2.
 
-The first is small, is not blocked by anything, and is most of the plan's "onion
-fill" hypothesis. The second is a research problem with a cheap first rung.
+The first was small, was not blocked by anything, and is most of the plan's
+"onion fill" hypothesis. The second is a research problem with a cheap first
+rung.
 
 ## Why this is cheaper here than in TVPaint
 
@@ -77,6 +81,26 @@ capped 512×512 solve that is about 120 ms each.
 Key it by `(ImageId, LayerId)`. This is the change most likely to be missed,
 because nothing fails — it just gets slow, and slowly.
 
+> **Built:** the key is `(ImageId, LayerId)`, but the reasoning above is wrong in
+> the direction that matters. It *would* have served wrong fills. Source cel
+> revisions do not reliably differ per image: a revision counts writes to one
+> cel, so two drawings inked with the same number of strokes sit at the same
+> number, and **every cel in a project straight off disk is at revision 1**. Two
+> drawings inheriting one scribble with equally-worn line art would have swapped
+> answers silently.
+>
+> For the same reason `inputs` now mixes the scribble *cel's id* and not only its
+> revision. Reordering drawings changes which cel is read and moves no revision
+> anywhere, so a key made of revisions alone goes on serving the colour from
+> whichever drawing used to precede this one. There is a test with the two
+> scribbles drawn identically, so only their identity tells them apart.
+>
+> The cache also had to be bounded. A fill covers the canvas — 135 tiles at
+> 1080p, about 17 MB — and before inheritance it took scribbles of your own to
+> get one. Every drawing has one now, so playing a coloured shot through once was
+> a gigabyte. Least recently used, budgeted in tiles; evicting costs a recompute,
+> which is the whole reason the layer stores marks instead of pixels.
+
 ### Undo, deletion, reordering
 
 - Creating the cel on first edit is a `CelAssignOp`. Already the mechanism; use
@@ -108,6 +132,17 @@ layer down. The minimum is a per-drawing indication of "own scribbles" against
 
 Cheap, and load-bearing: the feature is invisible when it works, so the only way
 to know it is working is to be told.
+
+> **Built:** both. A blue bar under the number on the timeline card where the
+> colour was carried rather than drawn, and an arrow before the layer's name in
+> the panel with the drawing it came from in the tooltip. The two say the same
+> thing at different scales — the timeline across time, the panel about the
+> drawing you are standing on.
+>
+> Note what this half does *not* wait for: whether marks were carried is a walk
+> over the slots and costs nothing, so it is drawn for every drawing always,
+> where the flag beside it needs a solve. The two are shown together and are
+> computed nothing alike.
 
 ### Tests worth writing
 
@@ -217,6 +252,43 @@ used and automation that gets switched off.
 
 Worth building early — with part 2's first rung, not after it.
 
+> **Built, and the proposed number does not work.** It was built with part 1
+> rather than part 2, because carrying a mark unchanged under line art that has
+> moved is precisely how it lands wrong — motion is what would *reduce* that.
+>
+> The fraction proposed here comes out at exactly 1 in every case in `test_ctg`.
+> A seed is only overruled when severing it beats isolating it, and that needs a
+> mark which is nearly all edge, so in practice the solver honours whatever it
+> can see. It is kept as `CtgFill::confidence` and marked a dead end.
+>
+> What works is scoring a mark by what it **won**: region area per pixel of
+> itself, `CtgFill::spread`. A mark that filled a shape wins many times its own
+> area; a mark carried onto blank paper wins nothing but itself, because with no
+> line art to follow the cut simply hugs the seed. Measured — 8.3, 17, 23, 65,
+> 188 for marks that landed properly, 1.82 for the tightest legitimate one, and
+> 1.00 for a mark carried off its shape. The floor is 1.5 and it is measured, not
+> derived.
+>
+> It is not an invented quantity, which is worth knowing: it detects the failure
+> the research note already names. `fr/lazybrush-et-calques-ctg.md` §5 lists
+> **Raccourcis** — "un scribble trop fin dans une région à long contour troué :
+> la coupe encercle le scribble" — and a cut that encircles the scribble is
+> exactly a spread of 1. The remedy given there is a wider brush, and that is
+> still the remedy; what is new is being told which drawings need it.
+>
+> Two things this does not do, both worth knowing before part 2. It does not
+> catch a mark landing in the **wrong region of about the right size** — see the
+> open question below. And both numbers must be read off the solver's labels and
+> never off the finished fill: a mark wins its own pixels in the fill whatever
+> the solver decided, so from the fill every mark is perfectly placed, always.
+>
+> Judging a whole track is what makes it useful, and it is affordable because the
+> verdict is not the fill. `auditCtgFills` solves coarsely and stops after the
+> labelling, keeping a few bytes a drawing: 67 ms for twelve 1080p drawings cold,
+> nothing when none has moved. Flags read from the fill cache instead only
+> appeared on drawings somebody had already visited, which is the feature
+> inverted.
+
 ### Scheduling
 
 Propagation multiplies solve cost by the number of drawings, against a solve that
@@ -244,10 +316,26 @@ front of you. Do part 1 first and do not wait for the thread work.
 
 ## Open questions, for whoever picks this up
 
-- **Forward only, or backwards too?** Forward is simpler and matches how a shot
-  gets coloured. Backwards would let you colour any drawing and have it apply to
-  the whole run, which is sometimes what you want and never what you expect.
-  Probably: forward by default, with an explicit "apply back from here".
+- ~~**Forward only, or backwards too?**~~ **Settled.** A per-layer choice of
+  forwards, backwards, or whichever coloured drawing is nearer, defaulting to
+  forwards. Backwards is for colouring the drawing in front of you — often the
+  last of a run, because it is the one you were working on. Both ways is what
+  fills the gaps between drawings already coloured, which neither of the other
+  two does. None of them is guessed at: reaching in a direction you did not ask
+  for is sometimes what you want and never what you expect. Carrying at all is
+  also a switch, because a shot whose design changes every drawing gets nothing
+  from it and has to go looking for the marks it carried.
+- **What is "the wrong region"?** Still open, and it is the interesting one. The
+  flag catches a mark that filled *nothing*, which is a fact about one drawing.
+  It does not catch a mark that landed in the wrong region of about the right
+  size, and that cannot be judged from one drawing at all: "wrong" only exists by
+  reference to the drawing the mark came from, so it needs a correspondence
+  between regions on two drawings — which is exactly what part 2 has to build
+  anyway. Proxies considered and not built: region area ratio between source and
+  target, and region overlap. Both misfire on fast movement, which is when
+  carrying is most likely to be wrong *and* most likely to be right. A second
+  flag that cries wolf teaches people to ignore the first one, so this waits for
+  part 2 to give it something real to check against.
 - **Override granularity.** Per (image, layer) is proposed here and needs no
   fork. Per *scribble* is finer and more useful — change one region's colour on
   one drawing without detaching the rest — and needs the vector fork.
