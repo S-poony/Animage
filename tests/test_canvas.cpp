@@ -542,43 +542,64 @@ void altClickPicksTheColourUnderThePointer() {
                            1, 0);
 
     // The colour is taken where the button comes up, not where it went down, so
-    // the pointer can be slid onto the right pixel while it is held. Press
-    // somewhere useless, release on the stroke, and the stroke is what is
-    // picked.
+    // the pointer can be slid onto the right pixel while it is held -- and it
+    // follows the pointer the whole way, so you can see what you are sliding
+    // onto. Press somewhere useless, drag onto the stroke, and the colour
+    // arrives during the drag rather than after it.
     QMouseEvent press(QEvent::MouseButtonPress, off_the_stroke,
                       f.canvas.mapToGlobal(off_the_stroke), Qt::LeftButton, Qt::LeftButton,
                       Qt::AltModifier);
     QCoreApplication::sendEvent(&f.canvas, &press);
-    CHECK_EQ(picks, 0);  // nothing yet: the gesture is not finished
+    CHECK_EQ(picks, 0);  // bare paper, so there was nothing to report
+
+    QMouseEvent drag(QEvent::MouseMove, on_the_stroke, f.canvas.mapToGlobal(on_the_stroke),
+                     Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+    QCoreApplication::sendEvent(&f.canvas, &drag);
+    CHECK_EQ(picks, 1);  // shown while the button is still down
+    CHECK(std::abs(r - 0.0f) < 0.01f);
+    CHECK(std::abs(g - 0.6f) < 0.01f);
+    CHECK(std::abs(b - 0.2f) < 0.01f);
+
+    // Dragging back out over bare paper holds what is shown rather than
+    // snatching it away, which is what makes "the release commits what you can
+    // see" true even when the release lands on nothing.
+    QMouseEvent drag_off(QEvent::MouseMove, off_the_stroke,
+                         f.canvas.mapToGlobal(off_the_stroke), Qt::NoButton, Qt::LeftButton,
+                         Qt::AltModifier);
+    QCoreApplication::sendEvent(&f.canvas, &drag_off);
+    CHECK_EQ(picks, 1);
+    CHECK(std::abs(g - 0.6f) < 0.01f);
 
     QMouseEvent release(QEvent::MouseButtonRelease, on_the_stroke,
                         f.canvas.mapToGlobal(on_the_stroke), Qt::LeftButton, Qt::NoButton,
                         Qt::AltModifier);
     QCoreApplication::sendEvent(&f.canvas, &release);
-    CHECK_EQ(picks, 1);
-    CHECK(std::abs(r - 0.0f) < 0.01f);
+    CHECK_EQ(picks, 2);
     CHECK(std::abs(g - 0.6f) < 0.01f);
-    CHECK(std::abs(b - 0.2f) < 0.01f);
 
     // The same with the pen, which is the path that matters.
     QTabletEvent pen_down(QEvent::TabletPress, &stylus, off_the_stroke,
                           f.canvas.mapToGlobal(off_the_stroke), 1.0, 0, 0, 0, 0, 0,
                           Qt::AltModifier, Qt::LeftButton, Qt::LeftButton);
     QCoreApplication::sendEvent(&f.canvas, &pen_down);
-    CHECK_EQ(picks, 1);
+    CHECK_EQ(picks, 2);  // bare paper again
 
-    // Alt let go mid-gesture must not turn the rest of it into a stroke.
+    // Alt let go mid-gesture must not turn the rest of it into a stroke -- and
+    // the pick carries on, because the gesture is the one that is in progress
+    // and not the modifier that started it.
     QTabletEvent pen_move(QEvent::TabletMove, &stylus, on_the_stroke,
                           f.canvas.mapToGlobal(on_the_stroke), 1.0, 0, 0, 0, 0, 0, Qt::NoModifier,
                           Qt::NoButton, Qt::LeftButton);
     QCoreApplication::sendEvent(&f.canvas, &pen_move);
     CHECK(!f.canvas.isStroking());
+    CHECK_EQ(picks, 3);
+    CHECK(std::abs(g - 0.6f) < 0.01f);
 
     QTabletEvent pen_up(QEvent::TabletRelease, &stylus, on_the_stroke,
                         f.canvas.mapToGlobal(on_the_stroke), 0.0, 0, 0, 0, 0, 0, Qt::NoModifier,
                         Qt::LeftButton, Qt::NoButton);
     QCoreApplication::sendEvent(&f.canvas, &pen_up);
-    CHECK_EQ(picks, 2);
+    CHECK_EQ(picks, 4);
     CHECK(std::abs(g - 0.6f) < 0.01f);
 
     // Neither one drew: picking a colour is not an edit, and it must not leave
@@ -588,13 +609,15 @@ void altClickPicksTheColourUnderThePointer() {
 
     // Bare paper has no colour to take, so the brush keeps the one it had.
     const QPointF empty_at(50, 50);
-    QMouseEvent empty_down(QEvent::MouseButtonPress, empty_at, f.canvas.mapToGlobal(empty_at),
-                           Qt::LeftButton, Qt::LeftButton, Qt::AltModifier);
-    QMouseEvent empty_up(QEvent::MouseButtonRelease, empty_at, f.canvas.mapToGlobal(empty_at),
-                         Qt::LeftButton, Qt::NoButton, Qt::AltModifier);
+    QTabletEvent empty_down(QEvent::TabletPress, &stylus, empty_at,
+                            f.canvas.mapToGlobal(empty_at), 1.0, 0, 0, 0, 0, 0, Qt::AltModifier,
+                            Qt::LeftButton, Qt::LeftButton);
+    QTabletEvent empty_up(QEvent::TabletRelease, &stylus, empty_at,
+                          f.canvas.mapToGlobal(empty_at), 0.0, 0, 0, 0, 0, 0, Qt::AltModifier,
+                          Qt::LeftButton, Qt::NoButton);
     QCoreApplication::sendEvent(&f.canvas, &empty_down);
     QCoreApplication::sendEvent(&f.canvas, &empty_up);
-    CHECK_EQ(picks, 2);
+    CHECK_EQ(picks, 4);
 }
 
 // Touching the tablet must not disable the mouse for the rest of the session.

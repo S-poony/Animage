@@ -899,12 +899,26 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     // Taken when the pen lifts rather than when it lands, so the pen can be slid
     // onto the exact pixel while it is down. Landing a nib precisely is the hard
     // part; sliding it once it is on the tablet is not.
+    //
+    // Which is only worth having if you can see what you are sliding onto, so
+    // the colour follows the pen the whole way down and the release simply stops
+    // it moving. Sampling is a one-pixel composite, far below what a pen move
+    // already costs, and nothing is being drawn meanwhile -- so the live value
+    // can be the real brush colour rather than a preview of one, and there is
+    // one path instead of two that have to agree.
+    //
+    // An empty pixel leaves the colour alone, here as everywhere: dragging out
+    // over bare paper holds the last colour rather than snatching it away, so
+    // the release commits what is shown even when it lands on nothing.
     if (event->type() == QEvent::TabletPress && (event->modifiers() & Qt::AltModifier)) {
         picking_ = true;
+        pickColourAt(imageFromWidget(widget_point));
         return;
     }
     if (picking_) {
-        if (event->type() == QEvent::TabletRelease) {
+        if (event->type() == QEvent::TabletMove) {
+            pickColourAt(imageFromWidget(widget_point));
+        } else if (event->type() == QEvent::TabletRelease) {
             picking_ = false;
             pickColourAt(imageFromWidget(widget_point));
         }
@@ -954,7 +968,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
     if (event->modifiers() & Qt::AltModifier) {
-        picking_ = true;  // taken on release, so the pointer can be adjusted
+        // Shown from the moment the button goes down and followed until it comes
+        // up; see tabletEvent for why the live value is the colour itself.
+        picking_ = true;
+        pickColourAt(imageFromWidget(event->position()));
         return;
     }
     beginStroke(imageFromWidget(event->position()), 1.0f);
@@ -963,6 +980,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     if (continueNavigation(event->position())) return;
     if (eventIsSynthesisedFromPen(event)) return;
+    if (picking_) {
+        pickColourAt(imageFromWidget(event->position()));
+        return;
+    }
     if (stroking_) extendStroke(imageFromWidget(event->position()), 1.0f);
 }
 
