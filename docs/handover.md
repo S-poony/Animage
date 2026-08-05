@@ -174,6 +174,55 @@ that is trivially parallel. Together, 5-6x. `bench_composite` exists so this
 cannot quietly come back; run it before and after anything that touches
 compositing.
 
+**And then the same mistake, one function further out.** `bench_composite`
+watches the compositor, so the compositor is what got optimised — twice. Nobody
+timed the loop *after* it, which turns the flattened region into display pixels,
+and that loop was the larger half by a factor of ten: 37 ms against the
+compositor's 3-8, single-threaded, while the compositor had been parallel for
+years. The tell was there to be read and nobody read it — a 66-tile drawing and
+a 2425-tile drawing refreshed in the same time, because the work is per output
+pixel and not per stroke. **A benchmark defines where you will look, so it also
+defines where the next problem will be.** `bench_zoom` now times the whole path
+through the real widget, which is the only reason this was found.
+
+**Three rendering faults, one root: a memory limit making decisions nobody
+attributed to it.** Reported as "strokes are jagged at 68% but crisp at 72%,
+and it lags when zoomed out", which sounds like three unrelated complaints and
+was in fact mostly one. `cache_step_` is meant to be `floor(1/zoom)` — sample
+every pixel until there are more image pixels than screen pixels to hold them.
+But the cache was also capped at twice the viewport, and the region wanted at
+zoom `z` covers `viewport/z²`, so the cap bound first at exactly `z = 1/√2`.
+**70.7% is 68 and 72's only interesting neighbour**, and nothing in the code
+said so. Worse, the cap scales with the window, so the boundary moved: 50% in an
+800x500 canvas, 60% at 1100x640, 70.7% on anything larger. The same percentage
+meant different sharpness in different windows, which is exactly why the
+relationship looked non-linear and unexplainable.
+
+The lesson generalises past this bug. **A resource limit placed on one axis will
+express itself as a threshold on every other axis, and it will not be labelled.**
+If a quantity changes discontinuously and the constant that governs it is
+nowhere near, look for a budget.
+
+Two more, from the same investigation:
+
+- **The blit chose its filter on `zoom_ < 1.0`.** Two errors in four tokens. The
+  factor being applied is `cache_step_ * zoom_` — at step 2 and 70% zoom the
+  cache is being *magnified* by 1.4 — so it asked about the wrong number. And
+  the threshold was 1.0, which meant nearest-neighbour from 101% upwards, where
+  it duplicates one pixel column in eleven and puts a staircase along every
+  curve. Nearest is right when the pixels are the subject and wrong when they
+  are not; the line is around 3x, not 1x.
+- **Giving up the margin before giving up resolution is the wrong trade.** It
+  reads as the careful choice — keep the picture sharp, drop the convenience —
+  and between 60% and 72% zoom it ran the margin to zero, so the cache held the
+  viewport and not one pixel more and *every* mouse move of a pan recomposited.
+  A spent margin buys nothing back and costs again on the next move; a raised
+  step costs sharpness once. The margin has a floor now.
+
+`test_render` pins all of these as invariants rather than timings, because every
+one of them was a decision the code made and a decision can be asserted exactly.
+Reverting any single fix turns it red, which was checked rather than assumed.
+
 **Caches must be sized by the window, not by the drawing.** The composite cache
 was sized from the visible *image* area, so at 5% zoom it asked for half a
 gigabyte, and its margin was measured in image pixels, so it grew as you zoomed
@@ -203,7 +252,15 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/tests/bench_composite     # timings, not a test
+./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
 ```
+
+`bench_zoom` drives the real `CanvasWidget` across the zoom range and reports,
+per zoom, the step and margin it chose, what a full refresh costs against the
+compositing inside it, and what a pan and a scrubby zoom cost per mouse move —
+median *and* worst, because the median hides the whole effect. Given a directory
+it also writes comparison sheets, including one rendered through the real widget.
+Run it before and after anything that touches the canvas.
 
 `test_canvas` drives the real widgets offscreen and can send tablet events; it
 is where interface bugs get caught. A crash writes `animage-crash.txt` beside

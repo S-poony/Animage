@@ -26,7 +26,15 @@ if(TARGET animage_ui)
   target_include_directories(test_canvas PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_canvas COMMAND test_canvas -platform offscreen)
 
-  # A stopwatch, like bench_composite: built, never run by ctest.
+  add_executable(test_render test_render.cpp)
+  target_link_libraries(test_render PRIVATE animage_ui)
+  target_include_directories(test_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_render COMMAND test_render -platform offscreen)
+
+  # Stopwatches, like bench_composite: built, never run by ctest.
   add_executable(bench_save bench_save.cpp)
   target_link_libraries(bench_save PRIVATE animage_ui)
+
+  add_executable(bench_zoom bench_zoom.cpp)
+  target_link_libraries(bench_zoom PRIVATE animage_ui)
 endif()

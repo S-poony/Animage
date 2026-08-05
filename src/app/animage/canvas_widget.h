@@ -82,6 +82,32 @@ public:
     // the size of the window rather than the size of the visible image area.
     long long cacheEntryCount() const;
 
+    // The other two numbers ensureCacheCoversView settles on. Exposed for the
+    // same reason: how coarsely the cache samples the drawing, and over what
+    // area, is what decides both how much of a stroke survives to the screen
+    // and how much a pan costs. Neither could be read from outside, so both
+    // were argued about instead of measured. See bench_zoom.
+    int cacheStep() const { return cache_step_; }
+    animage::PixelRect cachedRegion() const { return cached_region_; }
+
+    // The margin the cache will not go below, in screen pixels, and how far
+    // beyond the viewport the cache currently reaches. A pan costs a full
+    // recomposite the moment it runs past this, so when it was allowed to reach
+    // zero every mouse move paid for one.
+    static constexpr int kMinCacheMargin = 32;
+
+    // Magnification at which the blit stops interpolating and starts showing
+    // pixels as squares. Above this an animator is looking *at* the pixels and
+    // a guess between them is a lie; below it, nearest-neighbour is just a
+    // staircase along every curve.
+    //
+    // A rule rather than a rendered result on purpose: testing it through the
+    // pixels Qt produces would be testing Qt's resampler, not this decision.
+    static constexpr double kNearestNeighbourAbove = 3.0;
+    static bool blitInterpolatesAt(double blit_scale) {
+        return blit_scale < kNearestNeighbourAbove;
+    }
+
 Q_SIGNALS:
     void viewChanged();
     void documentChanged();

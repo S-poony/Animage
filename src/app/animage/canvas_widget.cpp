@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <thread>
+#include <vector>
 
 #include "color.h"
 
@@ -61,6 +63,17 @@ bool comesFromAStylus(const QPointingDevice* device) {
     const QInputDevice::DeviceType type = device->type();
     return type == QInputDevice::DeviceType::Stylus ||
            type == QInputDevice::DeviceType::Airbrush || type == QInputDevice::DeviceType::Puck;
+}
+
+// Threads cost about as much to start as a small band costs to convert, so
+// only spread work that is worth spreading. The same shape as the
+// compositor's own heuristic, and for the same reason.
+int chooseWorkerCount(int rows, int columns) {
+    const long long work = static_cast<long long>(rows) * columns;
+    if (work < 64'000) return 1;
+    const unsigned hardware = std::thread::hardware_concurrency();
+    const int available = static_cast<int>(hardware ? hardware : 1u);
+    return std::clamp(std::min(available, rows / 32), 1, 8);
 }
 
 PixelRect intersect(const PixelRect& a, const PixelRect& b) {
@@ -321,8 +334,27 @@ void CanvasWidget::ensureCacheCoversView() {
     // the window rather than by how much of the image the window can see. At
     // 51% zoom a maximised window covers four times its own area in image
     // pixels, and sizing from that asked for a quarter of a gigabyte.
+    // Three times the viewport, not twice it, and the reason is not a taste for
+    // round numbers. The region wanted at zoom z covers viewport/z^2 image
+    // pixels, so a budget of 2*viewport is exhausted at exactly z = 1/sqrt(2) --
+    // and that, rather than any decision about resolution, is what put a hard
+    // step-1-to-step-2 edge at 70.7% zoom. A stroke was crisp at 72% and jagged
+    // at 68% because a memory limit happened to land between them. Worse, the
+    // edge moved with the window: measured at 50% on an 800x500 canvas, 60% at
+    // 1100x640, 70.7% on anything larger. The same percentage meant different
+    // sharpness in different windows, which is why the relationship looked
+    // non-linear and unexplainable.
+    //
+    // At 3x the edge falls to about 61% and the margin survives alongside it.
+    // Sampling every pixel all the way down to 50% -- which is what
+    // floor(1/zoom) below intends, and the honest place for the edge to be --
+    // needs 4.5x, and that much memory is not worth buying at this end. The
+    // real answer is to hold the cache at one entry per *screen* pixel instead
+    // of per image pixel, which makes its size independent of zoom and removes
+    // the edge rather than moving it. That is a change to how the cache is
+    // addressed, and it is the next thing to do here.
     const long long viewport = std::max<long long>(1, static_cast<long long>(width()) * height());
-    const long long budget = std::max<long long>(2'000'000, viewport * 2);
+    const long long budget = std::max<long long>(2'000'000, viewport * 3);
 
     int step = std::max(1, static_cast<int>(std::floor(1.0 / zoom_)));
 
@@ -331,6 +363,7 @@ void CanvasWidget::ensureCacheCoversView() {
     // 6144 at 3200%, so the cache -- and the rectangle the blit has to scale it
     // into -- grew without bound the further you zoomed in.
     int margin = std::max(1, static_cast<int>(std::lround(kCacheMargin / zoom_)));
+    const int margin_floor = std::max(1, static_cast<int>(std::lround(kMinCacheMargin / zoom_)));
 
     PixelRect padded{};
     for (;;) {
@@ -339,9 +372,16 @@ void CanvasWidget::ensureCacheCoversView() {
         const long long entries = static_cast<long long>((padded.width + step - 1) / step) *
                                   ((padded.height + step - 1) / step);
         if (entries <= budget) break;
-        // Give up the margin before giving up resolution.
-        if (margin > 0) {
-            margin /= 2;
+        // Give up the margin before giving up resolution, but not all of it.
+        // This used to run the margin down to nothing, and between 60% and 72%
+        // zoom that is exactly where it ended up: the cache held the viewport
+        // and not one pixel more, so every mouse move of a pan left it and paid
+        // for a full recomposite. Every move, not one in six -- measured at 18
+        // to 65 ms each, for as long as the hand kept moving. A margin that has
+        // been spent buys nothing back; a step that has been raised costs
+        // sharpness once and is still there to be zoomed past.
+        if (margin > margin_floor) {
+            margin = std::max(margin_floor, margin / 2);
             continue;
         }
         ++step;
@@ -402,38 +442,78 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     const bool checker = background_ == Background::Checker;
     const float flat = 1.0f;
 
-    for (int y = 0; y < scratch_.height(); ++y) {
-        const Rgba* source = scratch_.row(y);
-        const int image_y = area.y + y * step;
-        const int row = (image_y - cached_region_.y) / step;
-        if (row < 0 || row >= display_.height()) continue;
-        auto* destination = reinterpret_cast<QRgb*>(display_.scanLine(row));
+    // Detached once, here, before any worker exists. QImage is copy-on-write and
+    // scanLine() is the non-const accessor that triggers the copy, so calling it
+    // from several threads is a race over the detach rather than over the
+    // pixels. bits() does the same detach once, and the rows are then addressed
+    // by hand.
+    uchar* const base_line = display_.bits();
+    const qsizetype stride = display_.bytesPerLine();
 
-        for (int x = 0; x < scratch_.width(); ++x) {
-            const int image_x = area.x + x * step;
-            const int column = (image_x - cached_region_.x) / step;
-            if (column < 0 || column >= display_.width()) continue;
-            float background = flat;
-            if (checker) {
-                const bool light = (((image_x / kCheckerSize) + (image_y / kCheckerSize)) & 1) == 0;
-                background = light ? 1.0f : 0.78f;
+    // One band of rows: paper, onion, drawing, sRGB. Rows are independent --
+    // each reads one row of the scratch and writes one scanline of the cache --
+    // so this splits exactly the way the compositor already splits.
+    //
+    // It has to. This loop, not the flattening, is the larger part of a refresh
+    // by a wide margin: compositing a full viewport measures 3-8 ms and this
+    // measured 37, and it is the same 37 ms whether the drawing has 66 tiles or
+    // 2425 of them, because the work is per output pixel rather than per stroke.
+    // The compositor was parallelised years before this loop was even timed --
+    // `bench_composite` only ever watched the other end. See `bench_zoom`.
+    const auto convert_rows = [&](int y_begin, int y_end) {
+        for (int y = y_begin; y < y_end; ++y) {
+            const Rgba* source = scratch_.row(y);
+            const int image_y = area.y + y * step;
+            const int row = (image_y - cached_region_.y) / step;
+            if (row < 0 || row >= display_.height()) continue;
+            auto* destination = reinterpret_cast<QRgb*>(base_line + row * stride);
+
+            for (int x = 0; x < scratch_.width(); ++x) {
+                const int image_x = area.x + x * step;
+                const int column = (image_x - cached_region_.x) / step;
+                if (column < 0 || column >= display_.width()) continue;
+                float background = flat;
+                if (checker) {
+                    const bool light =
+                        (((image_x / kCheckerSize) + (image_y / kCheckerSize)) & 1) == 0;
+                    background = light ? 1.0f : 0.78f;
+                }
+
+                // Paper, then the onion skin over it, then the drawing over that.
+                Rgba base{background, background, background, 1.0f};
+                if (!onion_.isEmpty() && row < onion_.height() && column < onion_.width()) {
+                    base = over(onion_.row(row)[column], base);
+                }
+
+                const Rgba& pixel = source[x];
+                const float keep = 1.0f - std::clamp(pixel.a, 0.0f, 1.0f);
+                const float r = pixel.r + base.r * keep;
+                const float g = pixel.g + base.g * keep;
+                const float b = pixel.b + base.b * keep;
+
+                destination[column] = qRgb(toSrgbByte(r), toSrgbByte(g), toSrgbByte(b));
             }
-
-            // Paper, then the onion skin over it, then the drawing over that.
-            Rgba base{background, background, background, 1.0f};
-            if (!onion_.isEmpty() && row < onion_.height() && column < onion_.width()) {
-                base = over(onion_.row(row)[column], base);
-            }
-
-            const Rgba& pixel = source[x];
-            const float keep = 1.0f - std::clamp(pixel.a, 0.0f, 1.0f);
-            const float r = pixel.r + base.r * keep;
-            const float g = pixel.g + base.g * keep;
-            const float b = pixel.b + base.b * keep;
-
-            destination[column] = qRgb(toSrgbByte(r), toSrgbByte(g), toSrgbByte(b));
         }
+    };
+
+    const int rows = scratch_.height();
+    const int workers = chooseWorkerCount(rows, scratch_.width());
+    if (workers <= 1) {
+        convert_rows(0, rows);
+        return;
     }
+
+    const int band = (rows + workers - 1) / workers;
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<std::size_t>(workers) - 1);
+    for (int w = 1; w < workers; ++w) {
+        const int y_begin = std::min(rows, w * band);
+        const int y_end = std::min(rows, y_begin + band);
+        if (y_begin >= y_end) break;
+        pool.emplace_back(convert_rows, y_begin, y_end);
+    }
+    convert_rows(0, std::min(rows, band));  // this thread takes the first band
+    for (std::thread& worker : pool) worker.join();
 }
 
 void CanvasWidget::repaintImageRect(const PixelRect& region) {
@@ -481,9 +561,23 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     if (display_.isNull()) return;
 
-    // Nearest-neighbour when magnified: an animator zooming in wants to see the
-    // pixels, not a guess at what is between them.
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 1.0);
+    // Nearest-neighbour when magnified far enough that the pixels are the thing
+    // being looked at; smooth below that.
+    //
+    // Two corrections to what this used to be, both measured. The factor the
+    // blit applies is `cache_step_ * zoom_`, not `zoom_`: at step 2 and 70% zoom
+    // it is magnifying the cache by 1.4, not minifying it, so asking about the
+    // zoom asked the wrong question entirely.
+    //
+    // And the threshold was 1.0, which meant nearest-neighbour from 101%
+    // upwards. At 109% that duplicates one pixel column in eleven -- a
+    // staircase along every curve, invisible on an orthogonal edge, which is
+    // exactly the shape of the complaint. Measured against the same curve drawn
+    // at display size, it doubled the error a smooth blit gives. Nobody
+    // inspecting pixels is doing it at 109%; by 300% they are, and there
+    // nearest is the honest thing to show.
+    painter.setRenderHint(QPainter::SmoothPixmapTransform,
+                          blitInterpolatesAt(cache_step_ * zoom_));
 
     const QPointF origin = widgetFromImage({static_cast<double>(cached_region_.x),
                                             static_cast<double>(cached_region_.y)});
