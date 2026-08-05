@@ -6,24 +6,10 @@
 #include <unordered_map>
 
 #include "compositor.h"
+#include "scribble.h"
 
 namespace animage {
 namespace {
-
-// Scribble colours are compared after quantising to eight bits a channel. The
-// brush lays down one flat colour per stroke, but premultiplication and the
-// half-float round trip move the last few bits about, and two strokes of "the
-// same" red have to end up as one label.
-std::uint32_t quantise(const Rgba& premultiplied) {
-    const float alpha = std::max(premultiplied.a, 1e-4f);
-    const auto channel = [&](float value) {
-        const int quantised = static_cast<int>(std::lround(
-            std::clamp(value / alpha, 0.0f, 1.0f) * 255.0f));
-        return static_cast<std::uint32_t>(std::clamp(quantised, 0, 255));
-    };
-    return (channel(premultiplied.r) << 16) | (channel(premultiplied.g) << 8) |
-           channel(premultiplied.b);
-}
 
 PixelRect uniteRects(const PixelRect& a, const PixelRect& b) {
     if (a.isEmpty()) return b;
@@ -67,13 +53,6 @@ PixelRect celBounds(const Cel& cel) {
                                      kTileSize});
     }
     return bounds;
-}
-
-Rgba unquantise(std::uint32_t key) {
-    const float r = static_cast<float>((key >> 16) & 0xff) / 255.0f;
-    const float g = static_cast<float>((key >> 8) & 0xff) / 255.0f;
-    const float b = static_cast<float>(key & 0xff) / 255.0f;
-    return {r, g, b, 1.0f};  // premultiplied by an alpha of one
 }
 
 }  // namespace
@@ -275,7 +254,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
             const Rgba pixel = scribbles->pixel(region.x + x * step, region.y + y * step);
             if (pixel.a < settings.scribble_alpha_threshold) continue;
 
-            const std::uint32_t key = quantise(pixel);
+            const std::uint32_t key = scribbleLabel(pixel);
             auto found = index_of.find(key);
             if (found == index_of.end()) {
                 found = index_of.emplace(key, static_cast<int>(palette.size())).first;
@@ -319,16 +298,22 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     };
 
     std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;
-    const auto tileAt = [&](int px, int py) -> Tile& {
+
+    // Transparency is a label like any other, and paints nothing. Over a tile
+    // that already holds something it punches a hole; over one that does not
+    // exist it is simply the canvas, so no tile is made to hold a square of
+    // nothing.
+    const auto paint = [&](int px, int py, const Rgba& colour) {
         const TileCoord coord = tileCoordFor(px, py);
         const std::uint64_t key =
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |
             static_cast<std::uint32_t>(coord.y);
         auto found = tiles.find(key);
         if (found == tiles.end()) {
+            if (colour.a <= 0.0f) return;
             found = tiles.emplace(key, std::make_shared<Tile>()).first;
         }
-        return *found->second;
+        found->second->setPixel(tileLocal(px), tileLocal(py), colour);
     };
 
     for (int y = 0; y < filled.height; ++y) {
@@ -342,8 +327,7 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
                 solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
             if (label < 0) continue;  // nothing reached this pixel
 
-            tileAt(px, py).setPixel(tileLocal(px), tileLocal(py),
-                                    unquantise(palette[static_cast<std::size_t>(label)]));
+            paint(px, py, scribbleColour(palette[static_cast<std::size_t>(label)]));
         }
     }
 
@@ -379,14 +363,17 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         for (int py = part.y; py < part.y + part.height; ++py) {
             for (int px = part.x; px < part.x + part.width; ++px) {
                 const Rgba pixel = scribbles->pixel(px, py);
-                if (pixel.a < settings.scribble_alpha_threshold) continue;
-                tileAt(px, py).setPixel(tileLocal(px), tileLocal(py),
-                                        unquantise(quantise(pixel)));
+                if (pixel.a < settings.scribble_alpha_threshold) continue;  // not a label
+                paint(px, py, scribbleColour(scribbleLabel(pixel)));
             }
         }
     }
 
     for (auto& [key, tile] : tiles) {
+        // A tile every one of whose pixels was punched back out by a
+        // transparent scribble is a tile of nothing, and the grid says nothing
+        // by not holding it.
+        if (tile->isFullyTransparent()) continue;
         const TileCoord coord{static_cast<int>(static_cast<std::int32_t>(key >> 32)),
                               static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
         built.tiles.set(coord, std::move(tile));

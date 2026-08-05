@@ -29,6 +29,28 @@ struct BrushSettings {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
 
     bool erase = false;
+
+    // Lay down a label rather than paint: a pixel the dab covers takes the
+    // colour outright, one it does not is left alone, and nothing in between is
+    // written at all.
+    //
+    // This is what a CTG layer always meant and never did. A scribble is a
+    // label -- a pixel either carries it or it does not -- and the solver has
+    // read it that way from the start, thresholding coverage at a half. The
+    // brush went on blending, so the two only agreed in the middle of a stroke.
+    // At its rim, and anywhere one colour crossed another, it left pixels that
+    // quantised to some third colour and became a label nobody drew.
+    //
+    // That was invisible while the fill was all you could see. It is not now
+    // that a mark draws over its own fill, and it is what a transparent
+    // scribble cannot survive: a blended rim between "no colour" and a colour
+    // is neither. Writing hard fixes all three at once, and it costs nothing --
+    // the antialiasing it gives up was never being read.
+    //
+    // Erasing in this mode writes exact zeros, so a rubbed-out mark leaves a
+    // genuinely empty tile rather than a rim of residue too faint to see and
+    // strong enough to seed.
+    bool label = false;
 };
 
 // Stamps dabs along the stroke. Everything it writes goes through

@@ -38,6 +38,7 @@
 #include "main_window.h"
 #include "document.h"
 #include "project_files.h"
+#include "scribble.h"
 #include "scene_settings_dialog.h"
 #include "serialise.h"
 #include "testing.h"
@@ -1774,6 +1775,83 @@ void theFileMenuExports() {
     CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
 }
 
+// Transparency is a colour on a colour layer and nothing anywhere else. On a
+// raster layer it would be a stroke of negative light -- pixels no filter, no
+// export and no file format can make sense of -- so the state has to be
+// unreachable rather than guarded at the moment it would do damage.
+void transparencyIsOfferedOnlyWhereItMeansSomething() {
+    TEST("the None swatch is offered on colour layers and nowhere else");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* none = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("None")) none = button;
+    }
+    CHECK(none != nullptr);
+    if (!none) return;
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // A fresh document has one raster layer, so there is nothing to offer.
+    CHECK(!none->isEnabled());
+    CHECK(!none->isChecked());
+
+    QPushButton* add_colour = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
+    }
+    CHECK(add_colour != nullptr);
+    if (!add_colour) return;
+
+    add_colour->click();
+    QCoreApplication::processEvents();
+    CHECK(none->isEnabled());
+
+    // Picked, it really is the transparent label and not some dark colour
+    // standing in for one.
+    none->click();
+    QCoreApplication::processEvents();
+    const BrushSettings& picked = canvas->brushSettings();
+    CHECK(none->isChecked());
+    CHECK(isTransparentScribble(Rgba{picked.r, picked.g, picked.b, 1.0f}));
+
+    // It is a toggle, so the way out is the way in.
+    none->click();
+    QCoreApplication::processEvents();
+    CHECK(!none->isChecked());
+    CHECK(!isTransparentScribble(
+        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
+             1.0f}));
+
+    // And stepping off the colour layer with it in hand puts a colour back,
+    // rather than leaving a brush loaded with something a raster layer cannot
+    // hold. This is the path that matters: the button being disabled stops you
+    // choosing it, and this stops you carrying it.
+    none->click();
+    QCoreApplication::processEvents();
+    CHECK(isTransparentScribble(
+        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
+             1.0f}));
+
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(layers != nullptr);
+    if (!layers) return;
+    CHECK(layers->topLevelItemCount() >= 2);
+    layers->setCurrentItem(layers->topLevelItem(0));  // the raster layer
+    QCoreApplication::processEvents();
+
+    CHECK(!none->isEnabled());
+    CHECK(!none->isChecked());
+    CHECK(!isTransparentScribble(
+        Rgba{canvas->brushSettings().r, canvas->brushSettings().g, canvas->brushSettings().b,
+             1.0f}));
+}
+
 // Saving and opening through the window, rather than through project::save
 // directly: the part that has gone wrong before is not the file, it is the
 // canvas and the panels still holding ids from the document that was replaced.
@@ -1867,6 +1945,7 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
+    transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();

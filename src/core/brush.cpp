@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "scribble.h"
+
 namespace animage {
 namespace {
 
@@ -75,6 +77,19 @@ void Brush::stamp(float cx, float cy, float radius, float flow) {
                     const int lx = px - base_x;
                     const int ly = py - base_y;
                     const Rgba dst = tile->pixel(lx, ly);
+
+                    // A label is written or it is not; there is no partly. The
+                    // threshold is the one the solver reads with, so what the
+                    // brush puts down and what the fill makes of it cannot
+                    // drift apart.
+                    if (settings_.label) {
+                        if (alpha < kScribbleAlphaThreshold) continue;
+                        tile->setPixel(lx, ly,
+                                       settings_.erase
+                                           ? Rgba{}
+                                           : Rgba{settings_.r, settings_.g, settings_.b, 1.0f});
+                        continue;
+                    }
 
                     if (settings_.erase) {
                         const float keep = 1.0f - alpha;

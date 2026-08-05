@@ -4,6 +4,7 @@
 #include "ctg_fill.h"
 #include "document.h"
 #include "lazybrush.h"
+#include "scribble.h"
 
 namespace animage {
 
@@ -24,9 +25,9 @@ namespace animage {
 // scribble pixel would be half a vote for a colour, which means nothing.
 
 struct CtgSettings {
-    // Below this the stroke's antialiased rim is not counted as scribbled. A
-    // label is not a quantity.
-    float scribble_alpha_threshold = 0.5f;
+    // Below this a pixel is not scribbled. Shared with the brush, which rounds
+    // to it rather than writing anything softer -- see scribble.h.
+    float scribble_alpha_threshold = kScribbleAlphaThreshold;
 
     // Solve at this fraction of full size. The plan's answer to interactivity
     // is a coarse pass while the pen is down and a full one when it lifts.

@@ -852,6 +852,7 @@ void ctgStroke(Document& doc, TrackId track, ImageId image, LayerId layer, float
     settings.b = b;
     settings.a = 1.0f;
     settings.erase = erase;
+    settings.label = true;
     Brush brush(settings);
     brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
     brush.extend({x1, y1, 1.0f});
@@ -952,6 +953,144 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
 }
 
+// --- a mark is a label, and one of the labels is "nothing" ----------------
+
+// Every distinct label on the cel, and the alpha values it uses.
+std::vector<std::uint32_t> labelsOn(const Cel& cel, std::vector<float>* alphas) {
+    std::vector<std::uint32_t> labels;
+    for (const TileCoord& coord : cel.tiles().coords()) {
+        for (int y = 0; y < kTileSize; ++y) {
+            for (int x = 0; x < kTileSize; ++x) {
+                const Rgba p = cel.pixel(coord.x * kTileSize + x, coord.y * kTileSize + y);
+                if (alphas && std::find(alphas->begin(), alphas->end(), p.a) == alphas->end()) {
+                    alphas->push_back(p.a);
+                }
+                if (!isScribbled(p)) continue;
+                const std::uint32_t key = scribbleLabel(p);
+                if (std::find(labels.begin(), labels.end(), key) == labels.end()) {
+                    labels.push_back(key);
+                }
+            }
+        }
+    }
+    return labels;
+}
+
+// The brush blended, and the solver has thresholded from the start, so the two
+// only ever agreed in the middle of a stroke. At its rim, and anywhere one
+// colour crossed another, it left pixels quantising to a third colour -- a
+// label nobody drew. Invisible while the fill was all you could see, and not
+// invisible now that a mark draws over its own fill.
+void aCtgStrokeWritesLabelsAndNotPaint() {
+    TEST("a mark on a colour layer is written hard, so it makes no third colour");
+    Fixture f;
+    ctgStroke(f.doc, f.track, f.image, f.colour, 80, 100, 180, 100, 8.0f, 1, 0, 0, false);
+    ctgStroke(f.doc, f.track, f.image, f.colour, 130, 50, 130, 150, 8.0f, 0, 0, 1, false);
+
+    const Cel* cel = f.doc.celAt(f.track, f.image, f.colour);
+    std::vector<float> alphas;
+    const std::vector<std::uint32_t> labels = labelsOn(*cel, &alphas);
+
+    // Two strokes crossing, two labels. Not one more for the seam between them,
+    // and not one more for either rim.
+    CHECK_EQ(labels.size(), std::size_t{2});
+
+    // And a pixel is scribbled or it is not: nothing in between was written.
+    for (float a : alphas) CHECK(a == 0.0f || a == 1.0f);
+
+    // Erasing writes exact zeros, so a rubbed-out mark leaves nothing behind
+    // rather than a rim too faint to see and strong enough to seed.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 130, 50, 130, 150, 12.0f, 0, 0, 0, true);
+    std::vector<float> after_alphas;
+    const std::vector<std::uint32_t> after = labelsOn(*cel, &after_alphas);
+    CHECK_EQ(after.size(), std::size_t{1});
+    CHECK_EQ(after[0], std::uint32_t{0xff0000});
+    for (float a : after_alphas) CHECK(a == 0.0f || a == 1.0f);
+}
+
+// Transparency has to be a label rather than an absence, because an absence is
+// already how the layer says nothing was scribbled at all. Stored as a pixel
+// that is unmistakably present and unmistakably not a colour.
+void theTransparentScribbleSurvivesTheHalfFloat() {
+    TEST("the transparent label survives being stored");
+    Tile tile;
+    tile.setPixel(3, 4, kTransparentScribble);
+    const Rgba back = tile.pixel(3, 4);
+
+    CHECK_EQ(back.r, -1.0f);
+    CHECK_EQ(back.a, 1.0f);
+    CHECK(isScribbled(back));
+    CHECK(isTransparentScribble(back));
+    CHECK_EQ(scribbleLabel(back), kTransparentScribbleLabel);
+    CHECK_EQ(scribbleColour(kTransparentScribbleLabel).a, 0.0f);
+
+    // And no colour can be mistaken for it, including the extremes.
+    CHECK(!isTransparentScribble(Rgba{0.0f, 0.0f, 0.0f, 1.0f}));
+    CHECK(!isTransparentScribble(Rgba{1.0f, 1.0f, 1.0f, 1.0f}));
+    CHECK(scribbleLabel(Rgba{0.0f, 0.0f, 0.0f, 1.0f}) != kTransparentScribbleLabel);
+}
+
+// It competes for regions like any other colour -- that is the point of it
+// being a label -- and where it wins, the picture has a hole rather than a
+// colour. And a transparent mark keeps its own pixels, so it can be used to
+// take colour back off a spot the fill got wrong.
+void aTransparentScribbleTakesColourAway() {
+    TEST("a transparent scribble is a colour that leaves nothing behind");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+
+    // Red fills the box.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 90, 100, 170, 100, 6.0f, 1, 0, 0, false);
+    CHECK_NEAR(fillAt(ctgFill(f.doc, f.track, f.image, f.colour), 130, 160).r, 1.0, 0.02);
+
+    // A transparent scribble lower down. Two soft marks inside one shape do not
+    // put it to a vote -- the cut settles between them, at the cheapest
+    // boundary it can find -- so each takes the part of the shape nearer it.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 85, 150, 175, 150, 12.0f,
+              kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b, false);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    // Two labels, and transparency is one of them: it is a colour, not the
+    // absence of a scribble.
+    CHECK_EQ(fill.colours, 2);
+
+    // Its half of the shape has nothing in it -- no colour at all, rather than
+    // some colour standing in for none.
+    CHECK_NEAR(fillAt(fill, 130, 172).a, 0.0, 0.001);
+    CHECK_NEAR(fillAt(fill, 90, 168).a, 0.0, 0.001);
+
+    // Red keeps its own half, and its own pixels within it.
+    CHECK_NEAR(fillAt(fill, 70, 70).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 130, 100).r, 1.0, 0.02);
+
+    // And on the transparent mark itself there is nothing, which is what makes
+    // it usable to take colour back off a spot the solver got wrong: over the
+    // fill, never under it.
+    CHECK_NEAR(fillAt(fill, 130, 150).a, 0.0, 0.001);
+}
+
+// The case the whole encoding exists for: scribbling "nothing" over a region
+// that has already been filled has to leave a hole, not be hidden by the fill.
+void aTransparentScribbleShowsThroughAFillThatDisagrees() {
+    TEST("a transparent mark punches through a fill that says otherwise");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    ctgStroke(f.doc, f.track, f.image, f.colour, 90, 100, 170, 100, 10.0f, 1, 0, 0, false);
+
+    // Small enough that the solver keeps the region red around it.
+    ctgStroke(f.doc, f.track, f.image, f.colour, 125, 125, 125, 125, 2.0f,
+              kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b, false);
+
+    CtgSettings coarse;
+    coarse.downscale = 8;  // the mark is finer than the grid, so it is not a seed
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour, coarse);
+
+    CHECK_EQ(fill.colours, 1);                            // the solver never saw it
+    CHECK_NEAR(fillAt(fill, 90, 160).r, 1.0, 0.02);       // the region is red
+    CHECK_NEAR(fillAt(fill, 125, 125).a, 0.0, 0.001);     // and there is a hole in it
+}
+
 }  // namespace
 
 int main() {
@@ -985,5 +1124,10 @@ int main() {
 
     erasingAScribbleUndoesWhatItDid();
     erasingAStrayScribbleUndoesWhatItDid();
+
+    aCtgStrokeWritesLabelsAndNotPaint();
+    theTransparentScribbleSurvivesTheHalfFloat();
+    aTransparentScribbleTakesColourAway();
+    aTransparentScribbleShowsThroughAFillThatDisagrees();
     return testing::summarise("ctg");
 }

@@ -78,8 +78,19 @@ private:
     std::string nextLayerName() const;
     std::string nextColourLayerName() const;
     void chooseColour();
+
+    // Scribble "nothing here" rather than a colour. Only means anything on a
+    // colour layer, where a mark is a label and one of the labels can be the
+    // absence of colour; on a raster layer it would be paint made of negative
+    // light. The swatch is disabled off a colour layer and the colour is put
+    // back to the last real one on the way out, so the state cannot be reached
+    // by wandering into it.
+    void chooseTransparent();
+    bool colourIsTransparent() const;
+    void syncColourControls();
+
     // The one place a colour becomes the brush's, whether it came from the
-    // dialog or from the eyedropper. Linear light, straight.
+    // dialog, the eyedropper or the transparent swatch. Linear light, straight.
     void applyColour(float r, float g, float b);
     void syncToolSettings();
     void setBrushRadius(double radius);
@@ -139,6 +150,7 @@ private:
     QDoubleSpinBox* radius_ = nullptr;
     QLabel* status_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
+    QPushButton* transparent_swatch_ = nullptr;
     QCheckBox* pressure_opacity_ = nullptr;
     QSpinBox* onion_ = nullptr;
     QAction* play_action_ = nullptr;
@@ -168,4 +180,8 @@ private:
     bool forwarding_key_ = false;
     bool framed_once_ = false;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;
+
+    // The last colour that was a colour, so leaving a colour layer while
+    // "transparent" is selected has somewhere to go back to.
+    float solid_r_ = 0.0f, solid_g_ = 0.0f, solid_b_ = 0.0f;
 };

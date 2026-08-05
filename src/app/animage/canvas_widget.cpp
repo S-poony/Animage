@@ -687,11 +687,21 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
 
     // On a CTG layer the stroke is a label, not paint. Pressure must not thin
     // the mark into a half-vote for a colour, and a soft rim would be read as
-    // scribbled or not depending on a threshold, which is no way to decide.
+    // scribbled or not depending on a threshold, which is no way to decide --
+    // so the rim is not written at all. See BrushSettings::label.
     if (layer->kind == LayerKind::Ctg) {
         settings.pressure_affects_opacity = false;
         settings.hardness = 1.0f;
         settings.opacity = 1.0f;
+        settings.label = true;
+    } else if (!settings.erase &&
+               isTransparentScribble(Rgba{settings.r, settings.g, settings.b, 1.0f})) {
+        // The transparent label is a scribble, not paint: on a raster layer it
+        // would be a stroke of negative light. The interface puts the colour
+        // back when you leave a colour layer, so this cannot happen -- it is
+        // here because "cannot happen" is worth being wrong about cheaply, and
+        // the alternative is pixels no filter will ever make sense of.
+        return;
     }
     brush_.settings() = settings;
 

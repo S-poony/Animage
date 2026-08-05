@@ -38,6 +38,7 @@
 #include "export_sequence.h"
 #include "project_files.h"
 #include "color.h"
+#include "scribble.h"
 #include "scene_settings_dialog.h"
 #include "timeline_widget.h"
 
@@ -325,6 +326,26 @@ void MainWindow::buildActions() {
     colour_swatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #888;"));
     connect(colour_swatch_, &QPushButton::clicked, this, &MainWindow::chooseColour);
     tools->addWidget(colour_swatch_);
+
+    // Transparency is a colour on a colour layer, so it belongs in the colour
+    // controls rather than in a mode somewhere else. It cannot go in the colour
+    // dialog, which only knows how to offer colours -- and being a button here
+    // is why the dialog did not have to be replaced to get it.
+    //
+    // Named rather than drawn. The swatch beside it already shows the slash
+    // that means "none" whenever transparency is the colour in hand, and a
+    // second slash next to the first is two identical patches where one is a
+    // readout and one is a control, with nothing to say which. A word says it.
+    transparent_swatch_ = new QPushButton(QStringLiteral("None"), this);
+    transparent_swatch_->setCheckable(true);
+    transparent_swatch_->setFocusPolicy(Qt::NoFocus);
+    transparent_swatch_->setToolTip(
+        QStringLiteral("Scribble transparency: no colour here.\n"
+                       "Fills the region it wins with nothing, and takes colour\n"
+                       "back off the spots it covers.\n"
+                       "Colour layers only -- a mark there is a label, not paint."));
+    connect(transparent_swatch_, &QPushButton::clicked, this, &MainWindow::chooseTransparent);
+    tools->addWidget(transparent_swatch_);
 
     tools->addSeparator();
     // This acts on the drawing in front of you, not on the layer as a whole, so
@@ -1072,6 +1093,14 @@ void MainWindow::onLayerSelected() {
         const QSignalBlocker block(opacity_);
         opacity_->setValue(static_cast<int>(layer->opacity * 100.0f));
     }
+
+    // Stepping off a colour layer with transparency in hand puts the last real
+    // colour back, rather than leaving a brush loaded with negative light.
+    if (layer->kind != LayerKind::Ctg && colourIsTransparent()) {
+        applyColour(solid_r_, solid_g_, solid_b_);
+    } else {
+        syncColourControls();
+    }
 }
 
 void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {
@@ -1259,19 +1288,72 @@ void MainWindow::chooseColour() {
                 srgbToLinear(static_cast<float>(chosen.blueF())));
 }
 
+bool MainWindow::colourIsTransparent() const {
+    return isTransparentScribble(Rgba{colour_r_, colour_g_, colour_b_, 1.0f});
+}
+
+// A toggle, so the way out is the way in. Coming back off it restores the last
+// real colour rather than leaving you to go and find one.
+void MainWindow::chooseTransparent() {
+    if (colourIsTransparent()) {
+        applyColour(solid_r_, solid_g_, solid_b_);
+    } else {
+        applyColour(kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b);
+    }
+}
+
 void MainWindow::applyColour(float r, float g, float b) {
     colour_r_ = r;
     colour_g_ = g;
     colour_b_ = b;
     canvas_->setBrushColour(r, g, b);
 
+    // Remembered so that leaving a colour layer has a colour to fall back to.
+    // The eyedropper cannot produce the transparent label -- it reads what was
+    // composited, and what was composited is a colour or is nothing at all --
+    // so this is only ever skipped for a deliberate click on the swatch.
+    if (!colourIsTransparent()) {
+        solid_r_ = r;
+        solid_g_ = g;
+        solid_b_ = b;
+    }
+
     if (!colour_swatch_) return;
     const auto shown = [](float linear) {
         return static_cast<qreal>(std::clamp(linearToSrgb(linear), 0.0f, 1.0f));
     };
-    const QColor swatch = QColor::fromRgbF(shown(r), shown(g), shown(b));
-    colour_swatch_->setStyleSheet(
-        QStringLiteral("background:%1;border:1px solid #888;").arg(swatch.name()));
+
+    if (colourIsTransparent()) {
+        // The slash over nothing that every program uses for "none". A colour
+        // patch cannot show the absence of colour by being some colour.
+        colour_swatch_->setStyleSheet(QStringLiteral(
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            "stop:0 #ffffff, stop:0.44 #ffffff, stop:0.46 #d02020,"
+            "stop:0.54 #d02020, stop:0.56 #ffffff, stop:1 #ffffff);"
+            "border:1px solid #888;"));
+    } else {
+        const QColor swatch = QColor::fromRgbF(shown(r), shown(g), shown(b));
+        colour_swatch_->setStyleSheet(
+            QStringLiteral("background:%1;border:1px solid #888;").arg(swatch.name()));
+    }
+    syncColourControls();
+}
+
+// The transparent swatch only means something where a mark is a label. Off a
+// colour layer it is disabled, and if it was the colour in hand on the way out
+// the last real colour comes back -- so "transparent selected on a raster
+// layer" is a state that cannot be arrived at rather than one guarded against
+// at the moment it would do damage.
+void MainWindow::syncColourControls() {
+    if (!transparent_swatch_) return;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(canvas_->activeLayer()) : nullptr;
+    const bool on_colour_layer = layer && layer->kind == LayerKind::Ctg;
+
+    transparent_swatch_->setEnabled(on_colour_layer);
+    const QSignalBlocker block(transparent_swatch_);
+    transparent_swatch_->setChecked(on_colour_layer && colourIsTransparent());
 }
 
 void MainWindow::setBrushRadius(double radius) {
