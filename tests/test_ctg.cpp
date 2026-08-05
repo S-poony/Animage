@@ -953,6 +953,67 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
 }
 
+// A mark made outside a shape, near its wall. Reported as colour appearing
+// where nothing was scribbled, and suspected of the colour layer being used as
+// its own barrier -- so this pins both halves at once.
+void closedBox(Fixture& f, int left, int top, int right, int bottom) {
+    const float w = 2.5f;
+    f.stroke(f.ink, left, top, right, top, w, 0, 0, 0);
+    f.stroke(f.ink, left, bottom, right, bottom, w, 0, 0, 0);
+    f.stroke(f.ink, left, top, left, bottom, w, 0, 0, 0);
+    f.stroke(f.ink, right, top, right, bottom, w, 0, 0, 0);
+}
+
+void aMarkOutsideAShapeNearItsWall() {
+    TEST("what a mark just outside a shape does");
+
+    // A colour layer is never its own barrier: it holds labels, not edges, and
+    // a flat has nothing to cut along. Its cel is raster tiles like any other --
+    // there is no scribble tool, you draw with the ordinary brush -- but the
+    // *layer* is LayerKind::Ctg, and that is what the barrier is chosen by.
+    {
+        Fixture f;
+        const Layer* self = f.doc.scene().findTrack(f.track)->findLayer(f.colour);
+        CHECK(std::find(self->ctg_sources.begin(), self->ctg_sources.end(), f.colour) ==
+              self->ctg_sources.end());
+    }
+
+    // A shape that is genuinely closed, with the mark outside its left wall and
+    // close to it. It does not reach in: the shape stays uncoloured, the paper
+    // around it stays uncoloured, and the mark keeps its own pixels and nothing
+    // else. That last part is what the rim being unseverable buys.
+    {
+        Fixture f;
+        closedBox(f, 100, 100, 300, 300);
+        ctgStroke(f.doc, f.track, f.image, f.colour, 60, 200, 88, 200, 8.0f, 1, 0, 0, false);
+        const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+
+        CHECK_NEAR(fillAt(fill, 200, 200).a, 0.0, 0.001);  // inside the shape
+        CHECK_NEAR(fillAt(fill, 20, 20).a, 0.0, 0.001);    // far out on the paper
+        CHECK_NEAR(fillAt(fill, 74, 200).r, 1.0, 0.02);    // on the mark itself
+        CHECK(fill.spread < 1.5f);  // it filled nothing, which is the honest report
+    }
+
+    // The same, with a real hole in the wall the mark is sitting next to, which
+    // is what line art actually looks like. Still does not reach in: separating
+    // the mark from the rim where it is costs less than pouring through the gap.
+    {
+        Fixture f;
+        const float w = 2.5f;
+        f.stroke(f.ink, 100, 100, 300, 100, w, 0, 0, 0);
+        f.stroke(f.ink, 100, 300, 300, 300, w, 0, 0, 0);
+        f.stroke(f.ink, 300, 100, 300, 300, w, 0, 0, 0);
+        f.stroke(f.ink, 100, 100, 100, 180, w, 0, 0, 0);  // left wall, gap 180..220
+        f.stroke(f.ink, 100, 220, 100, 300, w, 0, 0, 0);
+        ctgStroke(f.doc, f.track, f.image, f.colour, 60, 200, 88, 200, 8.0f, 1, 0, 0, false);
+        const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+
+        CHECK_NEAR(fillAt(fill, 200, 200).a, 0.0, 0.001);
+        CHECK_NEAR(fillAt(fill, 74, 200).r, 1.0, 0.02);
+        CHECK(fill.spread < 1.5f);
+    }
+}
+
 // --- what a colour layer is allowed to do with time -----------------------
 
 void setCtg(Sequence& s, bool inherit, CtgDirection direction) {
@@ -1262,6 +1323,7 @@ int main() {
     erasingAScribbleUndoesWhatItDid();
     erasingAStrayScribbleUndoesWhatItDid();
 
+    aMarkOutsideAShapeNearItsWall();
     carryingScribblesCanBeSwitchedOff();
     carryingCanRunBackwards();
     aCarriedMarkThatLandsWrongIsFlagged();
