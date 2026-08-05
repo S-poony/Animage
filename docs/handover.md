@@ -9,8 +9,9 @@ records what happened when it was built.
 
 ## Where it got to
 
-M0 through M4 exist. **M5 does not: nothing can be saved.** That is the largest
-gap and the obvious next job — a session's work is lost when the window closes.
+M0 through M4 exist. **M5 is half done: a project saves and opens; nothing
+exports yet.** A session's work survives the window closing, which it did not
+before.
 
 | | |
 |---|---|
@@ -19,7 +20,28 @@ gap and the obvious next job — a session's work is lost when the window closes
 | M2 | Canvas, pressure brush, eraser, layers. Compositing is on the CPU, not the GPU. |
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
 | M4 | LazyBrush solver and the CTG layer, in the app and usable. |
-| M5 | **Missing.** No save, no load, no export. |
+| M5 | **Partly.** Save, open and Save As work. No export, no autosave, no New. |
+
+A project is a folder: `scene.json` in text, and one file per cel beside it.
+`serialise.h` decides the structure and `celfile.h` the pixels — both in `core`,
+both testable without a window — while `project_files.h` in the application adds
+the compressor and the folder around them. Saving builds alongside and swaps at
+the end, so an interrupted save leaves the last good project where it was;
+opening builds a whole document before adopting it, so a project that will not
+open cannot take the open one down with it.
+
+Since the first build, the model also grew a **canvas**: `Scene::canvas()`, the
+rectangle that will be exported, set under Edit ▸ Scene settings. Before it
+there was no such thing as "the picture" — tiles are sparse and their
+coordinates signed, so the drawing surface has no edges at all, which is
+deliberate and stays true. Drawing outside the canvas is still allowed; what is
+out there simply is not in the picture, which is why a colour fill stops at the
+frame.
+
+And **`Timeline` is now `Track`** throughout, including the French
+specification. A `Track` is one stack of layers with its own time; the timeline
+is the scene's shared time axis and the panel that shows it. A scene has several
+tracks and one timeline. If you find the old name anywhere, it meant the track.
 
 ## What is not what the plan asked for
 
@@ -159,6 +181,22 @@ two-pixel line becomes a dotted line, the barrier acquires holes that are not in
 the drawing, and the fill pours out through its own outline. Composite at full
 resolution and reduce by taking the *most* covered pixel in each block — too
 solid costs a little gap tolerance, too thin costs the whole fill.
+
+**The obvious optimisation was the wrong one, and only a measurement said so.**
+Saving ninety-six drawings took 10.5 seconds and opening them 3.9, every time,
+changed or not. The obvious fix is to skip cels that have not moved — which would
+have left the *first* save and every *open* exactly as slow, because neither
+repeats anything. Breaking the time down instead said 92.6% of the bytes handed
+to the compressor were zero: tiles were written whole, so a three-pixel line
+crossing a 128x128 tile contributed 128 KB of which almost none was ink. Storing
+only each row's occupied span took save to 3.0 s and open to 1.6 s, and made the
+files *smaller* — 12 MB to 6 MB — because deflate was no longer being asked to
+re-derive emptiness we already knew about.
+
+Two things to carry from it. **A repeated-work optimisation cannot help the first
+run**, so if the first run is also slow the problem is somewhere else. And format
+decisions are the ones to measure early: this was a change to the bytes on disk,
+which is cheap while no project exists and a migration afterwards.
 
 **A counter is not a state.** Mouse events promoted from the pen were recognised
 by "has this canvas ever seen a tablet event", which is true forever after the
@@ -319,11 +357,29 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **Saving.** M5, and the largest gap by far. A folder with `scene.json` and a
-   PNG per cel, per the plan. A CTG cel saves its scribbles; the fill is derived
-   and should never be written. The canvas rectangle exists now
-   (`Scene::canvas()`), so export has a size to write; before it, every frame
-   would have come out as its own bounding box and no two the same.
+1. **Finish M5**, in this order, because each one wants the last.
+   - **Incremental saving.** A save re-encodes every cel, which is about three
+     seconds for ninety-six drawings whether or not anything changed. Fine when
+     you asked for it; not fine for autosave, which would pay it every time it
+     fired. No format change is needed — cels are separate files and
+     `Cel::revision()` already says which ones moved — but it wants a small piece
+     of per-project state that the window has to hold, so it belongs before
+     autosave rather than after.
+   - **Autosave**, writing into the project folder. That was a deliberate choice
+     and it has a consequence: the disk is then always current, so there is
+     nothing for an unsaved-changes warning to warn about, and "quit without
+     saving to throw away a ruined drawing" stops working. The window title
+     carries a `*` in the meantime, which is the only signal until autosave
+     exists.
+   - **New**, which waits on autosave: discarding an untitled document is only
+     safe to offer once the alternative is not silent loss. It should feel like
+     launching the application, plus the Scene settings dialog opening.
+   - **Export.** A sequence per layer, `{track}_{layer}_{frame:04}`, over the
+     canvas rectangle. One decision is open and is easier made before the dialog
+     exists than after: 16-bit PNG cannot hold a half-float without throwing
+     pixels away — the same arithmetic that decided the save format — so a
+     lossless deliverable means EXR. PNG is still right where the destination
+     expects PNG and a conversion is understood.
 2. **Scribbles through time.** A CTG cel with no scribbles should fall back to
    the nearest earlier drawing's rather than being empty: colour once, carry
    forward, and a new scribble overrides from there. This is also most of the
