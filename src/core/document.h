@@ -72,6 +72,22 @@ public:
     const Cel* cel(CelId id) const;
     const Cel* celAt(TrackId track, ImageId image, LayerId layer) const;
 
+    // The scribbles a CTG layer shows at this drawing: its own, or -- when it
+    // has none -- the nearest earlier drawing's. Colour once and the colour
+    // carries forward until somebody changes it, which is the whole of
+    // "scribbles through time" part one.
+    //
+    // Not the same as celAt, and deliberately a different function rather than
+    // a flag on it: on any other kind of layer an absent cel still means the
+    // layer is empty here, and that must stay true. Returns nullptr for a layer
+    // that is not CTG, so a caller cannot get inheritance by accident.
+    //
+    // `source`, if given, receives the drawing the scribbles belong to. Equal
+    // to `image` when they are its own, which is how anything showing the
+    // distinction -- and anything keyed on it -- tells the two apart.
+    const Cel* ctgScribblesAt(TrackId track, ImageId image, LayerId layer,
+                              ImageId* source = nullptr) const;
+
     // Returns the cel to draw into, creating it on first use. Must be called
     // inside a command; the lazy creation is recorded so undo removes it.
     Cel* celForWriting(TrackId track, ImageId image, LayerId layer);
@@ -82,11 +98,12 @@ public:
 
     std::size_t celCount() const { return cels_.size(); }
 
-    // Regenerated fills for CTG layers, keyed by the cel holding the scribbles.
-    // Kept here rather than on the Cel because it is derived data: losing it
-    // costs a recompute and nothing else.
-    std::unordered_map<CelId, CtgFill>& ctgCache() { return ctg_cache_; }
-    const std::unordered_map<CelId, CtgFill>& ctgCache() const { return ctg_cache_; }
+    // Regenerated fills for CTG layers, keyed by (drawing, layer). Kept here
+    // rather than on the Cel because it is derived data: losing it costs a
+    // recompute and nothing else, which is also why the store is allowed to be
+    // bounded. See CtgFillCache.
+    CtgFillCache& ctgCache() { return ctg_cache_; }
+    const CtgFillCache& ctgCache() const { return ctg_cache_; }
 
     // The regenerated fill for a CTG layer, or null if it has not been built.
     // Const, so the compositor can draw one but never trigger a solve: the
@@ -164,7 +181,7 @@ private:
     std::vector<Command> undo_stack_;
     std::vector<Command> redo_stack_;
 
-    std::unordered_map<CelId, CtgFill> ctg_cache_;
+    CtgFillCache ctg_cache_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

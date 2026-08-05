@@ -136,14 +136,29 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
 
     const Image* record = line->findImage(image);
     if (!record) return kNothing;
-    const CelId scribble_id = record->celFor(layer_id);
-    const Cel* scribbles = doc.cel(scribble_id);
+
+    // The scribbles may belong to an earlier drawing: absence on a CTG layer
+    // means inherited. Only the scribbles inherit -- the barrier below is read
+    // from this drawing's own line art, which is the point of the feature. The
+    // two are always the same moment in time, because layers belong to the
+    // track and timing belongs to the image, so "the previous drawing" needs no
+    // qualification here the way it would in TVPaint.
+    const Cel* scribbles = doc.ctgScribblesAt(track, image, layer_id);
     if (!scribbles) return kNothing;
 
     // Everything the answer depends on, mixed into one number. Cheaper than
     // hashing the pixels and exact enough: a cel bumps its revision on every
     // write, so nothing can change without this changing.
     std::uint64_t inputs = scribbles->revision() * 0x9e3779b97f4a7c15ull;
+
+    // Which cel, and not only how many times it has been written. Inheritance
+    // is the reason: reordering drawings changes the cel a scribble is read
+    // from and touches no revision anywhere, so a key made of revisions alone
+    // would go on serving the colour from the drawing that used to precede
+    // this one. Revisions collide freely -- every cel in a project straight off
+    // disk is at revision 1 -- so this is not a long shot, it is the ordinary
+    // case for a reorder made before anything has been drawn.
+    inputs = inputs * 31 + scribbles->id();
     for (LayerId source : layer->ctg_sources) {
         const Cel* cel = doc.cel(record->celFor(source));
         inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
@@ -153,8 +168,11 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
 
-    CtgFill& cached = doc.ctgCache()[scribble_id];
-    if (cached.valid && cached.inputs == inputs) return cached;
+    const CtgKey key{image, layer_id};
+    CtgFillCache& cache = doc.ctgCache();
+    if (const CtgFill* hit = cache.find(key); hit && hit->valid && hit->inputs == inputs) {
+        return *hit;
+    }
 
     // Two rectangles, and the difference between them is where the resolution
     // comes from.
@@ -177,10 +195,10 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     // at a third of full size when it could be solved at full size.
     const PixelRect filled = doc.scene().canvas();
     if (filled.isEmpty()) {
-        cached = CtgFill{};
-        cached.inputs = inputs;
-        cached.valid = true;
-        return cached;
+        CtgFill empty;
+        empty.inputs = inputs;
+        empty.valid = true;
+        return cache.store(key, std::move(empty));
     }
 
     PixelRect region = celBounds(*scribbles);
@@ -192,10 +210,10 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
               region.height + 2 * kTileSize};
     region = intersectRects(region, filled);
     if (region.isEmpty()) {
-        cached = CtgFill{};
-        cached.inputs = inputs;
-        cached.valid = true;
-        return cached;
+        CtgFill empty;
+        empty.inputs = inputs;
+        empty.valid = true;
+        return cache.store(key, std::move(empty));
     }
 
     // The solve is bounded, whatever it is asked for. A max-flow over a region
@@ -251,12 +269,12 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
         }
     }
 
-    cached = CtgFill{};
-    cached.region = filled;
-    cached.inputs = inputs;
-    cached.valid = true;
-    cached.colours = static_cast<int>(palette.size());
-    if (palette.empty()) return cached;
+    CtgFill built;
+    built.region = filled;
+    built.inputs = inputs;
+    built.valid = true;
+    built.colours = static_cast<int>(palette.size());
+    if (palette.empty()) return cache.store(key, std::move(built));
 
     problem.colour_count = static_cast<int>(palette.size());
     problem.hard.assign(palette.size(), 0);
@@ -283,6 +301,18 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     };
 
     std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;
+    const auto tileAt = [&](int px, int py) -> Tile& {
+        const TileCoord coord = tileCoordFor(px, py);
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |
+            static_cast<std::uint32_t>(coord.y);
+        auto found = tiles.find(key);
+        if (found == tiles.end()) {
+            found = tiles.emplace(key, std::make_shared<Tile>()).first;
+        }
+        return *found->second;
+    };
+
     for (int y = 0; y < filled.height; ++y) {
         const int py = filled.y + y;
         const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
@@ -294,25 +324,56 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
                 solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
             if (label < 0) continue;  // nothing reached this pixel
 
-            const TileCoord coord = tileCoordFor(px, py);
-            const std::uint64_t key =
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |
-                static_cast<std::uint32_t>(coord.y);
-
-            auto found = tiles.find(key);
-            if (found == tiles.end()) {
-                found = tiles.emplace(key, std::make_shared<Tile>()).first;
-            }
-            found->second->setPixel(tileLocal(px), tileLocal(py),
+            tileAt(px, py).setPixel(tileLocal(px), tileLocal(py),
                                     unquantise(palette[static_cast<std::size_t>(label)]));
         }
     }
+
+    // And then the scribble wins wherever it was drawn.
+    //
+    // A scribble is a statement about the pixels it covers -- this is the
+    // colour here -- and the solver's job is only the pixels nobody said
+    // anything about. So where the two disagree the scribble is what was meant,
+    // and a mark becomes a manual touch-up for whatever the min-cut missed, at
+    // no cost to the solver at all.
+    //
+    // It has to be the scribble over the fill rather than under it, and a
+    // transparent scribble is what settles that: under the fill it would be the
+    // one thing hidden, so scribbling "nothing here" would do nothing. The rule
+    // that lets a transparent scribble mean anything is the rule that makes an
+    // opaque one an override.
+    //
+    // The marks are self-effacing, which is what stops this looking like scrawl
+    // over the artwork: a scribble carries the colour of the label it produces,
+    // so wherever the fill agreed with it the override paints the colour that
+    // was already there. What you see is exactly the disagreement.
+    //
+    // Painted from the cel at full resolution rather than from the solved grid,
+    // because the solve may be coarse and a mark you made should not be. And
+    // painted as the quantised label colour rather than the pixel's own, for
+    // the same reason the seeding thresholds: a scribble is a label, so its
+    // antialiased rim must not leave a stripe of some colour between.
+    for (const TileCoord& coord : scribbles->tiles().coords()) {
+        const PixelRect whole{coord.x * kTileSize, coord.y * kTileSize, kTileSize, kTileSize};
+        const PixelRect part = intersectRects(whole, filled);
+        if (part.isEmpty()) continue;
+
+        for (int py = part.y; py < part.y + part.height; ++py) {
+            for (int px = part.x; px < part.x + part.width; ++px) {
+                const Rgba pixel = scribbles->pixel(px, py);
+                if (pixel.a < settings.scribble_alpha_threshold) continue;
+                tileAt(px, py).setPixel(tileLocal(px), tileLocal(py),
+                                        unquantise(quantise(pixel)));
+            }
+        }
+    }
+
     for (auto& [key, tile] : tiles) {
         const TileCoord coord{static_cast<int>(static_cast<std::int32_t>(key >> 32)),
                               static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
-        cached.tiles.set(coord, std::move(tile));
+        built.tiles.set(coord, std::move(tile));
     }
-    return cached;
+    return cache.store(key, std::move(built));
 }
 
 }  // namespace animage

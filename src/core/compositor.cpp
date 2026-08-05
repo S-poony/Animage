@@ -409,9 +409,18 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
         // A CTG layer shows its regenerated fill, never the scribbles that
         // produced it. If no fill has been built yet the layer simply does not
         // draw -- compositing is not the place to start a max-flow.
-        if (layer->kind == LayerKind::Ctg && !layer->show_scribbles) {
-            const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it);
-            if (fill) passes.push_back({&fill->tiles, layer});
+        //
+        // Showing the scribbles instead reads them through the resolver rather
+        // than off this image, because a drawing with none of its own is
+        // showing an earlier one's and that is exactly what you are asking to
+        // look at.
+        if (layer->kind == LayerKind::Ctg) {
+            if (layer->show_scribbles) {
+                const Cel* scribbles = doc.ctgScribblesAt(track_id, image_id, *it);
+                if (scribbles) passes.push_back({&scribbles->tiles(), layer});
+            } else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it)) {
+                passes.push_back({&fill->tiles, layer});
+            }
             continue;
         }
 

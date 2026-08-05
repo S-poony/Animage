@@ -83,6 +83,30 @@ struct Track {
     // Distinct ImageIds walking outwards from `slot`, nearest first. An image
     // held for five frames counts once, which is what onion skin wants.
     std::vector<ImageId> distinctNeighbours(std::size_t slot, int count, int direction) const;
+
+    // Where a drawing starts, or slots.size() if no slot shows it. A drawing
+    // and its holds are one contiguous run -- moveDrawing keeps them so -- and
+    // anything that means "earlier than this drawing" has to start from the
+    // front of that run rather than from wherever the playhead happens to be.
+    std::size_t firstSlotOf(ImageId id) const;
+
+    // Which drawing a layer's cel is actually read from at `image`: the image
+    // itself when it has one, otherwise the nearest earlier distinct drawing
+    // that does, or kNoId if none of them does.
+    //
+    // Sparse absence already meant "the layer is empty here" for a raster
+    // layer. For a CTG layer it means "inherited", and this is the whole of
+    // that mechanism: resolved at read time by walking time backwards, never a
+    // parent pointer stored per image. A stored pointer would be invalidated by
+    // every reorder and every deletion, and the bugs would be intermittent.
+    // This walk gets both for free -- reordering changes who inherits from
+    // whom, deleting a drawing leaves the ones after it inheriting from
+    // whatever now precedes them, and neither touches a cel.
+    //
+    // Nothing here knows about layer kinds. Whether absence means empty or
+    // inherited is a decision about the layer, and it is made by the caller;
+    // see Document::ctgScribblesAt, which is the only one that should.
+    ImageId celSourceFor(ImageId image, LayerId layer) const;
 };
 
 }  // namespace animage

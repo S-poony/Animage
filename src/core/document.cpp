@@ -341,6 +341,25 @@ const Cel* Document::celAt(TrackId track_id, ImageId image_id, LayerId layer_id)
     return cel(image->celFor(layer_id));
 }
 
+const Cel* Document::ctgScribblesAt(TrackId track_id, ImageId image_id, LayerId layer_id,
+                                    ImageId* source) const {
+    if (source) *source = kNoId;
+
+    const Track* track = scene_.findTrack(track_id);
+    if (!track) return nullptr;
+    const Layer* layer = track->findLayer(layer_id);
+    if (!layer || layer->kind != LayerKind::Ctg) return nullptr;
+
+    const ImageId from = track->celSourceFor(image_id, layer_id);
+    if (from == kNoId) return nullptr;
+
+    const Image* record = track->findImage(from);
+    if (!record) return nullptr;
+    const Cel* found = cel(record->celFor(layer_id));
+    if (found && source) *source = from;
+    return found;
+}
+
 Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_id) {
     Track* track = scene_.findTrack(track_id);
     if (!track) return nullptr;
@@ -349,7 +368,20 @@ Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_i
 
     CelId cel_id = image->celFor(layer_id);
     if (cel_id == kNoId) {
-        cel_id = createCel();
+        // "Unless the user changes them", in one place. A CTG layer with no cel
+        // of its own is showing an earlier drawing's scribbles, so the first
+        // mark made here has to start from those: creating an empty cel instead
+        // would make one stroke silently throw away every inherited mark, and
+        // the colour would vanish from the drawing you were adding to.
+        //
+        // Copy-on-write makes this a copy of tile handles rather than of
+        // pixels, the same mechanism that makes duplicateImage nearly free. Two
+        // things fall out of it and neither needs its own concept: erasing an
+        // inherited mark works, because you are editing your own copy of it,
+        // and reverting is clearCel, because absence is what inheriting means.
+        const Cel* inherited = ctgScribblesAt(track_id, image_id, layer_id);
+        cel_id = inherited ? createCelCopy(*inherited) : createCel();
+
         recordOp(std::make_unique<CelAssignOp>(track_id, image_id, layer_id, kNoId));
         image->cels[layer_id] = cel_id;
         addCelRef(cel_id);
@@ -374,16 +406,12 @@ void Document::clearCel(TrackId track_id, ImageId image_id, LayerId layer_id) {
     releaseCelRef(cel_id);
 }
 
-const CtgFill* Document::ctgFillFor(TrackId track_id, ImageId image_id,
-                                    LayerId layer_id) const {
-    const Track* track = scene_.findTrack(track_id);
-    if (!track) return nullptr;
-    const Image* image = track->findImage(image_id);
-    if (!image) return nullptr;
-
-    auto found = ctg_cache_.find(image->celFor(layer_id));
-    if (found == ctg_cache_.end() || !found->second.valid) return nullptr;
-    return &found->second;
+// The track is not part of the key: ImageIds come from one counter per
+// document, so a drawing names itself unambiguously without it. It stays in the
+// signature because every caller has one and reads better for saying so.
+const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id) const {
+    const CtgFill* found = ctg_cache_.find(CtgKey{image_id, layer_id});
+    return (found && found->valid) ? found : nullptr;
 }
 
 std::size_t Document::totalTileCount() const {

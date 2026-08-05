@@ -14,6 +14,34 @@ using namespace animage;
 
 namespace {
 
+void strokeOn(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
+              float x1, float y1, float radius, float r, float g, float b) {
+    ScopedCommand command(doc, "Stroke");
+    BrushSettings settings;
+    settings.radius = radius;
+    settings.hardness = 0.95f;
+    settings.pressure_affects_opacity = false;
+    settings.r = r;
+    settings.g = g;
+    settings.b = b;
+    settings.a = 1.0f;
+    Brush brush(settings);
+    brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+    brush.extend({x1, y1, 1.0f});
+    brush.end();
+}
+
+// A box with a hole in the bottom wall, the case a paint bucket cannot do.
+void gappedBoxOn(Document& doc, TrackId track, ImageId image, LayerId layer, int left, int top,
+                 int right, int bottom, int gap_from, int gap_to) {
+    const float w = 2.5f;
+    strokeOn(doc, track, image, layer, left, top, right, top, w, 0, 0, 0);
+    strokeOn(doc, track, image, layer, left, top, left, bottom, w, 0, 0, 0);
+    strokeOn(doc, track, image, layer, right, top, right, bottom, w, 0, 0, 0);
+    strokeOn(doc, track, image, layer, left, bottom, gap_from, bottom, w, 0, 0, 0);
+    strokeOn(doc, track, image, layer, gap_to, bottom, right, bottom, w, 0, 0, 0);
+}
+
 struct Fixture {
     Document doc;
     TrackId track;
@@ -34,31 +62,58 @@ struct Fixture {
 
     void stroke(LayerId layer, float x0, float y0, float x1, float y1, float radius,
                 float r, float g, float b) {
-        ScopedCommand command(doc, "Stroke");
-        BrushSettings settings;
-        settings.radius = radius;
-        settings.hardness = 0.95f;
-        settings.pressure_affects_opacity = false;
-        settings.r = r;
-        settings.g = g;
-        settings.b = b;
-        settings.a = 1.0f;
-        Brush brush(settings);
-        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
-        brush.extend({x1, y1, 1.0f});
-        brush.end();
+        strokeOn(doc, track, image, layer, x0, y0, x1, y1, radius, r, g, b);
     }
 
-    // A box with a hole in the bottom wall, the case a paint bucket cannot do.
     void drawGappedBox(LayerId layer, int left, int top, int right, int bottom, int gap_from,
                        int gap_to) {
-        const float w = 2.5f;
-        stroke(layer, left, top, right, top, w, 0, 0, 0);
-        stroke(layer, left, top, left, bottom, w, 0, 0, 0);
-        stroke(layer, right, top, right, bottom, w, 0, 0, 0);
-        stroke(layer, left, bottom, gap_from, bottom, w, 0, 0, 0);
-        stroke(layer, gap_to, bottom, right, bottom, w, 0, 0, 0);
+        gappedBoxOn(doc, track, image, layer, left, top, right, bottom, gap_from, gap_to);
     }
+};
+
+// Several drawings in a row, which is what inheritance needs in order to have
+// anything to inherit from.
+struct Sequence {
+    Document doc;
+    TrackId track;
+    LayerId ink;
+    LayerId colour;
+    std::vector<ImageId> images;
+
+    explicit Sequence(int count, int hold = 1) {
+        track = doc.addTrack("main");
+        colour = doc.addLayer(track, "colour", 0, LayerKind::Ctg);
+        ink = doc.addLayer(track, "ink", 1);
+
+        for (int i = 0; i < count; ++i) {
+            const std::size_t at = doc.scene().findTrack(track)->slots.size();
+            images.push_back(doc.insertImage(track, at));
+            if (hold > 1) doc.extendExposure(track, at, hold - 1);
+        }
+
+        Layer ctg = *doc.scene().findTrack(track)->findLayer(colour);
+        ctg.ctg_sources = {ink};
+        doc.updateLayer(track, colour, ctg);
+    }
+
+    const Track& track_ref() const { return *doc.scene().findTrack(track); }
+
+    void stroke(int drawing, LayerId layer, float x0, float y0, float x1, float y1,
+                float radius, float r, float g, float b) {
+        strokeOn(doc, track, images[static_cast<std::size_t>(drawing)], layer, x0, y0, x1, y1,
+                 radius, r, g, b);
+    }
+
+    void box(int drawing, int left, int top, int right, int bottom, int gap_from, int gap_to) {
+        gappedBoxOn(doc, track, images[static_cast<std::size_t>(drawing)], ink, left, top,
+                    right, bottom, gap_from, gap_to);
+    }
+
+    const CtgFill& fillOf(int drawing) {
+        return ctgFill(doc, track, images[static_cast<std::size_t>(drawing)], colour);
+    }
+
+    ImageId at(int drawing) const { return images[static_cast<std::size_t>(drawing)]; }
 };
 
 Rgba fillAt(const CtgFill& fill, int x, int y) { return fill.tiles.pixel(x, y); }
@@ -414,6 +469,371 @@ void theCanvasSizeDoesNotChangeTheFill() {
     CHECK_NEAR(large[2].r, small[2].r, 0.001);
 }
 
+// The solver decides the pixels nobody said anything about. Where somebody did
+// say something, that is the answer -- so a mark is a touch-up for whatever the
+// min-cut missed, and it costs the solver nothing.
+// How many scribbled pixels the fill disagrees with. Zero is the rule; the
+// number is returned rather than asserted so a test can also show that there
+// was a disagreement there to lose, which is the part that would otherwise pass
+// for free.
+std::size_t scribblePixelsNotHonoured(const Cel& scribbles, const CtgFill& fill,
+                                      std::size_t* counted) {
+    std::size_t wrong = 0;
+    std::size_t total = 0;
+    for (const TileCoord& coord : scribbles.tiles().coords()) {
+        for (int y = 0; y < kTileSize; ++y) {
+            for (int x = 0; x < kTileSize; ++x) {
+                const int px = coord.x * kTileSize + x;
+                const int py = coord.y * kTileSize + y;
+                if (px < fill.region.x || px >= fill.region.x + fill.region.width) continue;
+                if (py < fill.region.y || py >= fill.region.y + fill.region.height) continue;
+
+                const Rgba mark = scribbles.pixel(px, py);
+                if (mark.a < 0.5f) continue;  // the same threshold the seeding uses
+                ++total;
+
+                // Both premultiplied; the mark is opaque, so this is its colour.
+                const Rgba got = fill.tiles.pixel(px, py);
+                if (std::fabs(got.r - mark.r / mark.a) > 0.02f ||
+                    std::fabs(got.g - mark.g / mark.a) > 0.02f ||
+                    std::fabs(got.b - mark.b / mark.a) > 0.02f) {
+                    ++wrong;
+                }
+            }
+        }
+    }
+    if (counted) *counted = total;
+    return wrong;
+}
+
+// The solver decides the pixels nobody said anything about. Where somebody did
+// say something, that is the answer -- so a mark is a touch-up for whatever the
+// min-cut missed, and it costs the solver nothing.
+//
+// Checked as the rule over every mark rather than at a point chosen to show it,
+// because a point chosen to show it is a point the solver may happen to agree
+// about. It usually does: a scribble sitting in open paper keeps its own region
+// easily, since cutting across blank paper is dear. The disagreement is where a
+// mark lands on the wrong side of a line, which is also the failure this exists
+// to let somebody fix.
+void aScribbleWinsInThePixelsItCovers() {
+    TEST("a scribble wins in its own pixels, whatever the solver decided");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(scribbles != nullptr);
+
+    std::size_t counted = 0;
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, &counted), std::size_t{0});
+    CHECK(counted > 500);  // there really were marks to honour
+
+    // The mark is invisible, because it agrees with what it produced. That is
+    // what stops this looking like scrawl over the artwork: you see the
+    // disagreement and nothing else.
+    CHECK_NEAR(fillAt(fill, 130, 110).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 130, 170).r, 1.0, 0.02);
+}
+
+// The disagreement that matters, and the one this exists for.
+//
+// The solve is capped -- it runs where the interface is waiting -- so on a
+// large drawing it is coarse, and a mark finer than one cell of the solve grid
+// is never sampled as a seed at all. The solver does not overrule it; it never
+// hears about it. That is exactly when somebody is dabbing at a spot the fill
+// got wrong, so it is exactly when the mark has to appear anyway.
+//
+// Constructed rather than tuned: the sample lattice starts at the region's
+// origin, which is tile-aligned, so a step of eight samples every eighth pixel
+// from a multiple of eight. A four-pixel dot centred at 125 falls between two
+// of them and cannot be sampled, whatever the solver then decides.
+void aMarkFinerThanTheSolveGridStillShows() {
+    TEST("a mark finer than the solve grid still shows");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 125, 125, 125, 125, 2.0f, 0.0f, 1.0f, 0.0f);
+
+    CtgSettings coarse;
+    coarse.downscale = 8;
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour, coarse);
+
+    // The solver never saw the green dot: one colour, not two.
+    CHECK(fill.valid);
+    CHECK_EQ(fill.colours, 1);
+
+    // The region is red, as the solver decided.
+    CHECK_NEAR(fillAt(fill, 90, 160).r, 1.0, 0.02);
+    // And the dot is green anyway, because somebody drew it there.
+    CHECK_NEAR(fillAt(fill, 125, 125).g, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 125, 125).r, 0.0, 0.02);
+
+    // Every mark honoured, dot included.
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, nullptr), std::size_t{0});
+}
+
+// --- scribbles through time, part 1 --------------------------------------
+//
+// Absence of a cel on a CTG layer means inherited, not empty. Colour the first
+// drawing of a run and the run is coloured; draw on one and it detaches from
+// there onwards. Everything below is that one sentence, taken apart.
+
+// The scribbles come from the earlier drawing and the barrier does not. That
+// distinction is the feature: the colour carries forward, the line art it is
+// cut against is always the drawing in front of you.
+void aDrawingWithNoScribblesInheritsTheEarlierOnes() {
+    TEST("a drawing with no scribbles of its own inherits the previous ones");
+    Sequence s(3);
+
+    // The same shape, moved right on the last drawing. Any point inside one box
+    // and outside the other says which drawing's line art was used.
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 60, 60, 200, 180, 120, 140);
+    s.box(2, 100, 60, 240, 180, 160, 180);
+
+    // Scribbled once, on the first drawing only.
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+    CHECK(s.doc.celAt(s.track, s.at(2), s.colour) == nullptr);
+
+    // All three fill, and none of the later two owns a scribble.
+    CHECK_NEAR(fillAt(s.fillOf(0), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+
+    const CtgFill& third = s.fillOf(2);
+    CHECK(third.valid);
+    CHECK_EQ(third.colours, 1);
+
+    // Inside the third drawing's box, out beyond where the first drawing's box
+    // ended: filled, so the barrier is this drawing's own.
+    CHECK_NEAR(fillAt(third, 225, 160).r, 1.0, 0.02);
+    // And inside the *first* drawing's box, outside the third's: not filled.
+    CHECK_NEAR(fillAt(third, 70, 160).a, 0.0, 0.001);
+
+    // Still nothing allocated on the drawings that inherited.
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+    CHECK(s.doc.celAt(s.track, s.at(2), s.colour) == nullptr);
+}
+
+// Drawing on an inheriting drawing copies what it was showing and edits the
+// copy, so the marks that were already there survive the first stroke. Getting
+// this wrong would make one stroke wipe the colour off the drawing you were
+// adding to, which is the worst possible failure and the quietest.
+void editingADrawingDetachesItAndTheOnesAfterFollow() {
+    TEST("drawing on an inherited scribble copies it rather than starting empty");
+    Sequence s(4);
+    for (int i = 0; i < 4; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    CHECK_NEAR(fillAt(s.fillOf(3), 130, 160).r, 1.0, 0.02);
+
+    // A green mark on the third drawing, nowhere near the inherited red one.
+    s.stroke(2, s.colour, 80, 165, 95, 165, 5.0f, 0.0f, 1.0f, 0.0f);
+
+    // It has its own cel now, and that cel still carries the inherited red --
+    // this is the copy, and it is what stops a first stroke from erasing.
+    const Cel* own = s.doc.celAt(s.track, s.at(2), s.colour);
+    CHECK(own != nullptr);
+    CHECK_NEAR(own->pixel(135, 110).r, 1.0, 0.02);
+    CHECK_NEAR(own->pixel(88, 165).g, 1.0, 0.02);
+
+    // Two colours from here on, one before.
+    CHECK_EQ(s.fillOf(1).colours, 1);
+    CHECK_EQ(s.fillOf(2).colours, 2);
+    CHECK_EQ(s.fillOf(3).colours, 2);
+
+    // The earlier drawings are untouched, and still own nothing.
+    CHECK(s.doc.celAt(s.track, s.at(0), s.colour) != nullptr);
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+    CHECK(s.doc.celAt(s.track, s.at(3), s.colour) == nullptr);
+}
+
+// Reverting is clearCel and nothing else, because absence is what inheriting
+// means. No "delete inherited scribble" concept exists and none is needed.
+void clearingAnOverrideReturnsItToInheriting() {
+    TEST("clearing a drawing's own scribbles returns it to inheriting");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    s.stroke(1, s.colour, 120, 110, 150, 110, 7.0f, 0.0f, 0.0f, 1.0f);
+
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).b, 1.0, 0.02);
+
+    s.doc.clearCel(s.track, s.at(1), s.colour);
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+
+    // Both are back to the first drawing's red, without anything having had to
+    // know that blue was an override.
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+}
+
+// Resolving at read time is what makes this true, and it is why the design says
+// never to store a parent pointer: one would be stale the instant a drawing was
+// deleted, and stale intermittently.
+void deletingTheSourceLeavesLaterDrawingsInheritingFromWhatPrecedes() {
+    TEST("deleting the drawing a scribble came from re-inherits from earlier");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    s.stroke(1, s.colour, 120, 110, 150, 110, 7.0f, 0.0f, 0.0f, 1.0f);
+
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).b, 1.0, 0.02);
+
+    s.doc.removeDrawing(s.track, s.at(1));
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+}
+
+void reorderingChangesInheritanceWithoutTouchingACel() {
+    TEST("reordering drawings changes who inherits from whom, and costs nothing");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    s.stroke(2, s.colour, 120, 110, 150, 110, 7.0f, 0.0f, 0.0f, 1.0f);
+
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+
+    // Bring the last drawing to the front: 2, 0, 1.
+    s.doc.moveDrawing(s.track, s.at(2), 0);
+
+    // The middle drawing now follows the blue one, and still owns no cel.
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);  // 0 still precedes 1
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+
+    // And the drawing that used to be first now inherits blue from the one in
+    // front of it -- except it has red of its own, so it keeps red.
+    CHECK_NEAR(fillAt(s.fillOf(0), 130, 160).r, 1.0, 0.02);
+
+    // Move the red one to the end instead: 2, 1, 0. Now the middle drawing,
+    // which owns nothing, follows blue.
+    s.doc.moveDrawing(s.track, s.at(0), 2);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).b, 1.0, 0.02);
+    CHECK(s.doc.celAt(s.track, s.at(1), s.colour) == nullptr);
+}
+
+// Forward only. A drawing before the one that was scribbled has nothing to
+// inherit and stays uncoloured; it does not reach forwards for a scribble it
+// was never given. Backwards is a separate, explicit thing if it is ever
+// wanted -- it is sometimes what you want and never what you expect.
+void inheritanceRunsForwardOnly() {
+    TEST("inheritance runs forward only");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(1, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    CHECK(!s.fillOf(0).valid);  // nothing before it, so nothing at all
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+}
+
+// A drawing held for five frames is one step back, not five, and a hold is not
+// a break in the chain either.
+void inheritanceCrossesAHold() {
+    TEST("a held drawing is one step back, not one per frame");
+    Sequence s(3, 5);  // each drawing exposed over five frames
+    CHECK_EQ(s.track_ref().frameCount(), std::size_t{15});
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    CHECK_EQ(s.track_ref().celSourceFor(s.at(2), s.colour), s.at(0));
+    CHECK_NEAR(fillAt(s.fillOf(2), 130, 160).r, 1.0, 0.02);
+}
+
+// Inheritance belongs to the CTG layer and to nothing else. On a raster layer
+// an absent cel still means the layer is empty here, and it has to keep meaning
+// that: it is what makes adding a layer and holding a drawing cost nothing.
+void onlyAColourLayerInherits() {
+    TEST("a raster layer with no cel is still empty, not inherited");
+    Sequence s(2);
+    s.box(0, 60, 60, 200, 180, 120, 140);
+
+    CHECK(s.doc.celAt(s.track, s.at(1), s.ink) == nullptr);
+    CHECK(s.doc.ctgScribblesAt(s.track, s.at(1), s.ink) == nullptr);
+    CHECK_EQ(s.track_ref().celSourceFor(s.at(1), s.ink), s.at(0));  // the walk is neutral
+
+    // The compositor draws nothing for the second drawing's ink.
+    Compositor compositor;
+    Framebuffer frame;
+    compositor.composite(s.doc, s.track, s.at(1), {0, 0, 260, 240}, frame);
+    CHECK_NEAR(frame.pixel(130, 60).a, 0.0, 1e-3);
+}
+
+// The invariant inheritance was most likely to break by materialising
+// something. It does not, because it resolves at read time.
+void addingAColourLayerToALongTrackAllocatesNothing() {
+    TEST("adding a colour layer to a long track still allocates nothing");
+    Sequence s(1);
+    for (int i = 0; i < 499; ++i) {
+        const std::size_t at = s.doc.scene().findTrack(s.track)->slots.size();
+        s.doc.insertImage(s.track, at);
+    }
+    const std::size_t before = s.doc.celCount();
+    s.doc.addLayer(s.track, "colour 2", 0, LayerKind::Ctg);
+    CHECK_EQ(s.doc.celCount(), before);
+}
+
+// Reordering moves no revision anywhere -- it only changes which cel a drawing
+// reads its scribbles from -- so a cache key made of revisions alone goes on
+// serving the colour from whichever drawing used to precede this one. The two
+// scribbles here are drawn identically on purpose, so their cels sit at exactly
+// the same revision and only their identity tells them apart. That is not a
+// contrived case: every cel in a project straight off disk is at revision 1.
+void aReorderInvalidatesTheFillEvenWhenNoRevisionMoves() {
+    TEST("a reorder invalidates the fill even though no revision moved");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+
+    // The same stroke twice, in two colours: same dabs, same revision.
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    s.stroke(2, s.colour, 120, 110, 150, 110, 6.0f, 0.0f, 0.0f, 1.0f);
+    CHECK_EQ(s.doc.celAt(s.track, s.at(0), s.colour)->revision(),
+             s.doc.celAt(s.track, s.at(2), s.colour)->revision());
+
+    // The middle drawing follows the red one, and that answer gets cached.
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 1.0, 0.02);
+
+    // Slide the blue drawing in between, so the middle one now follows blue:
+    // the order becomes 0, 2, 1. Nothing has been written to any cel.
+    s.doc.moveDrawing(s.track, s.at(2), 1);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(s.fillOf(1), 130, 160).r, 0.0, 0.02);
+}
+
+// The change most likely to be missed, because nothing fails when it is: the
+// fill is right either way and only the cost moves. Under the old key -- the
+// cel holding the scribbles -- a run of drawings inheriting one cel shared one
+// cache slot and fought over it, re-solving on every frame change.
+void solvingTwoDrawingsAndComingBackDoesNotResolve() {
+    TEST("coming back to a drawing does not re-solve it");
+    Sequence s(3);
+    for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
+    s.stroke(0, s.colour, 120, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    // All three inherit one cel, and each is its own entry.
+    s.fillOf(0);
+    s.fillOf(1);
+    s.fillOf(2);
+    const std::uint64_t solves = s.doc.ctgCache().storeCount();
+    CHECK_EQ(solves, std::uint64_t{3});
+
+    // Scrubbing back over them costs nothing at all.
+    s.fillOf(1);
+    s.fillOf(0);
+    s.fillOf(2);
+    s.fillOf(1);
+    CHECK_EQ(s.doc.ctgCache().storeCount(), solves);
+
+    // And each drawing still has its own fill to serve, rather than one of them
+    // having overwritten the others.
+    CHECK(s.doc.ctgFillFor(s.track, s.at(0), s.colour) != nullptr);
+    CHECK(s.doc.ctgFillFor(s.track, s.at(1), s.colour) != nullptr);
+    CHECK(s.doc.ctgFillFor(s.track, s.at(2), s.colour) != nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -430,5 +850,19 @@ int main() {
     noScribblesMeansNoFill();
     aCoarseSolveAgreesWithTheFineOne();
     theCompositorShowsTheFillNotTheScribbles();
+    aScribbleWinsInThePixelsItCovers();
+    aMarkFinerThanTheSolveGridStillShows();
+
+    aDrawingWithNoScribblesInheritsTheEarlierOnes();
+    editingADrawingDetachesItAndTheOnesAfterFollow();
+    clearingAnOverrideReturnsItToInheriting();
+    deletingTheSourceLeavesLaterDrawingsInheritingFromWhatPrecedes();
+    reorderingChangesInheritanceWithoutTouchingACel();
+    aReorderInvalidatesTheFillEvenWhenNoRevisionMoves();
+    inheritanceRunsForwardOnly();
+    inheritanceCrossesAHold();
+    onlyAColourLayerInherits();
+    addingAColourLayerToALongTrackAllocatesNothing();
+    solvingTwoDrawingsAndComingBackDoesNotResolve();
     return testing::summarise("ctg");
 }

@@ -1165,9 +1165,17 @@ void MainWindow::addLayer() {
     canvas_->refreshAll();
 }
 
-// Every raster layer becomes a barrier by default. Cutting against the rough as
-// well as the clean closes gaps that leak from either alone, and there is no
-// good reason to make someone ask for that.
+// The layers you can see become the barrier. Cutting against the rough as well
+// as the clean closes gaps that leak from either alone, so several sources is
+// the default rather than something to ask for -- but a layer you have hidden
+// is one you have said you are not working against, and taking it anyway meant
+// a fill stopping at a line nobody could see.
+//
+// Only raster layers: another colour layer is a flat, and a flat has no edges
+// to cut along. Taken once, at creation, and editable afterwards -- the set is
+// a property of the layer and not a reading of what happens to be on screen
+// when the solver runs, or toggling a rough for a moment would silently
+// recolour the shot.
 //
 // It goes to the bottom of the pile rather than above the selected layer, which
 // is where an ordinary layer goes. A colour layer is cut against the line art
@@ -1187,7 +1195,9 @@ void MainWindow::addColourLayer() {
     if (after) {
         Layer settings = *after->findLayer(created);
         for (const Layer& layer : after->layers) {
-            if (layer.kind == LayerKind::Raster) settings.ctg_sources.push_back(layer.id);
+            if (layer.kind == LayerKind::Raster && layer.visible) {
+                settings.ctg_sources.push_back(layer.id);
+            }
         }
         doc_.updateLayer(track_, created, settings);
     }

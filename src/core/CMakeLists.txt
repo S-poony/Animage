@@ -6,6 +6,7 @@
   command.cpp
   compositor.cpp
   ctg.cpp
+  ctg_fill.cpp
   document.cpp
   gridflow.cpp
   json.cpp
