@@ -137,6 +137,41 @@ struct InkLevel {
     std::vector<float> ink;
 };
 
+// Spread the ink out, a little, in place.
+//
+// Line art is thin, and two thin lines either coincide or they do not: agreement
+// between them is all or nothing, and its maximum can be nowhere near the right
+// answer. Two circles a person drew freehand at the same place are never quite
+// the same size, and two rings of different radius have no overlap at all when
+// they are concentric -- they overlap most when slid until they touch. So the
+// sharp-ink answer for "the same circle, drawn twice" is "it moved by the
+// difference of the radii", which is nonsense and is what was reported.
+//
+// Blurred, a drawing stops being a line and becomes a shape, and shapes agree
+// most when they sit on top of each other. Three taps, and the pyramid does the
+// rest: by the top level a stroke is a smudge several cells wide.
+void blur(InkLevel& level) {
+    std::vector<float> pass(level.ink.size(), 0.0f);
+    const auto at = [&](const std::vector<float>& from, int x, int y) {
+        x = std::clamp(x, 0, level.width - 1);
+        y = std::clamp(y, 0, level.height - 1);
+        return from[static_cast<std::size_t>(y) * level.width + x];
+    };
+    for (int y = 0; y < level.height; ++y) {
+        for (int x = 0; x < level.width; ++x) {
+            pass[static_cast<std::size_t>(y) * level.width + x] =
+                0.25f * at(level.ink, x - 1, y) + 0.5f * at(level.ink, x, y) +
+                0.25f * at(level.ink, x + 1, y);
+        }
+    }
+    for (int y = 0; y < level.height; ++y) {
+        for (int x = 0; x < level.width; ++x) {
+            level.ink[static_cast<std::size_t>(y) * level.width + x] =
+                0.25f * at(pass, x, y - 1) + 0.5f * at(pass, x, y) + 0.25f * at(pass, x, y + 1);
+        }
+    }
+}
+
 InkLevel halve(const InkLevel& fine) {
     InkLevel coarse;
     coarse.width = std::max(1, fine.width / 2);
@@ -169,28 +204,36 @@ InkLevel halve(const InkLevel& fine) {
     return coarse;
 }
 
-// Mean absolute difference between the two, with `from` shifted by (dx, dy) and
-// anything shifted off the edge counted as bare paper.
+// How much ink the two have in common, with `from` shifted by (dx, dy).
+// Bigger is better, and it is what the search maximises.
 //
-// Counting the edge rather than ignoring it is deliberate: a shift that slides
-// half the drawing out of the area is being asked to explain the ink that is
-// left behind, and scoring only the overlap would make the emptiest shift the
-// best one.
-float difference(const InkLevel& from, const InkLevel& to, int dx, int dy) {
+// Agreement, and emphatically not difference. Difference was what this did
+// first, and on line art it has a fatal minimum: a drawing is nearly all bare
+// paper, so a *wrong* alignment is charged twice -- once for the ink it puts
+// where there is none, once for the ink it fails to cover -- while sliding the
+// whole drawing off the edge is charged only once, for the ink left uncovered.
+// Two circles a person drew in the same place never coincide exactly, so
+// "disappear entirely" scored better than "line them up", and the search
+// happily reported four hundred and eighty pixels of movement for a circle that
+// had not moved.
+//
+// Agreement cannot do that: ink pushed off the edge agrees with nothing and
+// scores zero, which is the worst score there is rather than the best. It is
+// also the right question to be asking -- what a translation is *for* is
+// putting ink on ink.
+double agreement(const InkLevel& from, const InkLevel& to, int dx, int dy) {
     double total = 0.0;
     for (int y = 0; y < to.height; ++y) {
         const int sy = y - dy;
+        if (sy < 0 || sy >= from.height) continue;
         for (int x = 0; x < to.width; ++x) {
             const int sx = x - dx;
-            const float a = (sx < 0 || sy < 0 || sx >= from.width || sy >= from.height)
-                                ? 0.0f
-                                : from.ink[static_cast<std::size_t>(sy) * from.width + sx];
-            const float b = to.ink[static_cast<std::size_t>(y) * to.width + x];
-            total += std::abs(static_cast<double>(a) - static_cast<double>(b));
+            if (sx < 0 || sx >= from.width) continue;
+            total += static_cast<double>(from.ink[static_cast<std::size_t>(sy) * from.width + sx]) *
+                     static_cast<double>(to.ink[static_cast<std::size_t>(y) * to.width + x]);
         }
     }
-    return static_cast<float>(total /
-                              (static_cast<double>(to.width) * to.height));
+    return total;
 }
 
 }  // namespace
@@ -225,11 +268,16 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     };
     if (ink_total(a) < 1.0 || ink_total(b) < 1.0) return {};
 
+    blur(a);
+    blur(b);
+
     std::vector<InkLevel> pyramid_a{a};
     std::vector<InkLevel> pyramid_b{b};
     while (pyramid_a.back().width > 12 && pyramid_a.back().height > 12) {
         pyramid_a.push_back(halve(pyramid_a.back()));
         pyramid_b.push_back(halve(pyramid_b.back()));
+        blur(pyramid_a.back());
+        blur(pyramid_b.back());
     }
 
     // Exhaustive at the top, where the grid is a dozen cells across and every
@@ -253,12 +301,15 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
         const int reach_y = top ? coarse_b.height : 2;
         const CtgShift from_above{best.x * (top ? 1 : 2), best.y * (top ? 1 : 2)};
 
+        // Ties go to the shift already in hand, which at the top is no shift at
+        // all. Nothing to choose between two alignments means the drawing did
+        // not move, and that is the answer that carries a mark unchanged.
         CtgShift found = from_above;
-        float score = difference(coarse_a, coarse_b, found.x, found.y);
+        double score = agreement(coarse_a, coarse_b, found.x, found.y);
         for (int dy = from_above.y - reach_y; dy <= from_above.y + reach_y; ++dy) {
             for (int dx = from_above.x - reach_x; dx <= from_above.x + reach_x; ++dx) {
-                const float here = difference(coarse_a, coarse_b, dx, dy);
-                if (here >= score) continue;
+                const double here = agreement(coarse_a, coarse_b, dx, dy);
+                if (here <= score) continue;
                 score = here;
                 found = {dx, dy};
             }

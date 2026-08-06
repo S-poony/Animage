@@ -1469,6 +1469,40 @@ void theShiftIsMeasuredFromTheInkAlone() {
 // Reported: the fill follows the drawing, and everything that reports on the
 // marks says they did not. Three symptoms, and the test asks each of them
 // separately because they need not have had one cause.
+// Reported, with a project: five circles drawn freehand in the same place, and
+// the marks moved hundreds of pixels. Two drawings of the same thing never
+// coincide exactly, and the score has to survive that.
+//
+// The first version scored a shift by how much the two drawings *differed*,
+// which on line art has a fatal minimum: a drawing is nearly all bare paper, so
+// a wrong alignment is charged twice -- for the ink it puts where there is none
+// and for the ink it leaves uncovered -- while sliding the drawing clean off the
+// edge is charged once. "Disappear entirely" beat "line them up", and the search
+// answered with the far corner of its own search window.
+void aShapeRedrawnInPlaceHasNotMoved() {
+    TEST("a shape redrawn in the same place is not reported as having moved");
+    Sequence s(2);
+    s.followTheMotion();
+
+    // The same box twice, the second a little smaller and a little off, as a
+    // hand draws it. Nothing has moved.
+    s.box(0, 100, 100, 400, 400, 240, 260);
+    s.box(1, 108, 112, 388, 384, 240, 260);
+    s.stroke(0, s.colour, 200, 250, 300, 250, 12.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK(carried.inherited);
+
+    // Within a small part of the shape. It is not zero and should not be -- the
+    // drawing did shift a little -- but a mark in the middle stays in the
+    // middle.
+    CHECK(std::abs(carried.carried_by.x) < 60);
+    CHECK(std::abs(carried.carried_by.y) < 60);
+    CHECK_NEAR(fillAt(carried, 350, 350).r, 1.0, 0.02);
+    CHECK(carried.spread > 5.0f);
+}
+
 void whatIsShownAgreesWithWhatWasSolved() {
     TEST("everything that reports on a moved mark agrees with the fill");
     Sequence s(2);
@@ -1760,6 +1794,7 @@ int main() {
     movingMarksCanBeTurnedOff();
     redrawingTheOriginMovesTheMarkAgain();
     theShiftIsMeasuredFromTheInkAlone();
+    aShapeRedrawnInPlaceHasNotMoved();
     whatIsShownAgreesWithWhatWasSolved();
 
     aLiftedSolveAgreesWithTheDocument();
