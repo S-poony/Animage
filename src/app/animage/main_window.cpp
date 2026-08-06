@@ -460,7 +460,7 @@ void MainWindow::buildLayerPanel() {
     connect(ctg_sources_, &QListWidget::itemChanged, this, &MainWindow::onCtgSourcesChanged);
     colour_layout->addWidget(ctg_sources_);
 
-    ctg_inherit_ = new QCheckBox(QStringLiteral("Carry to drawings with none"),
+    ctg_inherit_ = new QCheckBox(QStringLiteral("Carry marks to drawings with none"),
                                  colour_settings_);
     ctg_inherit_->setFocusPolicy(Qt::NoFocus);
     ctg_inherit_->setToolTip(
