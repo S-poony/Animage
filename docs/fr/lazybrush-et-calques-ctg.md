@@ -1,5 +1,13 @@
 # LazyBrush et les calques CTG — recherche
 
+> **Note ajoutée après implémentation.** Ce document reste la spécification et
+> n'est pas réécrit. Quelques passages ont été dépassés par ce qui a été
+> construit, et sont signalés sur place par une note du même genre. Ce qui a
+> effectivement été fait, et pourquoi cela diffère, est en anglais dans
+> [../handover.md](../handover.md) et
+> [../scribbles-through-time.md](../scribbles-through-time.md) ; ces deux
+> fichiers décrivent le code, celui-ci décrit l'intention.
+
 ## 1. La filiation est confirmée
 
 - **LazyBrush**, Daniel Sýkora, John Dingliana, Steven Collins (Trinity College
@@ -208,6 +216,19 @@ Deux optimisations mentionnées :
 | Faible contraste | Trait à peine plus sombre que la zone → étiquetage aberrant | Prétraitement LoG ou rehaussement non linéaire |
 | Artefacts de métrication | Longs trous → frontière en escalier (norme L¹ minimisée) | Post-traitement par contour actif |
 
+> **Ajouté après implémentation.** Le cas « Raccourcis » est désormais *détecté*
+> et pas seulement documenté : après résolution, `CtgFill::spread` mesure la
+> surface qu'une marque a gagnée par pixel d'elle-même, et une coupe qui encercle
+> le scribble donne exactement 1. La timeline signale ces dessins-là. Le remède
+> reste celui de la table — un pinceau plus large.
+>
+> Une limite de plus, mesurée et absente d'ici parce qu'elle n'apparaît qu'en
+> reportant les marques d'un dessin à l'autre : **une marque qui atterrit dans la
+> mauvaise région de la bonne taille**. Aucune quantité lisible sur un seul
+> dessin ne la voit — `spread` *augmente* dans ce cas, la marque ayant bien
+> rempli une région. Voir `bench_carry` et
+> [../scribbles-through-time.md](../scribbles-through-time.md).
+
 ## 6. Ce que ça implique pour Animage
 
 **Le calque CTG ne stocke pas des pixels de couleur, il stocke des scribbles.**
@@ -222,6 +243,13 @@ partir de (trait source + scribbles + palette). D'où :
 Dans le modèle de données, ça donne un `Layer { kind: CTG }` dont les `Cel`
 contiennent des scribbles + une référence au calque de trait servant de source,
 et un cache raster invalidé à chaque édition.
+
+> **Ajouté après implémentation.** La référence aux calques de trait est portée
+> par le **calque** (`Layer::ctg_sources`) et non par le cel : elle vaut pour
+> toute la track, comme le calque lui-même, et un cel qui la porterait la
+> répéterait à chaque dessin. Le cache raster est dans le document, borné, et
+> jetable — perdre un remplissage ne coûte qu'un recalcul, ce qui est la
+> propriété qui autorise le calque à stocker des marques plutôt que des pixels.
 
 **"Onion fill" — le vrai gain de production.** Le papier montre qu'on peut
 colorier **plusieurs intervalles superposés en une seule passe** : un scribble
@@ -246,6 +274,20 @@ bénéfice/effort :
    n'est plus nécessaire. Les auteurs citent eux-mêmes l'extension au domaine
    spatio-temporel comme travail futur. C'est là qu'il y a de la place.
 
+> **Ajouté après implémentation.** Les trois pistes sont faites, la troisième à
+> moitié. Le multi-source est en place et par défaut. L'ordre des couleurs est
+> celui du papier (la plus grande aire de scribble d'abord) et non une prédiction
+> depuis l'image précédente : la prédiction reste ouverte et n'a pas été mesurée.
+>
+> La propagation temporelle est construite en deux temps, décrits en anglais dans
+> [../scribbles-through-time.md](../scribbles-through-time.md) : une marque
+> **reste** d'un dessin au suivant tant qu'on n'y touche pas, et elle **suit** le
+> trait, d'une translation par dessin estimée en recalant les deux dessins. Ni
+> l'une ni l'autre ne stocke quoi que ce soit — l'absence de cel signifie
+> « hérité », et la translation est recalculée à chaque résolution. Les rangs
+> au-dessus (une transformation par région, puis le recalage ARAP de Sýkora,
+> Dingliana et Collins 2009) restent à faire, et c'est bien là qu'est la place.
+
 **Performance et interactivité.** Le max-flow se parallélise mal sur GPU. La
 bonne stratégie est ailleurs :
 
@@ -255,6 +297,28 @@ bonne stratégie est ailleurs :
   un autre calque ;
 - utiliser le regroupement en 4 terminaux pour borner le coût ;
 - mettre en cache le résultat par cel, invalidé par un hash des scribbles.
+
+> **Ajouté après implémentation. Deux de ces quatre points sont faux tels
+> qu'écrits.**
+>
+> **La règle « jamais au dessin sur un autre calque » est à l'envers.** Le calque
+> de trait *est* la barrière : encrer par-dessus un dessin colorié change la
+> frontière, donc le remplissage. Ce qu'il fallait dire est « jamais pendant un
+> tracé, quel qu'il soit » — la résolution appartient à la fin du geste. Écrit
+> dans l'autre sens, cela a coûté un max-flow par point de pinceau pendant qu'on
+> encrait.
+>
+> **Le cache n'est pas par cel.** Depuis que les marques se reportent d'un dessin
+> à l'autre, un même cel de scribbles sert plusieurs dessins : la clé est
+> `(dessin, calque)`. Et le hash ne peut pas se limiter aux scribbles — il mêle
+> les révisions des cels de trait, l'identité du cel de scribbles (le
+> réordonnancement change lequel est lu sans changer aucune révision), et, quand
+> les marques suivent le mouvement, le trait du dessin d'où elles viennent.
+>
+> Le premier point, lui, est construit et amélioré : la passe grossière n'est pas
+> une fraction fixe mais un budget en cellules, et la passe pleine résolution
+> comme la passe grossière tournent **toutes les deux** hors du fil de
+> l'interface. Le regroupement en 4 terminaux n'a pas été fait et reste ouvert.
 
 **Point juridique à vérifier avant d'écrire une ligne :** LazyBrush a été
 commercialisé (plugin payant, puis intégration TVPaint). Il faut vérifier s'il

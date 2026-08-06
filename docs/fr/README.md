@@ -3,6 +3,12 @@
 Ces quatre documents sont la spécification d'origine du projet. Ils font
 autorité sur les décisions d'architecture ; le code les suit, pas l'inverse.
 
+Ils ne sont pas réécrits au fil de l'implémentation. Là où le code s'en écarte —
+et il s'en écarte, toujours délibérément — une note **ajoutée après
+implémentation** le signale sur place et renvoie au document anglais qui donne
+les raisons et les mesures. Ce qui a été construit se raconte dans
+[../handover.md](../handover.md) ; ce qui était voulu se lit ici.
+
 | Document | Sujet |
 |---|---|
 | [plan-de-prototype.md](plan-de-prototype.md) | Choix techniques, structures de données, jalons M0–M5 |

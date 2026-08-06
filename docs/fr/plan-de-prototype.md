@@ -1,5 +1,16 @@
 # Animage — Plan de prototype
 
+> **Note ajoutée après implémentation.** Ce plan reste la spécification et n'est
+> pas réécrit. Le code s'en écarte délibérément sur plusieurs points — le
+> compositing est sur le CPU et non en QRhi, le max-flow est écrit ici plutôt que
+> pris dans Boost, les cels ne sont pas des PNG (un PNG 16 bits ne peut pas
+> contenir un half-float sans perdre des pixels), et la prédiction du stylet est
+> refusée et non reportée. Chacun de ces écarts est un jugement, avec ses raisons
+> et ses mesures, et ils sont listés en anglais dans
+> [../handover.md](../handover.md) — section « What is not what the plan asked
+> for ». Lire les deux : celui-ci dit ce qui était voulu, l'autre ce qui a été
+> fait et pourquoi.
+
 **Objectif du prototype** : valider les deux paris du projet — le modèle de
 données (calques communs à la track, timing porté par l'image) et le calque
 CTG — sur une seule plateforme, avec une vraie tablette, avant d'écrire du code
