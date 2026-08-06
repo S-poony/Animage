@@ -134,16 +134,10 @@ std::vector<int> TimelineWidget::drawingNumbers() const {
 
 // What to show on one drawing's card about its colour layers.
 //
-// Read from the verdicts rather than from the fills, and that is the whole
-// difference between a flag that is useful and one that is not. A fill exists
-// only for a drawing somebody has looked at, so flags taken from fills lit up
-// behind you as you played through a shot -- telling you a drawing was wrong
-// only once you were already looking at it. The verdicts are made for every
-// drawing at once by auditCtgFills, which is run from outside because painting
-// a timeline is no more allowed to start a max-flow than compositing is.
-//
-// Whether the marks were carried is still a walk over the slots and costs
-// nothing, so it does not wait for the audit at all.
+// A walk over the slots and nothing else, so it costs nothing and is true for
+// every drawing whether or not anybody has been there. There was a second thing
+// here -- a wedge for a drawing whose carried marks had landed badly -- and it
+// was removed; see docs/handover.md for the measurements that took it out.
 TimelineWidget::ColourState TimelineWidget::colourStateFor(ImageId image) const {
     ColourState state;
     const Track* line = track();
@@ -157,8 +151,6 @@ TimelineWidget::ColourState TimelineWidget::colourStateFor(ImageId image) const 
         state.any = true;
         if (from != image) state.carried = true;
 
-        const CtgVerdict* verdict = doc_.ctgVerdictFor(image, layer.id);
-        if (verdict && verdict->suspect) state.suspect = true;
     }
     return state;
 }
@@ -204,23 +196,11 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             // The feature is invisible when it works -- a carried mark looks
             // exactly like one you drew -- so the only way to know it is
             // working is to be told. A bar under the number for colour that was
-            // carried here, and a wedge in the corner for colour that was
-            // carried here and filled nothing when it arrived.
+            // carried here.
             const ColourState state = colourStateFor(line->slots[i]);
             if (state.carried) {
                 painter.fillRect(QRect(cell.left() + 4, cell.bottom() - 4, cell.width() - 8, 2),
                                  colours.carried);
-            }
-            if (state.suspect) {
-                const int corner = 7;
-                QPolygon wedge;
-                wedge << QPoint(cell.right() - corner, cell.top() + 1)
-                      << QPoint(cell.right() - 1, cell.top() + 1)
-                      << QPoint(cell.right() - 1, cell.top() + corner);
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(colours.flag);
-                painter.drawPolygon(wedge);
-                painter.setBrush(Qt::NoBrush);
             }
         }
 

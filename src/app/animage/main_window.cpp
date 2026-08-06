@@ -99,24 +99,11 @@ MainWindow::MainWindow() {
     });
     connect(canvas_, &CanvasWidget::colourPicked, this, &MainWindow::applyColour);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
-    // Judging every drawing is what makes a flag say "go and look at drawing
-    // 34" rather than "you are standing on a bad one". It is cheap -- 67 ms for
-    // twelve 1080p drawings cold, nothing at all when none of them has moved --
-    // but not cheap enough to do per dab, so it waits for the edits to stop.
-    //
-    // Restarting rather than accumulating is the point of the timer: a stroke
-    // is many changes and deserves one audit, at the end.
-    audit_timer_ = new QTimer(this);
-    audit_timer_->setSingleShot(true);
-    audit_timer_->setInterval(250);
-    connect(audit_timer_, &QTimer::timeout, this, &MainWindow::auditColourFills);
-
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
-        audit_timer_->start();
         syncStatus();
     });
-    // A fill or a verdict landed. Queued, because a solve installed while the
+    // A fill landed. Queued, because a solve installed while the
     // canvas is painting itself would rebuild the layer panel underneath the
     // paint, which is a way to delete a widget while it is drawing.
     connect(
@@ -759,11 +746,6 @@ void MainWindow::afterProjectLoaded() {
 
     saved_undo_depth_ = doc_.undoDepth();
 
-    // A project straight off disk has been judged by nobody, and its flags are
-    // exactly what somebody opening a coloured shot wants first: which drawings
-    // to go and look at.
-    auditColourFills();
-
     syncStatus();
     updateTitle();
 }
@@ -1201,9 +1183,6 @@ QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
     // couple of hundred pixels wide, and a row that spells out what it is doing
     // is a row elided to "..." -- which says less than nothing, because it
     // hides the very words that were the point.
-    const CtgVerdict* verdict = doc_.ctgVerdictFor(here, layer.id);
-    if (verdict && verdict->suspect) return QStringLiteral("⚠ ") + name;
-
     ImageId from = kNoId;
     if (doc_.ctgScribblesAt(track_, here, layer.id, &from) && from != here) {
         return QStringLiteral("← ") + name;
@@ -1235,15 +1214,7 @@ void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, Image
                    .arg(source ? source->number : 0);
     }
 
-    const CtgVerdict* verdict = doc_.ctgVerdictFor(here, layer.id);
-    if (verdict && verdict->suspect) {
-        tip += QStringLiteral("\n\nThose carried marks fill almost nothing but themselves here,\n"
-                              "so whatever they were meant to colour has moved out from\n"
-                              "under them. Worth a look.");
-        item->setForeground(0, QBrush(QColor(0xe0, 0x7a, 0x1e)));
-    } else {
-        item->setForeground(0, QBrush());
-    }
+    item->setForeground(0, QBrush());
     item->setToolTip(0, tip);
 }
 
@@ -1310,7 +1281,6 @@ void MainWindow::onCtgSourcesChanged() {
     // the source cels' revisions and those have not moved, so nothing would
     // notice on its own.
     doc_.ctgCache().clear();
-    doc_.ctgVerdicts().clear();
     canvas_->refreshAll();
     // What the row says about the layer is about the layer, so it is said now
     // rather than whenever the next fill happens to land. It used to ride on
@@ -1318,7 +1288,6 @@ void MainWindow::onCtgSourcesChanged() {
     // inside the paint that started it and became a stale panel the moment the
     // solve moved to another thread.
     refreshLayerFlags();
-    audit_timer_->start();
     syncStatus();
 }
 
@@ -1336,49 +1305,18 @@ void MainWindow::onCtgSettingChanged() {
     doc_.updateLayer(track_, updated.id, updated);
 
     // Which drawing's marks a drawing reads is not part of the fill's key
-    // either -- it is resolved on the way in -- so the same applies, to the
-    // verdicts as much as to the fills.
+    // either -- it is resolved on the way in -- so the same applies.
     doc_.ctgCache().clear();
-    doc_.ctgVerdicts().clear();
     ctg_direction_->setEnabled(updated.ctg_inherit);
     ctg_follow_->setEnabled(updated.ctg_inherit);
     canvas_->refreshAll();
-    auditColourFills();
-    syncStatus();
-}
-
-// Ask for every drawing to be judged, and show what is already known.
-//
-// The asking is all that happens here now: the verdicts arrive on their own,
-// one drawing at a time, and each one brings the panels up to date with it
-// through colourChanged. What is shown in the meantime is the last thing that
-// was known, which for a shot being coloured is nearly all of it.
-//
-// Public so a test can drive it rather than wait a quarter of a second, for the
-// same reason openProjectAt and onAutosaveTick are. A test that wants the
-// answers rather than the asking waits for them -- see waitForColour.
-void MainWindow::auditColourFills() {
-    audit_timer_->stop();
-    canvas_->requestColourAudit();
-    timeline_widget_->refresh();
     refreshLayerFlags();
+    syncStatus();
 }
 
 // Waits for every solve in flight, for a test that needs to look at the result
 // rather than at the fact that it was asked for.
 bool MainWindow::waitForColour() { return canvas_->settleColour(); }
-
-bool MainWindow::colourFlagAt(std::size_t slot) const {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || slot >= track->slots.size()) return false;
-
-    for (const Layer& layer : track->layers) {
-        if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
-        const CtgVerdict* verdict = doc_.ctgVerdictFor(track->slots[slot], layer.id);
-        if (verdict && verdict->suspect) return true;
-    }
-    return false;
-}
 
 // The rows already exist; only what they report has moved.
 //
@@ -1601,6 +1539,7 @@ void MainWindow::addColourLayer() {
 
     canvas_->setActiveLayer(created);
     rebuildLayerList();
+    timeline_widget_->refresh();  // as above: the cards say what the colour is doing
     canvas_->refreshAll();
 }
 
@@ -1626,6 +1565,11 @@ void MainWindow::removeCurrentLayer() {
     const Track* after = doc_.scene().findTrack(track_);
     if (after && !after->layers.empty()) canvas_->setActiveLayer(after->layers.front().id);
     rebuildLayerList();
+    // The timeline draws what the colour layers are doing -- a bar under a
+    // drawing whose colour was carried there -- so removing one changes it.
+    // Nothing else was going to tell it: a card is painted from the layer list
+    // and a layer list that has lost a layer looks the same until it repaints.
+    timeline_widget_->refresh();
     canvas_->refreshAll();
 }
 

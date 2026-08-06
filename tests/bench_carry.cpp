@@ -16,8 +16,9 @@
 //               one, the fill has stopped short of what it was meant to fill.
 //   leak     -- of the world outside the shape, how much took it anyway. Above
 //               zero, the colour is somewhere it does not belong.
-//   spread   -- what the timeline flag is computed from, so that the flag can
-//               be checked against the thing it is supposed to detect.
+//   spread   -- how much region the worst mark won for each pixel of itself. A
+//               flag was built on this and taken out again; the number stays,
+//               because it is what the next attempt has to beat.
 //
 // Run it by hand:  ./build/tests/bench_carry
 
@@ -91,7 +92,6 @@ struct Landing {
     double coverage = 0.0;
     double leak = 0.0;
     float spread = 0.0f;
-    bool suspect = false;
 };
 
 // How much of the shape's inside took the mark's colour, and how much of the
@@ -128,7 +128,6 @@ Landing measure(const CtgFill& fill, const PixelRect& box) {
     out.coverage = inside_total ? static_cast<double>(inside_red) / inside_total : 0.0;
     out.leak = outside_total ? static_cast<double>(outside_red) / outside_total : 0.0;
     out.spread = fill.spread;
-    out.suspect = fill.suspect();
     return out;
 }
 
@@ -166,17 +165,16 @@ void carryAcross(int count, int step, float mark, bool follow) {
     std::printf("  shape %dx%d, gap %d, mark radius %.0f, moving %d px a drawing, marks %s\n",
                 shape.width, shape.height, shape.gap, static_cast<double>(mark), step,
                 follow ? "follow" : "stay");
-    std::printf("    drawing   shift   coverage    leak    spread   moved  flagged\n");
+    std::printf("    drawing   shift   coverage    leak    spread   moved\n");
 
     for (int i = 0; i < count; ++i) {
         const CtgJob job = ctgJobFor(doc, track, drawings[static_cast<std::size_t>(i)], colour,
                                      CtgSettings{}, kFullSolveBudget);
         const CtgFill fill = solveCtgJob(job, true);
         const Landing landed = measure(fill, shape.at(i * step));
-        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %5d   %s\n", i + 1, i * step,
+        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %5d\n", i + 1, i * step,
                     landed.coverage * 100.0, landed.leak * 100.0,
-                    static_cast<double>(landed.spread), fill.carried_by.x,
-                    landed.suspect ? "yes" : "");
+                    static_cast<double>(landed.spread), fill.carried_by.x);
     }
     std::printf("\n");
 }
@@ -275,7 +273,7 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
                 neighbour_marked ? "a mark in each" : "a mark in the left half only",
                 static_cast<double>(mark), step, follow ? "follow" : "stay");
     std::printf(
-        "    drawing   shift    left red   right blue   right red   spread   moved  flagged\n");
+        "    drawing   shift    left red   right blue   right red   spread   moved\n");
 
     constexpr int kInset = 10;
     for (int i = 0; i < count; ++i) {
@@ -290,12 +288,11 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
         const PixelRect right_half{mid + kInset, at.y + kInset, at.x + at.width - mid - 2 * kInset,
                                    at.height - 2 * kInset};
 
-        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %5d   %s\n",
+        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %5d\n",
                     i + 1, i * step, fractionOf(fill, left_half, true) * 100.0,
                     fractionOf(fill, right_half, false) * 100.0,
                     fractionOf(fill, right_half, true) * 100.0,
-                    static_cast<double>(fill.spread), fill.carried_by.x,
-                    fill.suspect() ? "yes" : "");
+                    static_cast<double>(fill.spread), fill.carried_by.x);
     }
     std::printf("\n");
 }

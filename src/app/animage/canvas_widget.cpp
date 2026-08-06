@@ -286,36 +286,6 @@ void CanvasWidget::requestCtgFills() {
     noteColourPending();
 }
 
-// Asks for every drawing to be judged.
-//
-// The same solve as a fill and a much cheaper one: coarse, and stopped after
-// the labelling, so what it keeps is a few bytes rather than a canvas of tiles.
-// It goes behind everything on screen, because it is a whole track's worth of
-// work and nobody is waiting for any one of its answers.
-//
-// This ran on the interface thread until now, once every quarter of a second
-// after the edits stopped -- 67 ms for twelve drawings and rather more for
-// ninety-six, paid in the middle of whatever you were doing.
-void CanvasWidget::requestColourAudit() {
-    if (track_ == kNoId) return;
-
-    const std::uint64_t generation = doc_.ctgCache().generation();
-    const CtgSettings settings = auditSettings();
-
-    for (const CtgToJudge& todo : ctgAuditWork(doc_, track_, settings)) {
-        const ColourAsked asked{todo.key.image, todo.key.layer, false};
-        const auto already = ctg_asked_.find(asked);
-        if (already != ctg_asked_.end() && already->second.inputs == todo.inputs) continue;
-
-        ctg_asked_[asked] = {todo.inputs, generation};
-        ctg_solver_.request(todo.key,
-                            ctgJobFor(doc_, track_, todo.key.image, todo.key.layer, settings),
-                            false, CtgSolver::Priority::Whenever);
-    }
-
-    noteColourPending();
-}
-
 // Starts and stops the poll, and says when the answer to "is the colour being
 // worked out" has changed.
 //
@@ -364,7 +334,6 @@ void CanvasWidget::dropStaleColourRequests(bool only_this_drawing) {
 // to the document stays on the thread that owns it.
 void CanvasWidget::collectColour() {
     bool filled = false;
-    bool judged = false;
     dropStaleColourRequests(/*only_this_drawing=*/false);
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
@@ -377,20 +346,15 @@ void CanvasWidget::collectColour() {
         if (asked == ctg_asked_.end() || asked->second.inputs != result.fill.inputs) continue;
 
         ctg_asked_.erase(asked);
-        // Where the marks ended up, from whichever kind of solve reported it.
-        // The Marks column and the first stroke on a carrying drawing both have
-        // to agree with the fill about that. See Document::ctgShiftAt.
+        // Where the marks ended up. The Marks column and the first stroke on a
+        // carrying drawing both have to agree with the fill about that. See
+        // Document::ctgShiftAt.
         doc_.ctgShifts()[result.key] = result.fill.carried_by;
-        if (result.wanted_tiles) {
-            doc_.ctgCache().store(result.key, std::move(result.fill));
-            filled = true;
-        } else {
-            doc_.ctgVerdicts()[result.key] = verdictFrom(result.fill);
-            judged = true;
-        }
+        doc_.ctgCache().store(result.key, std::move(result.fill));
+        filled = true;
     }
 
-    if (!filled && !judged) {
+    if (!filled) {
         noteColourPending();
         return;
     }
@@ -403,12 +367,8 @@ void CanvasWidget::collectColour() {
     // everywhere else, and hiding and showing the layer repainted the lot -- so
     // the same operation appeared to have two behaviours.
     //
-    // A verdict changes nothing on the canvas at all -- it is a judgement about
-    // pixels and not pixels -- so it costs a panel refresh and no repaint.
-    if (filled) {
-        dirty_everything_ = true;
-        update();
-    }
+    dirty_everything_ = true;
+    update();
     Q_EMIT colourChanged();
 }
 

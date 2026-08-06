@@ -1122,66 +1122,12 @@ void carryingCanRunBothWays() {
     CHECK_NEAR(fillAt(t.fillOf(1), 130, 160).g, 1.0, 0.02);
 }
 
-// A flag that only appears once you have looked at a drawing has told you
-// nothing you did not just find out. The whole track has to be judged without
-// anybody visiting it, and cheaply enough to do after every edit.
-void everyDrawingIsJudgedWithoutBeingVisited() {
-    TEST("every drawing is judged without being visited");
-    Sequence s(12);
-    s.doc.setCanvasSize(1920, 1080);
-
-    // The shape sits still for six drawings and then jumps across the frame,
-    // leaving the carried mark stranded from there on.
-    for (int i = 0; i < 12; ++i) {
-        const int left = (i < 6) ? 200 : 1200;
-        s.box(i, left, 200, left + 400, 700, left + 180, left + 220);
-    }
-    s.stroke(0, s.colour, 300, 400, 700, 400, 24.0f, 1.0f, 0.0f, 0.0f);
-
-    // Nothing has been looked at, so nothing is known.
-    CHECK(s.doc.ctgVerdictFor(s.at(7), s.colour) == nullptr);
-
-    const auto started = std::chrono::steady_clock::now();
-    auditCtgFills(s.doc, s.track);
-    const double seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    std::printf("      [audited 12 drawings of 1920x1080 in %.0f ms]\n", seconds * 1000.0);
-
-    // Judged everywhere, and the judgement is right on both sides of the jump.
-    for (int i = 0; i < 12; ++i) {
-        const CtgVerdict* verdict = s.doc.ctgVerdictFor(s.at(i), s.colour);
-        CHECK(verdict != nullptr);
-        if (!verdict) continue;
-        CHECK_EQ(verdict->inherited, i != 0);
-        CHECK_EQ(verdict->suspect, i >= 6);
-    }
-
-    // It cost nothing to look at, which is the part that has to be true for
-    // this to run after every edit.
-    CHECK(seconds < 1.0);
-
-    // And running it again is nearly free, because nothing moved.
-    const auto again_started = std::chrono::steady_clock::now();
-    auditCtgFills(s.doc, s.track);
-    const double again =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - again_started).count();
-    std::printf("      [re-audited unchanged in %.1f ms]\n", again * 1000.0);
-    CHECK(again < seconds / 4.0);
-
-    // The audit is a separate store and must not have disturbed the fills the
-    // canvas is showing: a coarse pass cannot evict a fine answer.
-    CHECK_EQ(s.doc.ctgCache().size(), std::size_t{0});
-}
-
-// The signal that decides whether the automation gets used or switched off.
-//
-// It has to work with marks that are merely carried, not only with marks that
-// have been moved to follow the drawing -- carrying a mark unchanged under line
-// art that has moved is exactly how it lands in the wrong place, so this is the
-// state where the flag earns its keep. The layer here is set not to move them,
-// which is what makes this that state.
-void aCarriedMarkThatLandsWrongIsFlagged() {
-    TEST("a carried mark that lands in the wrong region is flagged");
+// What `spread` measures, which is all that is left of the flag that was built
+// on it: how much region a mark won for each pixel of itself. The flag came out
+// -- see docs/handover.md -- and the number stayed, because it is the honest
+// measurement the next attempt has to beat and bench_carry reports it.
+void aCarriedMarkThatLandsWrongWinsNothingButItself() {
+    TEST("a carried mark that lands on nothing wins nothing but itself");
     Sequence s(2);
 
     // The same shape on both drawings, but moved a long way across. A mark
@@ -1196,7 +1142,6 @@ void aCarriedMarkThatLandsWrongIsFlagged() {
     const CtgFill& own = s.fillOf(0);
     CHECK(own.valid);
     CHECK(!own.inherited);
-    CHECK(!own.suspect());
     // It filled a shape many times its own size: 8.3 here, which is the box's
     // area over the mark's.
     CHECK(own.spread > 5.0f);
@@ -1207,17 +1152,17 @@ void aCarriedMarkThatLandsWrongIsFlagged() {
     const CtgFill& carried = s.fillOf(1);
     CHECK(carried.valid);
     CHECK(carried.inherited);
-    CHECK(carried.spread < kCtgSpreadFloor);
-    CHECK(carried.suspect());
+    CHECK(carried.spread < 1.05f);  // exactly 1.00: the cut hugs the seed
 
     // And the signal the design notes propose says nothing at all here, which
-    // is why it is not what the flag rests on.
+    // is the whole reason it was not what the flag rested on.
     CHECK(carried.confidence > 0.99f);
 }
 
-// The ordinary case has to stay quiet, or the flag is noise.
-void aCarriedMarkThatLandsRightIsNotFlagged() {
-    TEST("a carried mark that lands where it should says nothing");
+// And the ordinary case, which is what the number could never be told from --
+// a mark filling a small region snugly measures 1.96, against 1.00 here.
+void aCarriedMarkThatLandsRightWinsARegion() {
+    TEST("a carried mark that lands where it should wins a whole region");
     Sequence s(3);
     for (int i = 0; i < 3; ++i) s.box(i, 60, 60, 200, 180, 120, 140);
     s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
@@ -1225,8 +1170,7 @@ void aCarriedMarkThatLandsRightIsNotFlagged() {
     for (int i = 0; i < 3; ++i) {
         const CtgFill& fill = s.fillOf(i);
         CHECK(fill.valid);
-        CHECK(fill.spread > kCtgSpreadFloor);
-        CHECK(!fill.suspect());
+        CHECK(fill.spread > 5.0f);
     }
     CHECK(s.fillOf(1).inherited);
     CHECK(!s.fillOf(0).inherited);
@@ -1243,7 +1187,7 @@ void confidenceIsMeasuredAgainstTheSolveAndNotTheFill() {
     s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
 
     const CtgFill& carried = s.fillOf(1);
-    CHECK(carried.suspect());
+    CHECK(carried.spread < 1.05f);
 
     // Every one of those pixels is nonetheless its own colour in the fill,
     // which is what makes the fill useless for judging this.
@@ -1424,8 +1368,7 @@ void aCarriedMarkFollowsTheDrawing() {
 
     // And the shape is filled, where carrying it unchanged fills nothing.
     CHECK_NEAR(fillAt(carried, 390, 160).r, 1.0, 0.02);
-    CHECK(carried.spread > kCtgSpreadFloor);
-    CHECK(!carried.suspect());
+    CHECK(carried.spread > 5.0f);
 }
 
 // The mark's own pixels have to move with it. They are painted over the fill --
@@ -1479,7 +1422,7 @@ void movingMarksCanBeTurnedOff() {
     const CtgFill& carried = s.fillOf(1);
     CHECK(carried.valid);
     CHECK(carried.carried_by.isZero());
-    CHECK(carried.suspect());  // and it lands wrong, which is the whole point
+    CHECK(carried.spread < 1.05f);  // and it lands on nothing, which is the point
 }
 
 // Redrawing the line art of the drawing a mark came from changes how far the
@@ -1539,19 +1482,8 @@ void whatIsShownAgreesWithWhatWasSolved() {
     const CtgFill& carried = s.fillOf(1);
     CHECK(carried.valid);
     CHECK_NEAR(fillAt(carried, 390, 160).r, 1.0, 0.02);
-    CHECK(!carried.suspect());
 
-    // 1. The timeline's flag, which is not read off the fill but off the
-    //    whole-track audit.
-    auditCtgFills(s.doc, s.track);
-    const CtgVerdict* verdict = s.doc.ctgVerdictFor(s.at(1), s.colour);
-    CHECK(verdict != nullptr);
-    if (verdict) {
-        CHECK(!verdict->suspect);
-        CHECK(verdict->spread > kCtgSpreadFloor);
-    }
-
-    // 2. The Marks column, which shows the scribbles instead of the fill. It
+    // 1. The Marks column, which shows the scribbles instead of the fill. It
     //    has to show them where they are being used, or it says the fill is
     //    built from marks that are not the ones it was built from.
     const CtgShift moved = s.doc.ctgShiftAt(s.at(1), s.colour);
@@ -1569,7 +1501,7 @@ void whatIsShownAgreesWithWhatWasSolved() {
     CHECK(frame.pixel(390, 100).a > 0.5f);
     CHECK_NEAR(frame.pixel(130, 100).a, 0.0, 0.001);
 
-    // 3. Taking the drawing over. The first mark made on a drawing that is
+    // 2. Taking the drawing over. The first mark made on a drawing that is
     //    carrying copies what it was showing and edits the copy -- and what it
     //    was showing is the moved marks, not the ones as drawn.
     {
@@ -1591,7 +1523,32 @@ void whatIsShownAgreesWithWhatWasSolved() {
     CHECK(after.valid);
     CHECK(!after.inherited);
     CHECK_NEAR(fillAt(after, 390, 160).r, 1.0, 0.02);
-    CHECK(!after.suspect());
+
+    // 3. And now that the drawing owns its marks, nothing may move them again.
+    //    A stroke in progress is shown through the same path that draws the
+    //    Marks column, so a shift left over from before the takeover put the
+    //    pen's own line as far from the pen as the drawing had moved.
+    CHECK(s.doc.ctgShiftAt(s.at(1), s.colour).isZero());
+    {
+        Layer marks = *s.doc.scene().findTrack(s.track)->findLayer(s.colour);
+        marks.show_scribbles = true;
+        s.doc.updateLayer(s.track, s.colour, marks);
+    }
+    Framebuffer own_marks;
+    compositor.compositeLayers(s.doc, s.track, s.at(1), {s.colour}, {0, 0, 700, 250},
+                               own_marks);
+    // The dab made at 340..350, where it was made.
+    CHECK(own_marks.pixel(345, 170).a > 0.5f);
+    CHECK_NEAR(own_marks.pixel(605, 170).a, 0.0, 0.001);
+
+    // Taking the drawing over forgets the shift, and a solve that was already
+    // running for the state before it can still land afterwards and put one
+    // back. Own marks are where they are whatever the store says.
+    s.doc.ctgShifts()[CtgKey{s.at(1), s.colour}] = CtgShift{260, 0};
+    Framebuffer late;
+    compositor.compositeLayers(s.doc, s.track, s.at(1), {s.colour}, {0, 0, 700, 250}, late);
+    CHECK(late.pixel(345, 170).a > 0.5f);
+    CHECK_NEAR(late.pixel(605, 170).a, 0.0, 0.001);
 }
 
 // --- the solve, lifted off the document ---------------------------------
@@ -1724,7 +1681,7 @@ void anUnboundedSolveIsFinerThanABoundedOne() {
 
     CHECK(capped.step > 1);   // where the interface waits, quality is what pays
     CHECK_EQ(whole.step, 1);  // and where it does not, nothing pays
-    CHECK(whole.spread > kCtgSpreadFloor);
+    CHECK(whole.spread > 5.0f);
 }
 
 // A source layer is a source because it is listed as one, not because it is
@@ -1788,9 +1745,8 @@ int main() {
     carryingScribblesCanBeSwitchedOff();
     carryingCanRunBackwards();
     carryingCanRunBothWays();
-    everyDrawingIsJudgedWithoutBeingVisited();
-    aCarriedMarkThatLandsWrongIsFlagged();
-    aCarriedMarkThatLandsRightIsNotFlagged();
+    aCarriedMarkThatLandsWrongWinsNothingButItself();
+    aCarriedMarkThatLandsRightWinsARegion();
     confidenceIsMeasuredAgainstTheSolveAndNotTheFill();
 
     aCtgStrokeWritesLabelsAndNotPaint();

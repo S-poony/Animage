@@ -155,21 +155,9 @@ quantising to a third colour that competed for regions on its own account. See
 `BrushSettings::label`. Two strokes crossing leave two labels, every alpha on the
 cel is exactly 0 or 1, and erasing writes exact zeros.
 
-**Every drawing is judged, so the flags mean something.** After a solve, the
-worst mark's `spread` — how much region it won for each pixel of itself — says
-whether it filled a shape or only itself. `auditCtgFills` runs that over the
-whole track coarsely, keeping a few bytes per drawing and no tiles, in 67 ms for
-twelve 1080p drawings cold and nothing at all when none has moved. It is run a
-quarter of a second after the edits stop, and on opening a project, because a
-flag exists to say *which drawings to go to*: one that appears only once you are
-looking at a drawing has told you nothing you did not just find out.
-
-The flag is raised only for carried marks, and that is the point rather than a
-hedge. A mark disagreeing with the solver on the drawing in front of you is
-something you can watch happen; the same mark carried to the ninety drawings
-after it is not. It does not wait for scribbles that move, which is the right way
-round: carrying a mark unchanged under line art that has moved is precisely how
-it lands wrong.
+**There was a flag on every drawing, and it had to come out.** It is worth
+reading before building another one, because everything about it was right
+except the part that mattered. See "the flag that had to come out" below.
 
 Of the colour issues, #3, #6 and #7 are done and #8 is half done — the
 transparent colour exists, the non-modal colour panel is deliberately parked. #6
@@ -195,25 +183,24 @@ in the right region and nothing finer.
 was drawn, a carried mark holds its region only while the drawing has moved less
 than about half that region's width — that is the soft-scribble majority rule
 applied to a mark that has not moved — and half a region's width between two
-drawings is very ordinary. Past it, one of two things happens, and only one of
-them is caught:
+drawings is very ordinary. Past it, one of two things happens, and no quantity
+read off one drawing can tell them apart:
 
 - With a mark in the next region too, the two contest the overlap, somebody
-  loses, `spread` collapses to about 1 and the drawing is flagged. Every time,
-  at exactly the displacement where it goes wrong.
+  loses, and `spread` collapses to about 1 — at exactly the displacement where
+  it goes wrong.
 - With **nothing** in the next region, the carried mark simply takes it —
   uncontested majority is a formality — and `spread` *rises*, 6.3 to 12.8,
-  because the mark did fill a region and the number cannot ask which one. **The
-  flag does not merely miss this case, it endorses it.** That is the design
-  note's "wrong region of about the right size", and it is the one failure
-  nothing here can see.
+  because the mark did fill a region and the number cannot ask which one. That
+  is the design note's "wrong region of about the right size", and it is why a
+  flag on this number was worse than none. See "the flag that had to come out".
 
 Moving the marks removes both: 400 px of movement, `spread` unchanged at 7.70,
 and the neighbouring region goes from 100% wrong to none. **Where it fails is by
 locking on** — matching ink is ambiguous when ink repeats, and a box with a wall
 down the middle moved 200 px matched its far wall to the divider. The fill is
 then exactly as wrong as carrying unchanged, which is the floor this cannot go
-below, and the flag catches that one.
+below.
 
 **Three things have to agree about where a mark ended up, and at first only one
 of them did.** Reported as a bug and it was three: the fill followed the drawing
@@ -605,24 +592,61 @@ it the solver labelled with the mark's own colour comes out at exactly 1 across
 every case in `test_ctg`: a seed is only overruled when severing it beats
 isolating it, which needs a mark that is nearly all edge. It is kept in
 `CtgFill::confidence` and documented as a dead end so it is not derived a third
-time. What separates is `spread`, and by a wide margin — 8.3, 17, 23, 65, 188 for
-marks that landed properly, 1.82 for the tightest legitimate one, 1.00 for a mark
-carried off its shape. It is not an invented quantity either: a cut that
-encircles the scribble is exactly what `fr/lazybrush-et-calques-ctg.md` §5 calls
-**Raccourcis**, so the flag names a failure the research had already named.
+time. `spread` separates further — 8.3, 17, 23, 65, 188 for marks that landed
+properly against 1.00 for a mark carried off its shape — and not far enough to
+carry a flag either, which took a second round of measurements to establish. See
+"the flag that had to come out" above. A cut that encircles the scribble is
+exactly what `fr/lazybrush-et-calques-ctg.md` §5 calls **Raccourcis**, so the
+number does name a failure the research had already named; naming it is not the
+same as being able to detect it.
 
 **And both numbers have to come off the solver's labels, never the finished
 fill.** A mark wins its own pixels in the fill whatever the solver decided, so
 read back from the fill every mark is perfectly placed, always. There is a test
 pinning it, because it is the mistake the next person will make.
 
-**A flag read from a cache only reports where you have been.** The timeline's
-flags were taken from `ctgFillFor`, and a fill exists only for a drawing somebody
-has visited — so they lit up behind you as you played through a shot. That is not
-a weaker version of the feature, it is the absence of it: the flag exists to say
-which drawings to go to. The verdicts are a separate, unevictable store precisely
-because the timeline needs all of them at once and the fills it would need are
-megabytes each.
+**The flag that had to come out.** The timeline flagged drawings whose carried
+marks had filled nothing but themselves, from a whole-track audit that judged
+every drawing coarsely so the flag could say "go and look at drawing 34" rather
+than "you are standing on a bad one". It was reported as firing on drawings whose
+colour was perfectly good, often enough to be worth less than nothing, and it was
+removed rather than tuned. What is left is `CtgFill::spread`, the measurement,
+which `bench_carry` reports.
+
+Two things were measured before deciding, and neither found the reported case:
+the coarse audit does not judge differently from the fine solve (45.2 against
+62.1 on the same drawing, and the same verdict), and a mark that fills a small
+region snugly — which is what "scribble bigger to bridge bigger holes" asks
+people to draw — bottoms out at 1.96 against a floor of 1.5. Close, but not the
+reported symptom.
+
+What the measurements do say is that the number cannot carry a flag at all.
+A mark that filled nothing measures exactly 1.00; a mark that snugly fills a
+small region measures 1.96 and a thinner region would measure less; and a mark
+that filled *the wrong region* measures **higher** than one that filled the right
+one, because `spread` is an amount and not a correspondence. A threshold in a gap
+half a unit wide, with a case on the wrong side of it that the number actively
+rewards, is not a signal with a bad constant. It is the wrong quantity.
+
+So the next attempt should not start from a threshold on one drawing. What
+"wrong" means here only exists by reference to the drawing a mark came from —
+the same correspondence rung three of
+[scribbles-through-time.md](scribbles-through-time.md) has to build anyway — and
+until that exists, no flag is better than one that cries wolf. That is not a
+consolation: a flag people learn to ignore also teaches them to ignore the next
+one.
+
+The audit went with it, since nothing else read it. What survives is the shape of
+it, in `CtgSolver`: a second priority for work nobody is waiting for, and a solve
+that stops after the labelling and keeps no tiles. Both are tested and both are
+exactly what a whole-track pass needs when there is something worth passing over.
+
+One thing it taught that outlives it. **A flag read from a cache only reports
+where you have been.** The first version took its flags from `ctgFillFor`, and a
+fill exists only for a drawing somebody has visited — so they lit up behind you
+as you played through a shot. That is not a weaker version of such a feature, it
+is the absence of it, and any future one has to be computed for drawings nobody
+has opened.
 
 **A Qt stylesheet with no type selector styles the widget's tooltip too.** A
 swatch styled `background:#c00` handed its own colour to its own tooltip, and the
@@ -677,12 +701,10 @@ marks were made (`estimateCtgShift`), flatten the ink into a barrier
 (`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
 (`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
 poll on the canvas collects the result, puts it in the cache, marks everything
-dirty and emits `colourChanged`; `MainWindow` refreshes the timeline flags, the
-layer panel and the status bar from that one signal.
+dirty and emits `colourChanged`; `MainWindow` refreshes the timeline, the layer
+panel and the status bar from that one signal.
 
-The whole-track audit is the same path with `want_tiles` false and a lower
-priority, and it keeps a `CtgVerdict` per drawing rather than a picture. The
-compositor draws whatever fill is in the cache and never starts a solve —
+The compositor draws whatever fill is in the cache and never starts a solve —
 `Document::ctgFillFor` is const for exactly that reason.
 
 ```bash
@@ -700,8 +722,7 @@ ctest --test-dir build --output-on-failure
 before changing anything about carrying marks. It moves a shape a known amount
 per drawing, marks only the first, and reports what the fill did on the rest:
 how much of the region took the colour, how much of the world outside it did,
-what `spread` said about it, and how far the solve decided the drawing had
-moved. Every case runs twice, with the marks left where they were drawn and with
+what `spread` said about it, and how far the solve decided the drawing had moved. Every case runs twice, with the marks left where they were drawn and with
 them following the line art, so the two are read side by side.
 
 `bench_save` reports a full save, a full re-save, an incremental save with
@@ -757,18 +778,15 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    already ignores such tiles, so the correctness problem is gone and only the
    waste is left. The traps are the undo journal, which records tile snapshots
    by (cel, coord), and the tiles copy-on-write shares between cels.
-5. **A better "wrong region" test than `spread`.** What is flagged today is "this
-   mark filled nothing but itself", which is a fact. What is not caught is a mark
-   landing in the *wrong region of about the right size* — and that is no longer
-   a suspicion, it is measured: `bench_carry` produces it on demand, and `spread`
-   does not merely miss it, it **rises**, because the mark did fill a region and
-   the number cannot ask which one. "Wrong" only exists by reference to the
-   drawing the mark came from, so it needs a correspondence between regions on
-   two drawings, which is what item 3 would produce. Every proxy tried on paper —
+5. **A flag that means something.** There was one, built on `spread`, and it came
+   out — see "the flag that had to come out". Anything that replaces it has to
+   clear a bar the old one did not: "wrong" only exists by reference to the
+   drawing a mark came from, so it needs a correspondence between regions on two
+   drawings, which is what item 3 would produce. Every proxy tried on paper —
    area ratio, region overlap — misfires on fast movement, which is exactly when
-   carrying is most likely to be wrong *and* most likely to be right. Do not ship
-   a second flag that cries wolf often enough to teach somebody to ignore both;
-   wait until item 3 gives it something real to check against.
+   carrying is most likely to be wrong *and* most likely to be right. And it has
+   to be computed for drawings nobody has opened, which is what the audit did and
+   what `CtgSolver`'s second priority is still there for.
 6. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
 7. **The rest of the open issues**: several tracks (#1, which the timeline and

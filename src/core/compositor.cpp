@@ -417,10 +417,19 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
                 // somewhere the fill says they are not -- and the one view
                 // whose job is to show what the solver saw would be the one
                 // view that does not.
-                const Cel* scribbles = doc.ctgScribblesAt(track_id, image_id, *it);
+                //
+                // Only marks that were carried here. A drawing's own marks are
+                // already where they are, and moving them again would move the
+                // stroke you are making: a scribble in progress is shown
+                // through this path, so a shift left over from before the
+                // drawing took its marks over put the pen's own line half a
+                // screen away from the pen.
+                ImageId from = kNoId;
+                const Cel* scribbles = doc.ctgScribblesAt(track_id, image_id, *it, &from);
                 if (scribbles) {
-                    passes.push_back({&scribbles->tiles(), layer,
-                                      doc.ctgShiftAt(image_id, *it)});
+                    const CtgShift offset =
+                        (from == image_id) ? CtgShift{} : doc.ctgShiftAt(image_id, *it);
+                    passes.push_back({&scribbles->tiles(), layer, offset});
                 }
             } else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it)) {
                 passes.push_back({&fill->tiles, layer});

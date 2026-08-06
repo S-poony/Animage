@@ -105,26 +105,15 @@ public:
     CtgFillCache& ctgCache() { return ctg_cache_; }
     const CtgFillCache& ctgCache() const { return ctg_cache_; }
 
-    // The whole-track verdicts, one per (drawing, layer). Derived like the
-    // fills and kept for the same reason, but never evicted: they are a few
-    // bytes each and the timeline needs every one of them at once. See
-    // auditCtgFills.
-    using CtgVerdicts = std::unordered_map<CtgKey, CtgVerdict, CtgKeyHash>;
-    CtgVerdicts& ctgVerdicts() { return ctg_verdicts_; }
-    const CtgVerdicts& ctgVerdicts() const { return ctg_verdicts_; }
-
-    // The verdict on one drawing, or null if it has not been judged.
-    const CtgVerdict* ctgVerdictFor(ImageId image, LayerId layer) const;
-
     // How far the marks a drawing is carrying were moved to get there, as the
     // last solve of it worked out.
     //
-    // Derived like everything else about a fill, and kept here for the same
-    // reason the verdicts are: three other things have to agree with the fill
-    // about where a mark ended up, and none of them can afford to work it out.
-    // The Marks column draws the scribbles where they were used; the first
-    // stroke on a carrying drawing copies what it was showing; and both would
-    // otherwise say the mark is somewhere the fill it produced says it is not.
+    // Derived like everything else about a fill, and kept here because two
+    // other things have to agree with the fill about where a mark ended up and
+    // neither can afford to work it out: the Marks column draws the scribbles
+    // where they were used, and the first stroke on a carrying drawing copies
+    // what it was showing. Both would otherwise put the mark somewhere the fill
+    // it produced says it is not.
     //
     // Zero when nothing has solved this drawing yet, which is the same answer
     // as "it did not move" and is the behaviour it replaced.
@@ -209,7 +198,6 @@ private:
     std::vector<Command> redo_stack_;
 
     CtgFillCache ctg_cache_;
-    CtgVerdicts ctg_verdicts_;
     CtgShifts ctg_shifts_;
 };
 

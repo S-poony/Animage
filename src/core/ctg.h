@@ -69,32 +69,4 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
 CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer,
                      const CtgSettings& settings, bool want_tiles);
 
-// One drawing of one layer that has not been judged, or has been judged and has
-// moved since.
-struct CtgToJudge {
-    CtgKey key;
-    std::uint64_t inputs = 0;
-};
-
-// Which drawings of the track need judging, and forgetting the verdicts of the
-// ones that have gone.
-//
-// The walk, without the solving: both audits do this and only one of them has
-// anywhere to solve. Skipping the drawings whose inputs have not moved is what
-// makes running the pass over a whole track after every edit affordable -- one
-// drawing changed, so one drawing is re-judged and the rest cost a hash apiece.
-std::vector<CtgToJudge> ctgAuditWork(Document& doc, TrackId track,
-                                     const CtgSettings& settings = auditSettings());
-
-// Judges every drawing of the track, so the timeline can flag the ones worth
-// looking at without anybody having visited them.
-//
-// This is the whole point of the flag: it says which drawings to go and look at,
-// and a flag that only appears once you have looked at a drawing has told you
-// nothing you did not just find out. Painting a timeline is no more allowed to
-// start a max-flow than compositing is, so the pass is run deliberately, from
-// outside, and cheaply -- coarse by default, keeping only the numbers, and
-// skipping every drawing whose inputs have not moved.
-void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings = auditSettings());
-
 }  // namespace animage

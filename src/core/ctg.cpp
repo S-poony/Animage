@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctg.h"
 
-#include <algorithm>
-#include <unordered_map>
 
 namespace animage {
 
 // Everything the answer depends on, without working the answer out.
 //
-// Its own function because three callers need it and only one of them wants the
-// fill: the cache asks "has anything moved" before paying for a solve, and the
-// audit asks the same before paying for a coarse one. A second copy of the rule
-// for what a fill depends on is a stale fill nobody can explain, so there is
-// one.
+// Its own function because the cache asks "has anything moved" before paying
+// for a solve, and the canvas asks it again before deciding to ask for one. A
+// second copy of the rule for what a fill depends on is a stale fill nobody can
+// explain, so there is one.
 CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerId layer_id,
                        const CtgSettings& settings) {
     CtgInputs out;
@@ -149,72 +146,6 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     // about that and cannot afford to work it out. See Document::ctgShiftAt.
     doc.ctgShifts()[key] = built.carried_by;
     return cache.store(key, std::move(built));
-}
-
-std::vector<CtgToJudge> ctgAuditWork(Document& doc, TrackId track,
-                                     const CtgSettings& settings) {
-    std::vector<CtgToJudge> wanted;
-
-    const Track* line = doc.scene().findTrack(track);
-    if (!line) return wanted;
-
-    std::vector<LayerId> layers;
-    for (const Layer& layer : line->layers) {
-        if (layer.kind == LayerKind::Ctg && layer.visible) layers.push_back(layer.id);
-    }
-    if (layers.empty()) {
-        doc.ctgVerdicts().clear();
-        return wanted;
-    }
-
-    // Distinct drawings, not frames: a drawing held over five of them is one
-    // solve, and the verdict belongs to the drawing.
-    std::vector<ImageId> drawings;
-    for (ImageId id : line->slots) {
-        if (std::find(drawings.begin(), drawings.end(), id) == drawings.end()) {
-            drawings.push_back(id);
-        }
-    }
-
-    // Rebuilt rather than added to, so a verdict about a drawing that has been
-    // deleted, or a layer that is no longer a colour layer, goes away with it.
-    //
-    // A verdict that has merely gone out of date is *kept* until the new one
-    // arrives, and that is the difference between a flag and a flicker. One
-    // stroke on a drawing that others inherit from moves the hash of every one
-    // of them, so dropping the stale verdicts would take the flags off the
-    // whole timeline and put them back a moment later, on every stroke. A flag
-    // that is a fifth of a second out of date says what it said before; a flag
-    // that blinks teaches you to stop reading it.
-    auto& verdicts = doc.ctgVerdicts();
-    Document::CtgVerdicts kept;
-    for (ImageId image : drawings) {
-        for (LayerId layer : layers) {
-            const CtgKey key{image, layer};
-
-            const CtgInputs depends = ctgInputsFor(doc, track, image, layer, settings);
-            if (!depends.valid) continue;  // nothing on this layer here
-
-            auto known = verdicts.find(key);
-            const bool current = known != verdicts.end();
-            if (current) kept.emplace(key, known->second);
-            if (current && known->second.inputs == depends.hash) continue;
-
-            wanted.push_back({key, depends.hash});
-        }
-    }
-    verdicts = std::move(kept);
-    return wanted;
-}
-
-void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
-    for (const CtgToJudge& todo : ctgAuditWork(doc, track, settings)) {
-        const CtgFill probe =
-            solveCtgFill(doc, track, todo.key.image, todo.key.layer, settings, false);
-        if (!probe.valid) continue;
-        doc.ctgVerdicts()[todo.key] = verdictFrom(probe);
-        doc.ctgShifts()[todo.key] = probe.carried_by;
-    }
 }
 
 }  // namespace animage

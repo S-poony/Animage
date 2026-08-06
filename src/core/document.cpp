@@ -55,7 +55,7 @@ void Document::loadScene(Scene scene) {
     scene_ = std::move(scene);
     cels_.clear();
     ctg_cache_.clear();
-    ctg_verdicts_.clear();
+    ctg_shifts_.clear();
     undo_stack_.clear();
     redo_stack_.clear();
     pending_ = Command{};
@@ -414,6 +414,11 @@ Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_i
         recordOp(std::make_unique<CelAssignOp>(track_id, image_id, layer_id, kNoId));
         image->cels[layer_id] = cel_id;
         addCelRef(cel_id);
+
+        // The marks are this drawing's own now, and they are where they were
+        // being shown. Anything that goes on applying the shift to them applies
+        // it twice.
+        ctg_shifts_.erase(CtgKey{image_id, layer_id});
     }
 
     auto it = cels_.find(cel_id);
@@ -441,11 +446,6 @@ void Document::clearCel(TrackId track_id, ImageId image_id, LayerId layer_id) {
 const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id) const {
     const CtgFill* found = ctg_cache_.find(CtgKey{image_id, layer_id});
     return (found && found->valid) ? found : nullptr;
-}
-
-const CtgVerdict* Document::ctgVerdictFor(ImageId image_id, LayerId layer_id) const {
-    auto found = ctg_verdicts_.find(CtgKey{image_id, layer_id});
-    return (found == ctg_verdicts_.end()) ? nullptr : &found->second;
 }
 
 CtgShift Document::ctgShiftAt(ImageId image_id, LayerId layer_id) const {

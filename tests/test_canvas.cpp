@@ -1173,8 +1173,6 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     QCoreApplication::processEvents();
     window.grab();
     CHECK(window.waitForColour());
-    window.auditColourFills();
-    CHECK(window.waitForColour());
     QCoreApplication::processEvents();
 
     // The fill followed the box.
@@ -1182,14 +1180,6 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     CHECK(fill != nullptr);
     if (!fill) return;
     CHECK_NEAR(fill->tiles.pixel(850, 450).r, 1.0, 0.02);
-
-    // ...so nothing may say it did not. The timeline's flag comes from the
-    // whole-track audit and not from this fill, which is exactly why it can
-    // disagree with it.
-    CHECK(!window.colourFlagAt(1));
-    const CtgVerdict* verdict = doc.ctgVerdictFor(second, colour);
-    CHECK(verdict != nullptr);
-    if (verdict) CHECK(!verdict->suspect);
 
     // And a stroke made here takes the drawing over from the marks as they are
     // being shown, so the fill it had survives the taking over.
@@ -1202,10 +1192,6 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     if (!after) return;
     CHECK(!after->inherited);
     CHECK_NEAR(after->tiles.pixel(850, 450).r, 1.0, 0.02);
-
-    window.auditColourFills();
-    CHECK(window.waitForColour());
-    CHECK(!window.colourFlagAt(1));
 }
 
 // A fill depends on some things it is not keyed on -- which way marks are
@@ -2197,11 +2183,12 @@ animage::Document buildStrandedShot() {
     return doc;
 }
 
-// The flag has to reach the panel, not only exist in the model. It appears on
-// the drawing you are standing on, which is what makes it a layer property:
-// walking onto a flagged drawing brings it in, walking off takes it away.
-void aStrandedCarriedMarkIsFlaggedInThePanel() {
-    TEST("a carried mark that fills nothing is flagged on the layer row");
+// What the panel says about a drawing that is carrying its colour, and what the
+// status bar says while the colour is being worked out. There was a third thing
+// here -- a warning for carried marks that had landed badly -- and it was
+// removed; see docs/handover.md.
+void aCarriedMarkSaysSoInThePanel() {
+    TEST("a drawing carrying its colour says so on the layer row");
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("stranded.animage"));
@@ -2229,35 +2216,24 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
         return QString();
     };
 
-    // The judging happens on a worker thread, so the answers arrive after the
-    // opening rather than during it. Waited for here; in use they land one
-    // drawing at a time and each brings the timeline up to date with it.
-    //
-    // And while they are being worked out the status bar says so, which is the
-    // whole of the visible difference between solving here and solving
-    // elsewhere: the program does not stop, so without it a fill a second out
-    // of date looks like a fill that is wrong.
+    // The solve happens on a worker thread, so the colour arrives after the
+    // opening rather than during it, and the status bar says so while it does.
+    // That is the whole of the visible difference between solving here and
+    // solving elsewhere: the program does not stop, so without a word about it
+    // a fill a second out of date looks like a fill that is wrong.
     const auto statusText = [&] {
         for (QLabel* label : window.findChildren<QLabel*>()) {
             if (label->text().contains(QStringLiteral("frame "))) return label->text();
         }
         return QString();
     };
+    window.grab();  // the paint is what asks for the colour
+    QCoreApplication::processEvents();
     CHECK(statusText().contains(QStringLiteral("colouring")));
 
     CHECK(window.waitForColour());
     QCoreApplication::processEvents();
     CHECK(!statusText().contains(QStringLiteral("colouring")));
-
-    // The whole point of the flag: it says which drawings to go and look at, so
-    // it has to be right about a drawing nobody has looked at. Opening the
-    // project is the only thing that has happened here -- the playhead has
-    // never left the first frame, and drawings 3 and 4 have never been
-    // composited, let alone solved.
-    CHECK(window.colourFlagAt(2));
-    CHECK(window.colourFlagAt(3));
-    CHECK(!window.colourFlagAt(0));
-    CHECK(!window.colourFlagAt(1));
 
     // Standing on each drawing in turn, letting the paint that asks for the
     // solve happen, the solve finish, and the queued report that follows it
@@ -2270,25 +2246,20 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
         QCoreApplication::processEvents();
     };
 
-    // Its own marks: no arrow, no flag.
+    // Its own marks: no arrow.
     visit(0);
     CHECK(!colourRowText().startsWith(QStringLiteral("←")));
-    CHECK(!colourRowText().startsWith(QStringLiteral("⚠")));
 
-    // Carried, and the shape has not moved, so it still fills: an arrow and no
-    // flag. This is the case that must stay quiet, or the flag is noise.
+    // Carried here from an earlier drawing: an arrow, and which drawing it came
+    // from in the tooltip.
     visit(1);
     CHECK(colourRowText().startsWith(QStringLiteral("←")));
-
-    // Carried onto a drawing the shape has left: flagged.
-    visit(2);
-    CHECK(colourRowText().startsWith(QStringLiteral("⚠")));
     visit(3);
-    CHECK(colourRowText().startsWith(QStringLiteral("⚠")));
+    CHECK(colourRowText().startsWith(QStringLiteral("←")));
 
-    // And walking back off it takes the flag away again.
-    visit(1);
-    CHECK(!colourRowText().startsWith(QStringLiteral("⚠")));
+    // And back onto the drawing that owns them, which takes the arrow away.
+    visit(0);
+    CHECK(!colourRowText().startsWith(QStringLiteral("←")));
 }
 
 // The colour-layer settings, which are the only way to reach carrying and its
@@ -2627,7 +2598,7 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
-    aStrandedCarriedMarkIsFlaggedInThePanel();
+    aCarriedMarkSaysSoInThePanel();
     theColourLayerBoxEditsWhatTheLayerDoes();
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();

@@ -92,16 +92,8 @@ public:
     // max-flow taking a second happens beside the interface rather than inside
     // it. Lives here because the canvas is what knows which drawing is on
     // screen, when a stroke has ended and what has to be repainted -- and it is
-    // lent out, because the whole-track audit is the same work on the same
-    // drawings and a second worker would only fight this one for the machine.
+    // lent out to anything else that needs one solved.
     animage::CtgSolver& colourSolver() { return ctg_solver_; }
-
-    // Ask for every drawing of the track to be judged, behind whatever is on
-    // screen. This is what makes a timeline flag mean "go and look at drawing
-    // 34" rather than "you are standing on a bad drawing", and it is a whole
-    // track's worth of max-flows -- which is why it goes at the back of the
-    // queue and no longer happens on this thread at all.
-    void requestColourAudit();
 
     // Installs anything the solver has finished. Called on a timer while
     // solves are outstanding; public so a test can drive it directly.
@@ -160,8 +152,7 @@ Q_SIGNALS:
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
 
-    // A fill or a verdict landed, so anything reporting on the colour is out of
-    // date -- the timeline's flags and the layer panel's. Emitted when a solve
+    // A fill landed, so anything reporting on the colour is out of date. Emitted when a solve
     // is installed, which happens on a timer and no longer inside a paint; the
     // queued connection it is on can stay either way, and a fill arriving while
     // the canvas is painting itself would be a way to delete a widget from
@@ -217,10 +208,6 @@ private:
     // about. Without this a paint would ask again for a solve already running,
     // and the rule that the newest question wins would call off the answer it
     // was waiting for -- for ever, at the rate a widget repaints.
-    //
-    // Pictures and judgements are in one table because everything done to them
-    // is the same: they are asked for the same way, dropped the same way, and
-    // installed the same way. Only where they go afterwards differs.
     //
     // The generation is the other half of "is this answer still about the
     // question I asked". A fill depends on things it is not keyed on -- which

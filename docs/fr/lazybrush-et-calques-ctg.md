@@ -216,11 +216,12 @@ Deux optimisations mentionnées :
 | Faible contraste | Trait à peine plus sombre que la zone → étiquetage aberrant | Prétraitement LoG ou rehaussement non linéaire |
 | Artefacts de métrication | Longs trous → frontière en escalier (norme L¹ minimisée) | Post-traitement par contour actif |
 
-> **Ajouté après implémentation.** Le cas « Raccourcis » est désormais *détecté*
-> et pas seulement documenté : après résolution, `CtgFill::spread` mesure la
-> surface qu'une marque a gagnée par pixel d'elle-même, et une coupe qui encercle
-> le scribble donne exactement 1. La timeline signale ces dessins-là. Le remède
-> reste celui de la table — un pinceau plus large.
+> **Ajouté après implémentation.** Le cas « Raccourcis » se *mesure* : après
+> résolution, `CtgFill::spread` donne la surface qu'une marque a gagnée par pixel
+> d'elle-même, et une coupe qui encercle le scribble donne exactement 1. Il ne se
+> *signale* pas pour autant — un voyant construit là-dessus a été retiré, faute
+> de séparer les cas ; voir [../handover.md](../handover.md). Le remède reste
+> celui de la table : un pinceau plus large.
 >
 > Une limite de plus, mesurée et absente d'ici parce qu'elle n'apparaît qu'en
 > reportant les marques d'un dessin à l'autre : **une marque qui atterrit dans la

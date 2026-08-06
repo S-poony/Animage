@@ -181,13 +181,17 @@ on screen until the new one lands, and nothing waits. A coarse answer arrives
 about a tenth of a second after the pen lifts and a full-resolution one replaces
 it, so a stroke costs the coarse one and pausing is what buys the rest.
 
-**The timeline says where the colour went wrong.** A blue bar under a drawing's
-number means its colour was carried there rather than drawn there. An orange
-corner means those carried marks fill almost nothing but themselves — whatever
-they were meant to colour has moved out from under them, and moving the marks
-did not find it — and the layer's row turns orange with the reason in its
-tooltip when you go there. Every drawing is judged, not just the ones you have
-looked at: the flag exists to tell you which drawings to go to.
+**The timeline says where the colour came from.** A blue bar under a drawing's
+number means its colour was carried there rather than drawn there, and an arrow
+before the colour layer's name says the same about the drawing you are standing
+on, with the drawing it came from in the tooltip. Both are a walk over the
+drawings and cost nothing, so they are true everywhere whether or not you have
+been there.
+
+There was a warning beside them — an orange corner for carried marks that had
+landed on nothing — and it was taken out because it fired on drawings whose
+colour was perfectly good. What it was measuring, and why the measurement cannot
+carry a flag, is in [docs/handover.md](docs/handover.md).
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the track rather than to the image, which is the point of the

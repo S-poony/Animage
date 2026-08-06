@@ -58,22 +58,25 @@ struct CtgFill {
     bool valid = false;
     int colours = 0;  // distinct scribble colours found
 
-    // The fraction of the worst mark that the solver labelled with that mark's
-    // own colour. This is the signal the design notes propose, and it does not
-    // work: over every case in test_ctg it is exactly 1, because a seed is only
-    // overruled when severing it beats isolating it and that needs a mark which
-    // is nearly all edge. Kept because it is free and it is the honest reading
-    // of "did the solver disagree with you", and recorded as a dead end so it
-    // is not derived a third time.
-    float confidence = 1.0f;
-
-    // How much region the worst mark won for each pixel of itself.
+    // Two numbers about how well the worst mark landed. Both were built to
+    // drive a flag in the timeline, both are free at solve time, and neither
+    // turned out to be able to carry one -- see docs/handover.md, "the flag
+    // that had to come out". They are kept because bench_carry reports them and
+    // because they are the honest measurements the next attempt has to beat.
     //
-    // This is the one that separates, and it separates by a lot. A mark that
-    // filled a shape wins many times its own area -- 17, 23, 65, 188 measured
-    // across the tests -- while a mark carried onto blank paper wins nothing
-    // but itself, because with no line art to follow the cut simply hugs the
-    // seed. That case measures exactly 1.00.
+    // `confidence` is the fraction of a mark the solver labelled with that
+    // mark's own colour, which is what the design notes propose. Over every
+    // case in test_ctg it is exactly 1: a seed is only overruled when severing
+    // it beats isolating it, and that needs a mark which is nearly all edge.
+    //
+    // `spread` is how much region a mark won for each pixel of itself. A mark
+    // that filled a shape wins many times its own area -- 17, 23, 65, 188
+    // measured across the tests -- and a mark carried onto blank paper wins
+    // nothing but itself, exactly 1.00. What it cannot do is tell either of
+    // those from a mark that snugly fills a small region, which measures 1.96,
+    // or from a mark that filled the *wrong* region, which measures higher than
+    // a right one.
+    float confidence = 1.0f;
     float spread = 1e9f;
 
     // Whether the marks this was solved from were made on this drawing or
@@ -90,44 +93,7 @@ struct CtgFill {
     // this still matches, nothing the fill depends on has moved.
     std::uint64_t inputs = 0;
 
-    // Worth going to look at: built from marks made on some other drawing, and
-    // a good part of one of them did not land in the region it was asking for.
-    //
-    // Only for carried marks, and that restriction is the point of the flag
-    // rather than a hedge. A mark you made on the drawing in front of you
-    // disagreeing with the solver is something you can watch happen; the same
-    // mark carried to the ninety drawings after it is not, because you are not
-    // looking at them. Flagging the one you can already see is how you teach
-    // somebody to ignore flags.
-    //
-    // This does not wait for scribbles that move. Carrying a mark unchanged to
-    // a drawing whose line art has moved under it is precisely how it ends up
-    // half in the wrong region -- moving it is what would reduce that, not what
-    // causes it -- so the flag is most useful in exactly the state where marks
-    // are carried and nothing moves them.
-    bool suspect() const;
 };
-
-// Below this a carried mark is reported as having filled nothing.
-//
-// This is a threshold, and this codebase distrusts those for good reasons --
-// but the reason is that a hidden threshold moves the surprise when it changes
-// *behaviour*, and this one changes nothing. The fill is identical either way.
-// It decides only whether somebody is told to go and look, which the design
-// notes allow by name.
-//
-// One and a half, and it is measured rather than derived, which is the honest
-// description of it. Marks that filled a shape came out at 17, 23, 65 and 188;
-// the tightest legitimate one at 1.82, which is a scribble made outside the
-// line art where the rim cannot be overruled and so keeps roughly its own
-// pixels; and a mark carried off its shape at exactly 1.00. Half way between
-// the last two, on eight samples. If it starts crying wolf, this is the number,
-// and the numbers to re-argue it are in the comment above `spread`.
-inline constexpr float kCtgSpreadFloor = 1.5f;
-
-inline bool CtgFill::suspect() const {
-    return valid && inherited && colours > 0 && spread < kCtgSpreadFloor;
-}
 
 // What a fill belongs to: one drawing, one layer.
 //
@@ -152,34 +118,6 @@ struct CtgKeyHash {
         return static_cast<std::size_t>(mixed);
     }
 };
-
-// What the whole-track audit keeps about one drawing: the verdict and nothing
-// else.
-//
-// Tiny on purpose, and never evicted. A fill is megabytes and is thrown away
-// when memory is wanted; this is a few bytes and is what the timeline draws
-// from, so it has to survive for every drawing at once. Keeping the summary and
-// discarding the picture is the whole trick that lets a flag mean "go and look
-// at drawing 34".
-struct CtgVerdict {
-    float spread = 0.0f;
-    bool inherited = false;
-    bool suspect = false;
-    std::uint64_t inputs = 0;
-};
-
-// The judgement a solve leaves behind, kept when the picture is thrown away.
-// One function because two callers make it -- the audit that solves where it
-// stands, and the one that has its solves run somewhere else -- and two copies
-// of "what a verdict is" is how they come to disagree.
-inline CtgVerdict verdictFrom(const CtgFill& fill) {
-    CtgVerdict verdict;
-    verdict.inputs = fill.inputs;
-    verdict.spread = fill.spread;
-    verdict.inherited = fill.inherited;
-    verdict.suspect = fill.suspect();
-    return verdict;
-}
 
 // A bounded store of fills, keeping the ones looked at most recently.
 //

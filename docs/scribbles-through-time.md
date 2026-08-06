@@ -244,16 +244,17 @@ Order of attack, cheapest first:
    > it was right at 60 px and wrong at 80. Nothing degrades: it is the same
    > fill until it is a different one.
    >
-   > **Which way it fails depends on the neighbour, and only one of the two is
-   > caught.** Where the next region has a mark of its own, the two contest the
-   > overlap and the loser's region goes uncoloured or takes the wrong colour —
-   > and `spread` collapses to about 1, so the drawing is flagged, every time,
-   > at exactly the displacement where it goes wrong. Where the next region has
-   > *no* mark of its own, a carried mark overlapping it by any amount at all
-   > takes it: uncontested, majority is a formality. 100% of the neighbouring
-   > region, wrong, from the first drawing of motion — and `spread` **rises**,
-   > from 6.3 to 12.8, because the mark did win a region, just not the one it
-   > was asking for. The flag is not merely silent there, it is pleased.
+   > **Which way it fails depends on the neighbour, and the number can only see
+   > one of the two.** Where the next region has a mark of its own, the two
+   > contest the overlap and the loser's region goes uncoloured or takes the
+   > wrong colour — and `spread` collapses to about 1 at exactly the
+   > displacement where it goes wrong. Where the next region has *no* mark of
+   > its own, a carried mark overlapping it by any amount at all takes it:
+   > uncontested, majority is a formality. 100% of the neighbouring region,
+   > wrong, from the first drawing of motion — and `spread` **rises**, from 6.3
+   > to 12.8, because the mark did win a region, just not the one it was asking
+   > for. A flag was built on this number and has since been removed; see
+   > docs/handover.md.
    >
    > That is the open question at the bottom of this document, measured: the
    > wrong region of about the right size is real, it is the ordinary
@@ -353,9 +354,11 @@ used and automation that gets switched off.
 
 Worth building early — with part 2's first rung, not after it.
 
-> **Built, and the proposed number does not work.** It was built with part 1
-> rather than part 2, because carrying a mark unchanged under line art that has
-> moved is precisely how it lands wrong — motion is what would *reduce* that.
+> **Built, and then removed.** It was built with part 1 rather than part 2,
+> because carrying a mark unchanged under line art that has moved is precisely
+> how it lands wrong — motion is what would *reduce* that. It fired on drawings
+> whose colour was good and it is gone; the numbers below are what remains, and
+> docs/handover.md records why neither of them can carry a flag.
 >
 > The fraction proposed here comes out at exactly 1 in every case in `test_ctg`.
 > A seed is only overruled when severing it beats isolating it, and that needs a
@@ -442,9 +445,12 @@ front of you. Do part 1 first and do not wait for the thread work.
   case on demand: a wall sliding across a carried mark, with nothing marked on
   the far side. The neighbouring region takes the wrong colour completely, from
   the first drawing of movement, and `spread` goes *up* — 6.3 to 12.8 — because
-  the mark did fill a region and the number cannot ask which one. So this is not
-  a gap in the flag's coverage, it is a case the flag actively endorses. It
-  stays open, and it stays waiting for the same correspondence.
+  the mark did fill a region and the number cannot ask which one.
+
+  That, and a snug mark in a small region measuring 1.96 against a floor of 1.5,
+  is why the flag built on `spread` was taken out rather than tuned. The
+  quantity is an amount and the question is a correspondence. This stays open,
+  and it is now the whole of what a flag would need.
 - **Override granularity.** Per (image, layer) is proposed here and needs no
   fork. Per *scribble* is finer and more useful — change one region's colour on
   one drawing without detaching the rest — and needs the vector fork.
