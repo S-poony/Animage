@@ -411,8 +411,17 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
         // look at.
         if (layer->kind == LayerKind::Ctg) {
             if (layer->show_scribbles) {
+                // Shown where they were used, which on a layer that moves
+                // carried marks is not where they were drawn. Otherwise the
+                // Marks column says the fill beside it was built from marks
+                // somewhere the fill says they are not -- and the one view
+                // whose job is to show what the solver saw would be the one
+                // view that does not.
                 const Cel* scribbles = doc.ctgScribblesAt(track_id, image_id, *it);
-                if (scribbles) passes.push_back({&scribbles->tiles(), layer});
+                if (scribbles) {
+                    passes.push_back({&scribbles->tiles(), layer,
+                                      doc.ctgShiftAt(image_id, *it)});
+                }
             } else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it)) {
                 passes.push_back({&fill->tiles, layer});
             }
@@ -456,15 +465,28 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
     const ColumnPlan plan =
         reducing ? planColumns(step, region, stride, out.width()) : ColumnPlan{};
 
+    // A layer drawn away from where its pixels are stored is read from a region
+    // moved the other way and written to the same columns, which is the whole
+    // of the offset. Worked out per pass and only when there is one, so every
+    // other layer takes exactly the path it took before this existed.
     const auto run_band = [&](int y_begin, int y_end) {
         std::vector<Rgba> accumulator;
         if (reducing) accumulator.resize(static_cast<std::size_t>(out.width()));
         for (const LayerPass& pass : passes) {
+            const bool moved = !pass.offset.isZero();
+            const PixelRect from = moved ? PixelRect{region.x - pass.offset.x,
+                                                     region.y - pass.offset.y, region.width,
+                                                     region.height}
+                                         : region;
             if (reducing) {
-                blendLayerRowsBoxed(*pass.tiles, *pass.layer, region, step, first_row, stride,
-                                    plan, y_begin, y_end, out, accumulator);
+                const long long rows_from = moved ? step.entryAt(from.y) : first_row;
+                const ColumnPlan moved_plan =
+                    moved ? planColumns(step, from, stride, out.width()) : ColumnPlan{};
+                blendLayerRowsBoxed(*pass.tiles, *pass.layer, from, step, rows_from, stride,
+                                    moved ? moved_plan : plan, y_begin, y_end, out,
+                                    accumulator);
             } else {
-                blendLayerRows(*pass.tiles, *pass.layer, region, y_begin, y_end, out);
+                blendLayerRows(*pass.tiles, *pass.layer, from, y_begin, y_end, out);
             }
         }
     };

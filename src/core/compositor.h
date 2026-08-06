@@ -117,6 +117,13 @@ private:
 struct LayerPass {
     const TileGrid* tiles = nullptr;
     const Layer* layer = nullptr;
+
+    // Drawn this far from where its pixels are stored. Only one thing uses it:
+    // a colour layer showing its marks has to show them where they were used,
+    // and on a layer that moves carried marks that is not where they were
+    // drawn. Zero for everything else, and zero is the path that existed
+    // before this.
+    CtgShift offset;
 };
 
 // Flattens the layers of one image.

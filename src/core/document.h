@@ -116,6 +116,22 @@ public:
     // The verdict on one drawing, or null if it has not been judged.
     const CtgVerdict* ctgVerdictFor(ImageId image, LayerId layer) const;
 
+    // How far the marks a drawing is carrying were moved to get there, as the
+    // last solve of it worked out.
+    //
+    // Derived like everything else about a fill, and kept here for the same
+    // reason the verdicts are: three other things have to agree with the fill
+    // about where a mark ended up, and none of them can afford to work it out.
+    // The Marks column draws the scribbles where they were used; the first
+    // stroke on a carrying drawing copies what it was showing; and both would
+    // otherwise say the mark is somewhere the fill it produced says it is not.
+    //
+    // Zero when nothing has solved this drawing yet, which is the same answer
+    // as "it did not move" and is the behaviour it replaced.
+    using CtgShifts = std::unordered_map<CtgKey, CtgShift, CtgKeyHash>;
+    CtgShifts& ctgShifts() { return ctg_shifts_; }
+    CtgShift ctgShiftAt(ImageId image, LayerId layer) const;
+
     // The regenerated fill for a CTG layer, or null if it has not been built.
     // Const, so the compositor can draw one but never trigger a solve: the
     // caller decides when it is worth paying for.
@@ -194,6 +210,7 @@ private:
 
     CtgFillCache ctg_cache_;
     CtgVerdicts ctg_verdicts_;
+    CtgShifts ctg_shifts_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

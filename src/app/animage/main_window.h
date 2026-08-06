@@ -55,6 +55,10 @@ public:
     // user is waiting on.
     bool waitForColour();
 
+    // The document this window is editing. For tests that need to build a
+    // situation the interface can only reach with a tablet in somebody's hand.
+    animage::Document& documentForTesting() { return doc_; }
+
     // Whether the drawing at `slot` is flagged on any colour layer. What the
     // timeline card draws, and the only way to ask about a drawing without
     // going there -- which is exactly what a test of this feature must not do.

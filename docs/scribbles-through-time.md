@@ -307,6 +307,21 @@ Order of attack, cheapest first:
    > And **the shift is part of what the fill depends on**, so the fill's key
    > has to mix the *source* drawing's line art as well as this one's — nothing
    > else in it mentions that drawing, and redrawing it moves the answer.
+   >
+   > A third, from the first bug report against it. **Everything that shows a
+   > mark has to be told where it went.** The fill followed the drawing while
+   > the Marks column drew the mark where it was made, and the first stroke on a
+   > carrying drawing copied the marks unmoved — so touching the colour layer
+   > anywhere undid the fill you were looking at. The shift is derived, so the
+   > temptation is to work it out where it is wanted; it costs 20 ms, which is
+   > nothing in a solve and impossible in a paint. It is kept in
+   > `Document::ctgShiftAt`, written by every solve and read by everything else.
+   >
+   > And **the search window has to cover the whole area, not half of it**. It
+   > was half the grid, so a shape that had moved most of its own width sat
+   > outside the window and the search reported the best wrong answer with
+   > nothing to say it had been looking in the wrong place. That is the failure
+   > mode to fear in all of this: not a wrong answer, a confident one.
 3. **One transform per region**, from the previous fill's regions. Translation
    first; affine only if translation measurably is not enough.
 4. **As-rigid-as-possible registration** — Sýkora, Dingliana & Collins, NPAR

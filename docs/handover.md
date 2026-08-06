@@ -215,6 +215,22 @@ down the middle moved 200 px matched its far wall to the divider. The fill is
 then exactly as wrong as carrying unchanged, which is the floor this cannot go
 below, and the flag catches that one.
 
+**Three things have to agree about where a mark ended up, and at first only one
+of them did.** Reported as a bug and it was three: the fill followed the drawing
+while the Marks column drew the mark where it was made, the first stroke on a
+carrying drawing copied the marks unmoved and so undid the fill you could see,
+and a shift larger than half the area went unfound. The last one is the
+interesting one — the search window was half the grid, so a shape that had moved
+most of its own width sat outside it and the search reported the best wrong
+answer with nothing to say it had been looking in the wrong place. The window is
+the whole grid now, which at these sizes costs nothing.
+
+The other two are the same lesson from different directions: **a derived value
+that changes what is drawn has to be reachable by everything that draws it.**
+The shift lives in `Document::ctgShiftAt`, written by every solve, read by the
+compositor's marks pass and by `celForWriting`. Any fourth thing that shows
+marks must read it too.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and

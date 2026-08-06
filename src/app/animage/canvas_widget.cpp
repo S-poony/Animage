@@ -377,6 +377,10 @@ void CanvasWidget::collectColour() {
         if (asked == ctg_asked_.end() || asked->second.inputs != result.fill.inputs) continue;
 
         ctg_asked_.erase(asked);
+        // Where the marks ended up, from whichever kind of solve reported it.
+        // The Marks column and the first stroke on a carrying drawing both have
+        // to agree with the fill about that. See Document::ctgShiftAt.
+        doc_.ctgShifts()[result.key] = result.fill.carried_by;
         if (result.wanted_tiles) {
             doc_.ctgCache().store(result.key, std::move(result.fill));
             filled = true;

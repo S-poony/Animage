@@ -146,4 +146,48 @@ private:
     std::unordered_map<TileCoord, TileRef, TileCoordHash> tiles_;
 };
 
+// The same pixels, moved.
+//
+// A genuine copy and not a view, because a tile is immutable once shared and an
+// arbitrary offset is not tile-aligned: nothing here can be expressed by
+// handing out the same handles under different coordinates. Cheap anyway, in
+// the one place it is used -- a colour layer's marks are a few tiles, against
+// line art that is hundreds.
+inline TileGrid translated(const TileGrid& grid, int dx, int dy) {
+    TileGrid moved;
+    if (dx == 0 && dy == 0) return grid;
+
+    // Every destination tile any source tile can reach: an offset that is not a
+    // multiple of the tile size spreads one tile over four.
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+    for (const auto& [coord, tile] : grid.tiles()) {
+        if (!tile) continue;
+        for (int corner = 0; corner < 4; ++corner) {
+            const int px = coord.x * kTileSize + (corner % 2) * (kTileSize - 1) + dx;
+            const int py = coord.y * kTileSize + (corner / 2) * (kTileSize - 1) + dy;
+            built.emplace(tileCoordFor(px, py), nullptr);
+        }
+    }
+
+    for (auto& [coord, tile] : built) {
+        bool any = false;
+        auto made = std::make_shared<Tile>();
+        for (int y = 0; y < kTileSize; ++y) {
+            const int py = coord.y * kTileSize + y;
+            for (int x = 0; x < kTileSize; ++x) {
+                const int px = coord.x * kTileSize + x;
+                const Rgba pixel = grid.pixel(px - dx, py - dy);
+                if (pixel.a == 0.0f && pixel.r == 0.0f && pixel.g == 0.0f && pixel.b == 0.0f) {
+                    continue;
+                }
+                made->setPixel(x, y, pixel);
+                any = true;
+            }
+        }
+        if (any) moved.set(coord, std::move(made));
+        (void)tile;
+    }
+    return moved;
+}
+
 }  // namespace animage

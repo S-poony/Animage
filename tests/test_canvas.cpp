@@ -1090,6 +1090,124 @@ void theColourIsCoarseFirstAndThenAsFineAsTheDrawing() {
     CHECK(!canvas.colourPending());
 }
 
+// Reported, and worth driving through the real window rather than the model:
+// draw a shape, move it on the next drawing, colour the first, and everything
+// that reports on the colour has to agree with the fill it can see.
+void movedMarksAgreeWithThemselvesInTheWindow() {
+    TEST("a mark that moved with the drawing is reported as having moved");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(canvas != nullptr);
+    CHECK(timeline != nullptr);
+    if (!canvas || !timeline) return;
+
+    QPushButton* add_colour = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
+    }
+    CHECK(add_colour != nullptr);
+    if (!add_colour) return;
+    add_colour->click();
+    QCoreApplication::processEvents();
+
+    // The document the window is holding, reached through the canvas rather
+    // than through an accessor invented for a test.
+    Document& doc = window.documentForTesting();
+    const Track* track = doc.scene().findTrack(doc.scene().tracks.front().id);
+    CHECK(track != nullptr);
+    if (!track) return;
+    const TrackId track_id = track->id;
+
+    LayerId ink = kNoId;
+    LayerId colour = kNoId;
+    for (const Layer& layer : track->layers) {
+        if (layer.kind == LayerKind::Ctg) {
+            colour = layer.id;
+        } else if (ink == kNoId) {
+            ink = layer.id;
+        }
+    }
+    CHECK(ink != kNoId);
+    CHECK(colour != kNoId);
+    if (ink == kNoId || colour == kNoId) return;
+
+    // Two drawings, the same box, moved a long way right on the second.
+    const ImageId first = track->slots.front();
+    const ImageId second = doc.insertImage(track_id, 1);
+
+    const auto strokeOn = [&](ImageId image, LayerId layer, float x0, float y0, float x1,
+                              float y1, float radius, float r, float g, float b, bool label) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.label = label;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track_id, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    const auto box = [&](ImageId image, float left) {
+        strokeOn(image, ink, left, 200, left + 300, 200, 3.0f, 0, 0, 0, false);
+        strokeOn(image, ink, left, 200, left, 500, 3.0f, 0, 0, 0, false);
+        strokeOn(image, ink, left + 300, 200, left + 300, 500, 3.0f, 0, 0, 0, false);
+        strokeOn(image, ink, left, 500, left + 300, 500, 3.0f, 0, 0, 0, false);
+    };
+    box(first, 200);
+    box(second, 700);
+    strokeOn(first, colour, 300, 350, 400, 350, 20.0f, 1.0f, 0.0f, 0.0f, true);
+
+    // Stand on the second drawing and let everything settle, exactly as using
+    // it would.
+    timeline->setCurrentSlot(1);
+    QCoreApplication::processEvents();
+    window.grab();
+    CHECK(window.waitForColour());
+    window.auditColourFills();
+    CHECK(window.waitForColour());
+    QCoreApplication::processEvents();
+
+    // The fill followed the box.
+    const CtgFill* fill = doc.ctgFillFor(track_id, second, colour);
+    CHECK(fill != nullptr);
+    if (!fill) return;
+    CHECK_NEAR(fill->tiles.pixel(850, 450).r, 1.0, 0.02);
+
+    // ...so nothing may say it did not. The timeline's flag comes from the
+    // whole-track audit and not from this fill, which is exactly why it can
+    // disagree with it.
+    CHECK(!window.colourFlagAt(1));
+    const CtgVerdict* verdict = doc.ctgVerdictFor(second, colour);
+    CHECK(verdict != nullptr);
+    if (verdict) CHECK(!verdict->suspect);
+
+    // And a stroke made here takes the drawing over from the marks as they are
+    // being shown, so the fill it had survives the taking over.
+    strokeOn(second, colour, 760, 460, 780, 460, 8.0f, 1.0f, 0.0f, 0.0f, true);
+    window.grab();
+    CHECK(window.waitForColour());
+
+    const CtgFill* after = doc.ctgFillFor(track_id, second, colour);
+    CHECK(after != nullptr);
+    if (!after) return;
+    CHECK(!after->inherited);
+    CHECK_NEAR(after->tiles.pixel(850, 450).r, 1.0, 0.02);
+
+    window.auditColourFills();
+    CHECK(window.waitForColour());
+    CHECK(!window.colourFlagAt(1));
+}
+
 // A fill depends on some things it is not keyed on -- which way marks are
 // carried, and, when a project is opened, the whole document being a different
 // one whose drawings answer to the same ids. The way all of those say "every
@@ -2486,6 +2604,7 @@ int main(int argc, char** argv) {
     theFillWaitsForTheStrokeToFinish();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
+    movedMarksAgreeWithThemselvesInTheWindow();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
     aFailedSaveLeavesTheOldProjectAlone();

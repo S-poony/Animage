@@ -233,17 +233,24 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     }
 
     // Exhaustive at the top, where the grid is a dozen cells across and every
-    // plausible shift can simply be tried, then one refinement per level down.
-    // A translation found at the top is worth two cells at the next level, so
-    // the window below only has to cover the halving.
+    // shift can simply be tried, then one refinement per level down. A
+    // translation found at the top is worth two cells at the next level, so the
+    // window below only has to cover the halving.
+    //
+    // Every shift, and not half of them. The area covers both drawings, so a
+    // shape that moved by more than half of it -- which is any shape that has
+    // moved most of its own width -- sits outside a window of half the grid,
+    // and the search then reports the best wrong answer with no sign that it
+    // was looking in the wrong place. It is a few hundred thousand operations
+    // at this size either way.
     CtgShift best;
     for (int level = static_cast<int>(pyramid_a.size()) - 1; level >= 0; --level) {
         const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(level)];
         const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(level)];
         const bool top = level == static_cast<int>(pyramid_a.size()) - 1;
 
-        const int reach_x = top ? coarse_b.width / 2 : 2;
-        const int reach_y = top ? coarse_b.height / 2 : 2;
+        const int reach_x = top ? coarse_b.width : 2;
+        const int reach_y = top ? coarse_b.height : 2;
         const CtgShift from_above{best.x * (top ? 1 : 2), best.y * (top ? 1 : 2)};
 
         CtgShift found = from_above;

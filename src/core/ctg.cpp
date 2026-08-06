@@ -144,7 +144,11 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     if (const CtgFill* hit = cache.find(key); hit && hit->valid && hit->inputs == depends.hash) {
         return *hit;
     }
-    return cache.store(key, solveCtgFill(doc, track, image, layer_id, settings, true));
+    CtgFill built = solveCtgFill(doc, track, image, layer_id, settings, true);
+    // Where the marks ended up, for everything that has to agree with this fill
+    // about that and cannot afford to work it out. See Document::ctgShiftAt.
+    doc.ctgShifts()[key] = built.carried_by;
+    return cache.store(key, std::move(built));
 }
 
 std::vector<CtgToJudge> ctgAuditWork(Document& doc, TrackId track,
@@ -209,6 +213,7 @@ void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
             solveCtgFill(doc, track, todo.key.image, todo.key.layer, settings, false);
         if (!probe.valid) continue;
         doc.ctgVerdicts()[todo.key] = verdictFrom(probe);
+        doc.ctgShifts()[todo.key] = probe.carried_by;
     }
 }
 

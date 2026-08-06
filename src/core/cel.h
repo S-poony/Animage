@@ -86,6 +86,15 @@ public:
     // operation its own inverse.
     void swapTile(TileCoord c, TileRef& other);
 
+    // Takes a whole grid, for a cel that is being created rather than edited.
+    // Not an edit and not undoable on its own: the only caller is the creation
+    // of a cel that starts from marks it has moved, and what undoes that is the
+    // cel going away again.
+    void adoptTiles(TileGrid tiles) {
+        grid_ = std::move(tiles);
+        ++revision_;
+    }
+
 private:
     CelId id_;
     TileGrid grid_;

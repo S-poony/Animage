@@ -1523,6 +1523,77 @@ void theShiftIsMeasuredFromTheInkAlone() {
     CHECK(estimateCtgShift({TileGrid{}}, {second->tiles()}, {0, 0, 640, 360}).isZero());
 }
 
+// Reported: the fill follows the drawing, and everything that reports on the
+// marks says they did not. Three symptoms, and the test asks each of them
+// separately because they need not have had one cause.
+void whatIsShownAgreesWithWhatWasSolved() {
+    TEST("everything that reports on a moved mark agrees with the fill");
+    Sequence s(2);
+    s.followTheMotion();
+
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    // The fill is right: this is the part that works.
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK_NEAR(fillAt(carried, 390, 160).r, 1.0, 0.02);
+    CHECK(!carried.suspect());
+
+    // 1. The timeline's flag, which is not read off the fill but off the
+    //    whole-track audit.
+    auditCtgFills(s.doc, s.track);
+    const CtgVerdict* verdict = s.doc.ctgVerdictFor(s.at(1), s.colour);
+    CHECK(verdict != nullptr);
+    if (verdict) {
+        CHECK(!verdict->suspect);
+        CHECK(verdict->spread > kCtgSpreadFloor);
+    }
+
+    // 2. The Marks column, which shows the scribbles instead of the fill. It
+    //    has to show them where they are being used, or it says the fill is
+    //    built from marks that are not the ones it was built from.
+    const CtgShift moved = s.doc.ctgShiftAt(s.at(1), s.colour);
+    CHECK(std::abs(moved.x - 260) <= 12);
+
+    Compositor compositor;
+    Framebuffer frame;
+    {
+        Layer marks = *s.doc.scene().findTrack(s.track)->findLayer(s.colour);
+        marks.show_scribbles = true;
+        s.doc.updateLayer(s.track, s.colour, marks);
+    }
+    compositor.compositeLayers(s.doc, s.track, s.at(1), {s.colour}, {0, 0, 500, 250}, frame);
+    // Where the mark is now, and not where it was drawn.
+    CHECK(frame.pixel(390, 100).a > 0.5f);
+    CHECK_NEAR(frame.pixel(130, 100).a, 0.0, 0.001);
+
+    // 3. Taking the drawing over. The first mark made on a drawing that is
+    //    carrying copies what it was showing and edits the copy -- and what it
+    //    was showing is the moved marks, not the ones as drawn.
+    {
+        Layer marks = *s.doc.scene().findTrack(s.track)->findLayer(s.colour);
+        marks.show_scribbles = false;
+        s.doc.updateLayer(s.track, s.colour, marks);
+    }
+    s.stroke(1, s.colour, 340, 170, 350, 170, 4.0f, 1.0f, 0.0f, 0.0f);
+
+    const Cel* own = s.doc.celAt(s.track, s.at(1), s.colour);
+    CHECK(own != nullptr);
+    if (own) {
+        CHECK(own->pixel(390, 100).a > 0.5f);
+        CHECK_NEAR(own->pixel(130, 100).a, 0.0, 0.001);
+    }
+
+    // And the fill it produces is the fill it had a moment ago.
+    const CtgFill& after = s.fillOf(1);
+    CHECK(after.valid);
+    CHECK(!after.inherited);
+    CHECK_NEAR(fillAt(after, 390, 160).r, 1.0, 0.02);
+    CHECK(!after.suspect());
+}
+
 // --- the solve, lifted off the document ---------------------------------
 //
 // A max-flow is the expensive thing this program does, and it may not run on
@@ -1733,6 +1804,7 @@ int main() {
     movingMarksCanBeTurnedOff();
     redrawingTheOriginMovesTheMarkAgain();
     theShiftIsMeasuredFromTheInkAlone();
+    whatIsShownAgreesWithWhatWasSolved();
 
     aLiftedSolveAgreesWithTheDocument();
     takingAJobCopiesNoPixels();

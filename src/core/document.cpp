@@ -393,8 +393,23 @@ Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_i
         // things fall out of it and neither needs its own concept: erasing an
         // inherited mark works, because you are editing your own copy of it,
         // and reverting is clearCel, because absence is what inheriting means.
+        // Copied where they were being *shown*, not where they were drawn. On a
+        // layer that moves carried marks, those are not the same place, and
+        // taking a drawing over has to hand you the drawing you were looking
+        // at: copying the marks unmoved would put them back where the drawing
+        // no longer is, undo the fill you could see, and do it in response to a
+        // stroke somewhere else entirely.
         const Cel* inherited = ctgScribblesAt(track_id, image_id, layer_id);
-        cel_id = inherited ? createCelCopy(*inherited) : createCel();
+        const CtgShift shift = ctgShiftAt(image_id, layer_id);
+        if (inherited && !shift.isZero()) {
+            cel_id = createCel();
+            auto made = cels_.find(cel_id);
+            if (made != cels_.end()) {
+                made->second->adoptTiles(translated(inherited->tiles(), shift.x, shift.y));
+            }
+        } else {
+            cel_id = inherited ? createCelCopy(*inherited) : createCel();
+        }
 
         recordOp(std::make_unique<CelAssignOp>(track_id, image_id, layer_id, kNoId));
         image->cels[layer_id] = cel_id;
@@ -431,6 +446,11 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
 const CtgVerdict* Document::ctgVerdictFor(ImageId image_id, LayerId layer_id) const {
     auto found = ctg_verdicts_.find(CtgKey{image_id, layer_id});
     return (found == ctg_verdicts_.end()) ? nullptr : &found->second;
+}
+
+CtgShift Document::ctgShiftAt(ImageId image_id, LayerId layer_id) const {
+    auto found = ctg_shifts_.find(CtgKey{image_id, layer_id});
+    return (found == ctg_shifts_.end()) ? CtgShift{} : found->second;
 }
 
 std::size_t Document::totalTileCount() const {
