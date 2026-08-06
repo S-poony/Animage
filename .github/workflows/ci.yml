@@ -1,0 +1,178 @@
+name: CI
+
+# Every push to main and every pull request is built and tested on all three
+# desktop platforms. A push to main also publishes the binaries as the "latest"
+# pre-release; a v* tag publishes them as a numbered release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second push supersedes the first: cancel the run it overtook.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: '6.8.*'
+  BUILD_TYPE: RelWithDebInfo
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            generator: Ninja
+          - name: windows
+            os: windows-2022
+            generator: Visual Studio 17 2022
+          - name: macos
+            os: macos-14
+            generator: Ninja
+            # Qt's macOS binaries are universal, so one build serves both Apple
+            # Silicon and Intel and there is one Mac download rather than two.
+            extra_cmake: -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Qt's own binaries need these at build time, and the offscreen platform
+      # plugin the interface tests run under needs them at run time.
+      - name: Install Linux dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libfontconfig1 libfreetype6 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1
+
+      - name: Install Ninja
+        if: matrix.name == 'macos'
+        run: brew install ninja
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -G "${{ matrix.generator }}"
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          ${{ matrix.extra_cmake }}
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure
+
+      # ---------------------------------------------------------------- package
+
+      - name: Package (Linux AppImage)
+        if: matrix.name == 'linux'
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix AppDir/usr
+          install -Dm644 packaging/animage.desktop AppDir/usr/share/applications/animage.desktop
+          install -Dm644 packaging/animage.svg AppDir/usr/share/icons/hicolor/scalable/apps/animage.svg
+
+          base=https://github.com/linuxdeploy
+          curl -fsSLO $base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSLO $base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-*.AppImage
+
+          # Unpack rather than mount: the runners have no FUSE.
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export OUTPUT=Animage-linux-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage
+
+          mkdir -p dist && mv "$OUTPUT" dist/
+
+      - name: Package (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          set -euo pipefail
+          app=build/src/app/animage.app
+          "$QT_ROOT_DIR/bin/macdeployqt" "$app"
+          # macdeployqt rewrites load paths, which invalidates the linker's
+          # signature. arm64 refuses to run unsigned code, so sign it again --
+          # ad hoc, since this is an unidentified developer either way.
+          codesign --force --deep --sign - "$app"
+          mkdir -p dist
+          # ditto, not zip: the frameworks inside are a web of symlinks.
+          ditto -c -k --keepParent "$app" dist/Animage-macos-universal.zip
+
+      - name: Package (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'stage/Animage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "build/src/app/$env:BUILD_TYPE/animage.exe" $stage
+          Copy-Item README.md, LICENSE $stage
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
+              --no-system-d3d-compiler --no-opengl-sw "$stage/animage.exe"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path $stage -DestinationPath dist/Animage-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Animage-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Downloadable without a GitHub account, unlike build artifacts.
+  release:
+    name: publish
+    needs: build
+    if: github.event_name == 'push' && github.repository == 'S-poony/Animage'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish a numbered release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Animage $GITHUB_REF_NAME" --generate-notes
+
+      - name: Move the "latest" pre-release to this commit
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/* \
+            --prerelease \
+            --title "Latest build of main" \
+            --notes "Built from [\`${GITHUB_SHA:0:7}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) on $(date -u '+%Y-%m-%d %H:%M UTC').
+
+          This is the tip of \`main\`, not a stable release. See the README for how to open an unsigned build on macOS."
