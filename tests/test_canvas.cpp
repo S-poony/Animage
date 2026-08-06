@@ -887,7 +887,11 @@ void theFillWaitsForTheStrokeToFinish() {
 
     canvas.setActiveLayer(ink);
     canvas.refreshAll();
-    canvas.grab();  // one paint, so the first fill is built
+    canvas.grab();  // one paint, so the first fill is asked for
+    // ...and the solve happens on a worker thread, so the fill arrives after
+    // it, not during it. Everything below is about *when* a solve is asked
+    // for, which is the part that did not change.
+    CHECK(canvas.settleColour());
 
     const CtgFill* fill = doc.ctgFillFor(track, image, colour);
     CHECK(fill != nullptr);
@@ -902,14 +906,16 @@ void theFillWaitsForTheStrokeToFinish() {
         sendMouse(&canvas, QEvent::MouseMove, QPointF(150 + i * 20, 150), Qt::NoButton,
                   Qt::LeftButton);
         canvas.grab();
-        // Nothing re-solved: the fill is still keyed on what it was before the
-        // stroke started.
+        // Nothing asked for and nothing re-solved: the fill is still keyed on
+        // what it was before the stroke started, and no solve is in flight.
         CHECK_EQ(doc.ctgFillFor(track, image, colour)->inputs, settled);
+        CHECK(!canvas.colourPending());
     }
 
     sendMouse(&canvas, QEvent::MouseButtonRelease, QPointF(310, 150), Qt::LeftButton,
               Qt::NoButton);
     canvas.grab();
+    CHECK(canvas.settleColour());
 
     // And once the pen is up it has, exactly once.
     const CtgFill* after = doc.ctgFillFor(track, image, colour);
@@ -917,10 +923,166 @@ void theFillWaitsForTheStrokeToFinish() {
     if (!after) return;
     CHECK(after->inputs != settled);
 
-    // A second paint with nothing changed must not solve again.
+    // A second paint with nothing changed must not ask for anything.
     const std::uint64_t resolved = after->inputs;
     canvas.grab();
+    CHECK(!canvas.colourPending());
     CHECK_EQ(doc.ctgFillFor(track, image, colour)->inputs, resolved);
+}
+
+// The solve is off the interface thread, so a paint no longer waits for one.
+// What is on screen in the meantime has to be the last answer rather than
+// nothing: the colour blinking out on every stroke would be a worse thing to
+// look at than colour that is a moment out of date.
+void theLastFillStaysUntilTheNextOneArrives() {
+    TEST("the colour on screen is the last answer until the next one lands");
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId image = doc.insertImage(track, 0);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+    canvas.setFrame(0);
+
+    const auto strokeOn = [&](LayerId layer, float x0, float y0, float x1, float y1,
+                              float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    strokeOn(ink, 100, 100, 400, 100, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 100, 100, 300, 3.0f, 0, 0, 0);
+    strokeOn(ink, 400, 100, 400, 300, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 300, 400, 300, 3.0f, 0, 0, 0);
+    strokeOn(colour, 200, 200, 300, 200, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    canvas.refreshAll();
+    canvas.grab();
+    CHECK(canvas.settleColour());
+
+    const CtgFill* first = doc.ctgFillFor(track, image, colour);
+    CHECK(first != nullptr);
+    if (!first) return;
+    const std::uint64_t was = first->inputs;
+    CHECK_EQ(first->colours, 1);
+
+    // A second colour, and a paint that does not wait for it.
+    strokeOn(colour, 140, 260, 180, 260, 8.0f, 0.0f, 0.0f, 1.0f);
+    canvas.refreshAll();
+    canvas.grab();
+    CHECK(canvas.colourPending());
+    CHECK_EQ(doc.ctgFillFor(track, image, colour)->inputs, was);
+
+    // And it arrives on its own, without anybody asking again: the poll is what
+    // brings the new fill and the repaint with it.
+    QElapsedTimer clock;
+    clock.start();
+    while (canvas.colourPending() && clock.elapsed() < 30000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    CHECK(!canvas.colourPending());
+
+    const CtgFill* second = doc.ctgFillFor(track, image, colour);
+    CHECK(second != nullptr);
+    if (!second) return;
+    CHECK(second->inputs != was);
+    CHECK_EQ(second->colours, 2);
+
+    // And it is on the screen, which is the part a document check cannot see.
+    // The view is untouched, so an image pixel is a widget pixel.
+    const QImage shown = canvas.grab().toImage();
+    const QColor inside = shown.pixelColor(250, 250);
+    CHECK(inside.red() > 200);
+    CHECK(inside.green() < 80);
+}
+
+// A fill depends on some things it is not keyed on -- which way marks are
+// carried, and, when a project is opened, the whole document being a different
+// one whose drawings answer to the same ids. The way all of those say "every
+// fill you have is wrong" is by emptying the cache, and that was enough while a
+// solve finished inside the call that started it.
+//
+// It is not enough now. A solve started before the emptying lands after it,
+// with a hash that still matches, and would be installed as though it were
+// current -- so a solve in flight has to be thrown away by the same act.
+void emptyingTheFillCacheThrowsAwayASolveAlreadyRunning() {
+    TEST("emptying the fill cache throws away the solves in flight as well");
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId image = doc.insertImage(track, 0);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+    canvas.setFrame(0);
+
+    const auto strokeOn = [&](LayerId layer, float x0, float y0, float x1, float y1,
+                              float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    strokeOn(ink, 100, 100, 400, 100, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 100, 100, 300, 3.0f, 0, 0, 0);
+    strokeOn(ink, 400, 100, 400, 300, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 300, 400, 300, 3.0f, 0, 0, 0);
+    strokeOn(colour, 200, 200, 300, 200, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    canvas.refreshAll();
+    canvas.grab();  // a solve is now running
+    CHECK(canvas.colourPending());
+
+    doc.ctgCache().clear();  // ...and everything it is about is now wrong
+    canvas.settleColour();
+
+    // The answer arrived and was dropped rather than installed. Nothing else
+    // could have told it apart: the document has not moved, so the hash it
+    // carries is exactly the one that was asked for.
+    CHECK(doc.ctgFillFor(track, image, colour) == nullptr);
+
+    // And asking again gets it back, so this is a discard and not a wedge.
+    canvas.refreshAll();
+    canvas.grab();
+    CHECK(canvas.settleColour());
+    const CtgFill* fill = doc.ctgFillFor(track, image, colour);
+    CHECK(fill != nullptr);
+    if (!fill) return;
+    CHECK_NEAR(fill->tiles.pixel(390, 280).r, 1.0, 0.02);
 }
 
 // --- saving ----------------------------------------------------------------
@@ -2191,6 +2353,8 @@ int main(int argc, char** argv) {
     theScribbleBoxCanBeClicked();
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
+    theLastFillStaysUntilTheNextOneArrives();
+    emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
     aFailedSaveLeavesTheOldProjectAlone();
     abrokenProjectDoesNotReplaceTheOpenOne();

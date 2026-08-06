@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctg_fill.h"
 
 #include <algorithm>
@@ -46,6 +46,7 @@ CtgFill& CtgFillCache::store(const CtgKey& key, CtgFill fill) {
 void CtgFillCache::clear() {
     entries_.clear();
     tiles_ = 0;
+    ++generation_;
 }
 
 // Oldest first, and never the entry just stored: the caller is holding a

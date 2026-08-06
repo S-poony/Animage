@@ -161,6 +161,23 @@ public:
 
     void clear();
 
+    // How many times the store has been emptied.
+    //
+    // Emptying it is how everything that a fill depends on but is not keyed on
+    // says so -- which sources the layer is cut against, which way marks are
+    // carried, and a whole document being replaced by another. None of those
+    // move a cel revision, so the hash cannot see them and the cache is thrown
+    // away instead.
+    //
+    // That was enough while a solve finished inside the call that started it.
+    // It is not enough when the answer arrives later: a solve started before
+    // the sources changed would land afterwards, match the hash, and be
+    // installed as though it were current. Anything with a solve in flight
+    // records this alongside the hash, so every present and future way of
+    // saying "all of that is wrong now" invalidates the answers in the air as
+    // well as the ones on the shelf.
+    std::uint64_t generation() const { return generation_; }
+
     std::size_t size() const { return entries_.size(); }
     std::size_t tileCount() const { return tiles_; }
 
@@ -186,6 +203,7 @@ private:
     mutable std::uint64_t clock_ = 0;
     std::size_t tiles_ = 0;
     std::uint64_t stores_ = 0;
+    std::uint64_t generation_ = 0;
 };
 
 }  // namespace animage

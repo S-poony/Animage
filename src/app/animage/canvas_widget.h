@@ -6,11 +6,16 @@
 #include <QPointF>
 #include <QWidget>
 
+#include <map>
+#include <utility>
+
 class QPainter;
+class QTimer;
 
 #include "brush.h"
 #include "compositor.h"
 #include "ctg.h"
+#include "ctg_solver.h"
 #include "document.h"
 
 // The drawing surface. Shows one image of one track, composited, and turns
@@ -36,6 +41,7 @@ public:
     };
 
     explicit CanvasWidget(animage::Document& document, QWidget* parent = nullptr);
+    ~CanvasWidget() override;
 
     void setTrack(animage::TrackId track);
     void setFrame(std::size_t slot);
@@ -82,6 +88,29 @@ public:
     // Everything drawn changed underneath us: undo, layer visibility, opacity.
     void refreshAll();
 
+    // Where the colour of a CTG layer is worked out: a worker thread, so that a
+    // max-flow taking a second happens beside the interface rather than inside
+    // it. Lives here because the canvas is what knows which drawing is on
+    // screen, when a stroke has ended and what has to be repainted -- and it is
+    // lent out, because the whole-track audit is the same work on the same
+    // drawings and a second worker would only fight this one for the machine.
+    animage::CtgSolver& colourSolver() { return ctg_solver_; }
+
+    // Installs anything the solver has finished. Called on a timer while
+    // solves are outstanding; public so a test can drive it directly.
+    void collectColour();
+
+    // Waits for every outstanding solve and installs it.
+    //
+    // For tests, and for anything that must not run ahead of the colour. Never
+    // during ordinary drawing: waiting for a max-flow on the interface thread
+    // is the thing all of this exists to stop.
+    bool settleColour(int timeout_ms = 30000);
+
+    // Whether a fill is being worked out. The interface has no business
+    // blocking on one, but it is entitled to say so.
+    bool colourPending() const { return !ctg_wanted_.empty(); }
+
     // Entries in the composite cache. Exposed so a test can assert this tracks
     // the size of the window rather than the size of the visible image area.
     long long cacheEntryCount() const;
@@ -125,10 +154,11 @@ Q_SIGNALS:
     void colourPicked(float r, float g, float b);
 
     // A CTG fill was rebuilt, so anything reporting on one is out of date --
-    // the timeline's flags and the layer panel's. Emitted from inside a paint,
-    // because that is the only place a solve is allowed to start, so it must be
-    // connected queued: rebuilding a panel underneath a paint is how a widget
-    // ends up being deleted while it is drawing itself.
+    // the timeline's flags and the layer panel's. Emitted when a solve is
+    // installed, which happens on a timer and no longer inside a paint; the
+    // queued connection it is on can stay either way, and a fill arriving while
+    // the canvas is painting itself would be a way to delete a widget from
+    // inside its own paint.
     void ctgFillsChanged();
 
 protected:
@@ -154,7 +184,8 @@ private:
     void rebuildOnion();
     void fitTo(const animage::PixelRect& bounds);
     void drawCanvasFrame(QPainter& painter);
-    bool refreshCtgFills();
+    void requestCtgFills();
+    void dropStaleColourRequests(bool only_this_drawing);
     void setScribblePreview(animage::LayerId layer, bool previewing);
 
     bool pickColourAt(const QPointF& image_point);
@@ -173,6 +204,32 @@ private:
     animage::Compositor compositor_;
     animage::Brush brush_;
     animage::Framebuffer scratch_;
+
+    // The solves asked for and not yet installed, and what each one was asked
+    // about. Without this a paint would ask again for a solve already running,
+    // and the rule that the newest question wins would call off the answer it
+    // was waiting for -- for ever, at the rate a widget repaints.
+    //
+    // The generation is the other half of "is this answer still about the
+    // question I asked". A fill depends on things it is not keyed on -- which
+    // layers it is cut against, which way marks are carried -- and the way
+    // those say so is by emptying the fill cache. See CtgFillCache::generation.
+    struct ColourWanted {
+        std::uint64_t inputs = 0;
+        std::uint64_t generation = 0;
+    };
+    animage::CtgSolver ctg_solver_;
+    std::map<std::pair<animage::ImageId, animage::LayerId>, ColourWanted> ctg_wanted_;
+
+    // Runs only while something is outstanding.
+    //
+    // A poll rather than the solver's own wake-up, deliberately: that callback
+    // arrives on a worker thread, and a worker thread that touches a widget --
+    // or outlives one by a few microseconds -- is a crash that happens to
+    // somebody else on a machine with a different number of cores. Sixteen
+    // milliseconds is nothing beside a solve, and the timer stops when there is
+    // nothing to wait for.
+    QTimer* ctg_poll_ = nullptr;
 
     animage::TrackId track_ = animage::kNoId;
     animage::ImageId image_ = animage::kNoId;

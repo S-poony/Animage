@@ -1302,6 +1302,12 @@ void MainWindow::onCtgSourcesChanged() {
     doc_.ctgCache().clear();
     doc_.ctgVerdicts().clear();
     canvas_->refreshAll();
+    // What the row says about the layer is about the layer, so it is said now
+    // rather than whenever the next fill happens to land. It used to ride on
+    // the re-solve this causes, which was invisible while a solve finished
+    // inside the paint that started it and became a stale panel the moment the
+    // solve moved to another thread.
+    refreshLayerFlags();
     audit_timer_->start();
     syncStatus();
 }

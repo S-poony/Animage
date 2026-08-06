@@ -10,6 +10,7 @@
 #include <QPointingDevice>
 #include <QResizeEvent>
 #include <QTabletEvent>
+#include <QTimer>
 #include <QWheelEvent>
 #include <algorithm>
 #include <array>
@@ -140,7 +141,19 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     eraser_settings_.pressure_affects_opacity = false;
     eraser_settings_.erase = true;
 
+    ctg_poll_ = new QTimer(this);
+    ctg_poll_->setInterval(16);
+    connect(ctg_poll_, &QTimer::timeout, this, &CanvasWidget::collectColour);
+
     clock_.start();
+}
+
+CanvasWidget::~CanvasWidget() {
+    // Before anything else this object owns goes away. A solve holds only its
+    // own copy of the drawing, so nothing here is unsafe -- but a max-flow that
+    // has not been told the window is closing goes on running for a second or
+    // two after it has, and the process stays up with nothing on screen.
+    ctg_solver_.cancelAll();
 }
 
 void CanvasWidget::setTrack(TrackId track) {
@@ -198,48 +211,142 @@ void CanvasWidget::setPlaying(bool playing) {
     refreshAll();
 }
 
-// Rebuilds any CTG fill whose scribbles or line art have moved, and says
-// whether any of them actually changed. Regenerating is skipped entirely when
-// nothing has, so this is a few comparisons in the common case; the cost only
-// appears when there is something new to solve.
+// Asks for any CTG fill whose scribbles or line art have moved to be solved
+// somewhere else.
 //
-// Done here rather than inside the compositor on purpose: a max-flow is not
-// something a paint should be able to start by accident.
-bool CanvasWidget::refreshCtgFills() {
+// Nothing is computed here. What was a max-flow inside a paint -- capped at
+// about 512x512 precisely so that it could not stop the program -- is now a
+// hash compared against the cached fill and, if they differ, a snapshot handed
+// to a worker thread. The old fill stays on screen until the new one lands,
+// which is the honest thing to show: it is what the drawing looked like a
+// moment ago, and the alternative is the colour blinking out on every stroke.
+//
+// The bookkeeping in ctg_wanted_ is what stops this asking again on the next
+// paint for a solve that is already running. A widget repaints many times a
+// second, and the solver's rule is that the newest question wins -- so without
+// it, every paint would call off the answer the last paint was waiting for and
+// no fill would ever be finished.
+void CanvasWidget::requestCtgFills() {
     const Track* track = doc_.scene().findTrack(track_);
-    if (!track || image_ == kNoId) return false;
+    if (!track || image_ == kNoId) return;
 
     // Never during a stroke, whichever layer is being drawn on. Every dab bumps
-    // the cel's revision, so solving whenever a fill looked stale meant a
-    // max-flow per dab -- tens of them a second, each one hundreds of
-    // milliseconds.
+    // the cel's revision, so asking whenever a fill looked stale would start a
+    // solve per dab -- and each one would supersede the last, so the pen would
+    // be leaving a trail of abandoned max-flows and no fill at all.
     //
     // This used to test for a scribble in progress, which covered drawing on the
     // colour layer and missed drawing on the line art it is cut against. Inking
     // over a filled drawing therefore re-solved on every dab, and it is the same
     // trap either way: the solve belongs at the end of the stroke.
-    if (stroking_) return false;
+    if (stroking_) return;
 
-    bool changed = false;
-    CtgSettings settings;
+    dropStaleColourRequests(/*only_this_drawing=*/true);
+
+    const std::uint64_t generation = doc_.ctgCache().generation();
+    const CtgSettings settings;
     for (const Layer& layer : track->layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
         // Nothing to solve for a layer showing its scribbles: the fill would be
         // computed and then not drawn.
         if (layer.show_scribbles) continue;
 
-        // What the cached fill was keyed on before asking for it. If that moves,
-        // the whole fill has been regenerated and the whole of it has to be
-        // redrawn -- a new fill changes colour across entire regions, nowhere
-        // near wherever the pen happened to be.
-        const CtgFill* previous = doc_.ctgFillFor(track_, image_, layer.id);
-        const bool existed = previous != nullptr;
-        const std::uint64_t was = existed ? previous->inputs : 0;
+        const CtgInputs wanted = ctgInputsFor(doc_, track_, image_, layer.id, settings);
+        if (!wanted.valid) continue;
 
-        const CtgFill& fill = ctgFill(doc_, track_, image_, layer.id, settings);
-        if (!existed || fill.inputs != was) changed = true;
+        const CtgFill* held = doc_.ctgFillFor(track_, image_, layer.id);
+        if (held && held->valid && held->inputs == wanted.hash) continue;  // current
+
+        const auto key = std::make_pair(image_, layer.id);
+        const auto asked = ctg_wanted_.find(key);
+        if (asked != ctg_wanted_.end() && asked->second.inputs == wanted.hash) {
+            continue;  // already being worked out
+        }
+
+        ctg_wanted_[key] = {wanted.hash, generation};
+        ctg_solver_.request({image_, layer.id},
+                            ctgJobFor(doc_, track_, image_, layer.id, settings), true);
     }
-    return changed;
+
+    if (!ctg_wanted_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
+}
+
+// Takes what the solver has finished and puts it in the document.
+//
+// This runs on the interface thread and it is the only place a solved fill
+// enters the document, which is the whole of the threading discipline here: the
+// worker is handed a copy and hands back an answer, and every write to the
+// document stays on the thread that owns it.
+// Requests whose answer nobody is waiting for any more.
+//
+// A drawing that has been left, or -- whether or not it is on screen -- a layer
+// that has since been told to cut against something else. Playing a coloured
+// shot is twenty-four of the first a second against solves taking a tenth of
+// one, and a queue that fills faster than it drains never catches up.
+void CanvasWidget::dropStaleColourRequests(bool only_this_drawing) {
+    const std::uint64_t generation = doc_.ctgCache().generation();
+    for (auto it = ctg_wanted_.begin(); it != ctg_wanted_.end();) {
+        const bool left = only_this_drawing && it->first.first != image_;
+        if (!left && it->second.generation == generation) {
+            ++it;
+            continue;
+        }
+        ctg_solver_.cancel({it->first.first, it->first.second}, true);
+        it = ctg_wanted_.erase(it);
+    }
+}
+
+void CanvasWidget::collectColour() {
+    bool installed = false;
+    dropStaleColourRequests(/*only_this_drawing=*/false);
+
+    for (CtgSolver::Result& result : ctg_solver_.collect()) {
+        if (!result.wanted_tiles) continue;  // a verdict; the audit collects those
+
+        const auto key = std::make_pair(result.key.image, result.key.layer);
+        const auto asked = ctg_wanted_.find(key);
+        // An answer to a question that has since been asked again, about a
+        // drawing that has since been left, or about a layer that has since
+        // been told to cut against something else. All ordinary, and all
+        // dropped: the fill it would replace is at worst as old.
+        if (asked == ctg_wanted_.end() || asked->second.inputs != result.fill.inputs) continue;
+
+        ctg_wanted_.erase(asked);
+        doc_.ctgCache().store(result.key, std::move(result.fill));
+        installed = true;
+    }
+
+    if (ctg_wanted_.empty() && ctg_poll_) ctg_poll_->stop();
+    if (!installed) return;
+
+    // A regenerated fill changes colour across whole regions, nowhere near
+    // wherever the pen was, so all of it is redrawn. Marking only the stroke's
+    // own rectangle left the new fill beside the stroke and the old one
+    // everywhere else, and hiding and showing the layer repainted the lot -- so
+    // the same operation appeared to have two behaviours.
+    dirty_everything_ = true;
+    update();
+    Q_EMIT ctgFillsChanged();
+}
+
+bool CanvasWidget::settleColour(int timeout_ms) {
+    QElapsedTimer clock;
+    clock.start();
+    while (!ctg_wanted_.empty()) {
+        if (clock.elapsed() > timeout_ms) return false;
+        ctg_solver_.waitUntilIdle();
+        collectColour();
+
+        // A solve that came back to nobody -- superseded, or about a drawing
+        // that has been left -- leaves its entry behind, and waiting for an
+        // answer that will never arrive is a hang. Nothing outstanding at the
+        // solver means nothing more is coming.
+        if (!ctg_wanted_.empty() && ctg_solver_.idle()) {
+            ctg_wanted_.clear();
+            return false;
+        }
+    }
+    return true;
 }
 
 // While a scribble is being drawn its layer shows the marks rather than the
@@ -539,14 +646,10 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // All the compositing for this frame happens here, once, however many
     // edits arrived since the last paint.
     //
-    // A regenerated fill repaints everything. It is not an edit to the pixels
-    // under the pen: a colour boundary can move anywhere in the picture, so
-    // repainting only what was marked dirty left the new fill showing beside the
-    // stroke and the old one everywhere else.
-    if (refreshCtgFills()) {
-        dirty_everything_ = true;
-        Q_EMIT ctgFillsChanged();
-    }
+    // The colour is asked for here and never worked out here. What arrives is
+    // whatever was solved by the time this ran; a fill landing later brings the
+    // paint on itself.
+    requestCtgFills();
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;

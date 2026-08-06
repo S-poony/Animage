@@ -117,6 +117,29 @@ void CtgSolver::onFinished(std::function<void()> notify) {
     notify_ = std::move(notify);
 }
 
+void CtgSolver::cancel(const CtgKey& key, bool want_tiles) {
+    std::lock_guard<std::mutex> held(mutex_);
+
+    const auto drop = [&](std::deque<Request>& queue) {
+        const auto stale = std::remove_if(
+            queue.begin(), queue.end(),
+            [&](const Request& queued) { return sameQuestion(queued, key, want_tiles); });
+        superseded_ += static_cast<std::uint64_t>(std::distance(stale, queue.end()));
+        queue.erase(stale, queue.end());
+    };
+    drop(now_);
+    drop(whenever_);
+
+    for (Active& active : running_) {
+        if (sameQuestion(active, key, want_tiles)) active.abandon->store(true);
+    }
+
+    // A result already collected into finished_ is left alone. It is an answer
+    // to a question that was asked, and whoever collects it decides whether it
+    // is still wanted -- which they have to be able to do anyway, because a
+    // result can be in flight while this runs.
+}
+
 void CtgSolver::cancelAll() {
     {
         std::lock_guard<std::mutex> held(mutex_);

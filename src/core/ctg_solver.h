@@ -79,6 +79,11 @@ public:
     // wake-up: anything that touches a document from in here is a race.
     void onFinished(std::function<void()> notify);
 
+    // Call one off. What playing a coloured shot needs: the drawing that was on
+    // screen a frame ago is a question nobody is waiting for the answer to any
+    // more, and without this the queue fills faster than it drains.
+    void cancel(const CtgKey& key, bool want_tiles);
+
     // Forget everything queued and give up on everything running. Used when the
     // document underneath is being replaced -- opening a project, closing one --
     // where every answer in flight is about a document that will not exist.
