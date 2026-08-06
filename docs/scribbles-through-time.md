@@ -218,6 +218,42 @@ Order of attack, cheapest first:
 1. **Carry unchanged.** Part 1, and nothing else. On twos and threes it may
    simply be enough — measure how often before building anything else, because
    the answer decides whether the rest is worth it.
+
+   > **Measured, in `bench_carry`.** A shape that moves a known amount per
+   > drawing, a mark made on the first drawing only, and the fill read off each
+   > drawing that inherits it.
+   >
+   > **The rule is half the width of the region.** A carried mark holds its
+   > region while the majority of it is still inside — that is not a new rule,
+   > it is the soft-scribble majority rule applied to a mark that has not moved
+   > — so a mark scrawled across the middle of a region survives displacement of
+   > about half that region's width and fails just past it. On a 150-wide region
+   > it was right at 60 px and wrong at 80. Nothing degrades: it is the same
+   > fill until it is a different one.
+   >
+   > **Which way it fails depends on the neighbour, and only one of the two is
+   > caught.** Where the next region has a mark of its own, the two contest the
+   > overlap and the loser's region goes uncoloured or takes the wrong colour —
+   > and `spread` collapses to about 1, so the drawing is flagged, every time,
+   > at exactly the displacement where it goes wrong. Where the next region has
+   > *no* mark of its own, a carried mark overlapping it by any amount at all
+   > takes it: uncontested, majority is a formality. 100% of the neighbouring
+   > region, wrong, from the first drawing of motion — and `spread` **rises**,
+   > from 6.3 to 12.8, because the mark did win a region, just not the one it
+   > was asking for. The flag is not merely silent there, it is pleased.
+   >
+   > That is the open question at the bottom of this document, measured: the
+   > wrong region of about the right size is real, it is the ordinary
+   > consequence of a wall sliding across a mark, and no quantity read off one
+   > drawing can see it. It needs the correspondence that rung 2 has to build
+   > anyway.
+   >
+   > **So it is worth building.** Half a region's width is a very ordinary
+   > amount of movement between two drawings — a hand on twos crosses far more —
+   > and the failure is not a soft degradation but a whole region taking the
+   > wrong colour. What carrying unchanged does buy is everything that barely
+   > moves: held drawings, backgrounds, and the slow parts of a shot, where it
+   > is exactly right and costs nothing.
 2. **One translation for the whole drawing**, from coarse correlation of the two
    barriers. Cel animation mostly translates between consecutive drawings, so
    this buys a lot for very little.
@@ -336,6 +372,14 @@ front of you. Do part 1 first and do not wait for the thread work.
   carrying is most likely to be wrong *and* most likely to be right. A second
   flag that cries wolf teaches people to ignore the first one, so this waits for
   part 2 to give it something real to check against.
+
+  **Since measured, and worse than it reads above.** `bench_carry` produces the
+  case on demand: a wall sliding across a carried mark, with nothing marked on
+  the far side. The neighbouring region takes the wrong colour completely, from
+  the first drawing of movement, and `spread` goes *up* — 6.3 to 12.8 — because
+  the mark did fill a region and the number cannot ask which one. So this is not
+  a gap in the flag's coverage, it is a case the flag actively endorses. It
+  stays open, and it stays waiting for the same correspondence.
 - **Override granularity.** Per (image, layer) is proposed here and needs no
   fork. Per *scribble* is finer and more useful — change one region's colour on
   one drawing without detaching the rest — and needs the vector fork.

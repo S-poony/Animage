@@ -19,6 +19,11 @@ animage_test(test_color)
 add_executable(bench_composite bench_composite.cpp)
 target_link_libraries(bench_composite PRIVATE animage::core)
 
+# A measurement rather than a test: how far a mark can be carried before it
+# stops landing. See docs/scribbles-through-time.md, part 2.
+add_executable(bench_carry bench_carry.cpp)
+target_link_libraries(bench_carry PRIVATE animage::core)
+
 # Interface tests need Qt, and run offscreen so they work on a build machine
 # with no display.
 if(TARGET animage_ui)
