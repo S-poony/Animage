@@ -52,6 +52,17 @@ inline void checkNear(double a, double b, double tol, const char* file, int line
     }
 }
 
+// A shared build machine is virtualised, short of cores and sitting next to
+// somebody else's build, so a check that compares two durations measures the
+// neighbours as much as it measures us. Tests that time things say so and step
+// aside there rather than reporting a failure they cannot substantiate.
+inline bool onSharedHardware() {
+    const char* ci = std::getenv("CI");
+    return ci && *ci && std::string(ci) != "false";
+}
+
+inline void skip(const char* why) { std::printf("    skipped: %s\n", why); }
+
 inline int summarise(const char* suite) {
     if (g_failures == 0) {
         std::printf("%s: %d checks passed\n", suite, g_checks);

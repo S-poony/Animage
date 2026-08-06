@@ -58,7 +58,7 @@ Nothing needs to be installed alongside them — Qt travels with the download.
 | | |
 |---|---|
 | Windows | `Animage-windows-x64.zip` — unzip and run `animage.exe`. |
-| macOS | `Animage-macos-universal.zip` — unzip, then **right-click ▸ Open** the first time. |
+| macOS | `Animage-macos-universal.zip` — unzip, then **right-click ▸ Open** the first time. Needs macOS 13.3 or newer. |
 | Linux | `Animage-linux-x86_64.AppImage` — `chmod +x` it and run it. |
 
 These are prototype builds from the tip of `main`, not stable releases, and they

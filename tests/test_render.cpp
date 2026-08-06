@@ -367,6 +367,16 @@ void theBlitInterpolatesUntilThePixelsAreWorthSeeing() {
 // about 3 to about 12.
 void theWritebackIsNotTheSlowHalfOfARefresh() {
     TEST("the writeback does not dominate a refresh");
+
+    // The ratio only tells threaded from un-threaded on a machine with cores to
+    // spare, because threading the writeback is the whole reason it is small.
+    // A GitHub runner has four, and measured 6.03 there against about 3 here --
+    // near enough to the un-threaded 12 to be saying nothing.
+    if (testing::onSharedHardware()) {
+        testing::skip("a shared runner has too few cores to tell threaded from not");
+        return;
+    }
+
     Fixture fixture(1645, 765, 40);
     fixture.settleAt(0.72);  // near the largest the cache is allowed to get
 

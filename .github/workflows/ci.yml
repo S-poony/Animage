@@ -43,7 +43,9 @@ jobs:
             # Qt's macOS binaries are universal, so one build serves both Apple
             # Silicon and Intel and there is one Mac download rather than two.
             # The quotes matter: the list separator is a shell separator too.
-            extra_cmake: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0'
+            # 13.3 is where Apple's standard library grew the floating-point
+            # to_chars, which the project file format is written with.
+            extra_cmake: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3'
 
     steps:
       - uses: actions/checkout@v7
