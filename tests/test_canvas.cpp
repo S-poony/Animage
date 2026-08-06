@@ -40,11 +40,10 @@
 #include "export_sequence.h"
 #include "main_window.h"
 #include "document.h"
-#include "project_files.h"
+#include "project_io.h"
 #include "scribble.h"
 #include "timeline_widget.h"
 #include "scene_settings_dialog.h"
-#include "serialise.h"
 #include "testing.h"
 
 using namespace animage;
@@ -1352,7 +1351,7 @@ void aProjectSurvivesSavingAndLoading() {
 
     const Document original = buildDrawnScene();
     QString error;
-    CHECK(project::save(original, folder, &error));
+    CHECK(ProjectIO::save(original, folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     // The layout is part of the promise: a folder somebody can look inside.
@@ -1361,13 +1360,13 @@ void aProjectSurvivesSavingAndLoading() {
     CHECK(QDir(folder + QStringLiteral("/cels")).entryList(QDir::Files).size() >= 3);
 
     Document loaded;
-    CHECK(project::load(loaded, folder, &error));
+    CHECK(ProjectIO::load(loaded, folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     // Structure.
     CHECK_EQ(loaded.scene().framerate, 12);
     CHECK_EQ(loaded.scene().width, 1280);
-    CHECK_EQ(writeSceneJson(loaded), writeSceneJson(original));
+    CHECK_EQ(ProjectIO::writeSceneJson(loaded), ProjectIO::writeSceneJson(original));
 
     // And the pixels, bit for bit, on both drawings and both layers.
     const TrackId track = loaded.scene().tracks.front().id;
@@ -1413,7 +1412,7 @@ void aFailedSaveLeavesTheOldProjectAlone() {
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
 
     const Document first = buildDrawnScene();
-    CHECK(project::save(first, folder, nullptr));
+    CHECK(ProjectIO::save(first, folder, nullptr));
     QFile scene(folder + QStringLiteral("/scene.json"));
     CHECK(scene.open(QIODevice::ReadOnly));
     const QByteArray original_bytes = scene.readAll();
@@ -1424,7 +1423,7 @@ void aFailedSaveLeavesTheOldProjectAlone() {
     Document second = buildDrawnScene();
     second.setFramerate(30);
     QString error;
-    CHECK_EQ(project::save(second, QStringLiteral("\0invalid"), &error), false);
+    CHECK_EQ(ProjectIO::save(second, QStringLiteral("\0invalid"), &error), false);
     CHECK(!error.isEmpty());
 
     // The first save is exactly as it was.
@@ -1445,18 +1444,18 @@ void abrokenProjectDoesNotReplaceTheOpenOne() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     Document open_document = buildDrawnScene();
     open_document.setFramerate(25);
-    const std::string before = writeSceneJson(open_document);
+    const std::string before = ProjectIO::writeSceneJson(open_document);
 
     // No such folder.
     QString error;
-    CHECK_EQ(project::load(open_document, scratch.filePath(QStringLiteral("absent")), &error),
+    CHECK_EQ(ProjectIO::load(open_document, scratch.filePath(QStringLiteral("absent")), &error),
              false);
     CHECK(!error.isEmpty());
-    CHECK_EQ(writeSceneJson(open_document), before);
+    CHECK_EQ(ProjectIO::writeSceneJson(open_document), before);
 
     // A cel file corrupted after the fact. This is the case that matters: the
     // scene reads, so a careless loader would have replaced the document before
@@ -1469,9 +1468,9 @@ void abrokenProjectDoesNotReplaceTheOpenOne() {
         broken.write("ANIMCELZ and then nonsense");
         broken.close();
 
-        CHECK_EQ(project::load(open_document, folder, &error), false);
+        CHECK_EQ(ProjectIO::load(open_document, folder, &error), false);
         CHECK(!error.isEmpty());
-        CHECK_EQ(writeSceneJson(open_document), before);
+        CHECK_EQ(ProjectIO::writeSceneJson(open_document), before);
         CHECK_EQ(open_document.scene().framerate, 25);
     }
 }
@@ -1484,8 +1483,8 @@ void savingTwiceWritesTheSameBytes() {
 
     const QString a = scratch.filePath(QStringLiteral("a.animage"));
     const QString b = scratch.filePath(QStringLiteral("b.animage"));
-    CHECK(project::save(doc, a, nullptr));
-    CHECK(project::save(doc, b, nullptr));
+    CHECK(ProjectIO::save(doc, a, nullptr));
+    CHECK(ProjectIO::save(doc, b, nullptr));
 
     const QStringList files = QDir(a + QStringLiteral("/cels")).entryList(QDir::Files);
     CHECK(!files.isEmpty());
@@ -1516,8 +1515,8 @@ void anIncrementalSaveWritesTheSameProject() {
     const ImageId image = doc.scene().tracks.front().slots.front();
     const LayerId ink = doc.scene().tracks.front().layers.front().id;
 
-    project::SaveState state;
-    CHECK(project::save(doc, grown, state, nullptr));
+    ProjectIO::SaveState state;
+    CHECK(ProjectIO::save(doc, grown, state, nullptr));
     CHECK_EQ(state.folder.toStdString(), grown.toStdString());
     CHECK(!state.revisions.empty());
 
@@ -1525,18 +1524,18 @@ void anIncrementalSaveWritesTheSameProject() {
     strokeOn(doc, track, image, ink, 500, 480, 620, 560);
 
     QString error;
-    CHECK(project::save(doc, grown, state, &error));
+    CHECK(ProjectIO::save(doc, grown, state, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     // The same document written from nothing, as the comparison.
-    CHECK(project::save(doc, fresh, nullptr));
+    CHECK(ProjectIO::save(doc, fresh, nullptr));
     CHECK(projectBytes(fresh).size() >= 4);
     CHECK_EQ(projectBytes(grown) == projectBytes(fresh), true);
 
     // And it is a project, not merely a folder with matching bytes: the stroke
     // that arrived after the first save is in it.
     Document back;
-    CHECK(project::load(back, grown, &error));
+    CHECK(ProjectIO::load(back, grown, &error));
     CHECK(alphaAt(back, back.scene().tracks.front().id, image, ink, 560, 520) > 0.0f);
 }
 
@@ -1551,8 +1550,8 @@ void anIncrementalSaveReplacesWhatWentMissing() {
     const QString reference = scratch.filePath(QStringLiteral("reference.animage"));
 
     const Document doc = buildDrawnScene();
-    project::SaveState state;
-    CHECK(project::save(doc, folder, state, nullptr));
+    ProjectIO::SaveState state;
+    CHECK(ProjectIO::save(doc, folder, state, nullptr));
 
     const QString cels = folder + QStringLiteral("/cels");
     const QStringList names = QDir(cels).entryList(QDir::Files);
@@ -1563,15 +1562,15 @@ void anIncrementalSaveReplacesWhatWentMissing() {
     // Nothing in the document changed, so every cel is a candidate to be
     // carried forward -- including the one that is no longer there to carry.
     QString error;
-    CHECK(project::save(doc, folder, state, &error));
+    CHECK(ProjectIO::save(doc, folder, state, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
-    CHECK(project::save(doc, reference, nullptr));
+    CHECK(ProjectIO::save(doc, reference, nullptr));
     CHECK_EQ(projectBytes(folder) == projectBytes(reference), true);
 
     Document back;
-    CHECK(project::load(back, folder, &error));
-    CHECK_EQ(writeSceneJson(back), writeSceneJson(doc));
+    CHECK(ProjectIO::load(back, folder, &error));
+    CHECK_EQ(ProjectIO::writeSceneJson(back), ProjectIO::writeSceneJson(doc));
 }
 
 // Save As has to hand back something that stands on its own, so a state
@@ -1584,9 +1583,9 @@ void savingElsewhereCarriesNothingForward() {
     const QString second = scratch.filePath(QStringLiteral("second.animage"));
 
     const Document doc = buildDrawnScene();
-    project::SaveState state;
-    CHECK(project::save(doc, first, state, nullptr));
-    CHECK(project::save(doc, second, state, nullptr));
+    ProjectIO::SaveState state;
+    CHECK(ProjectIO::save(doc, first, state, nullptr));
+    CHECK(ProjectIO::save(doc, second, state, nullptr));
 
     CHECK_EQ(state.folder.toStdString(), second.toStdString());
     CHECK_EQ(projectBytes(second) == projectBytes(first), true);
@@ -1599,18 +1598,18 @@ void openingLeavesTheFolderKnown() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     Document back;
-    project::SaveState state;
+    ProjectIO::SaveState state;
     QString error;
-    CHECK(project::load(back, folder, state, &error));
+    CHECK(ProjectIO::load(back, folder, state, &error));
     CHECK_EQ(state.folder.toStdString(), folder.toStdString());
-    CHECK_EQ(state.revisions.size(), celsReferencedBy(back).size());
+    CHECK_EQ(state.revisions.size(), ProjectIO::celsReferencedBy(back).size());
 
     // Every revision recorded is the one the document is actually holding --
     // the check the save will make, made here where a mismatch is legible.
-    for (CelId id : celsReferencedBy(back)) {
+    for (CelId id : ProjectIO::celsReferencedBy(back)) {
         const Cel* cel = back.cel(id);
         CHECK(cel != nullptr);
         if (!cel) continue;
@@ -1620,8 +1619,8 @@ void openingLeavesTheFolderKnown() {
     }
 
     const QString again = scratch.filePath(QStringLiteral("again.animage"));
-    CHECK(project::save(back, folder, state, &error));
-    CHECK(project::save(back, again, nullptr));
+    CHECK(ProjectIO::save(back, folder, state, &error));
+    CHECK(ProjectIO::save(back, again, nullptr));
     CHECK_EQ(projectBytes(folder) == projectBytes(again), true);
 }
 
@@ -1634,7 +1633,7 @@ void autosaveWritesOnlyWhenSomethingMoved() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     MainWindow window;
     window.resize(1200, 800);
@@ -1678,7 +1677,7 @@ void autosaveWritesOnlyWhenSomethingMoved() {
 
     // And what is on disk is a project that opens.
     Document back;
-    CHECK(project::load(back, folder, &error));
+    CHECK(ProjectIO::load(back, folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
     CHECK(!back.scene().tracks.empty());
 }
@@ -1690,7 +1689,7 @@ void autosaveWaitsForTheStrokeToFinish() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     MainWindow window;
     window.resize(1200, 800);
@@ -1740,7 +1739,7 @@ void closingWritesTheLastChanges() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     {
         MainWindow window;
@@ -1765,7 +1764,7 @@ void closingWritesTheLastChanges() {
     // It is on disk, and the project still opens.
     Document back;
     QString error;
-    CHECK(project::load(back, folder, &error));
+    CHECK(ProjectIO::load(back, folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
     CHECK(!back.scene().tracks.empty());
 }
@@ -1823,7 +1822,7 @@ void newProjectStartsOverCleanly() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     MainWindow window;
     window.resize(1200, 800);
@@ -1864,7 +1863,7 @@ void newProjectStartsOverCleanly() {
 
     // The project it came from is untouched on disk.
     Document back;
-    CHECK(project::load(back, folder, nullptr));
+    CHECK(ProjectIO::load(back, folder, nullptr));
     CHECK(back.scene().tracks.front().layers.size() == 2);
 }
 
@@ -1989,11 +1988,11 @@ void exportSolvesColourItHasNeverSeen() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     // Straight off disk, so no fill has ever been built for any frame.
     Document doc;
-    CHECK(project::load(doc, folder, nullptr));
+    CHECK(ProjectIO::load(doc, folder, nullptr));
     const TrackId track = doc.scene().tracks.front().id;
     const ImageId first = doc.scene().tracks.front().imageAtSlot(0);
     const LayerId colour = doc.scene().tracks.front().layers.back().id;
@@ -2097,7 +2096,7 @@ void theFileMenuExports() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
     const QString out = scratch.filePath(QStringLiteral("out"));
 
     MainWindow window;
@@ -2193,7 +2192,7 @@ void aCarriedMarkSaysSoInThePanel() {
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("stranded.animage"));
     animage::Document built = buildStrandedShot();
-    CHECK(project::save(built, folder, nullptr));
+    CHECK(ProjectIO::save(built, folder, nullptr));
 
     MainWindow window;
     window.resize(1200, 800);
@@ -2501,7 +2500,7 @@ void transparencyIsOfferedOnlyWhereItMeansSomething() {
     CHECK(solid->styleSheet().contains(QStringLiteral("#1fb6a6")));
 }
 
-// Saving and opening through the window, rather than through project::save
+// Saving and opening through the window, rather than through ProjectIO::save
 // directly: the part that has gone wrong before is not the file, it is the
 // canvas and the panels still holding ids from the document that was replaced.
 void theFileMenuSavesAndOpens() {
@@ -2509,7 +2508,7 @@ void theFileMenuSavesAndOpens() {
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(project::save(buildDrawnScene(), folder, nullptr));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     MainWindow window;
     window.resize(1200, 800);

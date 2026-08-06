@@ -5,7 +5,7 @@
 #include <QMainWindow>
 
 #include "document.h"
-#include "project_files.h"
+#include "project_io.h"
 
 class CanvasWidget;
 class TimelineWidget;
@@ -209,7 +209,7 @@ private:
     // only re-encodes the drawings that moved. Held by the window because it
     // describes this document in that folder and nothing outside the pair
     // means anything.
-    project::SaveState save_state_;
+    ProjectIO::SaveState save_state_;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;

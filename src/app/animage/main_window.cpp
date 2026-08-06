@@ -39,7 +39,7 @@
 
 #include "canvas_widget.h"
 #include "export_sequence.h"
-#include "project_files.h"
+#include "project_io.h"
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
@@ -649,7 +649,7 @@ bool MainWindow::leaveCurrentDocument() {
 
     if (!project_folder_.isEmpty()) {
         QString error;
-        if (project::save(doc_, project_folder_, save_state_, &error)) {
+        if (ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
             saved_undo_depth_ = doc_.undoDepth();
             updateTitle();
             return true;
@@ -689,7 +689,7 @@ void MainWindow::resetToNewDocument() {
     doc_.clearHistory();
 
     project_folder_.clear();
-    save_state_ = project::SaveState();
+    save_state_ = ProjectIO::SaveState();
 
     // Everything downstream holds ids from the document that has just gone --
     // the same rebinding an open needs, for the same reason.
@@ -713,7 +713,7 @@ void MainWindow::openProject() {
 
     QString error;
     if (!openProjectAt(folder, &error)) {
-        // The open document is untouched -- project::load builds a new one and
+        // The open document is untouched -- ProjectIO::load builds a new one and
         // only swaps it in once every cel has come back -- so this is a plain
         // refusal and nothing has been lost.
         QMessageBox::warning(this, QStringLiteral("Cannot open that project"), error);
@@ -721,7 +721,7 @@ void MainWindow::openProject() {
 }
 
 bool MainWindow::openProjectAt(const QString& folder, QString* error) {
-    if (!project::load(doc_, folder, save_state_, error)) return false;
+    if (!ProjectIO::load(doc_, folder, save_state_, error)) return false;
     project_folder_ = folder;
     afterProjectLoaded();
     return true;
@@ -830,7 +830,7 @@ bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flat
 
 bool MainWindow::saveTo(const QString& folder) {
     QString error;
-    if (!project::save(doc_, folder, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, folder, save_state_, &error)) {
         QMessageBox::warning(this, QStringLiteral("Cannot save"), error);
         return false;
     }
@@ -858,7 +858,7 @@ void MainWindow::onAutosaveTick() {
     }
 
     QString error;
-    if (!project::save(doc_, project_folder_, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
         // Deliberately not a dialog. A failing autosave would otherwise
         // interrupt drawing every two minutes, which is worse than the failure
         // it is reporting -- and Save still says so properly when asked.
@@ -898,12 +898,12 @@ void MainWindow::saveProjectAs() {
     stopPlayback();
     QString chosen = QFileDialog::getSaveFileName(
         this, QStringLiteral("Save project as"), project_folder_,
-        QStringLiteral("Animage project (*%1)").arg(project::folderSuffix()));
+        QStringLiteral("Animage project (*%1)").arg(ProjectIO::folderSuffix()));
     if (chosen.isEmpty()) return;
-    if (!chosen.endsWith(project::folderSuffix())) chosen += project::folderSuffix();
+    if (!chosen.endsWith(ProjectIO::folderSuffix())) chosen += ProjectIO::folderSuffix();
 
     // A project is a folder, and the file dialog has just offered to replace it
-    // as though it were a file. It has not created anything; project::save
+    // as though it were a file. It has not created anything; ProjectIO::save
     // builds alongside and swaps, so an existing project is only replaced once
     // the new one is complete.
     saveTo(chosen);

@@ -12,9 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "celfile.h"
-#include "json.h"
-#include "serialise.h"
+#include "project_io.h"
 #include "testing.h"
 
 using namespace animage;
@@ -23,14 +21,16 @@ namespace {
 
 // A JSON document nested a hundred thousand levels deep. The scene format
 // nests about six; anything past a few hundred is either a truncated file or
-// one built to break a recursive-descent parser, and the parser's depth limit
-// has to refuse it before the stack runs out.
+// one built to break a parser, and the reader has to refuse it before the
+// stack runs out.
 //
-// This used to be a crash: every level is a stack frame, a frame has no idea
-// how many are below it, and the process died on a file a hundred kilobytes
-// long. The depth limit turns the crash into an ordinary refusal.
-void jsonRefusesDeepNesting() {
-    TEST("JSON nested past the depth limit is refused, not crashed on");
+// This used to crash this program: the JSON reader was ours, recursive, and a
+// hundred-thousand-level file overflowed the stack -- a crash on a file a
+// hundred kilobytes long. The reader is Qt's now, and Qt refuses the same file
+// itself, at its own depth limit and with an error rather than a crash; the
+// test pins the behaviour the reader has to have.
+void aDeeplyNestedSceneIsRefused() {
+    TEST("a deeply nested file is refused, not crashed on");
     std::string text;
     constexpr int kDepth = 100'000;
     text.reserve(static_cast<std::size_t>(kDepth) * 2 + 8);
@@ -38,33 +38,13 @@ void jsonRefusesDeepNesting() {
     text += "0";
     for (int i = 0; i < kDepth; ++i) text += ']';
 
-    Json parsed;
+    Document doc;
     std::string error;
-    CHECK(!Json::parse(text, parsed, &error));
+    CHECK(!ProjectIO::readSceneJson(text, doc, &error));
     CHECK(error.find("nested") != std::string::npos);
 }
 
-// A number in a scene file is data, and the file may put any double it likes
-// in a JSON number. Converting one outside the target type's range is
-// undefined behaviour, so the readers refuse rather than cast.
-//
-// Under the old code this failed by tripping UndefinedBehaviorSanitizer's
-// float-cast-overflow check -- which is why the sanitizers are on by default:
-// the cast "worked", in the sense that it produced a garbage integer and did
-// not crash, so only the sanitizer could see it.
-void numbersOutOfRangeAreRefused() {
-    TEST("numbers outside a type's range read as the fallback, not as UB");
-    Json root;
-    std::string error;
-    CHECK(Json::parse(R"({"huge": 1e300, "negative": -1e300})", root, &error));
-
-    CHECK_EQ(root["huge"].asInt(42), 42);
-    CHECK_EQ(root["huge"].asId(std::uint64_t{42}), std::uint64_t{42});
-    CHECK_EQ(root["negative"].asInt(42), 42);
-    CHECK_EQ(root["negative"].asId(std::uint64_t{42}), std::uint64_t{42});
-}
-
-// The scene reader is where those numbers actually meet the file. A canvas of
+// The scene reader is where hostile numbers actually meet the file. A canvas of
 // 1e300 by -1e300 is nonsense; the reader must fall back to its defaults and
 // clamp, with no undefined behaviour on the way.
 void sceneCanvasOutOfRangeFallsBack() {
@@ -87,7 +67,7 @@ void sceneCanvasOutOfRangeFallsBack() {
 })";
     Document doc;
     std::string error;
-    CHECK(readSceneJson(text, doc, &error));
+    CHECK(ProjectIO::readSceneJson(text, doc, &error));
     CHECK_EQ(doc.scene().width, 1920);
     CHECK_EQ(doc.scene().height, 1080);
 }
@@ -120,7 +100,7 @@ void sceneIdsOutOfRangeAreRefused() {
 })";
     Document doc;
     std::string error;
-    CHECK(!readSceneJson(text, doc, &error));
+    CHECK(!ProjectIO::readSceneJson(text, doc, &error));
     CHECK(error.find("no tracks") != std::string::npos);
 }
 
@@ -142,15 +122,15 @@ void aCelWithTooManyTilesIsRefused() {
         tile->setPixel(3, 3, Rgba{1.0f, 0.0f, 0.0f, 1.0f});
         grid.set({i, 0}, std::move(tile));
     }
-    const std::vector<std::uint8_t> bytes = encodeCel(grid);
+    const std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(grid);
 
-    CelFileInfo info;
+    ProjectIO::CelFileInfo info;
     std::string error;
-    CHECK(!readCelFileInfo(bytes, info, &error));
+    CHECK(!ProjectIO::readCelFileInfo(bytes, info, &error));
     CHECK(error.find("too many") != std::string::npos);
 
     TileGrid out;
-    CHECK(!decodeCel(bytes, out, &error));
+    CHECK(!ProjectIO::decodeCel(bytes, out, &error));
     CHECK(out.empty());  // untouched
 }
 
@@ -158,8 +138,7 @@ void aCelWithTooManyTilesIsRefused() {
 
 int main() {
     std::printf("hostile:\n");
-    jsonRefusesDeepNesting();
-    numbersOutOfRangeAreRefused();
+    aDeeplyNestedSceneIsRefused();
     sceneCanvasOutOfRangeFallsBack();
     sceneIdsOutOfRangeAreRefused();
     aCelWithTooManyTilesIsRefused();

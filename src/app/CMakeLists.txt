@@ -26,8 +26,8 @@ add_library(animage_ui STATIC
   animage/timeline_widget.h
   animage/scene_settings_dialog.cpp
   animage/scene_settings_dialog.h
-  animage/project_files.cpp
-  animage/project_files.h
+  animage/project_io.cpp
+  animage/project_io.h
   animage/export_sequence.cpp
   animage/export_sequence.h
   animage/crash_report.cpp
