@@ -2025,6 +2025,12 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
         return QString();
     };
 
+    // The judging happens on a worker thread, so the answers arrive after the
+    // opening rather than during it. Waited for here; in use they land one
+    // drawing at a time and each brings the timeline up to date with it.
+    CHECK(window.waitForColour());
+    QCoreApplication::processEvents();
+
     // The whole point of the flag: it says which drawings to go and look at, so
     // it has to be right about a drawing nobody has looked at. Opening the
     // project is the only thing that has happened here -- the playhead has
@@ -2035,12 +2041,14 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
     CHECK(!window.colourFlagAt(0));
     CHECK(!window.colourFlagAt(1));
 
-    // Standing on each drawing in turn, letting the paint that runs the solve
-    // happen and the queued report that follows it arrive.
+    // Standing on each drawing in turn, letting the paint that asks for the
+    // solve happen, the solve finish, and the queued report that follows it
+    // arrive.
     const auto visit = [&](int slot) {
         timeline->setCurrentSlot(static_cast<std::size_t>(slot));
         QCoreApplication::processEvents();
         window.grab();
+        CHECK(window.waitForColour());
         QCoreApplication::processEvents();
     };
 

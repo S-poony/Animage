@@ -221,7 +221,7 @@ void CanvasWidget::setPlaying(bool playing) {
 // which is the honest thing to show: it is what the drawing looked like a
 // moment ago, and the alternative is the colour blinking out on every stroke.
 //
-// The bookkeeping in ctg_wanted_ is what stops this asking again on the next
+// The bookkeeping in ctg_asked_ is what stops this asking again on the next
 // paint for a solve that is already running. A widget repaints many times a
 // second, and the solver's rule is that the newest question wins -- so without
 // it, every paint would call off the answer the last paint was waiting for and
@@ -257,82 +257,124 @@ void CanvasWidget::requestCtgFills() {
         const CtgFill* held = doc_.ctgFillFor(track_, image_, layer.id);
         if (held && held->valid && held->inputs == wanted.hash) continue;  // current
 
-        const auto key = std::make_pair(image_, layer.id);
-        const auto asked = ctg_wanted_.find(key);
-        if (asked != ctg_wanted_.end() && asked->second.inputs == wanted.hash) {
+        const ColourAsked asked{image_, layer.id, true};
+        const auto already = ctg_asked_.find(asked);
+        if (already != ctg_asked_.end() && already->second.inputs == wanted.hash) {
             continue;  // already being worked out
         }
 
-        ctg_wanted_[key] = {wanted.hash, generation};
+        ctg_asked_[asked] = {wanted.hash, generation};
         ctg_solver_.request({image_, layer.id},
                             ctgJobFor(doc_, track_, image_, layer.id, settings), true);
     }
 
-    if (!ctg_wanted_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
+    if (!ctg_asked_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
 }
 
-// Takes what the solver has finished and puts it in the document.
+// Asks for every drawing to be judged.
 //
-// This runs on the interface thread and it is the only place a solved fill
-// enters the document, which is the whole of the threading discipline here: the
-// worker is handed a copy and hands back an answer, and every write to the
-// document stays on the thread that owns it.
+// The same solve as a fill and a much cheaper one: coarse, and stopped after
+// the labelling, so what it keeps is a few bytes rather than a canvas of tiles.
+// It goes behind everything on screen, because it is a whole track's worth of
+// work and nobody is waiting for any one of its answers.
+//
+// This ran on the interface thread until now, once every quarter of a second
+// after the edits stopped -- 67 ms for twelve drawings and rather more for
+// ninety-six, paid in the middle of whatever you were doing.
+void CanvasWidget::requestColourAudit() {
+    if (track_ == kNoId) return;
+
+    const std::uint64_t generation = doc_.ctgCache().generation();
+    const CtgSettings settings = auditSettings();
+
+    for (const CtgToJudge& todo : ctgAuditWork(doc_, track_, settings)) {
+        const ColourAsked asked{todo.key.image, todo.key.layer, false};
+        const auto already = ctg_asked_.find(asked);
+        if (already != ctg_asked_.end() && already->second.inputs == todo.inputs) continue;
+
+        ctg_asked_[asked] = {todo.inputs, generation};
+        ctg_solver_.request(todo.key,
+                            ctgJobFor(doc_, track_, todo.key.image, todo.key.layer, settings),
+                            false, CtgSolver::Priority::Whenever);
+    }
+
+    if (!ctg_asked_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
+}
+
 // Requests whose answer nobody is waiting for any more.
 //
-// A drawing that has been left, or -- whether or not it is on screen -- a layer
-// that has since been told to cut against something else. Playing a coloured
-// shot is twenty-four of the first a second against solves taking a tenth of
-// one, and a queue that fills faster than it drains never catches up.
+// A fill for a drawing that has been left, or -- fill or judgement, on screen
+// or not -- one about a document that has since been thrown away. Playing a
+// coloured shot is twenty-four of the first a second against solves taking a
+// tenth of one, and a queue that fills faster than it drains never catches up.
+//
+// Judgements are not dropped for being about another drawing: being about the
+// drawings you are not looking at is the whole of what they are for.
 void CanvasWidget::dropStaleColourRequests(bool only_this_drawing) {
     const std::uint64_t generation = doc_.ctgCache().generation();
-    for (auto it = ctg_wanted_.begin(); it != ctg_wanted_.end();) {
-        const bool left = only_this_drawing && it->first.first != image_;
+    for (auto it = ctg_asked_.begin(); it != ctg_asked_.end();) {
+        const bool left = only_this_drawing && it->first.tiles && it->first.image != image_;
         if (!left && it->second.generation == generation) {
             ++it;
             continue;
         }
-        ctg_solver_.cancel({it->first.first, it->first.second}, true);
-        it = ctg_wanted_.erase(it);
+        ctg_solver_.cancel({it->first.image, it->first.layer}, it->first.tiles);
+        it = ctg_asked_.erase(it);
     }
 }
 
+// Takes what the solver has finished and puts it in the document.
+//
+// This runs on the interface thread and it is the only place a solved fill or
+// verdict enters the document, which is the whole of the threading discipline
+// here: the worker is handed a copy and hands back an answer, and every write
+// to the document stays on the thread that owns it.
 void CanvasWidget::collectColour() {
-    bool installed = false;
+    bool filled = false;
+    bool judged = false;
     dropStaleColourRequests(/*only_this_drawing=*/false);
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
-        if (!result.wanted_tiles) continue;  // a verdict; the audit collects those
-
-        const auto key = std::make_pair(result.key.image, result.key.layer);
-        const auto asked = ctg_wanted_.find(key);
+        const ColourAsked key{result.key.image, result.key.layer, result.wanted_tiles};
+        const auto asked = ctg_asked_.find(key);
         // An answer to a question that has since been asked again, about a
-        // drawing that has since been left, or about a layer that has since
-        // been told to cut against something else. All ordinary, and all
-        // dropped: the fill it would replace is at worst as old.
-        if (asked == ctg_wanted_.end() || asked->second.inputs != result.fill.inputs) continue;
+        // drawing that has since been left, or about a document that has since
+        // been replaced. All ordinary, and all dropped: what it would have
+        // replaced is at worst as old.
+        if (asked == ctg_asked_.end() || asked->second.inputs != result.fill.inputs) continue;
 
-        ctg_wanted_.erase(asked);
-        doc_.ctgCache().store(result.key, std::move(result.fill));
-        installed = true;
+        ctg_asked_.erase(asked);
+        if (result.wanted_tiles) {
+            doc_.ctgCache().store(result.key, std::move(result.fill));
+            filled = true;
+        } else {
+            doc_.ctgVerdicts()[result.key] = verdictFrom(result.fill);
+            judged = true;
+        }
     }
 
-    if (ctg_wanted_.empty() && ctg_poll_) ctg_poll_->stop();
-    if (!installed) return;
+    if (ctg_asked_.empty() && ctg_poll_) ctg_poll_->stop();
+    if (!filled && !judged) return;
 
     // A regenerated fill changes colour across whole regions, nowhere near
     // wherever the pen was, so all of it is redrawn. Marking only the stroke's
     // own rectangle left the new fill beside the stroke and the old one
     // everywhere else, and hiding and showing the layer repainted the lot -- so
     // the same operation appeared to have two behaviours.
-    dirty_everything_ = true;
-    update();
-    Q_EMIT ctgFillsChanged();
+    //
+    // A verdict changes nothing on the canvas at all -- it is a judgement about
+    // pixels and not pixels -- so it costs a panel refresh and no repaint.
+    if (filled) {
+        dirty_everything_ = true;
+        update();
+    }
+    Q_EMIT colourChanged();
 }
 
 bool CanvasWidget::settleColour(int timeout_ms) {
     QElapsedTimer clock;
     clock.start();
-    while (!ctg_wanted_.empty()) {
+    while (!ctg_asked_.empty()) {
         if (clock.elapsed() > timeout_ms) return false;
         ctg_solver_.waitUntilIdle();
         collectColour();
@@ -341,8 +383,8 @@ bool CanvasWidget::settleColour(int timeout_ms) {
         // that has been left -- leaves its entry behind, and waiting for an
         // answer that will never arrive is a hang. Nothing outstanding at the
         // solver means nothing more is coming.
-        if (!ctg_wanted_.empty() && ctg_solver_.idle()) {
-            ctg_wanted_.clear();
+        if (!ctg_asked_.empty() && ctg_solver_.idle()) {
+            ctg_asked_.clear();
             return false;
         }
     }

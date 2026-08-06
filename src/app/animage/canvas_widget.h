@@ -96,6 +96,13 @@ public:
     // drawings and a second worker would only fight this one for the machine.
     animage::CtgSolver& colourSolver() { return ctg_solver_; }
 
+    // Ask for every drawing of the track to be judged, behind whatever is on
+    // screen. This is what makes a timeline flag mean "go and look at drawing
+    // 34" rather than "you are standing on a bad drawing", and it is a whole
+    // track's worth of max-flows -- which is why it goes at the back of the
+    // queue and no longer happens on this thread at all.
+    void requestColourAudit();
+
     // Installs anything the solver has finished. Called on a timer while
     // solves are outstanding; public so a test can drive it directly.
     void collectColour();
@@ -107,9 +114,9 @@ public:
     // is the thing all of this exists to stop.
     bool settleColour(int timeout_ms = 30000);
 
-    // Whether a fill is being worked out. The interface has no business
+    // Whether any colour is being worked out. The interface has no business
     // blocking on one, but it is entitled to say so.
-    bool colourPending() const { return !ctg_wanted_.empty(); }
+    bool colourPending() const { return !ctg_asked_.empty(); }
 
     // Entries in the composite cache. Exposed so a test can assert this tracks
     // the size of the window rather than the size of the visible image area.
@@ -153,13 +160,13 @@ Q_SIGNALS:
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
 
-    // A CTG fill was rebuilt, so anything reporting on one is out of date --
-    // the timeline's flags and the layer panel's. Emitted when a solve is
-    // installed, which happens on a timer and no longer inside a paint; the
+    // A fill or a verdict landed, so anything reporting on the colour is out of
+    // date -- the timeline's flags and the layer panel's. Emitted when a solve
+    // is installed, which happens on a timer and no longer inside a paint; the
     // queued connection it is on can stay either way, and a fill arriving while
     // the canvas is painting itself would be a way to delete a widget from
     // inside its own paint.
-    void ctgFillsChanged();
+    void colourChanged();
 
 protected:
     void tabletEvent(QTabletEvent* event) override;
@@ -210,16 +217,28 @@ private:
     // and the rule that the newest question wins would call off the answer it
     // was waiting for -- for ever, at the rate a widget repaints.
     //
+    // Pictures and judgements are in one table because everything done to them
+    // is the same: they are asked for the same way, dropped the same way, and
+    // installed the same way. Only where they go afterwards differs.
+    //
     // The generation is the other half of "is this answer still about the
     // question I asked". A fill depends on things it is not keyed on -- which
-    // layers it is cut against, which way marks are carried -- and the way
-    // those say so is by emptying the fill cache. See CtgFillCache::generation.
+    // way marks are carried, and a document being replaced by another whose
+    // drawings answer to the same ids -- and the way those say so is by
+    // emptying the fill cache. See CtgFillCache::generation.
+    struct ColourAsked {
+        animage::ImageId image = animage::kNoId;
+        animage::LayerId layer = animage::kNoId;
+        bool tiles = true;  // a picture, rather than a judgement about one
+
+        friend auto operator<=>(const ColourAsked&, const ColourAsked&) = default;
+    };
     struct ColourWanted {
         std::uint64_t inputs = 0;
         std::uint64_t generation = 0;
     };
     animage::CtgSolver ctg_solver_;
-    std::map<std::pair<animage::ImageId, animage::LayerId>, ColourWanted> ctg_wanted_;
+    std::map<ColourAsked, ColourWanted> ctg_asked_;
 
     // Runs only while something is outstanding.
     //

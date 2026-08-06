@@ -140,6 +140,19 @@ struct CtgVerdict {
     std::uint64_t inputs = 0;
 };
 
+// The judgement a solve leaves behind, kept when the picture is thrown away.
+// One function because two callers make it -- the audit that solves where it
+// stands, and the one that has its solves run somewhere else -- and two copies
+// of "what a verdict is" is how they come to disagree.
+inline CtgVerdict verdictFrom(const CtgFill& fill) {
+    CtgVerdict verdict;
+    verdict.inputs = fill.inputs;
+    verdict.spread = fill.spread;
+    verdict.inherited = fill.inherited;
+    verdict.suspect = fill.suspect();
+    return verdict;
+}
+
 // A bounded store of fills, keeping the ones looked at most recently.
 //
 // Bounded because a fill covers the canvas at full resolution: 1920x1080 is 135

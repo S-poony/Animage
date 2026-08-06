@@ -119,9 +119,12 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     return cache.store(key, solveCtgFill(doc, track, image, layer_id, settings, true));
 }
 
-void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
+std::vector<CtgToJudge> ctgAuditWork(Document& doc, TrackId track,
+                                     const CtgSettings& settings) {
+    std::vector<CtgToJudge> wanted;
+
     const Track* line = doc.scene().findTrack(track);
-    if (!line) return;
+    if (!line) return wanted;
 
     std::vector<LayerId> layers;
     for (const Layer& layer : line->layers) {
@@ -129,7 +132,7 @@ void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
     }
     if (layers.empty()) {
         doc.ctgVerdicts().clear();
-        return;
+        return wanted;
     }
 
     // Distinct drawings, not frames: a drawing held over five of them is one
@@ -141,8 +144,18 @@ void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
         }
     }
 
+    // Rebuilt rather than added to, so a verdict about a drawing that has been
+    // deleted, or a layer that is no longer a colour layer, goes away with it.
+    //
+    // A verdict that has merely gone out of date is *kept* until the new one
+    // arrives, and that is the difference between a flag and a flicker. One
+    // stroke on a drawing that others inherit from moves the hash of every one
+    // of them, so dropping the stale verdicts would take the flags off the
+    // whole timeline and put them back a moment later, on every stroke. A flag
+    // that is a fifth of a second out of date says what it said before; a flag
+    // that blinks teaches you to stop reading it.
     auto& verdicts = doc.ctgVerdicts();
-    std::unordered_map<CtgKey, CtgVerdict, CtgKeyHash> fresh;
+    Document::CtgVerdicts kept;
     for (ImageId image : drawings) {
         for (LayerId layer : layers) {
             const CtgKey key{image, layer};
@@ -150,28 +163,25 @@ void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
             const CtgInputs depends = ctgInputsFor(doc, track, image, layer, settings);
             if (!depends.valid) continue;  // nothing on this layer here
 
-            // Already judged, and nothing it depends on has moved. This is what
-            // makes running the pass over a whole track after every edit
-            // affordable: one drawing changed, so one drawing is re-judged and
-            // the rest cost a hash apiece.
             auto known = verdicts.find(key);
-            if (known != verdicts.end() && known->second.inputs == depends.hash) {
-                fresh.emplace(key, known->second);
-                continue;
-            }
+            const bool current = known != verdicts.end();
+            if (current) kept.emplace(key, known->second);
+            if (current && known->second.inputs == depends.hash) continue;
 
-            const CtgFill probe = solveCtgFill(doc, track, image, layer, settings, false);
-            if (!probe.valid) continue;
-
-            CtgVerdict verdict;
-            verdict.inputs = probe.inputs;
-            verdict.spread = probe.spread;
-            verdict.inherited = probe.inherited;
-            verdict.suspect = probe.suspect();
-            fresh.emplace(key, verdict);
+            wanted.push_back({key, depends.hash});
         }
     }
-    verdicts = std::move(fresh);
+    verdicts = std::move(kept);
+    return wanted;
+}
+
+void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings) {
+    for (const CtgToJudge& todo : ctgAuditWork(doc, track, settings)) {
+        const CtgFill probe =
+            solveCtgFill(doc, track, todo.key.image, todo.key.layer, settings, false);
+        if (!probe.valid) continue;
+        doc.ctgVerdicts()[todo.key] = verdictFrom(probe);
+    }
 }
 
 }  // namespace animage

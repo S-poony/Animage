@@ -116,11 +116,11 @@ MainWindow::MainWindow() {
         audit_timer_->start();
         syncStatus();
     });
-    // Queued: this arrives from inside the canvas's paint, because that is the
-    // only place a solve is allowed to start. Rebuilding the layer panel
-    // underneath a paint is a way to delete a widget while it is drawing.
+    // A fill or a verdict landed. Queued, because a solve installed while the
+    // canvas is painting itself would rebuild the layer panel underneath the
+    // paint, which is a way to delete a widget while it is drawing.
     connect(
-        canvas_, &CanvasWidget::ctgFillsChanged, this,
+        canvas_, &CanvasWidget::colourChanged, this,
         [this] {
             timeline_widget_->refresh();
             refreshLayerFlags();
@@ -1335,16 +1335,26 @@ void MainWindow::onCtgSettingChanged() {
     syncStatus();
 }
 
-// Judge every drawing, then show what changed.
+// Ask for every drawing to be judged, and show what is already known.
+//
+// The asking is all that happens here now: the verdicts arrive on their own,
+// one drawing at a time, and each one brings the panels up to date with it
+// through colourChanged. What is shown in the meantime is the last thing that
+// was known, which for a shot being coloured is nearly all of it.
 //
 // Public so a test can drive it rather than wait a quarter of a second, for the
-// same reason openProjectAt and onAutosaveTick are.
+// same reason openProjectAt and onAutosaveTick are. A test that wants the
+// answers rather than the asking waits for them -- see waitForColour.
 void MainWindow::auditColourFills() {
     audit_timer_->stop();
-    auditCtgFills(doc_, track_);
+    canvas_->requestColourAudit();
     timeline_widget_->refresh();
     refreshLayerFlags();
 }
+
+// Waits for every solve in flight, for a test that needs to look at the result
+// rather than at the fact that it was asked for.
+bool MainWindow::waitForColour() { return canvas_->settleColour(); }
 
 bool MainWindow::colourFlagAt(std::size_t slot) const {
     const Track* track = doc_.scene().findTrack(track_);

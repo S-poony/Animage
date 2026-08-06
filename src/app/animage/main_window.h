@@ -45,10 +45,15 @@ public:
     // the pen is down or the animation is playing.
     void onAutosaveTick();
 
-    // Judges every drawing's colour fills so the timeline can flag the ones
-    // worth looking at without anybody having visited them. Runs a quarter of a
-    // second after the edits stop; public so a test need not wait.
+    // Asks for every drawing's colour to be judged, so the timeline can flag the
+    // ones worth looking at without anybody having visited them. Runs a quarter
+    // of a second after the edits stop; public so a test need not wait.
     void auditColourFills();
+
+    // Waits for every colour solve in flight and installs it. For tests that
+    // want the answers rather than the asking. Never call it from anything the
+    // user is waiting on.
+    bool waitForColour();
 
     // Whether the drawing at `slot` is flagged on any colour layer. What the
     // timeline card draws, and the only way to ask about a drawing without
