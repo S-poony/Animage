@@ -73,15 +73,20 @@ struct Layer {
     // is sometimes what you want and never what you expect.
     CtgDirection ctg_direction = CtgDirection::Forward;
 
-    // Whether carried scribbles are moved to follow the animation rather than
+    // Whether carried marks are moved to follow the animation rather than
     // staying where they were drawn.
     //
-    // Nothing implements this yet — see docs/scribbles-through-time.md, part 2,
-    // which also says why it has to wait for the solve to come off the
-    // interface thread. The setting is here because it belongs to the layer
-    // and because a format that learns it late is a migration; it is stored,
-    // loaded, and read by nothing.
-    bool ctg_follow_motion = false;
+    // On by default, which is a change of mind and not an oversight. Left
+    // alone, a carried mark holds its region only while the drawing has moved
+    // less than about half that region's width — measured, in `bench_carry` —
+    // and half a region's width between two drawings is very ordinary. Past it
+    // the region takes the wrong colour or none, so the default that does the
+    // less surprising thing is the one that moves the marks.
+    //
+    // Off is still worth having, and not only as an escape hatch: what is
+    // estimated is one translation for the whole drawing, so a shot where two
+    // things move apart is a shot where the estimate is right about one of them.
+    bool ctg_follow_motion = true;
 
     // Show the scribbles instead of the fill they produce. A view setting, not
     // a property of the drawing: what is on the layer does not change, only

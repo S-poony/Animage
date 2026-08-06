@@ -10,6 +10,21 @@
 
 namespace animage {
 
+// How far the drawing moved between where a mark was made and where it is being
+// used, in image pixels.
+//
+// Whole ones. A mark does not have to be placed precisely -- the region takes
+// the colour with the greater share of its pixels inside -- so a fraction of a
+// pixel is not a quantity any of this needs, and pretending otherwise would be
+// asking a registration for accuracy nothing reads.
+struct CtgShift {
+    int x = 0;
+    int y = 0;
+
+    bool isZero() const { return x == 0 && y == 0; }
+    friend bool operator==(const CtgShift&, const CtgShift&) = default;
+};
+
 // The regenerated fill of a CTG layer. Separated from ctg.h so that Document
 // can hold a cache of these without depending on the solver -- and so that the
 // solver can depend on Document, which it must.
@@ -64,6 +79,12 @@ struct CtgFill {
     // Whether the marks this was solved from were made on this drawing or
     // carried to it. Nothing about the fill differs -- it is who to tell.
     bool inherited = false;
+
+    // And how far they were moved on the way, when the layer follows the
+    // motion. Zero means they were left where they were drawn, whether because
+    // nothing moved, because nothing could be matched, or because the layer was
+    // told not to.
+    CtgShift carried_by;
 
     // Mixed from the revisions of the scribble cel and every barrier cel. If
     // this still matches, nothing the fill depends on has moved.

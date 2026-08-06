@@ -2032,6 +2032,11 @@ animage::Document buildStrandedShot() {
 
     Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
     settings.ctg_sources = {ink};
+    // The shot exists to strand a mark, so the marks are told to stay where
+    // they were drawn. With them following the drawing -- which is the default
+    // -- the mark lands in the shape that moved and there is nothing to flag,
+    // which is the feature and not this test.
+    settings.ctg_follow_motion = false;
     doc.updateLayer(track, colour, settings);
 
     std::vector<ImageId> images;
@@ -2229,23 +2234,34 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
         CHECK(!sources->item(row)->text().contains(QStringLiteral("colour")));
     }
 
-    // Part 2 is not built, and the control says so rather than looking live.
-    CHECK(!follow->isEnabled());
+    // Marks follow the drawing by default: left where they were drawn, a
+    // carried mark holds its region only while the drawing has moved less than
+    // about half that region's width, which between two drawings is not much.
+    CHECK(follow->isEnabled());
+    CHECK(follow->isChecked());
 
     // Three directions, not two: only reaching forwards leaves the drawings
     // before a coloured one with nothing.
     CHECK_EQ(direction->count(), 3);
 
-    // Carrying is on by default and the direction goes with it; turning it off
-    // leaves the choice visible but meaningless, so it greys.
+    // Carrying is on by default and the other two go with it; turning it off
+    // leaves the choices visible but meaningless, so they grey.
     CHECK(carry->isChecked());
     CHECK(direction->isEnabled());
     carry->setChecked(false);
     QCoreApplication::processEvents();
     CHECK(!direction->isEnabled());
+    CHECK(!follow->isEnabled());
     carry->setChecked(true);
     QCoreApplication::processEvents();
     CHECK(direction->isEnabled());
+    CHECK(follow->isEnabled());
+
+    // And the tick reaches the layer and comes back from it: the panel is
+    // filled from the document, so a setting that survives leaving the layer
+    // and returning to it is one that was really written.
+    follow->setChecked(false);
+    QCoreApplication::processEvents();
 
     // Unticking a source really reaches the layer. Read back through the row's
     // tooltip, which counts them, rather than through the document: what is
@@ -2280,6 +2296,18 @@ void theColourLayerBoxEditsWhatTheLayerDoes() {
     QCoreApplication::processEvents();
     CHECK(!box->isVisible());
     CHECK_EQ(dock->width(), settled);
+
+    // Back onto the colour layer: the box is filled from the document, so the
+    // tick that was cleared a moment ago comes back cleared only if it really
+    // reached the layer.
+    for (int row = 0; row < layers->topLevelItemCount(); ++row) {
+        if (layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
+            layers->setCurrentItem(layers->topLevelItem(row));
+            break;
+        }
+    }
+    QCoreApplication::processEvents();
+    CHECK(!follow->isChecked());
 }
 
 // Transparency is a colour on a colour layer and nothing anywhere else. On a

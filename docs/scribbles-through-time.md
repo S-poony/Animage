@@ -5,12 +5,15 @@ Design notes for two things, in this order:
 1. **A scribble stays** from one drawing to the next until the user changes it.
 2. **A scribble moves** to follow the animation.
 
-**Part 1 is built. Part 2 is not.** This document was written straight after the
+**Part 1 is built. Part 2 is built as far as its second rung** — one translation
+per drawing, estimated from the line art, on by default — and the rungs past it
+are still research. This document was written straight after the
 single-scribble change, while the solver was still in hand, because a good deal
 of it is a consequence of decisions already made rather than free choices. Where
-building part 1 contradicted it, the original text is kept and the correction is
-marked **Built:** underneath — a design note that quietly agrees with whatever
-happened is no use to anybody reading it before doing part 2.
+building either part contradicted it, the original text is kept and the
+correction is marked **Built:** or **Measured:** underneath — a design note that
+quietly agrees with whatever happened is no use to anybody reading it before
+doing the rest.
 
 The first was small, was not blocked by anything, and is most of the plan's
 "onion fill" hypothesis. The second is a research problem with a cheap first
@@ -198,6 +201,16 @@ seed grid; sampling through an inverse transform is a small, local change in one
 loop. The transform is six floats, undoable like any other layer property, and
 nothing about storage moves.
 
+> **Built, and not stored.** The local change in one loop is exactly what it
+> turned out to be — two of them, the seeding and the override. But the
+> transform is worked out inside the solve from the two drawings' line art
+> rather than kept anywhere, because a stored one would be a second piece of
+> derived data to keep in step with drawings that move, and it would have to be
+> invalidated by everything that already invalidates the fill. It is a
+> translation in whole pixels rather than an affine in six floats: a mark needs
+> most of its pixels in the right region and nothing finer, so anything more
+> precise is accuracy nothing reads.
+
 That buys the whole of one-transform-per-drawing without committing to the fork.
 Take the fork when per-*region* motion is genuinely needed — and take it
 knowingly, because it is the expensive decision in this document.
@@ -257,6 +270,43 @@ Order of attack, cheapest first:
 2. **One translation for the whole drawing**, from coarse correlation of the two
    barriers. Cel animation mostly translates between consecutive drawings, so
    this buys a lot for very little.
+
+   > **Built, and it is the default.** `estimateCtgShift`, and it is as cheap as
+   > this hoped: 19.7 ms on a 1920x1080 drawing against 129 ms for the coarse
+   > solve it precedes, so a carried mark costs about a seventh more than one
+   > that was drawn where it is.
+   >
+   > It is **derived and never stored**, which is a departure from the sketch
+   > below and the same rule the fill already lives by. The job carries both
+   > drawings' line art, so the shift can be worked out again whenever it is
+   > wanted and thrown away with the fill it produced. A stored transform would
+   > be a second derived thing to keep in step with drawings that move, and this
+   > document is emphatic that propagated means provisional.
+   >
+   > **What it buys, measured in `bench_carry`.** Everything the first rung
+   > failed at: a mark carried across 400 px of movement fills its shape with
+   > `spread` unchanged at 7.70, where leaving it behind gave 0% coverage and a
+   > flag. The wrong-region failure — a wall sliding across a mark, the
+   > neighbour taking a colour that was never meant for it — goes from 100% of
+   > the neighbouring region to none of it.
+   >
+   > **Where it fails is worth knowing, because it fails by locking on.** The
+   > estimate is a global translation found by matching ink, so line art that
+   > repeats gives it more than one good answer: a box with a wall down the
+   > middle, moved 200 px, matched its far wall to the divider and reported 49.
+   > The fill is then exactly as wrong as carrying unchanged, which is the floor
+   > this cannot go below — and the flag catches it, because a mark that landed
+   > on nothing still spreads to nothing. Real line art is less periodic than a
+   > test fixture, and rungs 3 and above are what a real answer to this looks
+   > like.
+   >
+   > Two rules fell out of building it. **The mark's own pixels move with its
+   > seed**: a mark wins the pixels it covers whatever the solver decided, so a
+   > seed read in one place and an override painted in another would leave a
+   > stripe of colour across a region with every reason to be a different one.
+   > And **the shift is part of what the fill depends on**, so the fill's key
+   > has to mix the *source* drawing's line art as well as this one's — nothing
+   > else in it mentions that drawing, and redrawing it moves the answer.
 3. **One transform per region**, from the previous fill's regions. Translation
    first; affine only if translation measurably is not enough.
 4. **As-rigid-as-possible registration** — Sýkora, Dingliana & Collins, NPAR

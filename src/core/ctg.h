@@ -34,6 +34,7 @@ struct CtgInputs {
     std::uint64_t hash = 0;
     bool valid = false;      // there is a CTG layer here with marks to show
     bool inherited = false;  // ...and they were made on another drawing
+    ImageId from = kNoId;    // ...that one
     const Cel* scribbles = nullptr;
 };
 

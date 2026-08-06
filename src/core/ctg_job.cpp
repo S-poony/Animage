@@ -128,6 +128,140 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
     return intensity;
 }
 
+namespace {
+
+// One level of the search pyramid: ink coverage, 0 where the paper is bare.
+struct InkLevel {
+    int width = 0;
+    int height = 0;
+    std::vector<float> ink;
+};
+
+InkLevel halve(const InkLevel& fine) {
+    InkLevel coarse;
+    coarse.width = std::max(1, fine.width / 2);
+    coarse.height = std::max(1, fine.height / 2);
+    coarse.ink.assign(static_cast<std::size_t>(coarse.width) * coarse.height, 0.0f);
+
+    // Averaged rather than maxed, which is the opposite of what the barrier
+    // does and right for the opposite reason. A barrier must not lose a thin
+    // line, because a hole in it is a fill pouring out; a correlation wants the
+    // ink to weigh what there is of it, so that half a line under a cell counts
+    // half.
+    for (int y = 0; y < coarse.height; ++y) {
+        for (int x = 0; x < coarse.width; ++x) {
+            float sum = 0.0f;
+            int count = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                const int sy = y * 2 + dy;
+                if (sy >= fine.height) continue;
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int sx = x * 2 + dx;
+                    if (sx >= fine.width) continue;
+                    sum += fine.ink[static_cast<std::size_t>(sy) * fine.width + sx];
+                    ++count;
+                }
+            }
+            coarse.ink[static_cast<std::size_t>(y) * coarse.width + x] =
+                count ? sum / static_cast<float>(count) : 0.0f;
+        }
+    }
+    return coarse;
+}
+
+// Mean absolute difference between the two, with `from` shifted by (dx, dy) and
+// anything shifted off the edge counted as bare paper.
+//
+// Counting the edge rather than ignoring it is deliberate: a shift that slides
+// half the drawing out of the area is being asked to explain the ink that is
+// left behind, and scoring only the overlap would make the emptiest shift the
+// best one.
+float difference(const InkLevel& from, const InkLevel& to, int dx, int dy) {
+    double total = 0.0;
+    for (int y = 0; y < to.height; ++y) {
+        const int sy = y - dy;
+        for (int x = 0; x < to.width; ++x) {
+            const int sx = x - dx;
+            const float a = (sx < 0 || sy < 0 || sx >= from.width || sy >= from.height)
+                                ? 0.0f
+                                : from.ink[static_cast<std::size_t>(sy) * from.width + sx];
+            const float b = to.ink[static_cast<std::size_t>(y) * to.width + x];
+            total += std::abs(static_cast<double>(a) - static_cast<double>(b));
+        }
+    }
+    return static_cast<float>(total /
+                              (static_cast<double>(to.width) * to.height));
+}
+
+}  // namespace
+
+CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                          const PixelRect& area) {
+    if (area.isEmpty() || from.empty() || to.empty()) return {};
+
+    // A few dozen cells across is enough to find a translation, and it is what
+    // keeps an exhaustive search affordable: the cost is offsets times cells,
+    // and both scale with this.
+    constexpr int kAcross = 96;
+    const int step = std::max(1, (std::max(area.width, area.height) + kAcross - 1) / kAcross);
+
+    InkLevel a;
+    InkLevel b;
+    a.width = b.width = (area.width + step - 1) / step;
+    a.height = b.height = (area.height + step - 1) / step;
+    if (a.width < 4 || a.height < 4) return {};
+
+    a.ink = ctgBarrier(from, area, step);
+    b.ink = ctgBarrier(to, area, step);
+    for (float& value : a.ink) value = 1.0f - value;  // coverage, not intensity
+    for (float& value : b.ink) value = 1.0f - value;
+
+    // Nothing to match. Two blank drawings agree at every offset, and the
+    // smallest shift is the honest answer.
+    const auto ink_total = [](const InkLevel& level) {
+        double sum = 0.0;
+        for (float value : level.ink) sum += value;
+        return sum;
+    };
+    if (ink_total(a) < 1.0 || ink_total(b) < 1.0) return {};
+
+    std::vector<InkLevel> pyramid_a{a};
+    std::vector<InkLevel> pyramid_b{b};
+    while (pyramid_a.back().width > 12 && pyramid_a.back().height > 12) {
+        pyramid_a.push_back(halve(pyramid_a.back()));
+        pyramid_b.push_back(halve(pyramid_b.back()));
+    }
+
+    // Exhaustive at the top, where the grid is a dozen cells across and every
+    // plausible shift can simply be tried, then one refinement per level down.
+    // A translation found at the top is worth two cells at the next level, so
+    // the window below only has to cover the halving.
+    CtgShift best;
+    for (int level = static_cast<int>(pyramid_a.size()) - 1; level >= 0; --level) {
+        const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(level)];
+        const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(level)];
+        const bool top = level == static_cast<int>(pyramid_a.size()) - 1;
+
+        const int reach_x = top ? coarse_b.width / 2 : 2;
+        const int reach_y = top ? coarse_b.height / 2 : 2;
+        const CtgShift from_above{best.x * (top ? 1 : 2), best.y * (top ? 1 : 2)};
+
+        CtgShift found = from_above;
+        float score = difference(coarse_a, coarse_b, found.x, found.y);
+        for (int dy = from_above.y - reach_y; dy <= from_above.y + reach_y; ++dy) {
+            for (int dx = from_above.x - reach_x; dx <= from_above.x + reach_x; ++dx) {
+                const float here = difference(coarse_a, coarse_b, dx, dy);
+                if (here >= score) continue;
+                score = here;
+                found = {dx, dy};
+            }
+        }
+        best = found;
+    }
+
+    return {best.x * step, best.y * step};
+}
+
 CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>* abandon) {
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
@@ -160,7 +294,38 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
         return empty;
     }
 
+    // Where the drawing has got to since the marks were made on it.
+    //
+    // Estimated here rather than stored anywhere: both drawings' line art is in
+    // the job, so the answer can be worked out again whenever it is wanted and
+    // thrown away with the fill it produced. A carried mark is provisional by
+    // definition, and a stored transform would be a second derived thing to
+    // keep in step with drawings that move.
+    //
+    // Empty origin_sources is how the job says not to: the marks are this
+    // drawing's own, or the layer is set to leave them where they were put.
+    CtgShift shift;
+    if (!job.origin_sources.empty()) {
+        PixelRect ink = intersectRects(
+            [&] {
+                PixelRect all;
+                for (const TileGrid& source : job.sources) {
+                    all = uniteRects(all, drawnBounds(source));
+                }
+                for (const TileGrid& source : job.origin_sources) {
+                    all = uniteRects(all, drawnBounds(source));
+                }
+                return all;
+            }(),
+            filled);
+        shift = estimateCtgShift(job.origin_sources, job.sources, ink);
+        if (abandoned(abandon)) return kNothing;
+    }
+
+    // The marks, where they are being read from: their own place plus wherever
+    // the drawing has taken them.
     PixelRect region = drawnBounds(job.scribbles);
+    region = {region.x + shift.x, region.y + shift.y, region.width, region.height};
     for (const TileGrid& source : job.sources) {
         region = uniteRects(region, drawnBounds(source));
     }
@@ -213,7 +378,10 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
 
     for (int y = 0; y < problem.height; ++y) {
         for (int x = 0; x < problem.width; ++x) {
-            const Rgba pixel = job.scribbles.pixel(region.x + x * step, region.y + y * step);
+            // Read through the shift: the mark is where it was drawn, and this
+            // is the drawing having moved out from under it.
+            const Rgba pixel = job.scribbles.pixel(region.x + x * step - shift.x,
+                                                   region.y + y * step - shift.y);
             if (pixel.a < job.settings.scribble_alpha_threshold) continue;
 
             const std::uint32_t key = scribbleLabel(pixel);
@@ -234,6 +402,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     built.budget = job.budget;
     built.valid = true;
     built.inherited = job.inherited;
+    built.carried_by = shift;
     built.colours = static_cast<int>(palette.size());
     if (palette.empty()) return built;
 
@@ -376,14 +545,21 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     // And painted as the quantised label colour rather than the pixel's own, for
     // the same reason the seeding thresholds: a scribble is a label, so its
     // antialiased rim must not leave a stripe of some colour between.
+    //
+    // Through the same shift as the seeding, and that is not a detail. The two
+    // are the same statement about the same mark -- what colour is here -- so a
+    // seed read from one place and an override painted in another would put the
+    // mark's own pixels somewhere the solver never saw it, which is a stripe of
+    // colour across a region that has every reason to be a different one.
     for (const auto& [coord, tile] : job.scribbles.tiles()) {
-        const PixelRect whole{coord.x * kTileSize, coord.y * kTileSize, kTileSize, kTileSize};
+        const PixelRect whole{coord.x * kTileSize + shift.x, coord.y * kTileSize + shift.y,
+                              kTileSize, kTileSize};
         const PixelRect part = intersectRects(whole, filled);
         if (part.isEmpty()) continue;
 
         for (int py = part.y; py < part.y + part.height; ++py) {
             for (int px = part.x; px < part.x + part.width; ++px) {
-                const Rgba pixel = job.scribbles.pixel(px, py);
+                const Rgba pixel = job.scribbles.pixel(px - shift.x, py - shift.y);
                 if (pixel.a < job.settings.scribble_alpha_threshold) continue;  // not a label
                 paint(px, py, scribbleColour(scribbleLabel(pixel)));
             }

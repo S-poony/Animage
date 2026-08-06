@@ -232,6 +232,19 @@ int main() {
                    0.2f + 0.3f * static_cast<float>(box), 0.3f, 0.8f);
         }
 
+        // What a carried mark costs before the solve starts: one estimate of
+        // how far the drawing has moved, on every solve of a drawing whose
+        // marks came from another one.
+        {
+            const CtgJob job = ctgJobFor(doc, track, image, colour);
+            const auto start = Clock::now();
+            const CtgShift shift = estimateCtgShift(job.sources, job.sources,
+                                                    doc.scene().canvas());
+            const double timed = milliseconds(start, Clock::now());
+            std::printf("    motion estimate, paid once per solve   %9.1f ms  (%d, %d)\n",
+                        timed, shift.x, shift.y);
+        }
+
         for (const auto& [name, budget] :
              {std::pair<const char*, long long>{"first  ", kInteractiveSolveBudget},
               std::pair<const char*, long long>{"refined", kFullSolveBudget}}) {

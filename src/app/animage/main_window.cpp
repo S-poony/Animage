@@ -505,20 +505,18 @@ void MainWindow::buildLayerPanel() {
     direction_layout->addWidget(ctg_direction_, 1);
     colour_layout->addWidget(direction_row);
 
-    // Present, stored, saved, and read by nothing. Part 2 of the design notes
-    // is not built and needs the solve off the interface thread first. Shown
-    // disabled and saying so, rather than left out: the setting is real and it
-    // is where it will be, and a control that looks live and does nothing is
-    // the one thing worse than a control that says it is not ready.
     ctg_follow_ = new QCheckBox(QStringLiteral("Move marks with the drawing"),
                                 colour_settings_);
     ctg_follow_->setFocusPolicy(Qt::NoFocus);
-    ctg_follow_->setEnabled(false);
     ctg_follow_->setToolTip(
-        QStringLiteral("Not built yet.\n"
-                       "Carried marks stay where they were drawn. Moving them to follow\n"
-                       "the animation is designed in docs/scribbles-through-time.md and\n"
-                       "waits on the fill being solved off the interface thread."));
+        QStringLiteral("Where marks are carried to a drawing, move them by however far\n"
+                       "the line art has moved between the two, rather than leaving them\n"
+                       "where they were drawn.\n\n"
+                       "One shift for the whole drawing, measured from the line art each\n"
+                       "time and stored nowhere. Left alone, a carried mark holds its\n"
+                       "region until the drawing has moved about half that region's width\n"
+                       "-- which between two drawings is not much."));
+    connect(ctg_follow_, &QCheckBox::toggled, this, &MainWindow::onCtgSettingChanged);
     colour_layout->addWidget(ctg_follow_);
 
     layout->addWidget(colour_settings_);
@@ -1274,10 +1272,12 @@ void MainWindow::syncColourLayerPanel() {
                                                                                     : 0);
     ctg_follow_->setChecked(layer->ctg_follow_motion);
 
-    // Both of these are about what gets carried, so neither means anything
-    // while nothing is. Greyed rather than hidden, so the shape of the choice
-    // stays visible: this is what you would be choosing if you turned it on.
+    // All three of these are about what gets carried, so none of them means
+    // anything while nothing is. Greyed rather than hidden, so the shape of the
+    // choice stays visible: this is what you would be choosing if you turned it
+    // on.
     ctg_direction_->setEnabled(layer->ctg_inherit);
+    ctg_follow_->setEnabled(layer->ctg_inherit);
     updating_colour_panel_ = false;
 }
 
@@ -1322,6 +1322,7 @@ void MainWindow::onCtgSettingChanged() {
     updated.ctg_direction = ctg_direction_->currentIndex() == 1   ? CtgDirection::Backward
                             : ctg_direction_->currentIndex() == 2 ? CtgDirection::Nearest
                                                                   : CtgDirection::Forward;
+    updated.ctg_follow_motion = ctg_follow_->isChecked();
     doc_.updateLayer(track_, updated.id, updated);
 
     // Which drawing's marks a drawing reads is not part of the fill's key
@@ -1330,6 +1331,7 @@ void MainWindow::onCtgSettingChanged() {
     doc_.ctgCache().clear();
     doc_.ctgVerdicts().clear();
     ctg_direction_->setEnabled(updated.ctg_inherit);
+    ctg_follow_->setEnabled(updated.ctg_inherit);
     canvas_->refreshAll();
     auditColourFills();
     syncStatus();

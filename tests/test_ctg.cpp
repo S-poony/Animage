@@ -59,6 +59,12 @@ struct Fixture {
 
         Layer ctg = *doc.scene().findTrack(track)->findLayer(colour);
         ctg.ctg_sources = {ink};
+        // Marks left where they were drawn, which is what most of these are
+        // about. Moving them to follow the line art is on by default in the
+        // application and has tests of its own further down; a fixture that did
+        // it silently would quietly repair every case here that is *supposed*
+        // to land wrong.
+        ctg.ctg_follow_motion = false;
         doc.updateLayer(track, colour, ctg);
     }
 
@@ -95,10 +101,18 @@ struct Sequence {
 
         Layer ctg = *doc.scene().findTrack(track)->findLayer(colour);
         ctg.ctg_sources = {ink};
+        ctg.ctg_follow_motion = false;  // see Fixture
         doc.updateLayer(track, colour, ctg);
     }
 
     const Track& track_ref() const { return *doc.scene().findTrack(track); }
+
+    // For the tests that are about the marks moving.
+    void followTheMotion() {
+        Layer ctg = *doc.scene().findTrack(track)->findLayer(colour);
+        ctg.ctg_follow_motion = true;
+        doc.updateLayer(track, colour, ctg);
+    }
 
     void stroke(int drawing, LayerId layer, float x0, float y0, float x1, float y1,
                 float radius, float r, float g, float b) {
@@ -1164,8 +1178,8 @@ void everyDrawingIsJudgedWithoutBeingVisited() {
 // It has to work with marks that are merely carried, not only with marks that
 // have been moved to follow the drawing -- carrying a mark unchanged under line
 // art that has moved is exactly how it lands in the wrong place, so this is the
-// state where the flag earns its keep. Nothing moves marks yet; the flag does
-// not wait for it.
+// state where the flag earns its keep. The layer here is set not to move them,
+// which is what makes this that state.
 void aCarriedMarkThatLandsWrongIsFlagged() {
     TEST("a carried mark that lands in the wrong region is flagged");
     Sequence s(2);
@@ -1376,6 +1390,139 @@ void aTransparentScribbleShowsThroughAFillThatDisagrees() {
     CHECK_NEAR(fillAt(fill, 125, 125).a, 0.0, 0.001);     // and there is a hole in it
 }
 
+// --- marks that move ----------------------------------------------------
+//
+// Part 2 of docs/scribbles-through-time.md: one translation for the whole
+// drawing, measured from the line art rather than stored anywhere, applied when
+// a mark is read on a drawing it was not made on.
+
+void aCarriedMarkFollowsTheDrawing() {
+    TEST("a carried mark moves with the drawing it was cut against");
+    Sequence s(2);
+    s.followTheMotion();
+
+    // The same shape, a long way across on the second drawing. Carried
+    // unchanged, the mark is out on bare paper there -- that is the case above.
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& own = s.fillOf(0);
+    CHECK(own.valid);
+    CHECK(!own.inherited);
+    CHECK(own.carried_by.isZero());  // its own marks are never moved
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK(carried.inherited);
+
+    // Found the shift, near enough. It is measured on a coarse grid because a
+    // mark does not need to be placed accurately -- what it needs is most of
+    // its pixels in the right region.
+    CHECK(std::abs(carried.carried_by.x - 260) <= 12);
+    CHECK(std::abs(carried.carried_by.y) <= 12);
+
+    // And the shape is filled, where carrying it unchanged fills nothing.
+    CHECK_NEAR(fillAt(carried, 390, 160).r, 1.0, 0.02);
+    CHECK(carried.spread > kCtgSpreadFloor);
+    CHECK(!carried.suspect());
+}
+
+// The mark's own pixels have to move with it. They are painted over the fill --
+// a mark wins the pixels it covers, whatever the solver decided -- so a seed
+// read in one place and an override painted in another would leave a stripe of
+// colour across a region with every reason to be a different one.
+void theMarkItselfMovesWithItsSeed() {
+    TEST("a mark that has moved is drawn where it moved to, not where it was");
+    Sequence s(2);
+    s.followTheMotion();
+
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+
+    // Where the mark was drawn there is now nothing: that part of the picture
+    // is outside every shape on this drawing, and the mark is not there any
+    // more to claim it.
+    CHECK_NEAR(fillAt(carried, 130, 100).a, 0.0, 0.001);
+}
+
+void aMarkOnItsOwnDrawingIsNeverMoved() {
+    TEST("a mark is only ever moved on a drawing it was not made on");
+    Sequence s(2);
+    s.followTheMotion();
+
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+    // Its own mark on the second drawing, in the shape where it belongs.
+    s.stroke(1, s.colour, 350, 100, 430, 100, 10.0f, 0.0f, 0.0f, 1.0f);
+
+    const CtgFill& second = s.fillOf(1);
+    CHECK(second.valid);
+    CHECK(!second.inherited);
+    CHECK(second.carried_by.isZero());
+    CHECK_NEAR(fillAt(second, 390, 160).b, 1.0, 0.02);
+}
+
+void movingMarksCanBeTurnedOff() {
+    TEST("leaving marks where they were drawn is still a choice");
+    Sequence s(2);  // the fixture leaves them, which is what is being checked
+
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK(carried.carried_by.isZero());
+    CHECK(carried.suspect());  // and it lands wrong, which is the whole point
+}
+
+// Redrawing the line art of the drawing a mark came from changes how far the
+// mark has to move. Nothing else in the fill's key mentions that drawing, so
+// without this the fill would go on showing a shift measured against ink that
+// is no longer there.
+void redrawingTheOriginMovesTheMarkAgain() {
+    TEST("redrawing the drawing a mark came from re-measures the shift");
+    Sequence s(2);
+    s.followTheMotion();
+
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const std::uint64_t before = s.fillOf(1).inputs;
+    s.stroke(0, s.ink, 62, 62, 198, 62, 2.5f, 0.0f, 0.0f, 0.0f);
+    CHECK(s.fillOf(1).inputs != before);
+}
+
+void theShiftIsMeasuredFromTheInkAlone() {
+    TEST("the shift is what the ink moved, found without any marks at all");
+    Sequence s(2);
+    s.box(0, 60, 60, 200, 180, 120, 140);
+    s.box(1, 200, 130, 340, 250, 260, 280);
+
+    const Cel* first = s.doc.celAt(s.track, s.at(0), s.ink);
+    const Cel* second = s.doc.celAt(s.track, s.at(1), s.ink);
+    CHECK(first != nullptr);
+    CHECK(second != nullptr);
+    if (!first || !second) return;
+
+    const CtgShift shift = estimateCtgShift({first->tiles()}, {second->tiles()},
+                                            {0, 0, 640, 360});
+    CHECK(std::abs(shift.x - 140) <= 12);
+    CHECK(std::abs(shift.y - 70) <= 12);
+
+    // Nothing to match against is not an error and not a guess: it is zero,
+    // which is the answer that carries the mark unchanged.
+    CHECK(estimateCtgShift({}, {second->tiles()}, {0, 0, 640, 360}).isZero());
+    CHECK(estimateCtgShift({TileGrid{}}, {second->tiles()}, {0, 0, 640, 360}).isZero());
+}
+
 // --- the solve, lifted off the document ---------------------------------
 //
 // A max-flow is the expensive thing this program does, and it may not run on
@@ -1579,6 +1726,13 @@ int main() {
     theTransparentScribbleSurvivesTheHalfFloat();
     aTransparentScribbleTakesColourAway();
     aTransparentScribbleShowsThroughAFillThatDisagrees();
+
+    aCarriedMarkFollowsTheDrawing();
+    theMarkItselfMovesWithItsSeed();
+    aMarkOnItsOwnDrawingIsNeverMoved();
+    movingMarksCanBeTurnedOff();
+    redrawingTheOriginMovesTheMarkAgain();
+    theShiftIsMeasuredFromTheInkAlone();
 
     aLiftedSolveAgreesWithTheDocument();
     takingAJobCopiesNoPixels();

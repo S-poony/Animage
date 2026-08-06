@@ -44,6 +44,19 @@ CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerI
         const Cel* cel = doc.cel(record->celFor(source));
         inputs = inputs * 31 + (cel ? cel->revision() : 0) + source;
     }
+
+    // The line art of the drawing the marks came from, when the layer moves
+    // them to follow it: the fill then depends on that drawing too, because how
+    // far the marks are moved is measured between the two. Redrawing the
+    // *source* drawing's ink changes the answer here, and nothing else in this
+    // hash would have noticed.
+    if (layer->ctg_follow_motion && from != image) {
+        const Image* origin = line->findImage(from);
+        for (LayerId source : layer->ctg_sources) {
+            const Cel* cel = origin ? doc.cel(origin->celFor(source)) : nullptr;
+            inputs = inputs * 31 + (cel ? cel->revision() : 0) + source + 1;
+        }
+    }
     inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
     // The canvas bounds the solve, so resizing it changes the answer.
     inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
@@ -52,6 +65,7 @@ CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerI
     out.hash = inputs;
     out.valid = true;
     out.inherited = from != image;
+    out.from = from;
     out.scribbles = scribbles;
     return out;
 }
@@ -90,6 +104,20 @@ CtgJob ctgJobFor(const Document& doc, TrackId track, ImageId image, LayerId laye
         if (!line->findLayer(source)) continue;  // a source that has been deleted
         const Cel* cel = doc.cel(record->celFor(source));
         if (cel) job.sources.push_back(cel->tiles());
+    }
+
+    // And the same layers on the drawing the marks were made on, if they were
+    // made on another one and this layer moves them to follow the animation.
+    // The solve estimates the motion between the two; handing over both is all
+    // it needs, and it is why nothing about the motion has to be stored.
+    if (layer->ctg_follow_motion && depends.inherited) {
+        if (const Image* origin = line->findImage(depends.from)) {
+            for (LayerId source : layer->ctg_sources) {
+                if (!line->findLayer(source)) continue;
+                const Cel* cel = doc.cel(origin->celFor(source));
+                if (cel) job.origin_sources.push_back(cel->tiles());
+            }
+        }
     }
     job.settings = settings;
     job.budget = budget;

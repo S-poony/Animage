@@ -134,7 +134,7 @@ Landing measure(const CtgFill& fill, const PixelRect& box) {
 
 // One run: `count` drawings, the shape moving `step` pixels between each, a mark
 // of radius `mark` drawn on the first drawing only and carried to the rest.
-void carryAcross(int count, int step, float mark) {
+void carryAcross(int count, int step, float mark, bool follow) {
     Document doc;
     doc.setCanvasSize(kCanvasWidth, kCanvasHeight);
     const TrackId track = doc.addTrack("main");
@@ -143,6 +143,7 @@ void carryAcross(int count, int step, float mark) {
     {
         Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
         settings.ctg_sources = {ink};
+        settings.ctg_follow_motion = follow;
         doc.updateLayer(track, colour, settings);
     }
 
@@ -162,18 +163,20 @@ void carryAcross(int count, int step, float mark) {
              static_cast<float>(first.x + 3 * first.width / 4), middle_y, mark, 1.0f, 0.0f,
              0.0f, true);
 
-    std::printf("  shape %dx%d, gap %d, mark radius %.0f, moving %d px a drawing\n",
-                shape.width, shape.height, shape.gap, static_cast<double>(mark), step);
-    std::printf("    drawing   shift   coverage    leak    spread  flagged\n");
+    std::printf("  shape %dx%d, gap %d, mark radius %.0f, moving %d px a drawing, marks %s\n",
+                shape.width, shape.height, shape.gap, static_cast<double>(mark), step,
+                follow ? "follow" : "stay");
+    std::printf("    drawing   shift   coverage    leak    spread   moved  flagged\n");
 
     for (int i = 0; i < count; ++i) {
         const CtgJob job = ctgJobFor(doc, track, drawings[static_cast<std::size_t>(i)], colour,
                                      CtgSettings{}, kFullSolveBudget);
         const CtgFill fill = solveCtgJob(job, true);
         const Landing landed = measure(fill, shape.at(i * step));
-        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %s\n", i + 1, i * step,
+        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %5d   %s\n", i + 1, i * step,
                     landed.coverage * 100.0, landed.leak * 100.0,
-                    static_cast<double>(landed.spread), landed.suspect ? "yes" : "");
+                    static_cast<double>(landed.spread), fill.carried_by.x,
+                    landed.suspect ? "yes" : "");
     }
     std::printf("\n");
 }
@@ -232,7 +235,8 @@ double fractionOf(const CtgFill& fill, const PixelRect& area, bool red) {
     return total ? static_cast<double>(matched) / total : 0.0;
 }
 
-void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked) {
+void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
+                        bool follow) {
     Document doc;
     doc.setCanvasSize(kCanvasWidth, kCanvasHeight);
     const TrackId track = doc.addTrack("main");
@@ -241,6 +245,7 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked) 
     {
         Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
         settings.ctg_sources = {ink};
+        settings.ctg_follow_motion = follow;
         doc.updateLayer(track, colour, settings);
     }
 
@@ -265,9 +270,12 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked) 
                  true);
     }
 
-    std::printf("  two %dx%d halves, marks of radius %.0f, moving %d px a drawing\n",
-                box.width / 2, box.height, static_cast<double>(mark), step);
-    std::printf("    drawing   shift    left red   right blue   right red   spread  flagged\n");
+    std::printf("  two %dx%d halves, %s, radius %.0f, moving %d px a drawing, marks %s\n",
+                box.width / 2, box.height,
+                neighbour_marked ? "a mark in each" : "a mark in the left half only",
+                static_cast<double>(mark), step, follow ? "follow" : "stay");
+    std::printf(
+        "    drawing   shift    left red   right blue   right red   spread   moved  flagged\n");
 
     constexpr int kInset = 10;
     for (int i = 0; i < count; ++i) {
@@ -282,11 +290,12 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked) 
         const PixelRect right_half{mid + kInset, at.y + kInset, at.x + at.width - mid - 2 * kInset,
                                    at.height - 2 * kInset};
 
-        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %s\n", i + 1,
-                    i * step, fractionOf(fill, left_half, true) * 100.0,
+        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %5d   %s\n",
+                    i + 1, i * step, fractionOf(fill, left_half, true) * 100.0,
                     fractionOf(fill, right_half, false) * 100.0,
                     fractionOf(fill, right_half, true) * 100.0,
-                    static_cast<double>(fill.spread), fill.suspect() ? "yes" : "");
+                    static_cast<double>(fill.spread), fill.carried_by.x,
+                    fill.suspect() ? "yes" : "");
     }
     std::printf("\n");
 }
@@ -302,10 +311,16 @@ int main() {
         "survives with nothing moving it -- which is what decides whether anything\n"
         "past 'carry it unchanged' is worth building.\n\n");
 
+    // Everything twice: with the marks left where they were drawn, and with the
+    // layer moving them to follow the line art. `moved` is how far the solve
+    // decided the drawing had gone, which for these is exactly the shift, so
+    // the estimate can be read against the truth in the same row.
     const auto started = Clock::now();
-    for (float mark : {30.0f, 12.0f}) {
-        for (int step : {0, 10, 20, 40, 80}) {
-            carryAcross(6, step, mark);
+    for (bool follow : {false, true}) {
+        for (float mark : {30.0f, 12.0f}) {
+            for (int step : {0, 20, 40, 80}) {
+                carryAcross(6, step, mark, follow);
+            }
         }
     }
 
@@ -314,9 +329,9 @@ int main() {
         "Left red and right blue are the fill being right; right red is the\n"
         "colour of one region landing in the other, which is the failure the\n"
         "single-shape table above cannot show.\n\n");
-    for (float mark : {30.0f, 12.0f}) {
-        for (int step : {10, 20, 40, 80}) {
-            carryAcrossDivided(6, step, mark, true);
+    for (bool follow : {false, true}) {
+        for (int step : {20, 40, 80}) {
+            carryAcrossDivided(6, step, 30.0f, true, follow);
         }
     }
 
@@ -328,12 +343,10 @@ int main() {
     // Moving the other way, so that the dividing wall slides *across* the mark
     // rather than away from it. This is the arrangement that puts a carried mark
     // in a region that is not its own, and it is the only one that can.
-    for (int step : {-20, -40}) {
-        carryAcrossDivided(6, step, 30.0f, false);
-    }
-    std::printf("  and with the neighbour holding a mark of its own:\n\n");
-    for (int step : {-20, -40}) {
-        carryAcrossDivided(6, step, 30.0f, true);
+    for (bool follow : {false, true}) {
+        for (int step : {-20, -40}) {
+            carryAcrossDivided(6, step, 30.0f, false, follow);
+        }
     }
     std::printf("all of it in %.1f s\n",
                 std::chrono::duration<double>(Clock::now() - started).count());

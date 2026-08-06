@@ -102,6 +102,18 @@ struct CtgJob {
     TileGrid scribbles;
     std::vector<TileGrid> sources;  // topmost first, as the layer lists them
 
+    // The same layers on the drawing the marks were made on, when they were
+    // made on another one and the layer is set to follow the motion. Empty
+    // otherwise, and empty is what says "do not go looking for a shift".
+    //
+    // This is the whole of what estimating the motion needs, and it is why the
+    // estimate can be derived rather than stored: both drawings are here, so
+    // the answer can be worked out again whenever it is wanted and thrown away
+    // with the fill. A stored transform would be a second thing to keep in step
+    // with the drawings, and the first one -- the fill -- is the thing this
+    // layer exists in order not to store.
+    std::vector<TileGrid> origin_sources;
+
     CtgSettings settings;
 
     // The cell budget: the solve is coarsened until it fits. Zero is no bound
@@ -140,5 +152,27 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles,
 // ask for by name.
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step = 1);
+
+// How far the ink moved between one drawing and another.
+//
+// One translation for the whole drawing, which is rung two of part two of
+// docs/scribbles-through-time.md and deliberately the cheapest thing that could
+// work: cel animation mostly translates between consecutive drawings, and a
+// carried mark does not need to be placed accurately -- it needs most of its
+// pixels in the right region, which is a far weaker thing to ask for than
+// registration for compositing.
+//
+// Coarse to fine, on the ink coverage the barrier already produces: an
+// exhaustive search at a few dozen cells across, then a refinement per level.
+// The answer is in image pixels over `area`, which should be everything either
+// drawing has been drawn on.
+//
+// Zero when there is nothing to match against -- one of the two drawings blank,
+// or an area with no ink in it -- which is the same answer as "it did not move"
+// and is the right way to fail: carrying unchanged is what happens then, and
+// that is the behaviour this is an improvement on rather than a replacement
+// for.
+CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                          const PixelRect& area);
 
 }  // namespace animage

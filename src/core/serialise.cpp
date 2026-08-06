@@ -110,15 +110,20 @@ Layer readLayer(const Json& json) {
         layer.ctg_sources.push_back(sources.at(i).asId());
     }
     layer.show_scribbles = json["show_scribbles"].asBool(false);
-    // A project written before carrying existed has none of these keys, and the
-    // defaults are what it behaved as: it had no choice about direction and
-    // nothing moved. Carrying itself defaults on, which does change how such a
-    // project reads -- a drawing with no marks of its own now shows an earlier
-    // drawing's rather than nothing. That is the feature, and it is reversible
-    // from the panel without touching a cel.
+    // A project written before carrying existed has none of these keys, and
+    // the defaults are what it behaved as: it had no choice about direction.
+    // Carrying itself defaults on, which does change how such a project reads
+    // -- a drawing with no marks of its own now shows an earlier drawing's
+    // rather than nothing. That is the feature, and it is reversible from the
+    // panel without touching a cel.
+    //
+    // Moving the marks defaults on for the same reason and reads the same way:
+    // an old project's carried marks will land where the drawing went rather
+    // than where they were drawn, and nothing on disk changes either way,
+    // because what is stored is still only the marks.
     layer.ctg_inherit = json["ctg_inherit"].asBool(true);
     layer.ctg_direction = directionFromName(json["ctg_direction"].asText("forward"));
-    layer.ctg_follow_motion = json["ctg_follow_motion"].asBool(false);
+    layer.ctg_follow_motion = json["ctg_follow_motion"].asBool(true);
     return layer;
 }
 
