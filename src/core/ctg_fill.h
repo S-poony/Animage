@@ -33,6 +33,13 @@ struct CtgFill {
     PixelRect solved;
     int step = 1;
 
+    // How many cells this solve was allowed. Kept beside what it achieved,
+    // because the two answer different questions: `step` is how good this
+    // answer is, and this is whether asking again could do better. A fill
+    // coarsened by a small budget is worth solving again when there is time; a
+    // fill coarsened by the largest budget there is, is finished.
+    long long budget = 0;
+
     bool valid = false;
     int colours = 0;  // distinct scribble colours found
 

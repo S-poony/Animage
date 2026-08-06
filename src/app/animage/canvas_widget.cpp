@@ -254,8 +254,23 @@ void CanvasWidget::requestCtgFills() {
         const CtgInputs wanted = ctgInputsFor(doc_, track_, image_, layer.id, settings);
         if (!wanted.valid) continue;
 
+        // Coarse first, then as fine as the drawing deserves. The first answer
+        // is bounded so that it arrives while the stroke that caused it is
+        // still recent -- about a tenth of a second -- and the second is bounded
+        // only by what a max-flow costs in memory, which at 1080p is full
+        // resolution. Nothing waits for either.
+        //
+        // A fill is finished when it is as fine as it was asked for, or when it
+        // already had the largest allowance there is. Without the second half a
+        // drawing too large for even the full budget would be re-solved for
+        // ever, arriving at the same coarse answer every time.
         const CtgFill* held = doc_.ctgFillFor(track_, image_, layer.id);
-        if (held && held->valid && held->inputs == wanted.hash) continue;  // current
+        const bool current = held && held->valid && held->inputs == wanted.hash;
+        if (current && (held->step <= std::max(1, settings.downscale) ||
+                        held->budget >= kFullSolveBudget)) {
+            continue;
+        }
+        const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
 
         const ColourAsked asked{image_, layer.id, true};
         const auto already = ctg_asked_.find(asked);
@@ -265,7 +280,7 @@ void CanvasWidget::requestCtgFills() {
 
         ctg_asked_[asked] = {wanted.hash, generation};
         ctg_solver_.request({image_, layer.id},
-                            ctgJobFor(doc_, track_, image_, layer.id, settings), true);
+                            ctgJobFor(doc_, track_, image_, layer.id, settings, budget), true);
     }
 
     if (!ctg_asked_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
@@ -374,7 +389,13 @@ void CanvasWidget::collectColour() {
 bool CanvasWidget::settleColour(int timeout_ms) {
     QElapsedTimer clock;
     clock.start();
-    while (!ctg_asked_.empty()) {
+    while (true) {
+        // Asking again is what carries the ladder up a rung: the coarse answer
+        // being installed is exactly what makes the fine one worth asking for,
+        // and in use it is the repaint that does this. Waiting without it would
+        // settle on the first answer and call that the colour.
+        requestCtgFills();
+        if (ctg_asked_.empty()) return true;
         if (clock.elapsed() > timeout_ms) return false;
         ctg_solver_.waitUntilIdle();
         collectColour();

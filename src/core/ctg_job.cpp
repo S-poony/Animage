@@ -155,6 +155,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     if (filled.isEmpty()) {
         CtgFill empty;
         empty.inputs = job.inputs;
+        empty.budget = job.budget;
         empty.valid = true;
         return empty;
     }
@@ -169,6 +170,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     if (region.isEmpty()) {
         CtgFill empty;
         empty.inputs = job.inputs;
+        empty.budget = job.budget;
         empty.valid = true;
         return empty;
     }
@@ -229,6 +231,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     built.solved = region;
     built.step = step;
     built.inputs = job.inputs;
+    built.budget = job.budget;
     built.valid = true;
     built.inherited = job.inherited;
     built.colours = static_cast<int>(palette.size());

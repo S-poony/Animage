@@ -1014,6 +1014,81 @@ void theLastFillStaysUntilTheNextOneArrives() {
     CHECK(inside.green() < 80);
 }
 
+// The cap that was on every solve is now on the first one only.
+//
+// It was there because the solve ran where the interface was waiting, and a
+// max-flow grows faster than its region: unbounded, a large drawing did not
+// take a while, it stopped the program. So a big drawing was coloured blockily
+// and permanently. Now the coarse answer is the one that arrives while the
+// stroke is still recent, and a full-resolution one replaces it.
+void theColourIsCoarseFirstAndThenAsFineAsTheDrawing() {
+    TEST("the first answer is coarse and the one that replaces it is not");
+    Document doc;
+    doc.setCanvasSize(1600, 1200);
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId image = doc.insertImage(track, 0);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto strokeOn = [&](LayerId layer, float x0, float y0, float x1, float y1,
+                              float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    strokeOn(ink, 100, 100, 1500, 100, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 100, 100, 1100, 3.0f, 0, 0, 0);
+    strokeOn(ink, 1500, 100, 1500, 1100, 3.0f, 0, 0, 0);
+    strokeOn(ink, 100, 1100, 1500, 1100, 3.0f, 0, 0, 0);
+    strokeOn(colour, 600, 600, 1000, 600, 20.0f, 1.0f, 0.0f, 0.0f);
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+    canvas.setFrame(0);
+    canvas.refreshAll();
+    canvas.grab();
+
+    // The first answer, collected directly so that nothing has asked for the
+    // better one yet.
+    canvas.colourSolver().waitUntilIdle();
+    canvas.collectColour();
+    const CtgFill* first = doc.ctgFillFor(track, image, colour);
+    CHECK(first != nullptr);
+    if (!first) return;
+    CHECK(first->step > 1);
+    const std::uint64_t question = first->inputs;
+
+    // And the one that replaces it: the same question, answered at the size the
+    // drawing was made at.
+    CHECK(canvas.settleColour());
+    const CtgFill* better = doc.ctgFillFor(track, image, colour);
+    CHECK(better != nullptr);
+    if (!better) return;
+    CHECK_EQ(better->step, 1);
+    CHECK_EQ(better->inputs, question);
+    CHECK_NEAR(better->tiles.pixel(1400, 1000).r, 1.0, 0.02);
+
+    // ...and then it is finished. Nothing asks a third time.
+    canvas.grab();
+    CHECK(!canvas.colourPending());
+}
+
 // A fill depends on some things it is not keyed on -- which way marks are
 // carried, and, when a project is opened, the whole document being a different
 // one whose drawings answer to the same ids. The way all of those say "every
@@ -1068,7 +1143,12 @@ void emptyingTheFillCacheThrowsAwayASolveAlreadyRunning() {
     CHECK(canvas.colourPending());
 
     doc.ctgCache().clear();  // ...and everything it is about is now wrong
-    canvas.settleColour();
+
+    // Let the solve finish and offer its answer. Collected directly rather than
+    // through settleColour, which would ask again and get a right answer, which
+    // is not what is being tested.
+    canvas.colourSolver().waitUntilIdle();
+    canvas.collectColour();
 
     // The answer arrived and was dropped rather than installed. Nothing else
     // could have told it apart: the document has not moved, so the hash it
@@ -2362,6 +2442,7 @@ int main(int argc, char** argv) {
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
     theLastFillStaysUntilTheNextOneArrives();
+    theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
     aFailedSaveLeavesTheOldProjectAlone();

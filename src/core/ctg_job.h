@@ -57,14 +57,29 @@ inline CtgSettings auditSettings() {
     return settings;
 }
 
-// How many cells a solve run where the interface is waiting may cover.
+// How many cells the first answer may cover.
 //
-// This is the cap the handover calls the honest thing to remove: a max-flow
-// grows faster than its region, so an unbounded one on a large drawing does not
-// take a while, it stops the program. It is still the right bound for a solve
-// nobody can escape from -- the first, coarse answer -- and wrong for one that
-// is running somewhere else while the program stays usable.
+// This was the cap on every solve, because every solve ran where the interface
+// was waiting: a max-flow grows faster than its region, so an unbounded one on
+// a large drawing does not take a while, it stops the program. It is still
+// exactly right for the *first* answer -- 115 ms at this size, so the colour
+// follows the pen closely enough to work with -- and it is now only the first
+// answer.
 inline constexpr long long kInteractiveSolveBudget = 512 * 512;
+
+// And how many the answer that replaces it may cover.
+//
+// A bound still, but a bound on memory rather than on patience. A max-flow
+// keeps something like ninety bytes a cell between the residuals, the search
+// trees and the labelling, so four million cells is a few hundred megabytes
+// while the solve runs. That is a real amount to ask for and not an absurd one;
+// forty million would be absurd.
+//
+// Four million is 2048x2048, which means a 1080p drawing is solved at full
+// resolution and a 4K one at half. It is the drawn area that is bounded and not
+// the canvas -- see solveCtgJob -- so a figure in the corner of a big canvas
+// gets full resolution whatever the canvas is.
+inline constexpr long long kFullSolveBudget = 2048LL * 2048;
 
 // Everything a solve reads. No pointer in here names anything the document can
 // take away, which is the whole point of it.

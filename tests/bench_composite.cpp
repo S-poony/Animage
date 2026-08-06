@@ -14,6 +14,7 @@
 #include "brush.h"
 #include "lazybrush.h"
 #include "compositor.h"
+#include "ctg.h"
 #include "document.h"
 
 using namespace animage;
@@ -173,6 +174,75 @@ int main() {
         const LazyBrushResult solved = solveLazyBrush(problem);
         const double timed = milliseconds(start, Clock::now());
         std::printf("    %4dx%-4d  %9.1f ms   (%d cuts)\n", side, side, timed, solved.cuts);
+    }
+
+    // A whole CTG solve on a real drawing, at both of the sizes one is asked
+    // for. The first answer is bounded so it arrives while the stroke that
+    // caused it is still recent; the second is bounded only by memory. Neither
+    // is on the interface thread any more, which is what makes the second one
+    // possible at all -- so what these numbers say is "how long until the
+    // colour is right", not "how long the program is stopped for".
+    std::printf("\nA CTG solve on a 1920x1080 drawing, coarse then full:\n");
+    {
+        Document doc;
+        doc.setCanvasSize(1920, 1080);
+        const TrackId track = doc.addTrack("main");
+        const LayerId colour = doc.addLayer(track, "colour", 0, LayerKind::Ctg);
+        const LayerId ink = doc.addLayer(track, "ink", 1);
+        const ImageId image = doc.insertImage(track, 0);
+        {
+            Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+            settings.ctg_sources = {ink};
+            doc.updateLayer(track, colour, settings);
+        }
+
+        const auto stroke = [&](LayerId layer, float x0, float y0, float x1, float y1,
+                                float radius, float r, float g, float b) {
+            ScopedCommand command(doc, "Stroke");
+            BrushSettings settings;
+            settings.radius = radius;
+            settings.hardness = 0.95f;
+            settings.pressure_affects_opacity = false;
+            // A mark on a colour layer is a label, as the application writes
+            // one: a blended rim would quantise to labels nobody drew, and the
+            // number of colours is what the solver's cost is counted in.
+            settings.label = layer == colour;
+            settings.r = r;
+            settings.g = g;
+            settings.b = b;
+            settings.a = 1.0f;
+            Brush brush(settings);
+            brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+            brush.extend({x1, y1, 1.0f});
+            brush.end();
+        };
+
+        // Three shapes with gapped walls, and a mark in each -- the arrangement
+        // the LazyBrush timings above use, drawn at the size an animator works
+        // at.
+        for (int box = 0; box < 3; ++box) {
+            const float left = 160.0f + static_cast<float>(box) * 560.0f;
+            const float right = left + 420.0f;
+            stroke(ink, left, 180, right, 180, 3.0f, 0, 0, 0);
+            stroke(ink, left, 180, left, 900, 3.0f, 0, 0, 0);
+            stroke(ink, right, 180, right, 900, 3.0f, 0, 0, 0);
+            stroke(ink, left, 900, left + 180.0f, 900, 3.0f, 0, 0, 0);  // gapped wall
+            stroke(ink, left + 240.0f, 900, right, 900, 3.0f, 0, 0, 0);
+            stroke(colour, left + 100.0f, 540, right - 100.0f, 540, 22.0f,
+                   0.2f + 0.3f * static_cast<float>(box), 0.3f, 0.8f);
+        }
+
+        for (const auto& [name, budget] :
+             {std::pair<const char*, long long>{"first  ", kInteractiveSolveBudget},
+              std::pair<const char*, long long>{"refined", kFullSolveBudget}}) {
+            const CtgJob job = ctgJobFor(doc, track, image, colour, CtgSettings{}, budget);
+            const auto start = Clock::now();
+            const CtgFill fill = solveCtgJob(job, true);
+            const double timed = milliseconds(start, Clock::now());
+            std::printf("    %s  budget %8lld  step %d  %9.1f ms  (%d colours, %zu tiles)\n",
+                        name, budget, fill.step, timed, fill.colours,
+                        fill.tiles.tileCount());
+        }
     }
 
     std::printf("\nA frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.\n");
