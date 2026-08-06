@@ -12,9 +12,9 @@
 
 namespace {
 
-const char* kReportName = "animage-crash.txt";
-
 #ifdef _WIN32
+
+const char* kReportName = "animage-crash.txt";
 
 const char* describe(DWORD code) {
     switch (code) {

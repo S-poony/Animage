@@ -12,6 +12,16 @@
 #include "ctg.h"
 #include "testing.h"
 
+// Every `ctgFill(...)` call below provokes GCC's -Wdangling-reference: the
+// helper is defined in another translation unit, so GCC cannot see that it
+// returns into the document's own fill cache (or a static empty fill), and
+// assumes the reference could point at one of the by-value arguments. It
+// cannot, so all seventeen of these are false positives, silenced here rather
+// than at each site.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wdangling-reference"
+#endif
+
 using namespace animage;
 
 namespace {

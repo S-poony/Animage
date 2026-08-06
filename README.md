@@ -79,6 +79,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The build denies compiler warnings and runs the tests under ASan and UBSan by
+default, so a warning or a memory error fails the build or the tests rather
+than being noticed later. `-DANIMAGE_WERROR=OFF` and `-DANIMAGE_SANITIZE=OFF`
+turn either off (the packaged CI builds use the latter, so released binaries
+do not carry a sanitizer runtime).
+
 The core library `animage_core` has no Qt dependency and no external
 dependencies at all. If Qt 6 is not found, the GUI targets are skipped and the
 core library and its tests still build.

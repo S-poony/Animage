@@ -14,6 +14,7 @@ animage_test(test_serialise)
 animage_test(test_track)
 animage_test(test_undo)
 animage_test(test_color)
+animage_test(test_hostile)
 
 # A stopwatch rather than a test, so it is built but not run by ctest.
 add_executable(bench_composite bench_composite.cpp)

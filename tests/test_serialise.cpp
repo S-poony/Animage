@@ -54,16 +54,19 @@ void jsonWritesWhatItReads() {
     CHECK_EQ(parsed.has("nothing"), true);
 }
 
-void jsonKeepsKeysInOrder() {
-    TEST("JSON keeps object keys in the order they were set");
+void jsonDumpsSortedKeys() {
+    TEST("JSON writes object keys sorted, so the file is canonical");
     Json root = Json::object();
     root.set("zebra", Json::number(1));
     root.set("apple", Json::number(2));
-    // A hash would sort or shuffle these, and every save would rewrite the file
-    // into a different order -- which is the whole reason for choosing a text
-    // format.
+    root.set("mango", Json::number(3));
+    root.set("banana", Json::number(4));
     const std::string dumped = root.dump(0);
-    CHECK(dumped.find("zebra") < dumped.find("apple"));
+    // A hash would shuffle these and every save would rewrite the file into a
+    // different order -- which is the whole reason for choosing a text format.
+    // Sorted is the strongest form of that guarantee: the same document is the
+    // same bytes however its keys were set.
+    CHECK_EQ(dumped, std::string("{\"apple\":2,\"banana\":4,\"mango\":3,\"zebra\":1}"));
 }
 
 void jsonRefusesRubbish() {
@@ -424,10 +427,18 @@ void acorruptCelIsRefused() {
 
     // A tile count that says there is far more here than there is. This is the
     // one that matters: taken on trust it is a request to allocate a terabyte.
+    // It is now caught by the per-cel tile budget, which refuses even earlier
+    // than the size floor that used to catch it.
     std::vector<std::uint8_t> lying = good;
-    lying[20] = 0xff;
-    lying[21] = 0xff;
-    refused(lying, "truncated");
+    lying.at(20) = 0xff;  // in-bounds: the header is always at least 24 bytes
+    lying.at(21) = 0xff;
+    refused(lying, "too many");
+
+    // A count that is under the budget but still far larger than the file: the
+    // size floor, not the budget, is what catches this one.
+    std::vector<std::uint8_t> lying_plausible = good;
+    lying_plausible.at(20) = 100;  // 100 tiles need 52,824 bytes; there are 552
+    refused(lying_plausible, "truncated");
 
     // Truncated in the middle of the pixels.
     std::vector<std::uint8_t> cut = good;
@@ -440,7 +451,7 @@ void acorruptCelIsRefused() {
 int main() {
     std::printf("serialise:\n");
     jsonWritesWhatItReads();
-    jsonKeepsKeysInOrder();
+    jsonDumpsSortedKeys();
     jsonRefusesRubbish();
     aSceneSurvivesTheRoundTrip();
     idsResumePastTheFile();

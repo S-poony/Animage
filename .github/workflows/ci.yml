@@ -79,6 +79,7 @@ jobs:
           cmake -S . -B build
           -G "${{ matrix.generator }}"
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DANIMAGE_SANITIZE=OFF
           ${{ matrix.extra_cmake }}
 
       - name: Build
@@ -143,6 +144,42 @@ jobs:
           name: Animage-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
+
+      # The packaging builds above turn the sanitizers off -- a shipped binary
+      # must not depend on a sanitizer runtime -- so the memory-safety story is
+      # told here instead: the default build, sanitizers on, warnings as errors.
+      # This is the build the README's commands produce.
+  sanitize:
+    name: sanitizers
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libfontconfig1 libfreetype6 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   # Downloadable without a GitHub account, unlike build artifacts.
   release:

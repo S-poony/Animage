@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "json.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -116,12 +117,25 @@ float Json::asFloat(float fallback) const {
 }
 
 int Json::asInt(int fallback) const {
-    return kind_ == Kind::Number ? static_cast<int>(number_) : fallback;
+    if (kind_ != Kind::Number) return fallback;
+    const double value = number_;
+    // A cast out of the type's range is undefined behaviour, and a scene file
+    // is data, so numbers that cannot be an int are refused rather than cast.
+    // The comparison also refuses NaN, which no comparison to a range accepts.
+    if (!(value >= static_cast<double>(std::numeric_limits<int>::min()) &&
+          value <= static_cast<double>(std::numeric_limits<int>::max()))) {
+        return fallback;
+    }
+    return static_cast<int>(value);
 }
 
 std::uint64_t Json::asId(std::uint64_t fallback) const {
-    if (kind_ != Kind::Number || number_ < 0.0) return fallback;
-    return static_cast<std::uint64_t>(number_);
+    if (kind_ != Kind::Number) return fallback;
+    const double value = number_;
+    // Same refusal as asInt: 2^64 and up, negatives and NaN are out of range
+    // for uint64_t and casting them would be undefined behaviour.
+    if (!(value >= 0.0 && value < 18446744073709551616.0)) return fallback;
+    return static_cast<std::uint64_t>(value);
 }
 
 std::string Json::asText(std::string fallback) const {
@@ -197,12 +211,20 @@ std::string Json::dump(int indent) const {
 
         if (value.object_.empty()) { out += "{}"; return; }
         out += '{';
-        for (std::size_t i = 0; i < value.object_.size(); ++i) {
+        // JSON objects carry no order, so the serialized form is canonical:
+        // the keys sorted, whatever order the writer set them in. Determinism
+        // is the point -- a saved scene has to be the same bytes twice running
+        // for a diff to mean anything, and sorting is what guarantees it
+        // without the writer having to remember to.
+        std::vector<std::pair<std::string, Json>> members = value.object_;
+        std::sort(members.begin(), members.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (std::size_t i = 0; i < members.size(); ++i) {
             if (i) out += ',';
             newline(depth + 1);
-            writeEscaped(value.object_[i].first, out);
+            writeEscaped(members[i].first, out);
             out += indent > 0 ? ": " : ":";
-            self(value.object_[i].second, depth + 1, self);
+            self(members[i].second, depth + 1, self);
         }
         newline(depth);
         out += '}';
@@ -217,6 +239,14 @@ namespace {
 // A recursive-descent parser over the whole string. `at` is the read position
 // and every failure reports it, because "unexpected character" without an
 // offset is no use on a file with ten thousand lines in it.
+//
+// How deep the parser will descend. A scene's real nesting is a handful of
+// levels, so the limit exists only to refuse the other kind of file -- nested
+// brackets run together, or built to crash a parser -- with an error rather
+// than a stack overflow. Each level is a couple of frames, so the bound is far
+// below anything that could overflow.
+constexpr int kMaxNesting = 256;
+
 class Parser {
 public:
     Parser(std::string_view source, std::string* error) : source_(source), error_(error) {}
@@ -224,6 +254,18 @@ public:
     bool parseValue(Json& out) {
         skipSpace();
         if (at_ >= source_.size()) return fail("unexpected end of input");
+
+        // The one recursion this parser has: parseValue recurses only through
+        // parseObject and parseArray, so this counter is exactly the nesting
+        // depth. The guard's destructor decrements it on every return path.
+        if (depth_ >= kMaxNesting) {
+            return fail("nested more than " + std::to_string(kMaxNesting) + " levels deep");
+        }
+        ++depth_;
+        struct DepthGuard {
+            int& depth;
+            ~DepthGuard() { --depth; }
+        } guard{depth_};
 
         switch (source_[at_]) {
             case '{': return parseObject(out);
@@ -403,6 +445,7 @@ private:
     std::string_view source_;
     std::string* error_;
     std::size_t at_ = 0;
+    int depth_ = 0;
 };
 
 }  // namespace

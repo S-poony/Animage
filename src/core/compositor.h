@@ -123,7 +123,7 @@ struct LayerPass {
     // and on a layer that moves carried marks that is not where they were
     // drawn. Zero for everything else, and zero is the path that existed
     // before this.
-    CtgShift offset;
+    CtgShift offset{};
 };
 
 // Flattens the layers of one image.

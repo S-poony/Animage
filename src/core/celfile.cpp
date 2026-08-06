@@ -14,6 +14,16 @@ constexpr std::uint32_t kSampleHalfLittleEndian = 0;
 constexpr int kChannels = 4;
 constexpr std::size_t kRowTableBytes = static_cast<std::size_t>(kTileSize) * 4;
 
+// The most tiles one cel may hold. A tile is 128x128 half-float RGBA -- 128 KB
+// -- so this is a memory budget as much as a count, and the count is the part
+// the file gets to say. The number is what a full layer over the largest
+// canvas the format allows (16384 squared, at 128-pixel tiles) can occupy:
+// 16384 tiles, two gigabytes. Anything past it is either off-canvas work at a
+// canvas nobody renders, or a file built to turn a few kilobytes into a
+// gigabyte -- one opaque pixel per tile costs 528 bytes in the file and 128 KB
+// in memory, so a sparse cel is exactly the shape a memory bomb takes.
+constexpr std::size_t kMaxCelTiles = 16384;
+
 // Written a byte at a time rather than by memcpy of a struct: the file has to
 // mean the same thing whatever the machine's word order is, and a struct would
 // quietly acquire padding the first time somebody added a field.
@@ -152,6 +162,11 @@ bool readCelFileInfo(const std::vector<std::uint8_t>& bytes, CelFileInfo& out,
     }
     if (sample != kSampleHalfLittleEndian) {
         return fail(error, "cel file uses an unknown sample format");
+    }
+    if (count > kMaxCelTiles) {
+        return fail(error, "cel file has " + std::to_string(count) +
+                               " tiles, too many: the most one cel can hold is " +
+                               std::to_string(kMaxCelTiles));
     }
 
     out.tile_size = static_cast<int>(tile_size);

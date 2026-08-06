@@ -17,9 +17,14 @@ namespace animage {
 // small: no comments, no trailing commas, no duplicate keys. It has to read
 // what it writes, and refuse a corrupt file loudly rather than guess.
 //
-// Objects keep their keys in insertion order. The plan chose JSON so that a
-// project is "readable, diffable, debuggable by hand", and a hash would reorder
-// the file on every save and make every diff useless.
+// Objects are written with their keys sorted. JSON objects carry no order, so
+// nothing that reads a scene depends on the order the writer set its keys;
+// sorting is what makes the file the same bytes twice running -- the plan
+// chose JSON so that a project is "readable, diffable, debuggable by hand",
+// and a hash would reorder the file on every save and make every diff useless.
+// Sorted is the strongest form of that guarantee: the same document is the
+// same bytes however its keys were set. Whatever order matters lives in the
+// arrays.
 class Json {
 public:
     enum class Kind { Null, Bool, Number, String, Array, Object };
