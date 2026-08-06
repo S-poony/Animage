@@ -44,4 +44,22 @@ target_compile_definitions(animage_ui PUBLIC QT_NO_KEYWORDS)
 
 add_executable(animage animage/main.cpp)
 target_link_libraries(animage PRIVATE animage_ui)
-set_target_properties(animage PROPERTIES WIN32_EXECUTABLE OFF)
+set_target_properties(animage PROPERTIES
+  # A console window on Windows, for the same reason as the latency harness:
+  # a prototype that crashes should be able to say so.
+  WIN32_EXECUTABLE OFF
+  # macOS will not run a loose executable that opens windows, and macdeployqt
+  # has nowhere to put Qt without a bundle to put it in.
+  MACOSX_BUNDLE TRUE
+  MACOSX_BUNDLE_BUNDLE_NAME "Animage"
+  MACOSX_BUNDLE_GUI_IDENTIFIER "org.animage.Animage"
+  MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+)
+
+# Enough of an install for the packaging step to have something to gather up.
+include(GNUInstallDirs)
+install(TARGETS animage
+  BUNDLE DESTINATION .
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)

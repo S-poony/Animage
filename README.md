@@ -1,5 +1,7 @@
 # Animage
 
+[![CI](https://github.com/S-poony/Animage/actions/workflows/ci.yml/badge.svg)](https://github.com/S-poony/Animage/actions/workflows/ci.yml)
+
 A 2D animation program for hand-drawn work, built around two bets:
 
 **Layers belong to the track, timing belongs to the image.** A layer is added
@@ -46,6 +48,26 @@ The original design documents are in French and are authoritative — the code
 follows them, not the other way round. They live in [docs/fr](docs/fr/).
 Everything else in the repository is in English.
 
+## Download
+
+Every push to `main` is built and tested on Linux, Windows and macOS, and the
+binaries are published to the
+[**latest build**](https://github.com/S-poony/Animage/releases/tag/latest).
+Nothing needs to be installed alongside them — Qt travels with the download.
+
+| | |
+|---|---|
+| Windows | `Animage-windows-x64.zip` — unzip and run `animage.exe`. |
+| macOS | `Animage-macos-universal.zip` — unzip, then **right-click ▸ Open** the first time. |
+| Linux | `Animage-linux-x86_64.AppImage` — `chmod +x` it and run it. |
+
+These are prototype builds from the tip of `main`, not stable releases, and they
+are unsigned. macOS will refuse a double-click and offer no way past it;
+right-click ▸ Open gives you the button that says yes. Windows may show a
+SmartScreen warning, behind *More info ▸ Run anyway*. Signing costs money per
+year from both Apple and a Windows certificate authority, and is worth paying
+when there is something worth shipping.
+
 ## Building
 
 Requires a C++20 compiler, CMake 3.21+, and (for the application, not the core
@@ -64,7 +86,7 @@ core library and its tests still build.
 ### On Windows with MSYS2
 
 ```bash
-pacman -S --needed mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-boost
+pacman -S --needed mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base
 ```
 
 Then run the CMake commands above from a UCRT64 shell.

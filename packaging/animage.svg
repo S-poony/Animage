@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A placeholder mark: three drawings stacked as onion skin, and one stroke
+     across them. Replace it when the project has a real icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" rx="52" fill="#1b1d21"/>
+
+  <!-- The two drawings behind, fading back in time. -->
+  <rect x="54" y="46" width="132" height="152" rx="8" fill="none" stroke="#4c5158" stroke-width="4"/>
+  <rect x="64" y="54" width="132" height="152" rx="8" fill="none" stroke="#767d87" stroke-width="4"/>
+  <!-- The drawing in hand. -->
+  <rect x="74" y="62" width="132" height="152" rx="8" fill="#f4f2ee" stroke="#d8d4cc" stroke-width="4"/>
+
+  <!-- The stroke, and the scribble of colour under it. -->
+  <path d="M96 176 C 116 96, 164 96, 184 152"
+        fill="none" stroke="#e8563f" stroke-width="20" stroke-linecap="round" opacity="0.55"/>
+  <path d="M92 182 C 112 90, 168 90, 188 158"
+        fill="none" stroke="#1b1d21" stroke-width="9" stroke-linecap="round"/>
+</svg>

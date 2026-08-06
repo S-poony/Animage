@@ -15,3 +15,12 @@ CMakeUserPresets.json
 *.a
 *.so
 .claude/
+
+# Editor and tool caches
+.dirac-cache/
+
+# Packaging scratch: everything here is rebuilt by .github/workflows/ci.yml
+dist/
+stage/
+AppDir/
+*.AppImage

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Animage
+GenericName=Animation editor
+Comment=A 2D animation program for hand-drawn work
+Exec=animage %f
+Icon=animage
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=animation;drawing;painting;cel;
