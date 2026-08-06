@@ -283,7 +283,7 @@ void CanvasWidget::requestCtgFills() {
                             ctgJobFor(doc_, track_, image_, layer.id, settings, budget), true);
     }
 
-    if (!ctg_asked_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
+    noteColourPending();
 }
 
 // Asks for every drawing to be judged.
@@ -313,7 +313,25 @@ void CanvasWidget::requestColourAudit() {
                             false, CtgSolver::Priority::Whenever);
     }
 
-    if (!ctg_asked_.empty() && ctg_poll_ && !ctg_poll_->isActive()) ctg_poll_->start();
+    noteColourPending();
+}
+
+// Starts and stops the poll, and says when the answer to "is the colour being
+// worked out" has changed.
+//
+// Both because they are the same event. Nothing is waiting for a solve, but the
+// status bar is entitled to say one is happening: it is the whole of the
+// visible difference between solving here and solving elsewhere, and without it
+// a fill that is a second out of date looks like a fill that is wrong.
+void CanvasWidget::noteColourPending() {
+    const bool pending = !ctg_asked_.empty();
+    if (ctg_poll_) {
+        if (pending && !ctg_poll_->isActive()) ctg_poll_->start();
+        if (!pending) ctg_poll_->stop();
+    }
+    if (pending == colour_was_pending_) return;
+    colour_was_pending_ = pending;
+    Q_EMIT colourChanged();
 }
 
 // Requests whose answer nobody is waiting for any more.
@@ -368,8 +386,12 @@ void CanvasWidget::collectColour() {
         }
     }
 
-    if (ctg_asked_.empty() && ctg_poll_) ctg_poll_->stop();
-    if (!filled && !judged) return;
+    if (!filled && !judged) {
+        noteColourPending();
+        return;
+    }
+    colour_was_pending_ = !ctg_asked_.empty();
+    if (ctg_poll_ && ctg_asked_.empty()) ctg_poll_->stop();
 
     // A regenerated fill changes colour across whole regions, nowhere near
     // wherever the pen was, so all of it is redrawn. Marking only the stroke's

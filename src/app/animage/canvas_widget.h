@@ -193,6 +193,7 @@ private:
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
     void dropStaleColourRequests(bool only_this_drawing);
+    void noteColourPending();
     void setScribblePreview(animage::LayerId layer, bool previewing);
 
     bool pickColourAt(const QPointF& image_point);
@@ -249,6 +250,7 @@ private:
     // milliseconds is nothing beside a solve, and the timer stops when there is
     // nothing to wait for.
     QTimer* ctg_poll_ = nullptr;
+    bool colour_was_pending_ = false;
 
     animage::TrackId track_ = animage::kNoId;
     animage::ImageId image_ = animage::kNoId;

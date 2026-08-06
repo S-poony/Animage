@@ -29,6 +29,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QGroupBox>
+#include <QLabel>
 #include <QListWidget>
 #include <QHeaderView>
 #include <QSlider>
@@ -2113,8 +2114,22 @@ void aStrandedCarriedMarkIsFlaggedInThePanel() {
     // The judging happens on a worker thread, so the answers arrive after the
     // opening rather than during it. Waited for here; in use they land one
     // drawing at a time and each brings the timeline up to date with it.
+    //
+    // And while they are being worked out the status bar says so, which is the
+    // whole of the visible difference between solving here and solving
+    // elsewhere: the program does not stop, so without it a fill a second out
+    // of date looks like a fill that is wrong.
+    const auto statusText = [&] {
+        for (QLabel* label : window.findChildren<QLabel*>()) {
+            if (label->text().contains(QStringLiteral("frame "))) return label->text();
+        }
+        return QString();
+    };
+    CHECK(statusText().contains(QStringLiteral("colouring")));
+
     CHECK(window.waitForColour());
     QCoreApplication::processEvents();
+    CHECK(!statusText().contains(QStringLiteral("colouring")));
 
     // The whole point of the flag: it says which drawings to go and look at, so
     // it has to be right about a drawing nobody has looked at. Opening the

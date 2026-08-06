@@ -124,6 +124,7 @@ MainWindow::MainWindow() {
         [this] {
             timeline_widget_->refresh();
             refreshLayerFlags();
+            syncStatus();
         },
         Qt::QueuedConnection);
     setWindowTitle(QStringLiteral("Untitled - Animage"));
@@ -942,9 +943,17 @@ void MainWindow::syncStatus() {
 
     const std::size_t slot = canvas_->frame();
     const ImageId image = track->imageAtSlot(slot);
+
+    // A solve happens on another thread now, so the colour on screen can be a
+    // moment behind the drawing and there would otherwise be nothing to say so.
+    // It is the whole of the visible difference: the program does not stop, and
+    // what you are looking at is the last answer until the next one lands.
+    const QString colouring =
+        canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
+
     status_->setText(
         QStringLiteral("frame %1 / %2   held %3   drawings %4   layers %5   zoom %6%   "
-                       "tiles %7   undo %8   %9 fps")
+                       "tiles %7   undo %8   %9 fps%10")
             .arg(slot + 1)
             .arg(track->frameCount())
             .arg(track->exposureOf(image))
@@ -953,7 +962,8 @@ void MainWindow::syncStatus() {
             .arg(canvas_->zoom() * 100.0, 0, 'f', 0)
             .arg(doc_.totalTileCount())
             .arg(doc_.undoDepth())
-            .arg(doc_.scene().framerate));
+            .arg(doc_.scene().framerate)
+            .arg(colouring));
 }
 
 void MainWindow::refreshEverything() {
