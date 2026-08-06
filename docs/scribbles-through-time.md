@@ -291,15 +291,23 @@ Order of attack, cheapest first:
    > neighbour taking a colour that was never meant for it — goes from 100% of
    > the neighbouring region to none of it.
    >
-   > **Where it fails is worth knowing, because it fails by locking on.** The
-   > estimate is a global translation found by matching ink, so line art that
-   > repeats gives it more than one good answer: a box with a wall down the
-   > middle, moved 200 px, matched its far wall to the divider and reported 49.
-   > The fill is then exactly as wrong as carrying unchanged, which is the floor
-   > this cannot go below — and the flag catches it, because a mark that landed
-   > on nothing still spreads to nothing. Real line art is less periodic than a
-   > test fixture, and rungs 3 and above are what a real answer to this looks
-   > like.
+   > **Where it fails is worth knowing.** It is a global translation found by
+   > matching ink, so line art that repeats gives it more than one good answer:
+   > a box with a wall down the middle, moved 200 px, matched its far wall to
+   > the divider and reported 49. The fill is then exactly as wrong as carrying
+   > unchanged, which is the floor this cannot go below.
+   >
+   > And a translation cannot explain a change of *size*, which is what freehand
+   > redrawing mostly is. On a reported project — five circles drawn in the same
+   > place — the circles had really drifted 42–65 px upwards and shrunk by a
+   > fifth, and the estimate came back 72–102 px: right direction, overstated,
+   > because the best overlap of two rings of different radius is where they
+   > touch rather than where they are concentric. A confidence gate was measured
+   > and cannot separate that from a genuine move (×1.09–1.25 against ×1.02–1.11
+   > for a real 20–40 px translation). Two rules came out of it and are in
+   > `estimateCtgShift`: score agreement rather than difference, and blur before
+   > matching so that a drawing is a shape rather than a line. Rungs 3 and above
+   > are what a real answer looks like.
    >
    > Two rules fell out of building it. **The mark's own pixels move with its
    > seed**: a mark wins the pixels it covers whatever the solver decided, so a

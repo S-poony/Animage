@@ -202,6 +202,38 @@ down the middle moved 200 px matched its far wall to the divider. The fill is
 then exactly as wrong as carrying unchanged, which is the floor this cannot go
 below.
 
+**Two things about the score, both learned from one reported project.** It is
+what a translation estimator lives or dies by, and the first version of it was
+wrong in a way that only shows on real drawings.
+
+*Score agreement, never difference.* A drawing is nearly all bare paper, so a
+wrong alignment is charged twice — for the ink it puts where there is none, and
+for the ink it fails to cover — while sliding the whole drawing off the edge is
+charged once, for the ink left behind. Two circles a person drew in the same
+place never coincide exactly, so "disappear entirely" scored better than "line
+them up" and the search answered with the corner of its own window: 480 px of
+movement for a circle that had not moved. Agreement cannot do that, because ink
+pushed off the edge agrees with nothing. It is also the right question: what a
+translation is for is putting ink on ink.
+
+*Match a shape, not a line.* Line art is thin, and two thin lines either
+coincide or they do not, so agreement between them is all or nothing and its
+maximum can be nowhere near the truth. Two rings of different radius do not
+overlap at all when concentric and overlap most when slid until they touch — so
+the sharp-ink answer to "the same circle, drawn twice, a little smaller" is "it
+moved by the difference of the radii". A three-tap blur at every level of the
+pyramid is what stops that, and it is load-bearing rather than tidy: without it
+a 400 px movement is found as 99 px and the fill is lost.
+
+What is left is honest and is the limit of one translation. On that project the
+circles really had drifted 42–65 px upwards and shrunk by a fifth, and the
+estimate came back 72–102 px: the right direction, overstated, because a
+translation is being asked to explain a change of size. A confidence gate was
+measured and does not separate — a real 20–40 px translation of a box scores
+×1.02 to ×1.11 against not moving, and those circles scored ×1.09 to ×1.25, so
+any threshold that blocks the second blocks the first. Getting past this needs
+rung three, not a better constant.
+
 **Three things have to agree about where a mark ended up, and at first only one
 of them did.** Reported as a bug and it was three: the fill followed the drawing
 while the Marks column drew the mark where it was made, the first stroke on a
