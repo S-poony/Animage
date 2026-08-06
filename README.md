@@ -22,7 +22,8 @@ stored, the fill regenerates whenever the drawing or the scribble changes.
 
 Status: **prototype**. You can draw, animate, colour, save and export. M0 through
 M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG
-and not yet EXR. Colour carries from drawing to drawing — see below.
+and not yet EXR. Colour carries from drawing to drawing and moves with the
+drawing when it does — see below.
 
 A project is a folder — `scene.json` beside one file per cel — under File ▸
 Open, Save and Save As. Cel pixels are stored losslessly, bit for bit as the
@@ -33,10 +34,11 @@ If you are picking this up, read [docs/handover.md](docs/handover.md) first: it
 records what was built, where it deliberately departs from the plan, and the
 mistakes that cost the most time.
 [docs/scribbles-through-time.md](docs/scribbles-through-time.md) designs the two
-halves of colouring across time — carrying scribbles from drawing to drawing,
-which is built, and moving them with the animation, which is not. Where building
-the first half contradicted the design, the note keeps the original text and
-marks the correction, which is the interesting part to read.
+halves of colouring across time — carrying scribbles from drawing to drawing and
+moving them with the animation. Both are built as far as one translation per
+drawing; the rungs past that are still research. Where building either half
+contradicted the design, the note keeps the original text and marks the
+correction underneath, which is the interesting part to read.
 
 ## Design documents
 
@@ -156,20 +158,36 @@ drawings after it follow that one instead. Clearing a drawing's marks puts it
 back to carrying. Nothing is copied and nothing is stored — it is resolved as it
 is read, so reordering and deleting drawings change what follows what for free.
 
+**And the marks move with the drawing.** Where a mark is carried to a drawing it
+was not made on, it is shifted by however far the line art moved between the
+two, measured from the drawings themselves and stored nowhere. Left where it was
+drawn a carried mark holds its region only while the drawing has moved less than
+about half that region's width — which between two drawings is not much — and
+past that the region takes the wrong colour or none. It is one shift for the
+whole drawing, so a shot where two things move apart is a shot where it is right
+about one of them; that is what the switch is for.
+
 The **Colour layer** box in the layer panel is where this is set: which layers
-the fill is cut against, whether it carries at all, and whether it carries
-forwards, backwards, or to whichever coloured drawing is nearer. Cutting against
-a rough as well as a clean closes gaps that leak from either alone, which is why
-several sources is the default. The **Marks** column shows the scribbles instead
-of the fill.
+the fill is cut against, whether it carries at all, whether it carries forwards,
+backwards or to whichever coloured drawing is nearer, and whether carried marks
+move with the drawing. Cutting against a rough as well as a clean closes gaps
+that leak from either alone, which is why several sources is the default. The
+**Marks** column shows the scribbles instead of the fill.
+
+**The fill is worked out beside the interface, not inside it.** A max-flow over
+a 1080p drawing takes about a second and a half, so it happens on another
+thread: the status bar says "colouring..." while it does, the last answer stays
+on screen until the new one lands, and nothing waits. A coarse answer arrives
+about a tenth of a second after the pen lifts and a full-resolution one replaces
+it, so a stroke costs the coarse one and pausing is what buys the rest.
 
 **The timeline says where the colour went wrong.** A blue bar under a drawing's
 number means its colour was carried there rather than drawn there. An orange
 corner means those carried marks fill almost nothing but themselves — whatever
-they were meant to colour has moved out from under them — and the layer's row
-turns orange with the reason in its tooltip when you go there. Every drawing is
-judged, not just the ones you have looked at: the flag exists to tell you which
-drawings to go to.
+they were meant to colour has moved out from under them, and moving the marks
+did not find it — and the layer's row turns orange with the reason in its
+tooltip when you go there. Every drawing is judged, not just the ones you have
+looked at: the flag exists to tell you which drawings to go to.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the track rather than to the image, which is the point of the

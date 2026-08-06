@@ -19,7 +19,7 @@ did not before — and now survives not thinking about it at all.
 | M1 | Data model, copy-on-write tiles, undo. All five plan tests pass. |
 | M2 | Canvas, pressure brush, eraser, layers. Compositing is on the CPU, not the GPU. |
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
-| M4 | LazyBrush solver and the CTG layer, in the app and usable. |
+| M4 | LazyBrush solver and the CTG layer, in the app and usable. Solved on a worker thread. |
 | M5 | Save, open, Save As, autosave, New, and PNG export. EXR is not written. |
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
@@ -90,9 +90,9 @@ off disk has no fills at all, and an export that composited only what was
 cached wrote blank colour sequences and said nothing about it — which is why
 `exporting::write` takes the document by mutable reference and solves what is
 missing. The price is that exporting a coloured shot for the first time pays one
-max-flow per CTG layer per distinct drawing, at the same capped resolution the
-screen gets. Solving off the interface thread, item 3 below, is what removes
-both the cap and that wait.
+max-flow per CTG layer per distinct drawing. It still solves where it stands and
+at the interactive budget, which is now the *only* place that budget still binds
+a final answer — see "what I would do next".
 
 Since the first build, the model also grew a **canvas**: `Scene::canvas()`, the
 rectangle that will be exported, set under Edit ▸ Scene settings. Before it
@@ -109,7 +109,8 @@ tracks and one timeline. If you find the old name anywhere, it meant the track.
 
 ## Colour through time
 
-**Part 1 of [scribbles-through-time.md](scribbles-through-time.md) is built.** An
+**Part 1 of [scribbles-through-time.md](scribbles-through-time.md) is built, and
+part 2 as far as its second rung** — see below. An
 absent cel on a CTG layer used to mean the layer was empty there; it now means
 *inherited*. Colour the first drawing of a run and the run is coloured, and a
 drawing you scribble on takes over from there. It is resolved at read time by
@@ -175,6 +176,45 @@ transparent colour exists, the non-modal colour panel is deliberately parked. #6
 was built the opposite way round from how it was written, for the transparency
 reason above.
 
+## Colour through time, part two
+
+**A carried mark now moves to where the drawing went.** One translation for the
+whole drawing, found by matching the two drawings' ink coarse-to-fine
+(`estimateCtgShift`), applied wherever a mark is read on a drawing it was not
+made on. It is on by default and it costs 19.7 ms against the 129 ms coarse
+solve it precedes.
+
+It is derived and never stored, which is a deliberate departure from the design
+note's six-floats-per-drawing. The job already carries both drawings' line art,
+so the shift is worked out inside the solve and thrown away with the fill; a
+stored transform would be a second piece of derived data to keep in step with
+drawings that move. Whole pixels, not an affine: a mark needs most of its pixels
+in the right region and nothing finer.
+
+**The reason it is the default is measured, in `bench_carry`.** Left where it
+was drawn, a carried mark holds its region only while the drawing has moved less
+than about half that region's width — that is the soft-scribble majority rule
+applied to a mark that has not moved — and half a region's width between two
+drawings is very ordinary. Past it, one of two things happens, and only one of
+them is caught:
+
+- With a mark in the next region too, the two contest the overlap, somebody
+  loses, `spread` collapses to about 1 and the drawing is flagged. Every time,
+  at exactly the displacement where it goes wrong.
+- With **nothing** in the next region, the carried mark simply takes it —
+  uncontested majority is a formality — and `spread` *rises*, 6.3 to 12.8,
+  because the mark did fill a region and the number cannot ask which one. **The
+  flag does not merely miss this case, it endorses it.** That is the design
+  note's "wrong region of about the right size", and it is the one failure
+  nothing here can see.
+
+Moving the marks removes both: 400 px of movement, `spread` unchanged at 7.70,
+and the neighbouring region goes from 100% wrong to none. **Where it fails is by
+locking on** — matching ink is ambiguous when ink repeats, and a box with a wall
+down the middle moved 200 px matched its far wall to the divider. The fill is
+then exactly as wrong as carrying unchanged, which is the floor this cannot go
+below, and the flag catches that one.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -190,7 +230,22 @@ what would show whether a rewrite paid.
 **Input and playback share a thread.** The plan asks for them to be split now
 rather than retrofitted. M0 measured the application's own share of latency at
 0.03 ms, so there was no case for it yet. The retrofit is well supported:
-copy-on-write tiles make a snapshot for a render thread nearly free.
+copy-on-write tiles make a snapshot for a render thread nearly free — which is
+no longer a claim, because the CTG solve is that retrofit and it cost almost
+nothing. See `CtgJob`.
+
+**What runs where.** Worth knowing before touching any of it, because it is
+three different answers:
+
+- The interface, the document and every write to it are on the main thread. The
+  document is not locked anywhere and must not be read from another one.
+- Compositing spreads its rows across a short-lived thread pool inside one call,
+  and joins before returning. Nothing outlives the call.
+- A CTG solve runs on a worker owned by `CtgSolver`, reads only its own `CtgJob`
+  copy, and hands back a whole `CtgFill`. It is installed into the document by
+  the interface thread on a 16 ms poll. A worker never touches a widget, and the
+  solver's own wake-up callback is deliberately unused by the canvas for that
+  reason.
 
 **There is no scribble tool**, and there should not be one — this was the
 user's call and it is a better design than the plan sketches. A CTG layer is
@@ -279,13 +334,27 @@ bug meant the result was never drawn; fixing the repaint made it obvious. The
 solve now happens once, when the pen lifts, and the scribble itself is shown
 during the stroke.
 
-**The solve runs where the interface is waiting, so it is capped.** A max-flow
-grows faster than its region — about 1.3 s for a megapixel — and on a large
-drawing an unbounded one does not take a while, it stops the program. The
-resolution is now reduced until the solve fits in roughly 512x512 whatever it
-was asked for. That is a real loss of quality on a big canvas, and the honest
-fix is to solve on a background thread and refine, which nobody has written yet.
-It is the first thing to do after saving if colouring is being used seriously.
+**The solve used to run where the interface was waiting, so it was capped.** A
+max-flow grows faster than its region — about 1.3 s for a megapixel — and on a
+large drawing an unbounded one does not take a while, it stops the program, so
+the resolution was reduced until the solve fitted in roughly 512x512 whatever it
+was asked for. That is a real loss of quality on a big canvas, and the fix was
+always to solve on a background thread and refine.
+
+That is now what happens, and the cap is only the *first* answer: 127 ms coarse
+so the colour follows the pen, then the same drawing solved at the size it was
+drawn at, 1.7 s later at 1080p. The second bound is on memory rather than
+patience — a max-flow keeps something like ninety bytes a cell, so four million
+cells is a few hundred megabytes while it runs. Both numbers are in
+`bench_composite`.
+
+Two things that were easy to get wrong here. **A widget repaints many times a
+second and the newest question wins**, so a paint that asks again for a solve
+already running calls off the answer the last paint was waiting for — for ever.
+The canvas records what it has asked about. And **leaving a drawing has to call
+its solve off**: playback is twenty-four questions a second against answers
+taking a tenth of one, and a queue that fills faster than it drains never
+catches up.
 
 **A widget on a list row disables that row's own tick.** The show-scribbles box
 was a `QCheckBox` in a widget set on the layer's row with `setItemWidget`. Qt
@@ -466,6 +535,33 @@ green test. Measuring a quantity twice on the same side of the event you care
 about will agree with itself perfectly and say nothing. Related: the dock is
 sized from the panel's *preferred* width, so a minimum does not hold it still.
 
+**An invalidation that empties a cache has to reach the answers in the air.**
+Some of what a fill depends on is not in its key — which way marks are carried,
+and a whole document being replaced by another whose drawings answer to the same
+ids — and the way all of those say so is by emptying the fill cache. That was
+enough for exactly as long as a solve finished inside the call that started it.
+With the answer arriving later, a solve started before the emptying lands after
+it, its hash still matches, and it is installed as though it were current. The
+cache counts how many times it has been emptied and anything with a solve in
+flight records that count, so every present *and future* way of saying "all of
+that is wrong" invalidates both. A list of call sites to remember would have
+been the same bug with more steps.
+
+**Anything that rode on a re-solve was riding on it being synchronous.** The
+layer panel's tooltip was refreshed by the solve that changing the colour
+sources happens to trigger. Invisible while the solve finished inside the paint
+that started it; a stale panel the moment it did not. What a row says about a
+layer is about the layer, so it is said when the layer changes. Expect more of
+these: anything that was correct only because two things happened in the same
+call stack.
+
+**A test that constructs a failure will be repaired by the fix for it.** Several
+tests build a mark that lands in the wrong place, and moving marks with the
+drawing makes them land right — so they went red on a change that was working
+perfectly. They now turn the moving off and say why. The tell is a *whole
+fixture* going green-to-red on a feature that is supposed to improve exactly
+that case; read what the test was for before believing the failure.
+
 **A cache key made of revisions was going to lie, not thrash.** The CTG fill
 cache was keyed on the cel holding the scribbles, which was a bijection for
 exactly as long as one drawing had one scribble cel. The design notes predicted a
@@ -542,17 +638,55 @@ shape at all. The printed numbers looked perfectly reasonable.
 ## How to work on it
 
 Everything in `src/core/` is free of Qt and can be tested headlessly. Everything
-in `src/app/` is Qt. Keep that line: it is why the model has real tests.
+in `src/app/` is Qt. Keep that line: it is why the model has real tests — and it
+is why the CTG solver, threads and all, is in `core` rather than in the window
+that uses it. The hard part of running a max-flow somewhere else is the queue,
+the superseding and the cancelling, and all of that is testable without a
+display; what is left in the widget is a timer and a map.
+
+### Where the colour comes from, in order
+
+The one map I wanted when I picked this up, because the path crosses four files
+and no single one of them says so.
+
+A stroke ends, and `CanvasWidget::paintEvent` calls `requestCtgFills`. That
+compares a hash of everything the fill depends on (`ctgInputsFor`) against the
+fill already in `Document::ctgCache()`, and if they differ it takes a `CtgJob` —
+a copy of the marks, the ink and the canvas, in shared tile handles — and hands
+it to `CtgSolver`. Nothing is computed on the interface thread; the paint
+finishes with whatever fill is in the cache, which is the last answer.
+
+A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
+marks were made (`estimateCtgShift`), flatten the ink into a barrier
+(`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
+(`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
+poll on the canvas collects the result, puts it in the cache, marks everything
+dirty and emits `colourChanged`; `MainWindow` refreshes the timeline flags, the
+layer panel and the status bar from that one signal.
+
+The whole-track audit is the same path with `want_tiles` false and a lower
+priority, and it keeps a `CtgVerdict` per drawing rather than a picture. The
+compositor draws whatever fill is in the cache and never starts a solve —
+`Document::ctgFillFor` is const for exactly that reason.
 
 ```bash
 $env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH   # MSYS2 UCRT64, from PowerShell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure
-./build/tests/bench_composite     # timings, not a test
+./build/tests/bench_composite     # timings, not a test -- including a whole CTG solve
 ./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
 ./build/tests/bench_save          # save, incremental save, open
+./build/tests/bench_carry         # how far a mark survives being carried
 ```
+
+`bench_carry` is a measurement rather than a stopwatch, and it is the one to run
+before changing anything about carrying marks. It moves a shape a known amount
+per drawing, marks only the first, and reports what the fill did on the rest:
+how much of the region took the colour, how much of the world outside it did,
+what `spread` said about it, and how far the solve decided the drawing had
+moved. Every case runs twice, with the marks left where they were drawn and with
+them following the line art, so the two are read side by side.
 
 `bench_save` reports a full save, a full re-save, an incremental save with
 nothing changed and one with a single drawing touched. The last is what autosave
@@ -579,26 +713,28 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **Solve the CTG fill off the interface thread.** This has moved to the front
-   and grown a second customer. It is capped at about 512x512 today purely so it
-   cannot freeze the program, which costs real quality on a large drawing;
-   solving in the background, coarse first and refining, removes both the cap
-   and the wait. The copy-on-write tiles already make the snapshot a background
-   thread would need almost free. What is new is that `auditCtgFills` now walks
-   the whole track on a timer, on the same thread — cheap today, and the obvious
-   thing to move once there is somewhere to move it to. It is also the
-   prerequisite for item 3.
+1. **Export solves on the interface thread, and it is now the only thing that
+   does.** `exporting::write` calls `ctgFill` directly, so a coloured shot's
+   first export pays a capped max-flow per drawing with the window frozen behind
+   a progress dialog. Everything it needs is built: hand the jobs to
+   `canvas_->colourSolver()` at `kFullSolveBudget`, collect them as they land,
+   and the progress dialog becomes honest as well as unfrozen. It also fixes a
+   quality bug nobody has reported yet — an exported fill is capped where the
+   one on screen is not.
 2. **EXR export**, the one piece of M5 deliberately left out. 16-bit PNG throws
    pixels away, so a lossless deliverable needs it; `tinyexr` is a single BSD
    header and the format list in `export_sequence.h` is where it goes.
    Everything around it — the layout, the naming, the canvas rectangle, the fill
    solving, the progress and cancellation — already exists and is tested, so this
    is a writer and a radio button.
-3. **Scribbles that move**, part 2 of
-   [scribbles-through-time.md](scribbles-through-time.md). Part 1 is built and in
-   use; this is the research half, and it is the setting already sitting disabled
-   in the colour layer box. Read the note there about what the first rung is
-   worth measuring before anything is built. Needs item 1.
+3. **Rung three of scribbles that move**: one transform per *region* rather than
+   one per drawing, from the previous fill's regions. Read
+   [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and
+   two are built and measured, and the note now records both what they buy and
+   the one way rung two fails, which is by locking onto the wrong alignment when
+   the ink repeats. Rung four is the paper written for this exact problem
+   (Sýkora, Dingliana & Collins, NPAR 2009) and is what to read before designing
+   anything past three.
 4. **Free the tiles that erasing has emptied.** A tile whose pixels are all
    cleared stays in the grid forever — it is written to saved projects and
    counted in memory. `Tile::isFullyTransparent` already exists and `celBounds`
@@ -607,14 +743,16 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    by (cel, coord), and the tiles copy-on-write shares between cels.
 5. **A better "wrong region" test than `spread`.** What is flagged today is "this
    mark filled nothing but itself", which is a fact. What is not caught is a mark
-   landing in the *wrong region of about the right size*, and that is genuinely
-   hard: "wrong" only exists by reference to the drawing the mark came from, so
-   it needs a correspondence between regions on two drawings, which is what item
-   3 would produce. Every proxy tried on paper — area ratio, region overlap —
-   misfires on fast movement, which is exactly when carrying is most likely to be
-   wrong *and* most likely to be right. Do not ship a second flag that cries wolf
-   often enough to teach somebody to ignore both; wait until item 3 gives it
-   something real to check against.
+   landing in the *wrong region of about the right size* — and that is no longer
+   a suspicion, it is measured: `bench_carry` produces it on demand, and `spread`
+   does not merely miss it, it **rises**, because the mark did fill a region and
+   the number cannot ask which one. "Wrong" only exists by reference to the
+   drawing the mark came from, so it needs a correspondence between regions on
+   two drawings, which is what item 3 would produce. Every proxy tried on paper —
+   area ratio, region overlap — misfires on fast movement, which is exactly when
+   carrying is most likely to be wrong *and* most likely to be right. Do not ship
+   a second flag that cries wolf often enough to teach somebody to ignore both;
+   wait until item 3 gives it something real to check against.
 6. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
 7. **The rest of the open issues**: several tracks (#1, which the timeline and
