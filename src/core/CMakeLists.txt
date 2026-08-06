@@ -8,6 +8,7 @@
   ctg.cpp
   ctg_fill.cpp
   ctg_job.cpp
+  ctg_solver.cpp
   document.cpp
   gridflow.cpp
   json.cpp
