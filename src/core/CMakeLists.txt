@@ -7,6 +7,7 @@
   compositor.cpp
   ctg.cpp
   ctg_fill.cpp
+  ctg_job.cpp
   document.cpp
   gridflow.cpp
   json.cpp

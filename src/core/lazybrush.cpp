@@ -50,7 +50,8 @@ std::vector<float> laplacianOfGaussian(const std::vector<float>& intensity, int 
 }
 
 LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
-                               const LazyBrushOptions& options) {
+                               const LazyBrushOptions& options,
+                               const std::atomic<bool>* abandon) {
     LazyBrushResult result;
     const int width = problem.width;
     const int height = problem.height;
@@ -223,7 +224,15 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
         return std::count(active.begin(), active.end(), static_cast<char>(1));
     };
 
+    const auto giveUp = [&] {
+        return abandon != nullptr && abandon->load(std::memory_order_relaxed);
+    };
+
     while (true) {
+        if (giveUp()) {
+            result.abandoned = true;
+            return result;
+        }
         labelUncontestedRegions();
         if (activeCount() == 0) break;
 
@@ -289,7 +298,14 @@ LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
             continue;
         }
 
-        const std::vector<char> source_side = flow.solve();
+        // Where most of the time goes, and so where giving up has to be
+        // possible: one colour over a megapixel is a second of max-flow, and a
+        // check between sub-problems would only notice after it.
+        const std::vector<char> source_side = flow.solve(abandon);
+        if (giveUp()) {
+            result.abandoned = true;
+            return result;
+        }
         ++result.cuts;
         for (std::size_t node = 0; node < count; ++node) {
             if (result.labels[node] < 0 && source_side[node]) result.labels[node] = chosen;

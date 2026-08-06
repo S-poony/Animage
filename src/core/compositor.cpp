@@ -384,25 +384,20 @@ void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_
 void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId image_id,
                                  const std::vector<LayerId>& layers, const PixelRect& region,
                                  Framebuffer& out, SampleStep step) const {
-    out.resize(step.entriesAcross(region.x, region.width),
-               step.entriesAcross(region.y, region.height));
-    if (out.isEmpty()) return;
-    out.clear();
-
     const Track* track = doc.scene().findTrack(track_id);
-    if (!track) return;
-    const Image* image = track->findImage(image_id);
-    if (!image) return;
+    const Image* image = track ? track->findImage(image_id) : nullptr;
+    if (!image) {
+        out.resize(step.entriesAcross(region.x, region.width),
+                   step.entriesAcross(region.y, region.height));
+        out.clear();
+        return;
+    }
 
-    // Bottom upwards: each layer goes over the accumulated result, and the
-    // list is topmost first. Resolved once, before any threads start.
-    struct Pass {
-        const TileGrid* tiles;
-        const Layer* layer;
-    };
-    std::vector<Pass> passes;
+    // Resolved once, before any threads start, and this is the only part that
+    // reads the document at all.
+    std::vector<LayerPass> passes;
     passes.reserve(layers.size());
-    for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+    for (auto it = layers.begin(); it != layers.end(); ++it) {
         const Layer* layer = track->findLayer(*it);
         if (!layer || !layer->visible) continue;
 
@@ -428,7 +423,22 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
         if (!cel) continue;  // no cel means the layer is empty here
         passes.push_back({&cel->tiles(), layer});
     }
-    if (passes.empty()) return;
+
+    compositeGrids(passes, region, out, step);
+}
+
+void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
+                                const PixelRect& region, Framebuffer& out,
+                                SampleStep step) const {
+    out.resize(step.entriesAcross(region.x, region.width),
+               step.entriesAcross(region.y, region.height));
+    if (out.isEmpty()) return;
+    out.clear();
+    if (topmost_first.empty()) return;
+
+    // Bottom upwards: each layer goes over the accumulated result, and the list
+    // is topmost first.
+    std::vector<LayerPass> passes(topmost_first.rbegin(), topmost_first.rend());
 
     // Split by rows rather than by layer: each band is independent, so no
     // synchronisation is needed anywhere, and a band does all of its layers
@@ -449,7 +459,7 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
     const auto run_band = [&](int y_begin, int y_end) {
         std::vector<Rgba> accumulator;
         if (reducing) accumulator.resize(static_cast<std::size_t>(out.width()));
-        for (const Pass& pass : passes) {
+        for (const LayerPass& pass : passes) {
             if (reducing) {
                 blendLayerRowsBoxed(*pass.tiles, *pass.layer, region, step, first_row, stride,
                                     plan, y_begin, y_end, out, accumulator);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -89,10 +90,20 @@ struct LazyBrushResult {
     std::vector<int> labels;
 
     int cuts = 0;  // how many max-flow problems were actually solved
+
+    // The caller asked for this to stop, and it did. The labels are then
+    // whatever had been settled and are not an answer to anything: a partial
+    // labelling looks exactly like a finished one, so it has to say so here.
+    bool abandoned = false;
 };
 
+// `abandon`, if given, is polled while this runs: set it and the solve gives up
+// as soon as it notices. It is read with relaxed ordering because nothing else
+// is being handed over -- the one bit is the whole message, and a solve that
+// notices a few thousand augmentations late has cost nothing anybody can see.
 LazyBrushResult solveLazyBrush(const LazyBrushProblem& problem,
-                               const LazyBrushOptions& options = {});
+                               const LazyBrushOptions& options = {},
+                               const std::atomic<bool>* abandon = nullptr);
 
 // Exposed for testing: the Laplacian-of-Gaussian preprocessing the paper
 // prescribes for pencil. Its maxima fall along the centre of a stroke, so after

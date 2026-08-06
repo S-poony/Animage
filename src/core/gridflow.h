@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -34,7 +35,13 @@ public:
 
     // Runs the flow and reports, per node, whether it ended on the source side
     // of the minimum cut.
-    std::vector<char> solve();
+    //
+    // `abandon`, if given, is polled as it runs, and setting it makes this
+    // return an empty vector -- not a partial cut, because a partial cut is
+    // indistinguishable from a finished one and would be believed. This is
+    // where a CTG solve spends nearly all of its time, so it is the only place
+    // giving up early actually gives anything up.
+    std::vector<char> solve(const std::atomic<bool>* abandon = nullptr);
 
     static int opposite(int direction) {
         static constexpr int kOpposite[4] = {1, 0, 3, 2};

@@ -107,6 +107,18 @@ private:
     std::vector<Rgba> pixels_;
 };
 
+// One layer's pixels and the properties to draw them with.
+//
+// Resolving a layer id to these two is the first thing compositeLayers does,
+// and it needs the document to do it. A caller that has already resolved them
+// hands them over instead -- which is what a solve running on another thread
+// has to do, because the document belongs to the thread that edits it and the
+// tiles, being immutable once shared, do not.
+struct LayerPass {
+    const TileGrid* tiles = nullptr;
+    const Layer* layer = nullptr;
+};
+
 // Flattens the layers of one image.
 //
 // This is the CPU reference implementation. The plan calls for QRhi doing this
@@ -136,6 +148,14 @@ public:
     void compositeLayers(const Document& doc, TrackId track, ImageId image,
                          const std::vector<LayerId>& layers, const PixelRect& region,
                          Framebuffer& out, SampleStep step = {}) const;
+
+    // The same again with the layers already resolved to pixels, topmost first,
+    // and every one of them drawn -- visibility, CTG fills and absent cels have
+    // all been decided by whoever built the list. This is the whole of the
+    // compositor that a background thread may use, because it names nothing that
+    // the interface thread can edit underneath it.
+    void compositeGrids(const std::vector<LayerPass>& passes, const PixelRect& region,
+                        Framebuffer& out, SampleStep step = {}) const;
 };
 
 // The bounding box of everything drawn on an image, in pixels, or an empty rect

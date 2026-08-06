@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ctg_fill.h"
+#include "ctg_job.h"
 #include "document.h"
 #include "lazybrush.h"
 #include "scribble.h"
@@ -23,33 +24,10 @@ namespace animage {
 // A stroke on a CTG layer is thresholded rather than blended. A scribble is a
 // label and a pixel either carries it or it does not; a half-transparent
 // scribble pixel would be half a vote for a colour, which means nothing.
-
-struct CtgSettings {
-    // Below this a pixel is not scribbled. Shared with the brush, which rounds
-    // to it rather than writing anything softer -- see scribble.h.
-    float scribble_alpha_threshold = kScribbleAlphaThreshold;
-
-    // Solve at this fraction of full size. The plan's answer to interactivity
-    // is a coarse pass while the pen is down and a full one when it lifts.
-    int downscale = 1;
-
-    LazyBrushOptions lazybrush;
-};
-
-// What the whole-track audit solves at.
 //
-// Deliberately coarse. The verdict is "did this mark fill a region or only
-// itself", which is a judgement about areas and survives a blocky answer; the
-// cost is what has to survive being paid once per drawing after every edit. A
-// drawing solved at eight is roughly a sixty-fourth of the grid it would be at
-// one, and the pass is what makes a flag mean "go and look at drawing 34"
-// rather than "you are standing on a bad drawing".
-inline CtgSettings auditSettings() {
-    CtgSettings settings;
-    settings.downscale = 8;
-    return settings;
-}
-
+// This header is the half that reads the document, and so belongs to the thread
+// that owns it. The solve itself is in ctg_job.h and belongs to no thread at
+// all.
 
 // Everything a fill depends on, worked out without working the fill out.
 struct CtgInputs {
@@ -62,17 +40,31 @@ struct CtgInputs {
 CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerId layer,
                        const CtgSettings& settings = {});
 
+// Lifts one solve off the document, so it can be run anywhere afterwards --
+// including on another thread while this one goes on editing. Cheap: it copies
+// tile handles and a few layer properties, and no pixels at all.
+//
+// `budget` is the cell count the solve will be coarsened to fit, and zero means
+// full resolution however large that is. The default is what a solve blocking
+// the interface may cost; a solve that is not in anybody's way should ask for
+// more.
+CtgJob ctgJobFor(const Document& doc, TrackId track, ImageId image, LayerId layer,
+                 const CtgSettings& settings = {},
+                 long long budget = kInteractiveSolveBudget);
+
 // Regenerates the fill if the scribbles or any barrier layer have changed since
 // last time, and returns it. The cache lives in the document, keyed by
 // (drawing, layer).
+//
+// Solves where it stands, so the caller waits for the max-flow. That is what
+// the budget is for and it is why a fill asked for this way is capped.
 const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer,
                        const CtgSettings& settings = {});
 
-// The same solve without the fill. `want_tiles` false stops after the labelling
-// and the verdict, skipping a write per pixel of the canvas -- which is two
-// million of them at 1080p and does not get cheaper when the solve is coarse.
-// Touches no cache, so a coarse pass cannot evict a fine fill somebody is
-// looking at.
+// The same solve without the cache. `want_tiles` false stops after the
+// labelling and the verdict, skipping a write per pixel of the canvas -- which
+// is two million of them at 1080p and does not get cheaper when the solve is
+// coarse.
 CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer,
                      const CtgSettings& settings, bool want_tiles);
 
@@ -86,16 +78,5 @@ CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId 
 // outside, and cheaply -- coarse by default, keeping only the numbers, and
 // skipping every drawing whose inputs have not moved.
 void auditCtgFills(Document& doc, TrackId track, const CtgSettings& settings = auditSettings());
-
-// Builds the barrier the scribbles are cut against: every source layer of the
-// CTG layer, flattened, as intensity where 0 is solid line and 1 is bare paper.
-//
-// More than one source is allowed on purpose. TVPaint cuts against a single
-// line-art layer; combining a rough with a clean closes most of the gaps that
-// leak from either alone, which is the one improvement over it the design notes
-// ask for by name.
-std::vector<float> ctgBarrier(const Document& doc, TrackId track, ImageId image,
-                              const std::vector<LayerId>& sources, const PixelRect& region,
-                              int step = 1);
 
 }  // namespace animage

@@ -3,7 +3,9 @@
 // The CTG layer: scribbles in, fill out, and the fill is never what is stored.
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <thread>
 
 #include "brush.h"
 #include "compositor.h"
@@ -1374,6 +1376,162 @@ void aTransparentScribbleShowsThroughAFillThatDisagrees() {
     CHECK_NEAR(fillAt(fill, 125, 125).a, 0.0, 0.001);     // and there is a hole in it
 }
 
+// --- the solve, lifted off the document ---------------------------------
+//
+// A max-flow is the expensive thing this program does, and it may not run on
+// the thread the interface is on. What makes that possible is that a solve
+// reads the document exactly once, into a job -- so these tests are about the
+// job being a complete and independent description of one solve, which is the
+// property the whole of the background solving rests on.
+
+void aLiftedSolveAgreesWithTheDocument() {
+    TEST("a solve lifted off the document gives the document's answer");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
+
+    const CtgFill lifted = solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), true);
+    const CtgFill& direct = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    CHECK(lifted.valid);
+    CHECK_EQ(lifted.colours, direct.colours);
+    CHECK_EQ(lifted.step, direct.step);
+    CHECK_EQ(lifted.inputs, direct.inputs);
+    CHECK_NEAR(fillAt(lifted, 130, 160).r, fillAt(direct, 130, 160).r, 0.001);
+    CHECK_NEAR(fillAt(lifted, 30, 200).b, fillAt(direct, 30, 200).b, 0.001);
+}
+
+void takingAJobCopiesNoPixels() {
+    TEST("lifting a solve off the document copies handles and not pixels");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgJob job = ctgJobFor(f.doc, f.track, f.image, f.colour);
+    const Cel* marks = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(marks != nullptr);
+
+    // The same tiles, not copies of them. This is what makes taking a job cheap
+    // enough to do on every stroke: a tile is immutable once shared, so the
+    // copy is the shared_ptr and the pixels stay where they are.
+    int shared = 0;
+    for (const TileCoord& coord : marks->tiles().coords()) {
+        if (job.scribbles.find(coord).get() == marks->tiles().find(coord).get()) ++shared;
+    }
+    CHECK_EQ(shared, static_cast<int>(marks->tiles().tileCount()));
+    CHECK(shared > 0);
+}
+
+void aLiftedSolveIsNotChangedByLaterEdits() {
+    TEST("editing the document does not change a solve already lifted off it");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgJob job = ctgJobFor(f.doc, f.track, f.image, f.colour);
+
+    // Everything the job read, changed underneath it.
+    f.stroke(f.colour, 110, 160, 160, 160, 6.0f, 0.0f, 0.0f, 1.0f);
+    f.stroke(f.ink, 60, 120, 200, 120, 2.5f, 0.0f, 0.0f, 0.0f);
+
+    const CtgFill lifted = solveCtgJob(job, true);
+    const CtgFill& now = ctgFill(f.doc, f.track, f.image, f.colour);
+
+    // The job still describes the drawing it was taken from: one colour, and
+    // red where the document now says blue.
+    CHECK_EQ(lifted.colours, 1);
+    CHECK_NEAR(fillAt(lifted, 130, 160).r, 1.0, 0.02);
+    CHECK_EQ(now.colours, 2);
+    CHECK_NEAR(fillAt(now, 130, 160).b, 1.0, 0.02);
+}
+
+void aLiftedSolveRunsWhileTheDocumentIsDrawnOn() {
+    TEST("a lifted solve runs on another thread while the document is drawn on");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgJob job = ctgJobFor(f.doc, f.track, f.image, f.colour);
+
+    std::atomic<bool> done{false};
+    CtgFill solved;
+    std::thread worker([&] {
+        solved = solveCtgJob(job, true);
+        done.store(true);
+    });
+
+    // Kept drawing on the very cels the job is reading. Copy-on-write is what
+    // makes this safe: the writer sees a tile it does not own alone and clones
+    // it, so the solve goes on reading the tiles it was handed.
+    for (int i = 0; i < 400 && !done.load(); ++i) {
+        f.stroke(f.ink, 62.0f, 62.0f + static_cast<float>(i % 100), 198.0f,
+                 62.0f + static_cast<float>(i % 100), 1.5f, 0.0f, 0.0f, 0.0f);
+    }
+    worker.join();
+
+    CHECK(solved.valid);
+    CHECK_EQ(solved.colours, 1);
+    CHECK_NEAR(fillAt(solved, 130, 160).r, 1.0, 0.02);
+}
+
+void anAbandonedSolveReturnsNothing() {
+    TEST("a solve told to give up returns nothing rather than half an answer");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    std::atomic<bool> abandon{true};
+    const CtgFill given_up =
+        solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), true, &abandon);
+
+    // Not a partial fill, because a partial fill is indistinguishable from a
+    // finished one and would be cached, drawn and believed.
+    CHECK(!given_up.valid);
+    CHECK_EQ(given_up.tiles.tileCount(), std::size_t{0});
+}
+
+void anUnboundedSolveIsFinerThanABoundedOne() {
+    TEST("a solve with no budget is solved at full resolution");
+    Fixture f;
+    // Big enough that the interactive budget has to coarsen it.
+    f.doc.setCanvasSize(1600, 1200);
+    f.drawGappedBox(f.ink, 100, 100, 1500, 1100, 700, 900);
+    f.stroke(f.colour, 400, 600, 1200, 600, 20.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill capped =
+        solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), false);
+    const CtgFill whole = solveCtgJob(
+        ctgJobFor(f.doc, f.track, f.image, f.colour, CtgSettings{}, /*budget=*/0), false);
+
+    CHECK(capped.step > 1);   // where the interface waits, quality is what pays
+    CHECK_EQ(whole.step, 1);  // and where it does not, nothing pays
+    CHECK(whole.spread > kCtgSpreadFloor);
+}
+
+// A source layer is a source because it is listed as one, not because it is
+// being looked at. Hiding the line art to see the colours underneath used to
+// take the barrier away with it -- and only at the next re-solve, since a
+// layer's visibility is not part of what a fill is keyed on, so the fill went
+// wrong at some later moment with nothing connecting the two.
+void ahiddenSourceIsStillABarrier() {
+    TEST("hiding a source layer does not take the barrier away with it");
+    Fixture f;
+    f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill seen = solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), true);
+
+    Layer ink = *f.doc.scene().findTrack(f.track)->findLayer(f.ink);
+    ink.visible = false;
+    f.doc.updateLayer(f.track, f.ink, ink);
+
+    const CtgFill hidden = solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), true);
+    CHECK_NEAR(hidden.spread, seen.spread, 0.001);
+    CHECK_NEAR(fillAt(hidden, 130, 160).r, fillAt(seen, 130, 160).r, 0.001);
+    CHECK_NEAR(fillAt(hidden, 30, 200).a, fillAt(seen, 30, 200).a, 0.001);
+}
+
 }  // namespace
 
 int main() {
@@ -1421,5 +1579,13 @@ int main() {
     theTransparentScribbleSurvivesTheHalfFloat();
     aTransparentScribbleTakesColourAway();
     aTransparentScribbleShowsThroughAFillThatDisagrees();
+
+    aLiftedSolveAgreesWithTheDocument();
+    takingAJobCopiesNoPixels();
+    aLiftedSolveIsNotChangedByLaterEdits();
+    aLiftedSolveRunsWhileTheDocumentIsDrawnOn();
+    anAbandonedSolveReturnsNothing();
+    anUnboundedSolveIsFinerThanABoundedOne();
+    ahiddenSourceIsStillABarrier();
     return testing::summarise("ctg");
 }

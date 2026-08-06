@@ -236,7 +236,7 @@ void GridFlow::adopt() {
     }
 }
 
-std::vector<char> GridFlow::solve() {
+std::vector<char> GridFlow::solve(const std::atomic<bool>* abandon) {
     active_.clear();
     active_head_ = 0;
     for (std::size_t node = 0; node < count_; ++node) {
@@ -267,9 +267,24 @@ std::vector<char> GridFlow::solve() {
     std::size_t from = 0;
     std::size_t to = 0;
     int direction = 0;
+
+    // Polled every so many augmenting paths rather than every one. An atomic
+    // read is cheap and a path is cheaper still, so at one check per path the
+    // check would be a measurable share of the flow; a thousand paths is a few
+    // milliseconds, which is far below anything a person waits for.
+    constexpr int kCheckEvery = 1024;
+    int since_check = 0;
+
     while (grow(from, to, direction)) {
         augment(from, to, direction);
         adopt();
+        if (abandon != nullptr && ++since_check >= kCheckEvery) {
+            since_check = 0;
+            // Nothing is cleaned up and nothing is finished: the caller is
+            // throwing this away, and the residuals are only meaningful
+            // together.
+            if (abandon->load(std::memory_order_relaxed)) return {};
+        }
     }
 
     // The source side of the cut is whatever is still reachable from the source
