@@ -403,31 +403,24 @@ void Document::moveDrawingOver(TrackId track_id, ImageId image_id, std::size_t s
 
     const std::size_t from = track->firstSlotOf(image_id);
     if (from >= track->slots.size()) return;
-    const auto [first, last] = track->runBounds(from);
+    const auto [own_first, own_last] = track->runBounds(from);
 
-    // The frames it is leaving go to whichever drawing is next to them -- the
-    // one before, or the one after when it is leaving the very start. Vacating
-    // them by erasing instead would shorten a track whose length is the whole
-    // point of the setting.
-    std::vector<ImageId> moved = track->slots;
-    const ImageId filler = (first > 0) ? moved[first - 1]
-                           : (last + 1 < moved.size()) ? moved[last + 1]
-                                                       : kNoId;
-    if (filler == kNoId) return;  // the only drawing in the track: nowhere to go
-    for (std::size_t i = first; i <= last; ++i) moved[i] = filler;
+    // Dropped somewhere inside its own hold, which has not retimed anything.
+    // Shortening a hold from the front is what Hold - is for, and a drag that
+    // lands on the drawing you picked up should do nothing at all.
+    if (slot >= own_first && slot <= own_last) return;
 
-    // Where it lands is read from the track it is landing in, which is the one
-    // it has just been lifted out of: dropping a drawing into the gap it left
-    // has to be the same as not moving it.
-    std::size_t start = slot;
-    std::size_t end = slot;
-    {
-        const ImageId there = moved[slot];
-        while (start > 0 && moved[start - 1] == there) --start;
-        while (end + 1 < moved.size() && moved[end + 1] == there) ++end;
-    }
-    const std::size_t at = std::max(slot, start + 1);
-    if (at > end) {
+    // Where it lands, read from the track as it stands -- *not* from a copy it
+    // has already been lifted out of.
+    //
+    // That ordering was the bug. Lifting first hands the frames it is leaving to
+    // the neighbour, so the neighbour's run measures as both runs together and
+    // "the rest of the hold it lands in" swallows the lot: on `1...2....3.....`,
+    // nudging drawing 1 one frame right left drawing 2 holding a single frame
+    // and drawing 1 holding everything up to drawing 3. Reading the run before
+    // anything moves is the whole fix.
+    const auto range = track->overwriteRangeAt(slot);
+    if (!range) {
         // A hold of one frame has nothing to spare, so this becomes the reorder
         // it would have been on a track that does not overwrite.
         std::size_t destination = 0;
@@ -437,7 +430,27 @@ void Document::moveDrawingOver(TrackId track_id, ImageId image_id, std::size_t s
         moveDrawing(track_id, image_id, destination);
         return;
     }
-    for (std::size_t i = at; i <= end; ++i) moved[i] = image_id;
+
+    std::vector<ImageId> moved = track->slots;
+    for (std::size_t i = range->first; i <= range->second; ++i) moved[i] = image_id;
+
+    // The frames it came from. They are only vacated when they are not already
+    // touching where it landed: a drawing moved up against its old hold simply
+    // keeps them, which is what makes the issue's own example come out at nine
+    // frames rather than eight.
+    const bool joins = (own_last + 1 == range->first) || (range->second + 1 == own_first);
+    if (!joins) {
+        // Given to whichever drawing is beside them -- the one before, or the
+        // one after when they were at the very start. Erasing them instead
+        // would shorten a track whose fixed length is the point of the setting.
+        const ImageId before = (own_first > 0) ? moved[own_first - 1] : kNoId;
+        const ImageId after = (own_last + 1 < moved.size()) ? moved[own_last + 1] : kNoId;
+        const ImageId filler = (before != kNoId && before != image_id) ? before
+                               : (after != kNoId && after != image_id) ? after
+                                                                       : kNoId;
+        if (filler == kNoId) return;  // the only drawing in the track: nowhere to go
+        for (std::size_t i = own_first; i <= own_last; ++i) moved[i] = filler;
+    }
     if (moved == track->slots) return;
 
     // Nothing here can retire a drawing, so nothing here has to tidy one away.

@@ -74,6 +74,10 @@ public:
     // keeps its length and every drawing stays one contiguous run. With no room
     // where it was dropped -- a hold of one frame -- this reorders instead,
     // which is length-preserving too and is the nearest thing to what was asked.
+    //
+    // Dropped inside its own hold it does nothing. A drag that lands on the
+    // drawing you picked up has not retimed anything, and shortening a hold from
+    // the front is what Hold - is for.
     void moveDrawingOver(TrackId track, ImageId image, std::size_t slot);
 
     // Deep copy: new ImageId and a new CelId per layer. The tiles themselves

@@ -379,6 +379,22 @@ delete one. It has a consequence that reaches further than it looks:
   property instead — because it is exactly what a later change to the rule would
   break silently.
 
+**Read the run before you move anything.** Reported on `1...2....3.....`: nudging
+the first drawing one frame swapped it with the second, leaving drawing 2 holding
+a single frame and drawing 1 holding everything up to drawing 3. Two faults, one
+of them subtle. The subtle one is an ordering mistake — `moveDrawingOver` lifted
+the drawing out first, which hands the frames it is leaving to the neighbour, so
+the neighbour's run then measures as *both* runs together and "take the rest of
+the hold it lands in" swallows the lot. The run has to be read from the track as
+it stands. The blunt one is that a drop inside the drawing's own hold was treated
+as a move at all; it now does nothing, because a drag that lands on the drawing
+you picked up has not retimed anything and shortening a hold from the front is
+what Hold - is for.
+
+The general shape is worth keeping: **an operation defined in terms of "the run
+at X" cannot compute X from a strip it has already modified.** The intermediate
+state has runs in it that were never really there.
+
 **Moving over a hold has two coordinate systems and neither derives from the
 other.** `moveDrawing` takes a position *between* drawings, counted with the
 drawing lifted out; `moveDrawingOver` takes the frame it was dropped *on*. One
