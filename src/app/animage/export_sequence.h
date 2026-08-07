@@ -5,6 +5,8 @@
 
 #include <functional>
 
+#include "ctg_fill.h"
+#include "ctg_job.h"
 #include "document.h"
 
 // Writing the shot out as image sequences, for somebody else's program to open.
@@ -17,10 +19,15 @@
 // The layout is the one the specification asks for -- a folder per layer, and
 // inside it `{track}_{layer}_{frame:04}.png`:
 //
-//   the-shot-export/
-//     main_ink/     main_ink_0001.png     main_ink_0002.png   ...
-//     main_colour/  main_colour_0001.png  ...
-//     composite/    composite_0001.png    ...
+//   the-shot/
+//     track-1_ink/     track-1_ink_0001.png     track-1_ink_0002.png   ...
+//     track-1_colour/  track-1_colour_0001.png  ...
+//     composite/       composite_0001.png       ...
+//
+// The underscore is the separator and nothing else is: every character of a
+// track or layer name that is not a letter or a digit becomes a hyphen, so
+// "layer 1" is `layer-1` and the number in a file name is always the frame. See
+// sequenceName.
 //
 // **16-bit PNG is lossy here**, and knowingly so. A half spends its precision
 // relatively and an integer spends it evenly, so of the 15362 half values in
@@ -43,35 +50,70 @@ struct Options {
     bool flattened = false;
 };
 
-// Called with (written so far, total). Return false to stop; `write` then
-// reports failure with an error saying it was cancelled, leaving whatever had
-// already been written on disk. An export is not atomic and does not pretend
-// to be: it produces files for somebody else, and half a sequence is visibly
-// half a sequence.
-using Progress = std::function<bool(int, int)>;
+// Called with (finished so far, the whole job, what is happening now). Return
+// false to stop; `write` then reports failure with an error saying it was
+// cancelled, leaving whatever had already been written on disk. An export is
+// not atomic and does not pretend to be: it produces files for somebody else,
+// and half a sequence is visibly half a sequence.
+//
+// The total counts colour solves as well as files, because a max-flow is a
+// second and a half and a PNG is a handful of milliseconds -- a bar that
+// counted only files would sit still through the whole of the slow half and
+// then run to the end. It is called before a solve as well as after one, with
+// the count unchanged, so the label says what is being waited for rather than
+// what has just finished.
+using Progress = std::function<bool(int done, int total, const QString& what)>;
+
+// Running one colour solve somewhere that is not here.
+//
+// A CTG layer stores scribbles and its fill is a cache, regenerated on demand
+// and held in the document -- and the canvas only ever builds it for the frame
+// being looked at, because compositing is not allowed to start a max-flow. So
+// the fills for frames nobody has visited do not exist, and an export that
+// composited only what was cached would write blank colour layers for a project
+// that had just been opened, without saying anything.
+//
+// So the export solves them, and this is how it asks. Fill `out` with the
+// answer to `job` and return true; return false to mean the caller gave up,
+// which stops the export the same way a cancelled progress step does. `write`
+// installs the answer in the document itself, so an implementation is a queue
+// and a wait and nothing about a fill.
+//
+// Passing nothing solves where the caller stands -- correct, and what the tests
+// do, and what freezes a window for a minute and a half on a coloured shot.
+// It is also *capped*: a solve nobody can wait for gets the interactive budget,
+// so an exported fill is coarser than the one on screen. A solver gets the full
+// one.
+using Solve = std::function<bool(const animage::CtgKey& key, const animage::CtgJob& job,
+                                 animage::CtgFill& out)>;
 
 // How many files these options will produce. Wanted before starting, so a
 // progress dialog can say how far along it is rather than counting up forever.
+// Files only: the solves are counted inside `write`, which is the only place
+// that knows which fills the document is already holding.
 int fileCount(const animage::Document& doc, const Options& options);
 
-// Takes the document by mutable reference, and the reason is worth knowing.
-// A CTG layer stores scribbles and its fill is a cache, regenerated on demand
-// and held in the document -- and the canvas only ever regenerates it for the
-// frame being looked at, because compositing is not allowed to start a max-flow.
-// So the fills for frames nobody has visited do not exist, and an export that
-// only composited what was cached would write blank colour layers for a project
-// that had just been opened, without saying anything. It solves them instead.
+// Takes the document by mutable reference, because it builds the fills that are
+// missing (see Solve) and a fill lives in the document.
 //
-// The consequence is that exporting a coloured shot for the first time is slow:
-// it pays one max-flow per CTG layer per distinct drawing. Fills already built
-// are reused, and they are solved at the same capped resolution the screen gets
-// -- see the handover on solving off the interface thread, which is what would
-// remove both the cap and the wait.
+// Frames are written in slot order, every sequence at once, rather than one
+// whole sequence after another. That is not a detail: it is what makes each
+// drawing solve exactly once. Sequence by sequence, a colour layer's pass
+// solves every drawing in the shot and the flattened pass then asks for them
+// all over again, by which time the bounded fill cache has evicted the early
+// ones -- so the same max-flows run twice and the progress cannot be counted in
+// advance.
 bool write(animage::Document& doc, const Options& options, const Progress& progress,
-           QString* error);
+           const Solve& solve, QString* error);
 
-// `{track}_{layer}`, with anything a filesystem would object to replaced. This
-// is both the folder name and the stem of every file in it.
+// `{track}_{layer}`, with every character that is not a letter or a digit
+// replaced by a hyphen, runs of them collapsed, and the ends trimmed. This is
+// both the folder name and the stem of every file in it.
+//
+// Hyphen rather than underscore so that the underscore means one thing: it
+// separates the track from the layer from the frame number, and nothing else in
+// the name can be mistaken for it. "layer 1" is `layer-1`, where the 1 is
+// visibly part of the layer's name and not a count of anything.
 QString sequenceName(const std::string& track, const std::string& layer);
 
 }  // namespace exporting

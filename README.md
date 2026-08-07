@@ -216,7 +216,10 @@ a 1080p drawing takes about a second and a half, so it happens on another
 thread: the status bar says "colouring..." while it does, the last answer stays
 on screen until the new one lands, and nothing waits. A coarse answer arrives
 about a tenth of a second after the pen lifts and a full-resolution one replaces
-it, so a stroke costs the coarse one and pausing is what buys the rest.
+it, so a stroke costs the coarse one and pausing is what buys the rest. Export
+solves the same way, so the window keeps drawing while it does — and at the
+resolution the drawing was made at rather than the interactive cap, which is
+what the screen gets only after you have paused on a drawing.
 
 **The timeline says where the colour came from.** A blue bar under a drawing's
 number means its colour was carried there rather than drawn there, and an arrow
@@ -229,6 +232,27 @@ There was a warning beside them — an orange corner for carried marks that had
 landed on nothing — and it was taken out because it fired on drawings whose
 colour was perfectly good. What it was measuring, and why the measurement cannot
 carry a flag, is in [docs/handover.md](docs/handover.md).
+
+**Exporting.** File ▸ Export sequences asks what to write — a sequence per
+layer, the flattened picture, or both — and what to call the export, then where
+to put it. The name is a folder of its own, so a shot's dozen sequence folders
+arrive together instead of loose among whatever else was in the directory you
+picked; it starts as the project's own name. Inside are 16-bit PNGs over the
+canvas rectangle, a folder per layer:
+
+```
+the-shot/
+  track-1_ink/     track-1_ink_0001.png     track-1_ink_0002.png  ...
+  track-1_colour/  track-1_colour_0001.png  ...
+  composite/       composite_0001.png       ...
+```
+
+The underscore separates the track from the layer from the frame number and
+nothing else in a name is allowed to be one, so a layer called "layer 1" is
+`layer-1` and the last number is always the frame. Hidden layers are not
+written at all. Colouring is solved for drawings nobody has opened — otherwise a
+project straight off disk would export blank colour sequences — and it is solved
+off the interface thread, so the progress dialog moves and Cancel answers.
 
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the track rather than to the image, which is the point of the

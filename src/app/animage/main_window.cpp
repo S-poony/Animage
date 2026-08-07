@@ -10,8 +10,11 @@
 #include <QDockWidget>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGroupBox>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QProgressDialog>
 #include <QFileInfo>
@@ -38,6 +41,7 @@
 #include <cmath>
 
 #include "canvas_widget.h"
+#include "ctg_solver.h"
 #include "export_sequence.h"
 #include "project_io.h"
 #include "color.h"
@@ -64,7 +68,12 @@ MainWindow::MainWindow() {
     setWindowTitle(QStringLiteral("Animage"));
     resize(1400, 900);
 
-    track_ = doc_.addTrack("main");
+    // "track 1" and not "main". It is the first of several -- the model and the
+    // timeline both take more than one already, only the interface does not --
+    // and it is the prefix on every exported file name, where "main_" beside a
+    // second track called something else would be the one track that did not
+    // say which number it was.
+    track_ = doc_.addTrack("track 1");
     const LayerId first = doc_.addLayer(track_, "layer 1");
     doc_.insertImage(track_, 0);
     doc_.clearHistory();  // an empty scene is the starting point, not an edit
@@ -683,7 +692,7 @@ void MainWindow::resetToNewDocument() {
     // a fresh document that arrives with setup already on the undo stack is a
     // fresh document you can undo into an invalid one.
     doc_ = Document();
-    track_ = doc_.addTrack("main");
+    track_ = doc_.addTrack("track 1");
     doc_.addLayer(track_, "layer 1");
     doc_.insertImage(track_, 0);
     doc_.clearHistory();
@@ -750,6 +759,18 @@ void MainWindow::afterProjectLoaded() {
     updateTitle();
 }
 
+// What the export folder is called if nobody says otherwise: the project's own
+// name, without the suffix that makes it a project folder. An untitled document
+// has no name to borrow, so it gets a word rather than an empty box.
+QString MainWindow::defaultExportName() const {
+    if (project_folder_.isEmpty()) return QStringLiteral("untitled");
+    QString name = QFileInfo(project_folder_).fileName();
+    if (name.endsWith(ProjectIO::folderSuffix())) {
+        name.chop(ProjectIO::folderSuffix().size());
+    }
+    return name.isEmpty() ? QStringLiteral("untitled") : name;
+}
+
 void MainWindow::exportSequences() {
     stopPlayback();
 
@@ -769,28 +790,42 @@ void MainWindow::exportSequences() {
     layout->addWidget(per_layer);
     layout->addWidget(flattened);
 
+    // The sequences go in a folder of their own rather than loose in whatever
+    // was chosen. An export is a dozen folders and hundreds of files, and
+    // dropping that into a directory that already had something in it is how
+    // two exports become one unreadable pile.
+    auto* form = new QFormLayout;
+    auto* name = new QLineEdit(defaultExportName(), &dialog);
+    name->selectAll();
+    form->addRow(QStringLiteral("Folder name"), name);
+    layout->addLayout(form);
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
-    // Nothing selected is not a thing to export, and it is better to say so by
-    // greying the button than by an error after the folder has been chosen.
+    // Nothing selected is not a thing to export, and nor is a folder with no
+    // name. Better said by greying the button than by an error after the folder
+    // has been chosen.
     const auto sync = [&] {
         buttons->button(QDialogButtonBox::Ok)
-            ->setEnabled(per_layer->isChecked() || flattened->isChecked());
+            ->setEnabled((per_layer->isChecked() || flattened->isChecked()) &&
+                         !name->text().trimmed().isEmpty());
     };
     connect(per_layer, &QCheckBox::toggled, &dialog, sync);
     connect(flattened, &QCheckBox::toggled, &dialog, sync);
+    connect(name, &QLineEdit::textChanged, &dialog, sync);
     sync();
 
     if (dialog.exec() != QDialog::Accepted) return;
 
-    const QString folder = QFileDialog::getExistingDirectory(
+    const QString parent = QFileDialog::getExistingDirectory(
         this, QStringLiteral("Export into"), QString(),
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-    if (folder.isEmpty()) return;
+    if (parent.isEmpty()) return;
 
+    const QString folder = QDir(parent).filePath(name->text().trimmed());
     QString error;
     if (!exportSequencesTo(folder, per_layer->isChecked(), flattened->isChecked(), &error)) {
         QMessageBox::warning(this, QStringLiteral("Cannot export"), error);
@@ -810,20 +845,59 @@ bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flat
     QProgressDialog progress(QStringLiteral("Exporting %1 frames...").arg(total),
                              QStringLiteral("Cancel"), 0, std::max(total, 1), this);
     // Modal to this window, so the pen cannot reach the document while it is
-    // being read frame by frame -- processEvents below is what keeps the
+    // being read frame by frame -- the event loop below is what keeps the
     // progress bar alive, and it lets everything else in too.
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(500);
 
+    // A solver of its own for the duration, and not the canvas's.
+    //
+    // Results are collected rather than delivered, so a solver has exactly one
+    // owner: everything CtgSolver hands back goes to whoever calls collect(),
+    // and the canvas drops what it did not ask for. Sharing one would mean a
+    // repaint during the export -- which the progress dialog causes -- quietly
+    // swallowing the answer the export was waiting for. One worker, so one
+    // max-flow at a time, which is also the memory bound.
+    CtgSolver solver;
+
+    // Hands one solve to it and waits without freezing the window: the event
+    // loop goes on running, so the dialog paints and Cancel is answered. This
+    // is the whole of "export does not solve on the interface thread" -- the
+    // thread waits, but it waits somewhere it can still draw.
+    const auto solve = [&](const CtgKey& key, const CtgJob& job, CtgFill& out) {
+        solver.request(key, job, /*want_tiles=*/true);
+
+        QEventLoop loop;
+        QTimer poll;
+        poll.setInterval(16);
+        connect(&poll, &QTimer::timeout, &loop, [&] {
+            if (solver.idle() || progress.wasCanceled()) loop.quit();
+        });
+        poll.start();
+        loop.exec();
+
+        if (progress.wasCanceled()) {
+            solver.cancelAll();
+            return false;
+        }
+        for (CtgSolver::Result& result : solver.collect()) {
+            if (result.key == key) out = std::move(result.fill);
+        }
+        // An abandoned solve produces nothing, and nothing is not an answer.
+        // Saying so stops the export rather than writing a blank sequence.
+        return out.valid;
+    };
+
     const bool ok = exporting::write(
         doc_, options,
-        [&progress](int done, int count) {
+        [&progress](int done, int count, const QString& what) {
             progress.setMaximum(std::max(count, 1));
             progress.setValue(done);
+            if (!what.isEmpty()) progress.setLabelText(what);
             QCoreApplication::processEvents();
             return !progress.wasCanceled();
         },
-        error);
+        solve, error);
     progress.close();
     return ok;
 }

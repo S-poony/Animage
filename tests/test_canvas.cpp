@@ -1891,7 +1891,7 @@ void exportWritesASequencePerLayer() {
     CHECK_EQ(exporting::fileCount(doc, options), static_cast<int>(frames * 3));
 
     QString error;
-    CHECK(exporting::write(doc, options, nullptr, &error));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     // The layout and the names the specification asks for: a folder per layer,
@@ -1965,7 +1965,7 @@ void exportRepeatsAHeldDrawing() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
 
     const auto frame = [&](int number) {
         return fileBytes(QStringLiteral("%1/main_ink/main_ink_%2.png")
@@ -2002,7 +2002,7 @@ void exportSolvesColourItHasNeverSeen() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
 
     // It solved rather than skipping.
     CHECK(doc.ctgFillFor(track, first, colour) != nullptr);
@@ -2048,7 +2048,7 @@ void exportLeavesOutHiddenLayers() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
 
     CHECK(!QDir(out + QStringLiteral("/main_ink")).exists());
     CHECK(QDir(out + QStringLiteral("/main_colour")).exists());
@@ -2067,26 +2067,52 @@ void exportCanBeCancelled() {
     options.folder = out;
     options.layers = true;
 
+    // Counted rather than compared against a fixed number: the steps before the
+    // first file are the colour solves this shot needs, and how many that is
+    // belongs to the fixture rather than to what is being tested here.
     int seen = 0;
+    int files = 0;
     QString error;
     const bool ok = exporting::write(
-        doc, options, [&seen](int done, int) { seen = done; return done < 2; }, &error);
+        doc, options,
+        [&](int done, int, const QString& what) {
+            if (done > seen && what.startsWith(QStringLiteral("writing"))) ++files;
+            seen = done;
+            return files < 2;
+        },
+        nullptr, &error);
     CHECK_EQ(ok, false);
     CHECK(!error.isEmpty());
-    CHECK_EQ(seen, 2);
+    CHECK_EQ(files, 2);
 
     // What it had already written is still there. An export is not atomic and
     // does not claim to be -- half a sequence is visibly half a sequence.
-    CHECK_EQ(QDir(out + QStringLiteral("/main_ink")).entryList(QDir::Files).size(), 2);
+    //
+    // One file each rather than two of one: frames are written in slot order,
+    // every sequence at once, which is what makes each drawing solve exactly
+    // once however many sequences it appears in.
+    CHECK_EQ(QDir(out + QStringLiteral("/main_ink")).entryList(QDir::Files).size(), 1);
+    CHECK_EQ(QDir(out + QStringLiteral("/main_colour")).entryList(QDir::Files).size(), 1);
 }
 
 // A name is a folder name here, and people call layers things like "rough 2".
 void exportNamesSurviveAwkwardLayerNames() {
     TEST("layer names that a filesystem would refuse become usable folder names");
     CHECK_EQ(exporting::sequenceName("main", "ink").toStdString(), std::string("main_ink"));
+    // The underscore is the separator and nothing else is, so the number in
+    // "layer 1" is visibly part of the layer's name rather than a fourth field.
+    CHECK_EQ(exporting::sequenceName("track 1", "layer 1").toStdString(),
+             std::string("track-1_layer-1"));
     CHECK_EQ(exporting::sequenceName("main", "rough 2").toStdString(),
-             std::string("main_rough_2"));
-    CHECK_EQ(exporting::sequenceName("a/b", "c:d").toStdString(), std::string("a_b_c_d"));
+             std::string("main_rough-2"));
+    // Including an underscore somebody typed: it would be indistinguishable
+    // from the separator, so it is not allowed to survive as one.
+    CHECK_EQ(exporting::sequenceName("main", "rough_2").toStdString(),
+             std::string("main_rough-2"));
+    CHECK_EQ(exporting::sequenceName("a/b", "c:d").toStdString(), std::string("a-b_c-d"));
+    // A run of junk is one separator, and the ends are trimmed.
+    CHECK_EQ(exporting::sequenceName("main", " rough // clean ").toStdString(),
+             std::string("main_rough-clean"));
     CHECK_EQ(exporting::sequenceName("", "").toStdString(), std::string("unnamed_unnamed"));
 }
 
@@ -2115,6 +2141,11 @@ void theFileMenuExports() {
     if (!exporter) return;
     CHECK(exporter->isEnabled());
 
+    // The sequences go in a folder named after the project rather than loose in
+    // whatever directory was chosen. "shot.animage" is the project; "shot" is
+    // what the export is called.
+    CHECK_EQ(window.defaultExportName().toStdString(), std::string("shot"));
+
     QString error;
     CHECK(window.exportSequencesTo(out, true, true, &error));
     CHECK_EQ(error.toStdString(), std::string());
@@ -2122,6 +2153,43 @@ void theFileMenuExports() {
 
     CHECK(QFileInfo::exists(out + QStringLiteral("/main_ink/main_ink_0001.png")));
     CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
+}
+
+// Exporting through the window hands its max-flows to a solver instead of
+// running them where the progress dialog is being drawn. What that buys, and
+// the only part of it a test can see from the outside, is the cap: a solve
+// nobody can wait for takes the interactive budget, and one on a worker takes
+// the whole of it. An exported fill used to be coarser than the one on screen.
+void theWindowExportsAtFullResolution() {
+    TEST("exporting through the window solves at the full budget, not the capped one");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    QString error;
+    CHECK(window.exportSequencesTo(out, true, false, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    const Document& doc = window.documentForTesting();
+    const Track& track = doc.scene().tracks.front();
+    const LayerId colour = track.layers.back().id;
+    // The last drawing, so that whatever the canvas happened to solve for the
+    // frame it was standing on is not what is being read back.
+    const ImageId last = track.imageAtSlot(track.frameCount() - 1);
+    const CtgFill* fill = doc.ctgFillFor(track.id, last, colour);
+    CHECK(fill != nullptr);
+    if (!fill) return;
+    CHECK(fill->valid);
+    CHECK(fill->budget >= kFullSolveBudget);
 }
 
 // A shot whose shape sits still for two drawings and then jumps across the
@@ -2597,6 +2665,7 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
+    theWindowExportsAtFullResolution();
     aCarriedMarkSaysSoInThePanel();
     theColourLayerBoxEditsWhatTheLayerDoes();
     transparencyIsOfferedOnlyWhereItMeansSomething();
