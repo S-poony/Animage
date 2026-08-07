@@ -323,7 +323,7 @@ bool AppController::exportSequencesTo(const QString& folder_or_url, bool layers,
         },
         error);
 
-    Q_EMIT exportFinished(ok, ok ? QString() : *error);
+    Q_EMIT exportFinished(ok, ok ? QString() : (error ? *error : QString()));
     return ok;
 }
 
