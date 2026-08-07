@@ -48,11 +48,13 @@ The original design documents are in French and are authoritative — the code
 follows them, not the other way round. They live in [docs/fr](docs/fr/).
 Everything else in the repository is in English.
 
-If you are wondering why this repository contains its own image format and its
-own JSON parser — a reasonable first question —
+If you are wondering why this repository has its own image format — a reasonable
+first question, and usually a sign of something gone wrong —
 [docs/why-our-own-formats.md](docs/why-our-own-formats.md) answers it, with the
 measurements, the alternatives that were rejected and why, and what would change
-the decision.
+the decision. It also records the hand-written JSON reader that used to sit
+beside it, why the argument for that one looked identical and was not, and why
+removing it was right.
 
 ## Download
 
