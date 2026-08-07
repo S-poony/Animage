@@ -47,8 +47,8 @@ void strokeOn(Document& doc, TrackId track, ImageId image, LayerId layer, float 
 }
 
 // A box with a hole in the bottom wall, the case a paint bucket cannot do.
-void gappedBoxOn(Document& doc, TrackId track, ImageId image, LayerId layer, int left, int top,
-                 int right, int bottom, int gap_from, int gap_to) {
+void gappedBoxOn(Document& doc, TrackId track, ImageId image, LayerId layer, float left,
+                 float top, float right, float bottom, float gap_from, float gap_to) {
     const float w = 2.5f;
     strokeOn(doc, track, image, layer, left, top, right, top, w, 0, 0, 0);
     strokeOn(doc, track, image, layer, left, top, left, bottom, w, 0, 0, 0);
@@ -86,8 +86,8 @@ struct Fixture {
         strokeOn(doc, track, image, layer, x0, y0, x1, y1, radius, r, g, b);
     }
 
-    void drawGappedBox(LayerId layer, int left, int top, int right, int bottom, int gap_from,
-                       int gap_to) {
+    void drawGappedBox(LayerId layer, float left, float top, float right, float bottom,
+                       float gap_from, float gap_to) {
         gappedBoxOn(doc, track, image, layer, left, top, right, bottom, gap_from, gap_to);
     }
 };
@@ -133,7 +133,8 @@ struct Sequence {
                  radius, r, g, b);
     }
 
-    void box(int drawing, int left, int top, int right, int bottom, int gap_from, int gap_to) {
+    void box(int drawing, float left, float top, float right, float bottom, float gap_from,
+             float gap_to) {
         gappedBoxOn(doc, track, images[static_cast<std::size_t>(drawing)], ink, left, top,
                     right, bottom, gap_from, gap_to);
     }
@@ -985,7 +986,7 @@ void erasingAStrayScribbleUndoesWhatItDid() {
 // A mark made outside a shape, near its wall. Reported as colour appearing
 // where nothing was scribbled, and suspected of the colour layer being used as
 // its own barrier -- so this pins both halves at once.
-void closedBox(Fixture& f, int left, int top, int right, int bottom) {
+void closedBox(Fixture& f, float left, float top, float right, float bottom) {
     const float w = 2.5f;
     f.stroke(f.ink, left, top, right, top, w, 0, 0, 0);
     f.stroke(f.ink, left, bottom, right, bottom, w, 0, 0, 0);

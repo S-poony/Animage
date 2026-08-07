@@ -29,6 +29,11 @@ if(MSVC)
   # parameter to hide. The alternative is renaming every one to say twice what
   # its type already says.
   add_compile_options(/wd4458)
+  # C4996 on fopen and getenv: Microsoft deprecates the C standard library in
+  # favour of _s variants that exist on no other platform. Taking the advice
+  # would make the crash reporter and the test harness Windows-only to silence
+  # a warning about code that is already correct everywhere.
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
   if(ANIMAGE_WERROR)
     add_compile_options(/WX)
   endif()
