@@ -196,16 +196,20 @@ QString sequenceName(const std::string& track, const std::string& layer) {
 
 int fileCount(const Document& doc, const Options& options) {
     const std::size_t frames = frameCount(doc);
-    std::size_t sequences = 0;
+    std::size_t files = 0;
     if (options.layers) {
         for (const Track& track : doc.scene().tracks) {
+            // A layer's sequence is as long as its own track and no longer. The
+            // end behaviour is about the picture, so it belongs to the flattened
+            // pass; a background's own sequence stops when the background does
+            // rather than repeating it to pad out the shot.
             for (const Layer& layer : track.layers) {
-                if (layer.visible) ++sequences;
+                if (layer.visible) files += track.frameCount();
             }
         }
     }
-    if (options.flattened) ++sequences;
-    return static_cast<int>(sequences * frames);
+    if (options.flattened) files += frames;
+    return static_cast<int>(files);
 }
 
 bool write(Document& doc, const Options& options, const Progress& progress, const Solve& solve,
@@ -270,17 +274,20 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
     const long long budget = solve ? kFullSolveBudget : kInteractiveSolveBudget;
 
     // How many max-flows this is going to be. Counted here, before anything has
-    // moved, and it is exact because of the order the frames are written in:
-    // each drawing is visited once, contiguously, so nothing is solved twice
-    // and nothing is evicted before it is used.
+    // moved, over the *distinct* drawings each track shows.
+    //
+    // It used to be enough to skip repeats of the drawing before, because the
+    // order the frames are written in visits each drawing once and contiguously.
+    // A cycling track breaks that -- it comes back to the same four drawings
+    // every four frames -- and counting each pass would have promised ten times
+    // the solves it then did, so the bar would sprint to the end and stop.
     int solves = 0;
     for (std::size_t track_index = 0; track_index < bottom_first.size(); ++track_index) {
-        ImageId previous = kNoId;
+        std::unordered_set<ImageId> counted;
         for (std::size_t slot = 0; slot < frames; ++slot) {
             const Track* track = doc.scene().findTrack(bottom_first[track_index]);
-            const ImageId image = track ? track->imageAtSlot(slot) : kNoId;
-            if (image == kNoId || image == previous) continue;
-            previous = image;
+            const ImageId image = track ? track->imageShownAt(slot) : kNoId;
+            if (image == kNoId || !counted.insert(image).second) continue;
             for (const LayerId layer : ctg_layers[track_index]) {
                 const CtgInputs wanted =
                     ctgInputsFor(doc, bottom_first[track_index], image, layer, settings);
@@ -373,7 +380,9 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
         for (std::size_t track_index = 0; track_index < bottom_first.size(); ++track_index) {
             if (ctg_layers[track_index].empty()) continue;
             const Track* track = doc.scene().findTrack(bottom_first[track_index]);
-            const ImageId image = track ? track->imageAtSlot(slot) : kNoId;
+            // Shown rather than held: the flattened pass draws what a cycling
+            // track shows out past its end, so that is what needs a fill.
+            const ImageId image = track ? track->imageShownAt(slot) : kNoId;
             if (image == kNoId) continue;
             if (!ensureFills(bottom_first[track_index], ctg_layers[track_index], image)) {
                 return cancelled();
@@ -384,12 +393,19 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
             QStringLiteral("writing frame %1 of %2...").arg(slot + 1).arg(frames);
 
         for (const Sequence& sequence : sequences) {
+            const Track* track = doc.scene().findTrack(sequence.track);
+            // A layer's sequence ends where its own track ends. The end
+            // behaviour is a fact about the picture, not about the layer, so a
+            // track that holds or cycles does so in the flattened pass below and
+            // its own sequences simply stop -- which is what makes them the
+            // length of the thing they are a sequence of.
+            if (!track || slot >= track->frameCount()) continue;
+
             // The compositor clears the buffer itself, but only when it runs. A
-            // slot this track does not reach has to come out empty rather than
+            // slot with no drawing on it has to come out empty rather than
             // repeating the frame before it.
             frame.clear();
-            const Track* track = doc.scene().findTrack(sequence.track);
-            const ImageId image = track ? track->imageAtSlot(slot) : kNoId;
+            const ImageId image = track->imageAtSlot(slot);
             if (image != kNoId) {
                 compositor.compositeLayers(doc, sequence.track, image, {sequence.layer}, canvas,
                                            frame);
@@ -406,7 +422,9 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
         frame.clear();
         for (const TrackId track_id : bottom_first) {
             const Track* track = doc.scene().findTrack(track_id);
-            const ImageId image = track ? track->imageAtSlot(slot) : kNoId;
+            // The one pass the end behaviour applies to: this is the picture,
+            // so a track that holds its last drawing or cycles does it here.
+            const ImageId image = track ? track->imageShownAt(slot) : kNoId;
             if (image == kNoId) continue;
             compositor.composite(doc, track_id, image, canvas, one);
             for (int y = 0; y < frame.height(); ++y) {

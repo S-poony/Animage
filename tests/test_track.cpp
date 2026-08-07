@@ -682,6 +682,67 @@ void trackPropertiesAreOneUndoStep() {
     CHECK_EQ(f.tl().name, std::string("main"));
 }
 
+// --- what a track shows past its last drawing ------------------------------
+//
+// Issue #20. Tracks share one timeline and are not obliged to be the same
+// length, so this is an ordinary question rather than an edge case.
+void whatATrackShowsPastItsEnd() {
+    TEST("a track holds, cycles or shows nothing past its last drawing");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.track, 0);
+    const ImageId b = f.doc.insertImage(f.track, 1);
+    const ImageId c = f.doc.insertImage(f.track, 2);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{3});
+
+    // Nothing, which is the default and what it did before there was a choice.
+    CHECK_EQ(f.tl().imageShownAt(2), c);
+    CHECK_EQ(f.tl().imageShownAt(3), kNoId);
+    CHECK_EQ(f.tl().imageShownAt(99), kNoId);
+
+    TrackProperties props = f.tl().properties();
+    props.end = TrackEnd::HoldLast;
+    f.doc.updateTrack(f.track, props);
+    CHECK_EQ(f.tl().imageShownAt(3), c);
+    CHECK_EQ(f.tl().imageShownAt(99), c);
+
+    props.end = TrackEnd::Cycle;
+    f.doc.updateTrack(f.track, props);
+    CHECK_EQ(f.tl().imageShownAt(3), a);
+    CHECK_EQ(f.tl().imageShownAt(4), b);
+    CHECK_EQ(f.tl().imageShownAt(5), c);
+    CHECK_EQ(f.tl().imageShownAt(6), a);
+
+    // What it *holds* is untouched by any of it. The two differ only past the
+    // end, and that separation is what lets a layer's own export stop where the
+    // track does while the flattened picture goes on.
+    CHECK_EQ(f.tl().imageAtSlot(2), c);
+    CHECK_EQ(f.tl().imageAtSlot(3), kNoId);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{3});
+
+    // And it never makes the shot longer: the scene is as long as the longest
+    // track, so a lone cycling track cycles over nothing at all.
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{3});
+}
+
+// A hold repeats a drawing inside the track; the end behaviour repeats it past
+// the end. Both are the same ImageId showing again, which is the model's
+// central bet -- so an empty track has nothing to repeat either way.
+void anEmptyTrackShowsNothingWhateverItsEnd() {
+    TEST("an empty track shows nothing however its end is set");
+    Fixture f;
+    TrackProperties props = f.tl().properties();
+    props.end = TrackEnd::Cycle;
+    f.doc.updateTrack(f.track, props);
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{0});
+    CHECK_EQ(f.tl().imageShownAt(0), kNoId);
+    CHECK_EQ(f.tl().imageShownAt(7), kNoId);
+
+    props.end = TrackEnd::HoldLast;
+    f.doc.updateTrack(f.track, props);
+    CHECK_EQ(f.tl().imageShownAt(3), kNoId);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -725,5 +786,7 @@ int main() {
     trackPropertiesAreOneUndoStep();
     anewDrawingTakesTheLowestFreeNumber();
     undoingADeletionPutsItsNumberBackInUse();
+    whatATrackShowsPastItsEnd();
+    anEmptyTrackShowsNothingWhateverItsEnd();
     return testing::summarise("track");
 }

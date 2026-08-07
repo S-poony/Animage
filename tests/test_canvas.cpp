@@ -18,6 +18,7 @@
 #include <QTabletEvent>
 #include <QWheelEvent>
 #include <QAbstractButton>
+#include <QDockWidget>
 #include <QMessageBox>
 #include <QTimer>
 #include <cmath>
@@ -420,6 +421,153 @@ void theTimelineIsAsLongAsTheLongestTrack() {
     CHECK_EQ(canvas->frame(), std::size_t{7});
     CHECK_EQ(canvas->currentImage(), kNoId);
     CHECK(!canvas->grab().isNull());
+}
+
+// The timeline dock's height, which had three wrong versions and no test.
+//
+// Deliberately relative rather than in pixels: what the dock should be for one
+// row belongs to the style and the font, and pinning a number here would fail on
+// a different theme while saying nothing about the behaviour. What broke twice
+// was the *shape* -- growing but never shrinking, then not growing at all -- and
+// that is what these assert.
+void theTimelineDockFollowsTheTrackCount() {
+    TEST("the timeline dock grows a row at a time, caps, and comes back down");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QDockWidget* dock = nullptr;
+    for (QDockWidget* d : window.findChildren<QDockWidget*>()) {
+        if (d->windowTitle() == QStringLiteral("Timeline")) dock = d;
+    }
+    CHECK(dock != nullptr);
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(add != nullptr && timeline != nullptr);
+    if (!dock || !add || !timeline) return;
+
+    Document& doc = window.documentForTesting();
+    std::vector<int> going_up{dock->height()};
+    for (int i = 0; i < 4; ++i) {
+        add->trigger();
+        QCoreApplication::processEvents();
+        going_up.push_back(dock->height());
+    }
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{5});
+
+    // One row is one row, however many there already are.
+    const int row = going_up[1] - going_up[0];
+    CHECK(row > 0);
+    CHECK_EQ(going_up[2] - going_up[1], row);
+    CHECK_EQ(going_up[3] - going_up[2], row);
+    // ...up to the cap, past which the strip scrolls instead of taking more of
+    // the canvas. The fifth track adds nothing.
+    CHECK_EQ(going_up[4], going_up[3]);
+
+    // And back down again, to the same heights it came up through. This is the
+    // half that was broken: adding raised the dock and deleting left it there.
+    for (int i = 4; i >= 1; --i) {
+        // What removeCurrentTrack does, without the dialog a test cannot answer.
+        const TrackId current = timeline->track();
+        std::size_t index = 0;
+        for (std::size_t t = 0; t < doc.scene().tracks.size(); ++t) {
+            if (doc.scene().tracks[t].id == current) index = t;
+        }
+        doc.removeTrack(current);
+        const std::vector<Track>& left = doc.scene().tracks;
+        timeline->setTrack(left[std::min(index, left.size() - 1)].id);
+        QCoreApplication::processEvents();
+        CHECK_EQ(dock->height(), going_up[static_cast<std::size_t>(i - 1)]);
+    }
+}
+
+// The other half: the track count chooses where the dock starts, and after that
+// it is the animator's. Pinning the minimum and maximum to the wanted height
+// sized it correctly and welded it shut, which is what this catches.
+void theTimelineDockCanBeResizedByHand() {
+    TEST("the timeline dock can be dragged smaller than its default and stays");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QDockWidget* dock = nullptr;
+    for (QDockWidget* d : window.findChildren<QDockWidget*>()) {
+        if (d->windowTitle() == QStringLiteral("Timeline")) dock = d;
+    }
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(dock != nullptr && timeline != nullptr);
+    if (!dock || !timeline) return;
+
+    const int settled = dock->height();
+
+    // Smaller than the track count asked for: what dragging the splitter does.
+    window.resizeDocks({dock}, {settled / 2}, Qt::Vertical);
+    QCoreApplication::processEvents();
+    const int dragged_small = dock->height();
+    CHECK(dragged_small < settled);
+
+    // A refresh must not shove it back. There is one of those per frame change,
+    // so a dock that resets would undo the drag the moment you scrubbed.
+    timeline->setCurrentSlot(0);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+    CHECK_EQ(dock->height(), dragged_small);
+
+    // And taller than any track count would ask for, which nothing caps.
+    window.resizeDocks({dock}, {settled * 3}, Qt::Vertical);
+    QCoreApplication::processEvents();
+    CHECK(dock->height() > settled);
+}
+
+// A track that holds or cycles is showing a picture out past its last drawing,
+// and that is all it is doing: there is no slot and no cel there, so there is
+// nothing to draw on. What a track shows and what it holds are different
+// questions, and editing follows what it holds.
+void pastATracksEndYouCanSeeItButNotDrawOnIt() {
+    TEST("a held or cycled drawing is shown past the end but cannot be drawn on");
+    Document doc;
+    const TrackId shot = doc.addTrack("character");
+    doc.addLayer(shot, "ink");
+    doc.insertImage(shot, 0);
+    doc.extendExposure(shot, 0, 5);  // six frames of scene
+
+    const TrackId back = doc.addTrack("background");
+    const LayerId back_ink = doc.addLayer(back, "ink");
+    const ImageId only = doc.insertImage(back, 0);
+    strokeOn(doc, back, only, back_ink, 40.0f, 200.0f, 200.0f, 200.0f);
+    TrackProperties props = doc.scene().findTrack(back)->properties();
+    props.end = TrackEnd::HoldLast;
+    doc.updateTrack(back, props);
+    CHECK_EQ(doc.scene().frameCount(), std::size_t{6});
+
+    CanvasWidget canvas(doc);
+    canvas.resize(400, 400);
+    canvas.setTrack(back);
+    canvas.setActiveLayer(back_ink);
+
+    // Inside the track, the drawing is there and is the one being edited.
+    canvas.setFrame(0);
+    CHECK_EQ(canvas.currentImage(), only);
+
+    // Past it, the track holds nothing, so there is nothing to edit...
+    canvas.setFrame(4);
+    CHECK_EQ(canvas.frame(), std::size_t{4});
+    CHECK_EQ(canvas.currentImage(), kNoId);
+
+    // ...but the picture still has it in, because the track is holding it. That
+    // is the whole distinction: shown, not held.
+    const Compositor compositor;
+    Framebuffer frame;
+    compositor.compositeScene(doc, 4, PixelRect{0, 0, 300, 300}, frame);
+    CHECK(frame.pixel(120, 200).a > 0.5f);
+
+    // And with the end behaviour off, neither is true out there.
+    props.end = TrackEnd::Nothing;
+    doc.updateTrack(back, props);
+    compositor.compositeScene(doc, 4, PixelRect{0, 0, 300, 300}, frame);
+    CHECK_NEAR(frame.pixel(120, 200).a, 0.0, 1e-3);
 }
 
 // Issue #9 through the button that does it, because the button is where the
@@ -2285,6 +2433,70 @@ QByteArray fileBytes(const QString& path) {
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
+// Issue #20's export half, and the distinction it turns on: what a track shows
+// past its last drawing is a fact about the *picture*, so it belongs to the
+// flattened composite and not to a layer's own sequence. A background that
+// cycles is in the composite for the whole shot, and its own folder holds only
+// the frames the background actually has.
+void theEndBehaviourAppliesToTheCompositeOnly() {
+    TEST("a cycling track fills the composite and not its own layer sequence");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc;
+    // A character over ten frames, and a two-drawing background that cycles.
+    const TrackId character = doc.addTrack("character");
+    const LayerId character_ink = doc.addLayer(character, "ink");
+    const ImageId drawn = doc.insertImage(character, 0);
+    doc.extendExposure(character, 0, 9);
+    strokeOn(doc, character, drawn, character_ink, 40.0f, 40.0f, 200.0f, 40.0f);
+
+    const TrackId background = doc.addTrack("background");
+    const LayerId background_ink = doc.addLayer(background, "ink");
+    const ImageId back_one = doc.insertImage(background, 0);
+    const ImageId back_two = doc.insertImage(background, 1);
+    strokeOn(doc, background, back_one, background_ink, 40.0f, 300.0f, 200.0f, 300.0f);
+    strokeOn(doc, background, back_two, background_ink, 40.0f, 360.0f, 200.0f, 360.0f);
+
+    TrackProperties props = doc.scene().findTrack(background)->properties();
+    props.end = TrackEnd::Cycle;
+    doc.updateTrack(background, props);
+
+    doc.setCanvasSize(640, 480);
+    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
+    CHECK_EQ(doc.scene().findTrack(background)->frameCount(), std::size_t{2});
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    options.flattened = true;
+    // Ten for the character, two for the background, ten for the composite.
+    CHECK_EQ(exporting::fileCount(doc, options), 22);
+
+    QString error;
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // The background's own sequence stops where the background does.
+    CHECK_EQ(QDir(out + QStringLiteral("/background_ink")).entryList(QDir::Files).size(), 2);
+    CHECK_EQ(QDir(out + QStringLiteral("/character_ink")).entryList(QDir::Files).size(), 10);
+    // The composite runs the length of the shot, which is the longest track.
+    CHECK_EQ(QDir(out + QStringLiteral("/composite")).entryList(QDir::Files).size(), 10);
+
+    // And frame 8 of the composite has the background in it: slot 7 is past its
+    // last drawing, and 7 % 2 is 1, so it is showing its second drawing.
+    const QImage late(QStringLiteral("%1/composite/composite_0008.png").arg(out));
+    CHECK(!late.isNull());
+    if (late.isNull()) return;
+    const auto opaque = [&](int x, int y) {
+        return qAlpha(late.pixelColor(x, y).rgba64().toArgb32()) > 0;
+    };
+    CHECK(opaque(120, 40));   // the character, still held
+    CHECK(opaque(120, 360));  // the background's second drawing, cycled round
+    CHECK(!opaque(120, 300)); // and not its first, which is not this frame's
+}
+
 void exportWritesASequencePerLayer() {
     TEST("export writes a 16-bit PNG sequence per layer, over the canvas");
     QTemporaryDir scratch;
@@ -3351,6 +3563,7 @@ int main(int argc, char** argv) {
     closingAnUntouchedWindowJustCloses();
     newProjectStartsOverCleanly();
     exportWritesASequencePerLayer();
+    theEndBehaviourAppliesToTheCompositeOnly();
     exportRepeatsAHeldDrawing();
     exportSolvesColourItHasNeverSeen();
     exportLeavesOutHiddenLayers();
@@ -3381,6 +3594,9 @@ int main(int argc, char** argv) {
     deletingATrackRebindsEverything();
     theCanvasCompositesEveryTrack();
     theTimelineIsAsLongAsTheLongestTrack();
+    pastATracksEndYouCanSeeItButNotDrawOnIt();
+    theTimelineDockFollowsTheTrackCount();
+    theTimelineDockCanBeResizedByHand();
     theInsertButtonObeysTheOverwriteSetting();
     return testing::summarise("canvas");
 }

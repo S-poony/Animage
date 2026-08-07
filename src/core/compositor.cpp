@@ -456,7 +456,9 @@ void Compositor::compositeScene(const Document& doc, std::size_t slot, const Pix
     // Topmost first, which is the order compositeGrids wants and the order the
     // tracks are already in: index 0 composites on top.
     for (const Track& track : doc.scene().tracks) {
-        const ImageId image = track.imageAtSlot(slot);
+        // What it shows, not what it holds: a track past its last drawing may
+        // still be holding it or cycling, and this is the picture.
+        const ImageId image = track.imageShownAt(slot);
         if (image == kNoId) continue;
 
         std::vector<LayerId> layers;

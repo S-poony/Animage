@@ -165,7 +165,7 @@ public:
     // opacity of its own applied to it, and track opacity is stored and not yet
     // applied. If it ever is, this is the function that stops being a flat list.
     //
-    // Which drawing each track shows at `slot` is Track::imageAtSlot's answer
+    // Which drawing each track shows at `slot` is Track::imageShownAt's answer
     // and nobody else's -- tracks are not all the same length, and what a track
     // does past its end is a decision that lives there. A track showing nothing
     // contributes nothing rather than clearing what is under it.

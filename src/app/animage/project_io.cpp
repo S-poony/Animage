@@ -181,6 +181,21 @@ BlendMode blendFromName(const std::string& name) {
     return BlendMode::Normal;
 }
 
+const char* endName(TrackEnd end) {
+    switch (end) {
+        case TrackEnd::HoldLast: return "hold";
+        case TrackEnd::Cycle: return "cycle";
+        case TrackEnd::Nothing: break;
+    }
+    return "nothing";
+}
+
+TrackEnd endFromName(const std::string& name) {
+    if (name == "hold") return TrackEnd::HoldLast;
+    if (name == "cycle") return TrackEnd::Cycle;
+    return TrackEnd::Nothing;
+}
+
 const char* kindName(LayerKind kind) { return kind == LayerKind::Ctg ? "ctg" : "raster"; }
 
 LayerKind kindFromName(const std::string& name) {
@@ -312,6 +327,7 @@ QJsonObject writeTrack(const Track& track) {
     out.insert("blend", QString::fromLatin1(blendName(track.blend)));
     out.insert("time_offset", jsonNumber(track.time_offset));
     out.insert("overwrite_drawings", track.overwrite_drawings);
+    out.insert("end", QString::fromLatin1(endName(track.end)));
     // No `next_drawing_number`: what a new drawing is called is the lowest
     // number the track is not using, worked out from the drawings themselves.
     // A file from before this carries the key and it is simply ignored.
@@ -357,6 +373,10 @@ Track readTrack(const QJsonObject& json) {
     // key, so it only touches projects saved before the setting existed.
     // No version bump: an older build reading a newer file ignores the key.
     track.overwrite_drawings = asBool(json.value("overwrite_drawings"), true);
+    // "nothing" for a file from before the setting, which is what it did.
+    // Unlike overwrite, this default *is* the old behaviour, so nothing changes
+    // under an old project.
+    track.end = endFromName(asText(json.value("end"), "nothing"));
 
     const QJsonArray layers = json.value("layers").toArray();
     for (const QJsonValue& value : layers) track.layers.push_back(readLayer(value.toObject()));

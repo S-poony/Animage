@@ -3,6 +3,8 @@
 
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <utility>
+#include <vector>
 
 #include "document.h"
 #include "export_sequence.h"
@@ -154,6 +156,7 @@ private:
     void renameTrack();
     void removeCurrentTrack();
     void setOverwriteDrawings(bool overwrite);
+    void setTrackEnd(animage::TrackEnd behaviour);
     // Points the canvas, the layer panel and the menus at another track.
     void setCurrentTrack(animage::TrackId track);
     // What the Track menu says about the track you are on.
@@ -240,6 +243,8 @@ private:
     QAction* brush_action_ = nullptr;
     QAction* eraser_action_ = nullptr;
     QAction* overwrite_action_ = nullptr;
+    // The three "past the last drawing" items, with what each one means.
+    std::vector<std::pair<QAction*, animage::TrackEnd>> end_actions_;
     bool updating_track_menu_ = false;
 
     QTimer* playback_timer_ = nullptr;

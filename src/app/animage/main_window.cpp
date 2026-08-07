@@ -272,6 +272,27 @@ void MainWindow::buildActions() {
                        "hold, instead of going in after it and making the shot longer."));
     connect(overwrite_action_, &QAction::toggled, this, &MainWindow::setOverwriteDrawings);
 
+    // What the track shows once the playhead is past its last drawing. Tracks
+    // share one timeline and are not obliged to be the same length, so this is
+    // an ordinary question: a background drawn once under a character animated
+    // over forty frames, or a four-drawing cycle for a walk.
+    QMenu* end_menu = track_menu->addMenu(QStringLiteral("Past the last drawing"));
+    auto* ends = new QActionGroup(this);
+    ends->setExclusive(true);
+    const std::pair<const char*, TrackEnd> choices[] = {
+        {"Show nothing", TrackEnd::Nothing},
+        {"Hold the last drawing", TrackEnd::HoldLast},
+        {"Cycle", TrackEnd::Cycle},
+    };
+    for (const auto& [label, behaviour] : choices) {
+        QAction* action = end_menu->addAction(QString::fromLatin1(label));
+        action->setCheckable(true);
+        ends->addAction(action);
+        end_actions_.push_back({action, behaviour});
+        connect(action, &QAction::triggered, this,
+                [this, behaviour] { setTrackEnd(behaviour); });
+    }
+
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
     view->addAction(QStringLiteral("Actual size"), QKeySequence(Qt::Key_1), canvas_,
                     &CanvasWidget::resetView);
@@ -1128,13 +1149,21 @@ void MainWindow::syncStatus() {
     const QString colouring =
         canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
 
+    // Past this track's last drawing there is no slot and no cel, so there is
+    // nothing to draw on -- while the canvas may still be showing something,
+    // because a track that holds or cycles goes on contributing to the picture.
+    // Said out loud, because a brush that does nothing is otherwise a bug.
+    const QString past = (image == kNoId && slot >= track->frameCount())
+                             ? QStringLiteral("   past the end of this track")
+                             : QString();
+
     // The frame count is the scene's and the rest is the current track's, which
     // is the distinction the whole panel now rests on: one timeline, several
     // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   undo %10   %11 fps%12")
+                       "tiles %9   undo %10   %11 fps%12%13")
             .arg(slot + 1)
             .arg(doc_.scene().frameCount())
             .arg(QString::fromStdString(track->name))
@@ -1146,7 +1175,8 @@ void MainWindow::syncStatus() {
             .arg(doc_.totalTileCount())
             .arg(doc_.undoDepth())
             .arg(doc_.scene().framerate)
-            .arg(colouring));
+            .arg(colouring)
+            .arg(past));
 }
 
 // The timeline dock follows the number of tracks, up to a point.
@@ -1327,12 +1357,32 @@ void MainWindow::setOverwriteDrawings(bool overwrite) {
     syncStatus();
 }
 
+void MainWindow::setTrackEnd(TrackEnd behaviour) {
+    if (updating_track_menu_) return;  // the menu being told, not the user asking
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->end == behaviour) return;
+
+    TrackProperties props = track->properties();
+    props.end = behaviour;
+    doc_.updateTrack(track_, props);
+
+    // It changes what is on screen at every frame past this track's last
+    // drawing, and what the row says about itself.
+    timeline_widget_->refresh();
+    canvas_->refreshAll();
+    syncStatus();
+}
+
 void MainWindow::syncTrackMenu() {
     if (!overwrite_action_) return;
     const Track* track = doc_.scene().findTrack(track_);
     updating_track_menu_ = true;
     overwrite_action_->setEnabled(track != nullptr);
     overwrite_action_->setChecked(track && track->overwrite_drawings);
+    for (const auto& [action, behaviour] : end_actions_) {
+        action->setEnabled(track != nullptr);
+        action->setChecked(track && track->end == behaviour);
+    }
     updating_track_menu_ = false;
 }
 

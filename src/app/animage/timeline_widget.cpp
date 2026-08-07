@@ -231,6 +231,40 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
                              Qt::AlignBottom | Qt::AlignLeft, QStringLiteral("overwrite"));
         }
 
+        // What the track goes on showing past its last drawing, drawn faintly so
+        // it reads as a consequence rather than as frames somebody exposed.
+        // Without it the row stops at four frames while the canvas keeps drawing
+        // out to forty, and nothing on screen says why.
+        if (line.end != TrackEnd::Nothing && !line.slots.empty()) {
+            for (std::size_t i = line.slots.size(); i < frames; ++i) {
+                const int x = kGutterWidth + static_cast<int>(i) * kCellWidth;
+                const QRect cell(x, top + 2, kCellWidth - 1, kRowHeight - 8);
+                painter.fillRect(cell, colours.cell_held);
+
+                const ImageId shown = line.imageShownAt(i);
+                const Image* image = line.findImage(shown);
+                // Against what the frame before it showed, which for the first
+                // extended frame is the track's last real one. A held drawing is
+                // then a tail off its own card rather than the same number
+                // printed twice, and a cycle starts a fresh card each time it
+                // comes round -- which is the difference between the two, said
+                // in the only place it can be seen.
+                const bool repeats = line.imageShownAt(i - 1) == shown;
+                painter.setPen(QPen(colours.outline, 1, Qt::DotLine));
+                if (repeats) {
+                    painter.drawLine(cell.center().x(), cell.top() + 3, cell.center().x(),
+                                     cell.bottom() - 3);
+                } else {
+                    painter.drawRect(cell.adjusted(0, 0, -1, -1));
+                    QColor faint = colours.text;
+                    faint.setAlpha(110);
+                    painter.setPen(faint);
+                    painter.drawText(cell, Qt::AlignCenter,
+                                     QString::number(image ? image->number : 0));
+                }
+            }
+        }
+
         const std::vector<int> numbers = drawingNumbers(line);
         for (std::size_t i = 0; i < line.slots.size(); ++i) {
             const int x = kGutterWidth + static_cast<int>(i) * kCellWidth;

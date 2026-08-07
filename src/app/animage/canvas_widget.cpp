@@ -170,6 +170,16 @@ void CanvasWidget::setFrame(std::size_t slot) {
     const std::size_t frames = doc_.scene().frameCount();
     slot_ = (frames == 0) ? 0 : std::min(slot, frames - 1);
 
+    // What the track *holds* here, not what it shows. Past its last drawing
+    // there is no slot and no cel, so there is nothing to draw on -- and the end
+    // behaviour is a fact about the picture rather than about the track's
+    // contents, which is the same reason a layer's own export sequence stops
+    // where the track does while the composite carries on.
+    //
+    // The canvas still shows the held or cycled drawing, because that is the
+    // picture. You can see it out there and not draw on it, and the timeline
+    // says so: those frames are drawn dotted and faint, because they are not
+    // frames anybody exposed.
     const Track* track = doc_.scene().findTrack(track_);
     const ImageId next = track ? track->imageAtSlot(slot_) : kNoId;
     const bool changed = next != image_;
@@ -260,7 +270,9 @@ void CanvasWidget::requestCtgFills() {
     const CtgSettings settings;
     for (const Track& track_here : doc_.scene().tracks) {
       const TrackId track_id = track_here.id;
-      const ImageId image = track_here.imageAtSlot(slot_);
+      // What is on screen needs a fill, wherever in its own time it came from:
+      // a cycling track's colour has to be solved out past its last drawing too.
+      const ImageId image = track_here.imageShownAt(slot_);
       if (image == kNoId) continue;
 
       for (const Layer& layer : track_here.layers) {
@@ -329,7 +341,7 @@ void CanvasWidget::noteColourPending() {
 bool CanvasWidget::isShownNow(ImageId image) const {
     if (image == kNoId) return false;
     for (const Track& track : doc_.scene().tracks) {
-        if (track.imageAtSlot(slot_) == image) return true;
+        if (track.imageShownAt(slot_) == image) return true;
     }
     return false;
 }

@@ -166,10 +166,19 @@ same drawing still showing, not a thing of their own, and they travel with it.
 on that track: the layer panel, the brush and every timing button follow it,
 while the canvas goes on showing all of them. The Track menu adds, renames and
 deletes them; a new track arrives at the bottom of the stack, with a layer and a
-drawing so there is something to draw on. Rows can be different lengths, and a
-track that has run out shows nothing rather than holding its last drawing --
-what it *should* do out there is
-[issue #20](https://github.com/S-poony/Animage/issues/20).
+drawing so there is something to draw on. Rows can be different lengths, and what a track does
+once the playhead is past its last drawing is set under Track ▸ Past the last
+drawing: show nothing (the default), hold the last drawing, or cycle. It never
+makes the shot longer -- the timeline is as long as the longest track, so a cycle
+fills frames that are already there. You can see a held or cycled drawing but not
+draw on it: out there the track has no frame of its own, which the status bar
+says and the timeline shows as dotted, faint cells.
+
+That setting is about the picture, so it applies to the flattened `composite/`
+export and not to the per-layer sequences: **a layer's folder is as long as its
+own track.** A background drawn once exports one frame, and downstream you import
+the still rather than a sequence. It does mean layer folders can differ in
+length.
 
 **Overwrite drawings**, in the Track menu, is per track and on by default. On,
 the shot is a fixed length and a new drawing lands on the playhead and takes over

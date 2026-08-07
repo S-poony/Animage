@@ -12,6 +12,18 @@
 
 namespace animage {
 
+// What a track shows once the playhead is past its last drawing.
+//
+// Tracks share one timeline and are not obliged to be the same length, so this
+// is a real question and not an edge case: a background drawn once sits under a
+// character animated over forty frames, and a four-drawing cycle is how a walk
+// is built.
+enum class TrackEnd {
+    Nothing,   // the track is simply empty out there
+    HoldLast,  // its last drawing stays on screen
+    Cycle,     // it starts again from the beginning, and keeps going
+};
+
 // A track's group-level properties: everything about a track that is not its
 // layers, its slots or its images. Those three have operations of their own
 // because they are large and change one at a time; these are small, they are
@@ -44,6 +56,14 @@ struct TrackProperties {
     // nothing to spare at all so the insert falls back to lengthening the
     // track. See Track::overwriteRangeAt.
     bool overwrite_drawings = true;
+
+    // What the track shows past its last drawing. Nothing by default, which is
+    // what it did before there was a choice.
+    //
+    // It never makes the shot longer: the timeline is as long as the longest
+    // track and a cycle fills the frames that are already there. A scene of one
+    // cycling track is four frames long and cycles over nothing.
+    TrackEnd end = TrackEnd::Nothing;
 };
 
 // Layers are shared by every image in the track; `slots` is time. Exposure
@@ -66,9 +86,10 @@ struct Track {
     BlendMode blend = BlendMode::Normal;
     int time_offset = 0;
     bool overwrite_drawings = true;
+    TrackEnd end = TrackEnd::Nothing;
 
     TrackProperties properties() const {
-        return {name, opacity, blend, time_offset, overwrite_drawings};
+        return {name, opacity, blend, time_offset, overwrite_drawings, end};
     }
     void setProperties(const TrackProperties& p) {
         name = p.name;
@@ -76,6 +97,7 @@ struct Track {
         blend = p.blend;
         time_offset = p.time_offset;
         overwrite_drawings = p.overwrite_drawings;
+        end = p.end;
     }
 
     // The number a new drawing on this track should carry: the lowest one no
@@ -130,18 +152,37 @@ struct Track {
         return (it == images.end()) ? nullptr : &it->second;
     }
 
-    // What this track shows at one frame of the scene's timeline. Every surface
-    // that draws a track -- the canvas, the timeline, the export -- asks this
-    // and nothing else, which matters because tracks are not all the same
-    // length: past its last slot a track currently shows nothing at all.
+    // What this track *holds* at one frame: the slot's own drawing, and kNoId
+    // past the end. The track as it was written, with no policy applied.
     //
-    // That is a policy and not a fact, and it is the only one on offer. Issue
-    // #20 wants it per track -- show nothing, hold the last drawing, or cycle --
-    // and this function is where that choice would be read, because it is the
-    // one place that knows a frame is past the end. Nothing else may compare a
-    // slot against `slots.size()` and decide for itself.
+    // This is what editing works on, and what a per-layer export writes, because
+    // both are about the drawings that are really there.
     ImageId imageAtSlot(std::size_t slot) const {
         return (slot < slots.size()) ? slots[slot] : kNoId;
+    }
+
+    // What this track *shows* at one frame, which past its last drawing is
+    // whatever `end` says. The picture rather than the contents.
+    //
+    // The two are the same everywhere inside the track and differ only out past
+    // it, and keeping them separate is the whole of how the export can flatten a
+    // cycling background into the composite while the background's own layer
+    // sequence still stops when the background does.
+    //
+    // This is the only place the end behaviour is read. Nothing else may compare
+    // a slot against `slots.size()` and decide for itself what happens after.
+    ImageId imageShownAt(std::size_t slot) const {
+        if (slots.empty()) return kNoId;
+        if (slot < slots.size()) return slots[slot];
+        switch (end) {
+            case TrackEnd::HoldLast:
+                return slots.back();
+            case TrackEnd::Cycle:
+                return slots[slot % slots.size()];
+            case TrackEnd::Nothing:
+                break;
+        }
+        return kNoId;
     }
 
     std::size_t frameCount() const { return slots.size(); }

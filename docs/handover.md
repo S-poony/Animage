@@ -647,6 +647,69 @@ The shift lives in `Document::ctgShiftAt`, written by every solve, read by the
 compositor's marks pass and by `celForWriting`. Any fourth thing that shows
 marks must read it too.
 
+## What a track does past its last drawing
+
+Issue #20. Tracks share one timeline and are not obliged to be the same length,
+so this is an ordinary question and not an edge case: a background drawn once
+under a character animated over forty frames, or a four-drawing cycle for a walk.
+`TrackEnd` is per track — show nothing, hold the last drawing, or cycle — and
+Nothing is the default, which is what happened before there was a choice.
+
+**The whole thing turns on one distinction: what a track *holds* against what it
+*shows*.** `Track::imageAtSlot` is the contents — the slot's own drawing, kNoId
+past the end. `Track::imageShownAt` is the picture, and past the end it is
+whatever `end` says. They agree everywhere inside the track and differ only out
+past it, and every question in the program is one or the other:
+
+| holds (`imageAtSlot`) | shows (`imageShownAt`) |
+|---|---|
+| which drawing the brush edits | what the canvas composites |
+| a layer's own export sequence | the flattened composite |
+| | which CTG fills are worth solving |
+
+**Only the flattened composite gets the end behaviour, and a layer's own sequence
+stops where its track stops.** That was the user's call and the argument for it
+is better than the one against: a layer sequence is a sequence of *that layer's
+drawings*, so padding a two-frame background out to forty is twenty times the
+bytes for no information, and downstream you import the still rather than the
+sequence — backgrounds do not move. It has a consequence worth stating plainly
+because nothing in the export announces it: **layer folders can be different
+lengths.** `character_ink/` holds ten frames and `background_ink/` holds two, and
+anyone dropping both onto a compositor timeline has to know the second is a still
+and not a sequence that ran out.
+
+That change reaches further than cycling. Per-layer sequences used to be padded
+with *blank* frames out to the scene length — `fileCount` was `sequences ×
+frames` — so any project with unequal track lengths now exports shorter folders
+than it did, whether or not any track holds or cycles.
+
+**It never makes the shot longer.** The timeline is as long as the longest track,
+so a cycle fills frames that already exist. One consequence to know: a cycling
+track that *is* the longest cycles over nothing at all, so a four-drawing walk in
+a four-frame scene does nothing until something else is longer. The missing piece
+is an explicit scene length, which does not exist yet.
+
+**You can see a held or cycled drawing and not draw on it.** Reported as a
+question — "why is the user allowed to draw past the track end? There are no cels
+there" — and it was right. The first version let a stroke out there edit the
+underlying drawing, on the grounds that a repeat is the same image showing again
+exactly as a hold is. But the end behaviour had already been scoped to the
+picture, and editing follows the contents; extending it to the brush contradicted
+the distinction the whole feature is built on. Past the end there is no slot and
+no cel, so there is nothing to edit. The status bar says "past the end of this
+track" and the timeline draws those frames dotted and faint, because a brush that
+silently does nothing is otherwise a bug.
+
+The solve counter in the export had to change with it. It used to skip repeats of
+the drawing before, which is exact when each drawing is visited once and
+contiguously — a cycling track comes back to the same four drawings every four
+frames, so it now counts distinct drawings. Left alone it would have promised ten
+times the max-flows it then ran, and the progress bar would have sprinted to the
+end and stopped.
+
+**Still open:** whether the end behaviour should also decide how playback repeats
+— looped against a single pass — which was raised and deliberately not settled.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -1243,16 +1306,15 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    what `CtgSolver`'s second priority is still there for.
 5. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-6. **What a track does past its last drawing** (#20). It shows nothing, which is
-   one of the three answers that issue asks for; the other two are hold the last
-   drawing and cycle. It is a `TrackProperties` field and a branch in
-   `Track::imageAtSlot`, which is already the only place that knows a frame is
-   past the end — the work is deciding what playback and export mean for a
-   cycling track, not finding the seam.
+6. **An explicit scene length.** A shot is currently as long as its longest
+   track, which is what stops a cycle running away — and it is also why a
+   cycling track that is the longest cycles over nothing. "This shot is sixty
+   frames" cannot be said, so cycling only does something when some other track
+   already reaches that far. See "What a track does past its last drawing".
 7. **The rest of the open issues**: deleting every layer of a drawing (#2), an
    eraser cursor (#4), brush-resize feedback (#5), and a non-modal colour panel
-   (the parked half of #8). Several tracks (#1) and "overwrite drawings" (#9)
-   are built — see "Several tracks, and a track that overwrites".
+   (the parked half of #8). Several tracks (#1), "overwrite drawings" (#9) and
+   what a track does past its end (#20) are built — see the two sections above.
 
 ## Two things to be careful of
 
