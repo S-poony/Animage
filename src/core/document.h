@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +28,7 @@ public:
 
     TrackId addTrack(std::string name);
     void removeTrack(TrackId track);
+    void updateTrack(TrackId track, const TrackProperties& properties);
     void setFramerate(int framerate);
 
     // The exported rectangle. Clamped to something sane rather than validated:
@@ -62,10 +64,33 @@ public:
     // has been lifted out. Reordering only: no cel is touched.
     void moveDrawing(TrackId track, ImageId image, std::size_t destination);
 
+    // The same drag on a track that overwrites, where `slot` is the frame the
+    // drawing was dropped on rather than a position between drawings -- the two
+    // are different questions and neither can be derived from the other, which
+    // is why this is a second function and not an argument.
+    //
+    // The drawing takes over the rest of the hold it lands in, and the frames it
+    // came from are absorbed by whichever drawing is next to them, so the track
+    // keeps its length and every drawing stays one contiguous run. With no room
+    // where it was dropped -- a hold of one frame -- this reorders instead,
+    // which is length-preserving too and is the nearest thing to what was asked.
+    void moveDrawingOver(TrackId track, ImageId image, std::size_t slot);
+
     // Deep copy: new ImageId and a new CelId per layer. The tiles themselves
     // are shared until one side is drawn on, so the copy is nearly free but the
     // two images are genuinely independent.
     ImageId duplicateImage(TrackId track, std::size_t slot);
+
+    // What the two buttons do, with the playhead's slot: a new drawing, or a
+    // copy of the one you are standing on, placed the way the track says.
+    //
+    // Without overwrite that is after the whole hold, lengthening the track --
+    // landing one in the middle of a ten-frame hold splits it in two, which is
+    // never what pressing the button meant. With overwrite it is on the playhead
+    // itself, spending the rest of the hold. Where the drawing ended up is
+    // `Track::firstSlotOf` on what comes back; it is not always `slot`.
+    ImageId addDrawing(TrackId track, std::size_t slot);
+    ImageId duplicateDrawing(TrackId track, std::size_t slot);
 
     // --- pixels ----------------------------------------------------------
 
@@ -181,6 +206,10 @@ private:
     CelId createCel();
     CelId createCelCopy(const Cel& source);
     bool historyReferences(CelId id) const;
+
+    // A new drawing with its own copy of every cel of `source`, refcounted and
+    // numbered, but in no slot yet. Shared by both ways of duplicating one.
+    std::optional<Image> copyOfImage(Track& track, ImageId source);
 
     Scene scene_;
     std::unordered_map<CelId, std::shared_ptr<Cel>> cels_;

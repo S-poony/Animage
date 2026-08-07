@@ -23,6 +23,7 @@ class QTimer;
 class QGroupBox;
 class QListWidget;
 class QComboBox;
+class QScrollArea;
 
 // The application window: canvas, timeline, layers, and the File menu. One
 // track. A project saves, opens, autosaves over itself and exports.
@@ -86,6 +87,17 @@ private:
     void rebuildLayerList();
     void syncStatus();
     void refreshEverything();
+    // Asks the timeline dock for a height that suits the number of tracks, up
+    // to four rows. A request and not a constraint: the dock stays draggable in
+    // both directions afterwards.
+    void syncTimelineHeight();
+    // The timeline's own metrics, so the dock asks for a height that matches
+    // what the widget will draw.
+    static constexpr int kRowHeight = 46;
+    static constexpr int kRulerAndRows = 18 + kRowHeight;
+    // Past this the dock stops growing and the strip scrolls: the height it
+    // takes comes out of the canvas, and the canvas is what is drawn on.
+    static constexpr int kMaxDockRows = 4;
 
     void addLayer();
     void addColourLayer();
@@ -136,10 +148,24 @@ private:
     void undo();
     void redo();
 
+    // Tracks. Adding one puts it at the bottom of the stack and makes it
+    // current, because the thing you do next is draw on it.
+    void addTrack();
+    void renameTrack();
+    void removeCurrentTrack();
+    void setOverwriteDrawings(bool overwrite);
+    // Points the canvas, the layer panel and the menus at another track.
+    void setCurrentTrack(animage::TrackId track);
+    // What the Track menu says about the track you are on.
+    void syncTrackMenu();
+
     void onSlotChanged(std::size_t slot);
     void stepFrame(int delta);
     void stepDrawing(int direction);
-    std::size_t slotAfterCurrentDrawing() const;
+    // Refreshes and puts the playhead on a drawing that has just been made.
+    // Where that is has to be asked rather than assumed: on a track that
+    // overwrites, a new drawing does not land after the hold.
+    void goToNewDrawing(animage::ImageId made);
     void insertInterval();
     void duplicateDrawing();
     void deleteDrawing();
@@ -187,6 +213,13 @@ private:
 
     CanvasWidget* canvas_ = nullptr;
     TimelineWidget* timeline_widget_ = nullptr;
+    QScrollArea* timeline_scroll_ = nullptr;
+    QDockWidget* timeline_dock_ = nullptr;
+    QWidget* timeline_controls_ = nullptr;
+    // How many rows the dock was last sized for. Without it every refresh --
+    // and there is one per frame change -- would shove the dock back to the
+    // height the track count implies, undoing a drag the moment you scrubbed.
+    int timeline_rows_shown_ = 0;
     QTreeWidget* layer_list_ = nullptr;
     QSlider* opacity_ = nullptr;
     QDoubleSpinBox* radius_ = nullptr;
@@ -206,6 +239,8 @@ private:
     QPushButton* play_button_ = nullptr;
     QAction* brush_action_ = nullptr;
     QAction* eraser_action_ = nullptr;
+    QAction* overwrite_action_ = nullptr;
+    bool updating_track_menu_ = false;
 
     QTimer* playback_timer_ = nullptr;
     QTimer* autosave_timer_ = nullptr;

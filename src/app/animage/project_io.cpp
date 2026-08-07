@@ -311,6 +311,7 @@ QJsonObject writeTrack(const Track& track) {
     out.insert("opacity", jsonNumber(track.opacity));
     out.insert("blend", QString::fromLatin1(blendName(track.blend)));
     out.insert("time_offset", jsonNumber(track.time_offset));
+    out.insert("overwrite_drawings", track.overwrite_drawings);
     out.insert("next_drawing_number", jsonNumber(track.next_drawing_number));
 
     QJsonArray layers;
@@ -346,6 +347,14 @@ Track readTrack(const QJsonObject& json) {
     track.opacity = asFloat(json.value("opacity"), 1.0f);
     track.blend = blendFromName(asText(json.value("blend"), "normal"));
     track.time_offset = asInt(json.value("time_offset"), 0);
+    // The track default, not the behaviour of the build that wrote the file.
+    // A project from before the setting existed did not overwrite, so this does
+    // change what such a file does -- deliberately, because a default that
+    // depended on how old the file was would be an invisible difference between
+    // two tracks that look identical. Every file this build writes carries the
+    // key, so it only touches projects saved before the setting existed.
+    // No version bump: an older build reading a newer file ignores the key.
+    track.overwrite_drawings = asBool(json.value("overwrite_drawings"), true);
     track.next_drawing_number = asInt(json.value("next_drawing_number"), 1);
 
     const QJsonArray layers = json.value("layers").toArray();

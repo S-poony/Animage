@@ -355,6 +355,233 @@ void drawingNumbersSurviveReordering() {
     CHECK_EQ(f.tl().findImage(fresh)->number, 5);
 }
 
+// --- overwriting drawings ------------------------------------------------
+//
+// The worked example from the issue, arithmetic and all: Drawing1 held 11, the
+// playhead on frame 4, press insert. Drawing1 keeps 3 frames, the new drawing
+// takes the other 8, and the track is still 11 frames long.
+void overwritingSpendsTheHoldRatherThanLengtheningTheTrack() {
+    TEST("adding a drawing over a hold spends it instead of lengthening the track");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 10);  // held 11
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});
+
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    const std::size_t before = f.doc.undoDepth();
+    const ImageId two = f.doc.addDrawing(f.track, 3);  // frame 4, counting from 1
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});  // the shot is the length it was
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{3});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{8});
+    CHECK_EQ(f.tl().firstSlotOf(two), std::size_t{3});
+    for (std::size_t slot = 0; slot < 3; ++slot) CHECK_EQ(f.tl().imageAtSlot(slot), one);
+    for (std::size_t slot = 3; slot < 11; ++slot) CHECK_EQ(f.tl().imageAtSlot(slot), two);
+
+    CHECK_EQ(f.doc.undoDepth(), before + 1);
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{11});
+    CHECK(f.tl().findImage(two) == nullptr);
+}
+
+// Switched off, the shot lengthens exactly as it did before the setting
+// existed. On is the default now, so this is the path that has to be asked for.
+void withoutOverwritingAddingADrawingStillLengthensTheTrack() {
+    TEST("without overwriting a new drawing goes in after the hold");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 10);
+
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = false;
+    f.doc.updateTrack(f.track, props);
+
+    const ImageId two = f.doc.addDrawing(f.track, 3);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{12});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{11});
+    CHECK_EQ(f.tl().firstSlotOf(two), std::size_t{11});
+}
+
+// The exception to the rule, and the reason it is an exception: taking the rest
+// of the hold from its *first* frame would take the whole drawing.
+void overwritingNeverTakesADrawingsLastFrame() {
+    TEST("overwriting leaves the drawing it lands on at least one frame");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 3);  // held 4
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    // Standing on the first frame of the hold: the new drawing starts one later.
+    const ImageId two = f.doc.addDrawing(f.track, 0);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{4});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{1});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{3});
+    CHECK_EQ(f.tl().firstSlotOf(two), std::size_t{1});
+
+    // And a hold of one frame has nothing to spare at all, so rather than wipe
+    // it the track goes back to getting longer.
+    const std::size_t frames = f.tl().frameCount();
+    const ImageId three = f.doc.addDrawing(f.track, 0);
+    CHECK_EQ(f.tl().frameCount(), frames + 1);
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{1});
+    CHECK_EQ(f.tl().firstSlotOf(three), std::size_t{1});
+}
+
+void duplicatingOverwritesTheSameWay() {
+    TEST("duplicating a drawing overwrites the hold too");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 10);  // held 11
+    paintDot(f.doc, f.track, one, f.layer, 40.0f, 40.0f);
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    const ImageId copy = f.doc.duplicateDrawing(f.track, 3);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{3});
+    CHECK_EQ(f.tl().exposureOf(copy), std::size_t{8});
+
+    // A copy and not a hold: the two drawings have cels of their own.
+    const Cel* original = f.doc.celAt(f.track, one, f.layer);
+    const Cel* duplicate = f.doc.celAt(f.track, copy, f.layer);
+    CHECK(original != nullptr && duplicate != nullptr);
+    CHECK(original != duplicate);
+    CHECK_NEAR(duplicate->pixel(40, 40).a, 1.0, 1e-2);
+}
+
+// The issue's second example. Drawing1 held 11 then Drawing2 held 1; drop
+// Drawing2 on frame 4 and it owns everything from there, while the frame it
+// came from is absorbed by the drawing beside it rather than disappearing.
+void movingOverAHoldTakesTheRestOfItAndLeavesNoGap() {
+    TEST("a drawing moved over a hold takes the rest of it");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 10);  // held 11
+    const ImageId two = f.doc.insertImage(f.track, 11);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{12});
+
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    f.doc.moveDrawingOver(f.track, two, 3);  // dropped on frame 4
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{12});  // and no frame was lost
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{3});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{9});
+    // One contiguous run each, which is what every walk over the slots assumes.
+    CHECK_EQ(f.tl().runBounds(f.tl().firstSlotOf(two)).second, std::size_t{11});
+
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{11});
+    CHECK_EQ(f.tl().imageAtSlot(11), two);
+}
+
+// Leaving from the very start there is no drawing before to take the frames, so
+// the one after does.
+void framesLeftAtTheStartGoToTheDrawingAfterThem() {
+    TEST("frames vacated at the start of a track go to the drawing after them");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    const ImageId two = f.doc.insertImage(f.track, 1);
+    f.doc.extendExposure(f.track, 1, 9);  // two held 10, after one held 1
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});
+
+    f.doc.moveDrawingOver(f.track, one, 8);
+
+    CHECK_EQ(f.tl().frameCount(), std::size_t{11});
+    CHECK_EQ(f.tl().imageAtSlot(0), two);  // its frame was taken over
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{8});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{3});
+    CHECK_EQ(f.tl().firstSlotOf(one), std::size_t{8});
+}
+
+// Dropping a drawing back into the gap it left has to be the same as not having
+// moved it, or a drag that goes nowhere would still change the timing.
+void movingOverToWhereItAlreadyIsDoesNothing() {
+    TEST("dropping a drawing over where it already is records no command");
+    Fixture f;
+    f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 2);
+    const ImageId two = f.doc.insertImage(f.track, 3);
+    f.doc.extendExposure(f.track, 3, 2);
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    const std::size_t before = f.doc.undoDepth();
+    f.doc.moveDrawingOver(f.track, two, 3);
+    CHECK_EQ(f.doc.undoDepth(), before);
+    CHECK_EQ(f.tl().firstSlotOf(two), std::size_t{3});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{3});
+}
+
+// The property that falls out of never taking a drawing's last frame, and the
+// reason nothing here has to tidy a retired drawing away: overwriting spends
+// frames and never a whole drawing. Worth pinning rather than deducing, because
+// it is the thing a later change to the rule would quietly break.
+void overwritingNeverLosesADrawing() {
+    TEST("no drawing is lost to overwriting, however it is spent");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 3);
+    const ImageId two = f.doc.insertImage(f.track, 4);
+    f.doc.extendExposure(f.track, 4, 3);  // two held 4, after one held 4
+    paintDot(f.doc, f.track, two, f.layer, 50.0f, 50.0f);
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = true;
+    f.doc.updateTrack(f.track, props);
+
+    const ImageId three = f.doc.addDrawing(f.track, 1);
+    // Every way of spending frames, over a drawing held one frame and a drawing
+    // held several, from the front of a hold and from the middle of one.
+    f.doc.moveDrawingOver(f.track, three, 4);
+    f.doc.moveDrawingOver(f.track, two, 0);
+    f.doc.addDrawing(f.track, 2);
+    f.doc.duplicateDrawing(f.track, 5);
+    f.doc.moveDrawingOver(f.track, one, 7);
+
+    for (const ImageId id : {one, two, three}) {
+        CHECK(f.tl().findImage(id) != nullptr);
+        CHECK(f.tl().exposureOf(id) >= std::size_t{1});
+    }
+    // And the shot is the length it started at, throughout.
+    CHECK_EQ(f.tl().frameCount(), std::size_t{8});
+
+    const Cel* kept = f.doc.celAt(f.track, two, f.layer);
+    CHECK(kept != nullptr);
+    CHECK_NEAR(kept->pixel(50, 50).a, 1.0, 1e-2);
+}
+
+void trackPropertiesUndoWithoutReusingADrawingNumber() {
+    TEST("changing a track's settings is one undo step");
+    Fixture f;
+    f.doc.insertImage(f.track, 0);
+    const int next = f.tl().next_drawing_number;
+
+    TrackProperties props = f.tl().properties();
+    props.overwrite_drawings = false;
+    props.name = "background";
+    f.doc.updateTrack(f.track, props);
+    CHECK(!f.tl().overwrite_drawings);
+    CHECK_EQ(f.tl().name, std::string("background"));
+
+    CHECK(f.doc.undo());
+    CHECK(f.tl().overwrite_drawings);
+    CHECK_EQ(f.tl().name, std::string("main"));
+    // The counter is not a property and does not travel with them.
+    CHECK_EQ(f.tl().next_drawing_number, next);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -386,5 +613,14 @@ int main() {
     duplicateLandsRightAfterTheOriginal();
     onionNeighboursSkipHeldFrames();
     drawingOnAHoldShowsOnEveryFrameOfIt();
+    overwritingSpendsTheHoldRatherThanLengtheningTheTrack();
+    withoutOverwritingAddingADrawingStillLengthensTheTrack();
+    overwritingNeverTakesADrawingsLastFrame();
+    duplicatingOverwritesTheSameWay();
+    movingOverAHoldTakesTheRestOfItAndLeavesNoGap();
+    framesLeftAtTheStartGoToTheDrawingAfterThem();
+    movingOverToWhereItAlreadyIsDoesNothing();
+    overwritingNeverLosesADrawing();
+    trackPropertiesUndoWithoutReusingADrawingNumber();
     return testing::summarise("track");
 }

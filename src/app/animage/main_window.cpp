@@ -29,6 +29,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -100,6 +101,7 @@ MainWindow::MainWindow() {
     buildTimelinePanel();
     buildStatusBar();
     rebuildLayerList();
+    syncTrackMenu();
 
     connect(canvas_, &CanvasWidget::brushSizeChanged, this, [this](double radius) {
         if (!radius_) return;
@@ -155,7 +157,14 @@ void MainWindow::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
     if (framed_once_) return;
     framed_once_ = true;
-    QTimer::singleShot(0, this, [this] { canvas_->fitToCanvas(); });
+    QTimer::singleShot(0, this, [this] {
+        canvas_->fitToCanvas();
+        // Again, now that the dock has been laid out and its title bar has a
+        // height to read. From the constructor there was nothing to measure and
+        // the strip came up exactly one title bar short.
+        timeline_rows_shown_ = 0;
+        syncTimelineHeight();
+    });
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -248,6 +257,21 @@ void MainWindow::buildActions() {
         action->setShortcutContext(Qt::ApplicationShortcut);
     }
 
+    // A menu of its own rather than more of Edit: a track is the other thing a
+    // scene is made of, beside its layers, and the layer panel already has a
+    // place of its own.
+    QMenu* track_menu = menuBar()->addMenu(QStringLiteral("&Track"));
+    track_menu->addAction(QStringLiteral("Add track"), this, &MainWindow::addTrack);
+    track_menu->addAction(QStringLiteral("Rename track..."), this, &MainWindow::renameTrack);
+    track_menu->addAction(QStringLiteral("Delete track"), this, &MainWindow::removeCurrentTrack);
+    track_menu->addSeparator();
+    overwrite_action_ = track_menu->addAction(QStringLiteral("Overwrite drawings"));
+    overwrite_action_->setCheckable(true);
+    overwrite_action_->setToolTip(
+        QStringLiteral("A new drawing lands on the playhead and takes over the rest of the\n"
+                       "hold, instead of going in after it and making the shot longer."));
+    connect(overwrite_action_, &QAction::toggled, this, &MainWindow::setOverwriteDrawings);
+
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
     view->addAction(QStringLiteral("Actual size"), QKeySequence(Qt::Key_1), canvas_,
                     &CanvasWidget::resetView);
@@ -272,6 +296,16 @@ void MainWindow::buildActions() {
         backgrounds->addAction(action);
         connect(action, &QAction::triggered, this, [this, mode] { canvas_->setBackground(mode); });
     }
+
+    view->addSeparator();
+    // Checked because the veil is what the canvas normally looks like; turning
+    // it off is the exception, taken when what ran off the edge is the thing
+    // being looked at.
+    QAction* passe_partout = view->addAction(QStringLiteral("&Passe-partout"));
+    passe_partout->setCheckable(true);
+    passe_partout->setChecked(canvas_->passePartout());
+    connect(passe_partout, &QAction::toggled, this,
+            [this](bool shown) { canvas_->setPassePartout(shown); });
 
     QToolBar* tools = addToolBar(QStringLiteral("Tools"));
     tools->setMovable(false);
@@ -564,12 +598,14 @@ void MainWindow::buildLayerPanel() {
 void MainWindow::buildTimelinePanel() {
     auto* dock = new QDockWidget(QStringLiteral("Timeline"), this);
     dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    timeline_dock_ = dock;
 
     auto* panel = new QWidget(dock);
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(4, 4, 4, 4);
 
     auto* controls = new QWidget(panel);
+    timeline_controls_ = controls;
     auto* row = new QHBoxLayout(controls);
     row->setContentsMargins(0, 0, 0, 0);
 
@@ -628,17 +664,25 @@ void MainWindow::buildTimelinePanel() {
             &MainWindow::onSlotChanged);
     connect(timeline_widget_, &TimelineWidget::documentChanged, this,
             &MainWindow::refreshEverything);
+    // Clicking a row is the other way the current track changes, and it has to
+    // reach the canvas and the layer panel exactly as the menu does.
+    connect(timeline_widget_, &TimelineWidget::trackChanged, this,
+            &MainWindow::setCurrentTrack);
 
-    auto* scroll = new QScrollArea(panel);
-    scroll->setWidget(timeline_widget_);
-    scroll->setWidgetResizable(true);
-    scroll->setFixedHeight(96);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    layout->addWidget(scroll);
+    timeline_scroll_ = new QScrollArea(panel);
+    timeline_scroll_->setWidget(timeline_widget_);
+    timeline_scroll_->setWidgetResizable(true);
+    timeline_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    timeline_scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // A floor low enough to drag the panel down to a single row, and no ceiling
+    // at all: how tall the timeline should be is the animator's business, and
+    // the track count only chooses where it starts. See syncTimelineHeight.
+    timeline_scroll_->setMinimumHeight(kRulerAndRows / 2);
+    layout->addWidget(timeline_scroll_);
 
     dock->setWidget(panel);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
+    syncTimelineHeight();
 }
 
 // --- files ---------------------------------------------------------------
@@ -749,6 +793,7 @@ void MainWindow::afterProjectLoaded() {
     if (track && !track->layers.empty()) canvas_->setActiveLayer(track->layers.front().id);
 
     rebuildLayerList();
+    syncTrackMenu();
     timeline_widget_->refresh();
     canvas_->refreshAll();
     canvas_->fitToCanvas();
@@ -1083,11 +1128,17 @@ void MainWindow::syncStatus() {
     const QString colouring =
         canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
 
+    // The frame count is the scene's and the rest is the current track's, which
+    // is the distinction the whole panel now rests on: one timeline, several
+    // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
+    // ran to 40 would be the timeline lying about its own length.
     status_->setText(
-        QStringLiteral("frame %1 / %2   held %3   drawings %4   layers %5   zoom %6%   "
-                       "tiles %7   undo %8   %9 fps%10")
+        QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
+                       "tiles %9   undo %10   %11 fps%12")
             .arg(slot + 1)
-            .arg(track->frameCount())
+            .arg(doc_.scene().frameCount())
+            .arg(QString::fromStdString(track->name))
+            .arg(track->overwrite_drawings ? QStringLiteral(" (overwrite)") : QString())
             .arg(track->exposureOf(image))
             .arg(track->images.size())
             .arg(track->layers.size())
@@ -1098,11 +1149,191 @@ void MainWindow::syncStatus() {
             .arg(colouring));
 }
 
+// The timeline dock follows the number of tracks, up to a point.
+//
+// A fixed height was right while there was exactly one row and hid the second
+// the moment there were two -- with a scrollbar as the only sign, which reads
+// as a panel that is merely scrolled rather than one that is too small. Past
+// four rows it stops growing, because the dock is taking height from the canvas
+// and the canvas is what the shot is drawn on.
+//
+// Asked for rather than constrained, and that distinction is the whole of why
+// this was wrong twice. Pinning the minimum and the maximum to the wanted height
+// does make the dock the right size, and it also welds it there: the dock cannot
+// then be dragged smaller than whatever the track count last asked for, and Qt
+// will not shrink a dock just because the widget inside it wants less. So the
+// scroll area keeps a small floor and no ceiling -- drag it wherever you like,
+// either way -- and the height is *requested* through resizeDocks when the
+// number of rows changes.
+void MainWindow::syncTimelineHeight() {
+    if (!timeline_scroll_ || !timeline_widget_ || !timeline_dock_) return;
+
+    const int rows = std::min(static_cast<int>(std::max<std::size_t>(doc_.scene().tracks.size(),
+                                                                     1)),
+                              kMaxDockRows);
+    const int was = timeline_rows_shown_;
+    if (rows == was) return;  // nothing about the height has changed
+
+    timeline_rows_shown_ = rows;
+
+    // Moved by a *difference*, and the difference is exactly the rows that came
+    // or went: a row is kRowHeight and everything wrapped round the strip --
+    // the scroll area's frame, the horizontal scrollbar, the buttons above it,
+    // the dock's own title bar -- costs the same whatever the row count is. So
+    // "be one row taller than you are" needs to measure none of it.
+    //
+    // Two versions of this measured instead and both were wrong. Adding the
+    // wrapping up forgot a different piece each time and put the bottom row
+    // under it. Reading the strip's own height is worse and looks better: with
+    // a resizable scroll area the widget is stretched to the viewport, so its
+    // height is the space available and never the space wanted, and comparing
+    // the two says "no growth needed" every time.
+    //
+    // The first call has nothing to take a difference from, and needs none: the
+    // panel's own sizeHint is the right height for one row, which is what the
+    // dock starts at anyway.
+    if (was == 0) return;
+    resizeDocks({timeline_dock_}, {timeline_dock_->height() + (rows - was) * kRowHeight},
+                Qt::Vertical);
+}
+
 void MainWindow::refreshEverything() {
+    syncTimelineHeight();
     timeline_widget_->refresh();
     canvas_->setFrame(timeline_widget_->currentSlot());
     rebuildLayerList();
     syncStatus();
+}
+
+// --- tracks --------------------------------------------------------------
+
+// The one place the current track changes. Everything downstream holds a track
+// id -- the canvas composites all of them but draws into this one, the layer
+// panel lists this one's layers, and every timing button acts on it -- so they
+// are all rebound here rather than at each call site.
+void MainWindow::setCurrentTrack(TrackId track) {
+    if (track == kNoId || track == track_) {
+        syncTrackMenu();
+        return;
+    }
+    stopPlayback();
+    track_ = track;
+
+    canvas_->setTrack(track_);
+    timeline_widget_->setTrack(track_);
+
+    // The active layer belonged to the track we have just left, and a layer id
+    // from another track is not a layer this one has.
+    const Track* now = doc_.scene().findTrack(track_);
+    canvas_->setActiveLayer((now && !now->layers.empty()) ? now->layers.front().id : kNoId);
+
+    rebuildLayerList();
+    syncTrackMenu();
+    // The dock is sized by how many tracks there are, and a track appearing or
+    // going is exactly when that changes. Cheap to ask twice -- it returns at
+    // once when the row count is what it already was -- and the alternative is
+    // remembering to ask on every path that adds or removes one.
+    syncTimelineHeight();
+    canvas_->refreshAll();
+    syncStatus();
+}
+
+// New tracks go under the ones already there. Index 0 composites on top, so
+// adding at the bottom leaves what you can already see where it was -- a new
+// track arriving in front of the drawing you are working on would be a surprise
+// every time, and moving it back is not something the interface offers yet.
+void MainWindow::addTrack() {
+    stopPlayback();
+    const std::string name = "track " + std::to_string(doc_.scene().tracks.size() + 1);
+
+    doc_.beginCommand("Add track");
+    const TrackId added = doc_.addTrack(name);
+    doc_.addLayer(added, "layer 1");
+    // One drawing, so the track has somewhere to draw from the moment it exists.
+    // Without it the new track is a row of nothing and the brush does nothing,
+    // with no way to tell that from a bug.
+    doc_.insertImage(added, 0);
+    doc_.endCommand();
+
+    setCurrentTrack(added);
+    refreshEverything();
+}
+
+void MainWindow::renameTrack() {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
+
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Rename track"), QStringLiteral("Name"), QLineEdit::Normal,
+        QString::fromStdString(track->name), &accepted);
+    if (!accepted) return;
+
+    const QString trimmed = name.trimmed();
+    // A track with no name has no row label and no prefix on its exported
+    // files, so the old one is kept rather than accepting the emptiness.
+    if (trimmed.isEmpty()) return;
+
+    TrackProperties props = track->properties();
+    props.name = trimmed.toStdString();
+    doc_.updateTrack(track_, props);
+    refreshEverything();
+}
+
+void MainWindow::removeCurrentTrack() {
+    if (doc_.scene().tracks.size() <= 1) {
+        // The same rule as the last drawing: leave something to draw on.
+        QMessageBox::information(this, QStringLiteral("Cannot delete that track"),
+                                 QStringLiteral("A scene needs at least one track."));
+        return;
+    }
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
+
+    if (QMessageBox::question(
+            this, QStringLiteral("Delete this track?"),
+            QStringLiteral("\"%1\" and every drawing on it will go. This can be undone.")
+                .arg(QString::fromStdString(track->name)),
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel) != QMessageBox::Yes) {
+        return;
+    }
+
+    stopPlayback();
+    const std::size_t index = static_cast<std::size_t>(
+        std::distance(doc_.scene().tracks.data(), track));
+    doc_.removeTrack(track_);
+
+    // Whichever track took its place in the stack, or the last one if it was
+    // the bottom: leaving the current track dangling would point the canvas and
+    // the layer panel at a track that no longer exists.
+    const std::vector<Track>& left = doc_.scene().tracks;
+    track_ = kNoId;
+    setCurrentTrack(left[std::min(index, left.size() - 1)].id);
+    refreshEverything();
+}
+
+void MainWindow::setOverwriteDrawings(bool overwrite) {
+    if (updating_track_menu_) return;  // the menu being told, not the user asking
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->overwrite_drawings == overwrite) return;
+
+    TrackProperties props = track->properties();
+    props.overwrite_drawings = overwrite;
+    doc_.updateTrack(track_, props);
+    // The timeline draws the setting on the row, and a drag behaves differently
+    // under it, so the row has to be redrawn as well as the menu ticked.
+    timeline_widget_->refresh();
+    syncStatus();
+}
+
+void MainWindow::syncTrackMenu() {
+    if (!overwrite_action_) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    updating_track_menu_ = true;
+    overwrite_action_->setEnabled(track != nullptr);
+    overwrite_action_->setChecked(track && track->overwrite_drawings);
+    updating_track_menu_ = false;
 }
 
 // --- time ----------------------------------------------------------------
@@ -1117,11 +1348,12 @@ void MainWindow::onSlotChanged(std::size_t slot) {
     syncStatus();
 }
 
+// Over the scene and not over one track: the playhead is the timeline's, so
+// stepping walks the whole shot however long the track being edited is.
 void MainWindow::stepFrame(int delta) {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.empty()) return;
+    const int count = static_cast<int>(doc_.scene().frameCount());
+    if (count <= 0) return;
 
-    const int count = static_cast<int>(track->slots.size());
     int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;
     next = ((next % count) + count) % count;  // wrap, so scrubbing loops
     timeline_widget_->setCurrentSlot(static_cast<std::size_t>(next));
@@ -1143,32 +1375,31 @@ void MainWindow::stepDrawing(int direction) {
         static_cast<std::size_t>(std::distance(track->slots.begin(), it)));
 }
 
-// After a drawing means after the whole hold. Landing a new drawing in the
-// middle of a ten-frame hold splits it in two, which is never what was meant.
-std::size_t MainWindow::slotAfterCurrentDrawing() const {
+// Where a new drawing goes is the track's decision, not this window's: with
+// "overwrite drawings" on it lands on the playhead and spends the rest of the
+// hold, and without it it goes in after the whole hold and the shot gets a frame
+// longer. Both live in Document::addDrawing, so the two buttons here do the same
+// thing whichever the track is set to -- and neither has to know which.
+void MainWindow::goToNewDrawing(ImageId made) {
+    timeline_widget_->refresh();
     const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.empty()) return 0;
-    return track->runBounds(timeline_widget_->currentSlot()).second + 1;
+    if (track && made != kNoId) {
+        // Asked rather than assumed. Under overwrite the drawing does not land
+        // where the playhead was, and it does not land after the hold either.
+        const std::size_t at = track->firstSlotOf(made);
+        if (at < track->slots.size()) timeline_widget_->setCurrentSlot(at);
+    }
+    refreshEverything();
 }
 
 void MainWindow::insertInterval() {
     stopPlayback();
-    const std::size_t at = slotAfterCurrentDrawing();
-    doc_.insertImage(track_, at);
-    timeline_widget_->refresh();
-    timeline_widget_->setCurrentSlot(at);
-    refreshEverything();
+    goToNewDrawing(doc_.addDrawing(track_, timeline_widget_->currentSlot()));
 }
 
 void MainWindow::duplicateDrawing() {
     stopPlayback();
-    const std::size_t at = slotAfterCurrentDrawing();
-    // duplicateImage inserts just after the slot it is given, so hand it the
-    // last frame of the hold.
-    doc_.duplicateImage(track_, at > 0 ? at - 1 : 0);
-    timeline_widget_->refresh();
-    timeline_widget_->setCurrentSlot(at);
-    refreshEverything();
+    goToNewDrawing(doc_.duplicateDrawing(track_, timeline_widget_->currentSlot()));
 }
 
 // Deletes the drawing and every frame it is held on. Shortening a hold is a
@@ -1260,8 +1491,7 @@ void MainWindow::togglePlayback() {
         return;
     }
 
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.size() < 2) return;
+    if (doc_.scene().frameCount() < 2) return;
 
     playback_start_slot_ = timeline_widget_->currentSlot();
     playback_clock_.start();
@@ -1286,8 +1516,12 @@ void MainWindow::stopPlayback() {
 // must not make the whole take run slow, which is exactly the thing playback
 // exists to let you judge.
 void MainWindow::onPlaybackTick() {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.empty()) {
+    // The whole shot, which is the longest track: playing only as far as the
+    // track being edited would cut the take short whenever a background ran
+    // longer than the character on it. What a shorter track shows out there is
+    // Track::imageAtSlot's answer -- nothing, today.
+    const std::size_t count = doc_.scene().frameCount();
+    if (count == 0) {
         stopPlayback();
         return;
     }
@@ -1295,7 +1529,6 @@ void MainWindow::onPlaybackTick() {
     const int fps = std::max(1, doc_.scene().framerate);
     const qint64 elapsed = playback_clock_.elapsed();
     const qint64 advanced = elapsed * fps / 1000;
-    const std::size_t count = track->slots.size();
     const std::size_t slot =
         (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
 

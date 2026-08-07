@@ -381,22 +381,16 @@ void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_
     compositeLayers(doc, track_id, image_id, layers, region, out, step);
 }
 
-void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId image_id,
-                                 const std::vector<LayerId>& layers, const PixelRect& region,
-                                 Framebuffer& out, SampleStep step) const {
+// Resolving layer ids to pixels and properties. The only part of compositing
+// that reads the document at all, which is what makes everything below it
+// usable from a thread that must not.
+static void collectPasses(const Document& doc, TrackId track_id, ImageId image_id,
+                          const std::vector<LayerId>& layers, std::vector<LayerPass>& passes) {
     const Track* track = doc.scene().findTrack(track_id);
     const Image* image = track ? track->findImage(image_id) : nullptr;
-    if (!image) {
-        out.resize(step.entriesAcross(region.x, region.width),
-                   step.entriesAcross(region.y, region.height));
-        out.clear();
-        return;
-    }
+    if (!image) return;
 
-    // Resolved once, before any threads start, and this is the only part that
-    // reads the document at all.
-    std::vector<LayerPass> passes;
-    passes.reserve(layers.size());
+    passes.reserve(passes.size() + layers.size());
     for (auto it = layers.begin(); it != layers.end(); ++it) {
         const Layer* layer = track->findLayer(*it);
         if (!layer || !layer->visible) continue;
@@ -440,6 +434,35 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
         const Cel* cel = doc.cel(image->celFor(*it));
         if (!cel) continue;  // no cel means the layer is empty here
         passes.push_back({&cel->tiles(), layer});
+    }
+}
+
+void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId image_id,
+                                 const std::vector<LayerId>& layers, const PixelRect& region,
+                                 Framebuffer& out, SampleStep step) const {
+    std::vector<LayerPass> passes;
+    collectPasses(doc, track_id, image_id, layers, passes);
+
+    // An image that is not there is an empty picture and not a missing one, and
+    // compositeGrids says so by clearing -- but it has to be told the size, and
+    // an early return here would leave the caller's buffer as it found it.
+    compositeGrids(passes, region, out, step);
+}
+
+void Compositor::compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
+                                Framebuffer& out, SampleStep step) const {
+    std::vector<LayerPass> passes;
+
+    // Topmost first, which is the order compositeGrids wants and the order the
+    // tracks are already in: index 0 composites on top.
+    for (const Track& track : doc.scene().tracks) {
+        const ImageId image = track.imageAtSlot(slot);
+        if (image == kNoId) continue;
+
+        std::vector<LayerId> layers;
+        layers.reserve(track.layers.size());
+        for (const Layer& layer : track.layers) layers.push_back(layer.id);
+        collectPasses(doc, track.id, image, layers, passes);
     }
 
     compositeGrids(passes, region, out, step);

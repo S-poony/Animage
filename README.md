@@ -13,8 +13,10 @@ belong in separate tracks.
 
 A **track** is one stack of layers with its own time. The **timeline** is the
 scene's shared time axis and the panel that shows it: a scene has several tracks
-and one timeline. (Only one track exists so far — see
-[docs/handover.md](docs/handover.md).)
+and one timeline. The timeline shows one row per track under a single playhead,
+tracks stack as flat groups with track 1 on top, and the canvas shows all of
+them while you draw on one. Tracks need not be the same length; a track shows
+nothing past its last drawing.
 
 **A colour layer stores scribbles, not pixels.** The CTG layer is an
 implementation of LazyBrush (Sýkora et al., Eurographics 2009): you scrawl a
@@ -159,6 +161,27 @@ In the timeline: drag the ruler to scrub, drag the right edge of a card to
 change how long the drawing is held, and drag the body of a numbered card to
 reorder it. Held frames carry no number and cannot be picked up -- they are the
 same drawing still showing, not a thing of their own, and they travel with it.
+
+**Tracks.** One row each, under one ruler and one playhead. Click a row to work
+on that track: the layer panel, the brush and every timing button follow it,
+while the canvas goes on showing all of them. The Track menu adds, renames and
+deletes them; a new track arrives at the bottom of the stack, with a layer and a
+drawing so there is something to draw on. Rows can be different lengths, and a
+track that has run out shows nothing rather than holding its last drawing --
+what it *should* do out there is
+[issue #20](https://github.com/S-poony/Animage/issues/20).
+
+**Overwrite drawings**, in the Track menu, is per track and on by default. On,
+the shot is a fixed length and a new drawing lands on the playhead and takes over
+the rest of the hold it lands in: a drawing held 11 frames with the playhead on
+frame 4 keeps 3, and the new one takes the other 8. Off, adding a drawing puts it
+in after the whole hold and the shot gets a frame longer. Duplicating
+does the same, and so does dragging a card -- it takes over the rest of the hold
+it is dropped on, and the frames it left are absorbed by the drawing beside them,
+so the length never changes. It never takes a drawing's last frame, so nothing is
+wiped out by putting something down: standing on the first frame of a hold the
+new drawing starts one frame later, and a hold of one frame has nothing to spare
+at all, so there the track goes back to getting longer.
 
 **Colour layers.** "Add colour layer" makes a layer that holds scribbles rather
 than colour, at the bottom of the pile — it is cut against the line art and

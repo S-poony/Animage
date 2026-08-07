@@ -156,6 +156,22 @@ public:
                          const std::vector<LayerId>& layers, const PixelRect& region,
                          Framebuffer& out, SampleStep step = {}) const;
 
+    // The whole picture at one frame of the timeline: every track, stacked.
+    //
+    // Tracks stack as flat groups -- every layer of track 0 over every layer of
+    // track 1 -- so this is one list of layers composited once, and not several
+    // tracks composited apart and then blended. That is not only cheaper, it is
+    // the definition: a group that could be blended separately would need an
+    // opacity of its own applied to it, and track opacity is stored and not yet
+    // applied. If it ever is, this is the function that stops being a flat list.
+    //
+    // Which drawing each track shows at `slot` is Track::imageAtSlot's answer
+    // and nobody else's -- tracks are not all the same length, and what a track
+    // does past its end is a decision that lives there. A track showing nothing
+    // contributes nothing rather than clearing what is under it.
+    void compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
+                        Framebuffer& out, SampleStep step = {}) const;
+
     // The same again with the layers already resolved to pixels, topmost first,
     // and every one of them drawn -- visibility, CTG fills and absent cels have
     // all been decided by whoever built the list. This is the whole of the

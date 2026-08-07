@@ -38,6 +38,16 @@ Document buildScene() {
     settings.show_scribbles = true;
     doc.updateLayer(front, colour, settings);
 
+    // The group-level properties, all four away from their defaults, because a
+    // field that is only ever written at its default round-trips whatever the
+    // reader does with it.
+    TrackProperties group = doc.scene().findTrack(back)->properties();
+    group.opacity = 0.35f;
+    group.blend = BlendMode::Multiply;
+    group.time_offset = -3;
+    group.overwrite_drawings = false;
+    doc.updateTrack(back, group);
+
     const ImageId first = doc.insertImage(front, 0);
     doc.extendExposure(front, 0, 2);  // held over three slots
     doc.insertImage(front, 3);
@@ -65,6 +75,10 @@ void checkSameScene(const Document& a, const Document& b) {
         const Track& tb = b.scene().tracks[t];
         CHECK_EQ(ta.id, tb.id);
         CHECK_EQ(ta.name, tb.name);
+        CHECK_NEAR(ta.opacity, tb.opacity, 0.0001);
+        CHECK_EQ(static_cast<int>(ta.blend), static_cast<int>(tb.blend));
+        CHECK_EQ(ta.time_offset, tb.time_offset);
+        CHECK_EQ(ta.overwrite_drawings, tb.overwrite_drawings);
         CHECK_EQ(ta.next_drawing_number, tb.next_drawing_number);
         CHECK_EQ(ta.slots.size(), tb.slots.size());
         for (std::size_t i = 0; i < ta.slots.size(); ++i) CHECK_EQ(ta.slots[i], tb.slots[i]);

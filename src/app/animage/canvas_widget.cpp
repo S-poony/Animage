@@ -162,12 +162,16 @@ void CanvasWidget::setTrack(TrackId track) {
 }
 
 void CanvasWidget::setFrame(std::size_t slot) {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track) return;
+    // Clamped to the scene and not to the current track: the timeline is shared,
+    // so frame 40 is a real frame of the shot even when the track being edited
+    // stops at 12. Standing there simply means this track has no drawing, which
+    // the rest of this handles -- the canvas still shows whatever the other
+    // tracks have, and there is nothing here to draw on until one is added.
+    const std::size_t frames = doc_.scene().frameCount();
+    slot_ = (frames == 0) ? 0 : std::min(slot, frames - 1);
 
-    slot_ = std::min(slot, track->slots.empty() ? std::size_t{0}
-                                                   : track->slots.size() - 1);
-    const ImageId next = track->imageAtSlot(slot_);
+    const Track* track = doc_.scene().findTrack(track_);
+    const ImageId next = track ? track->imageAtSlot(slot_) : kNoId;
     const bool changed = next != image_;
     image_ = next;
 
@@ -198,6 +202,14 @@ void CanvasWidget::setBackground(Background background) {
     refreshAll();
 }
 
+// A repaint and not a refresh: the veil is painted over the blit, so nothing
+// composited changes and the cache stays good.
+void CanvasWidget::setPassePartout(bool shown) {
+    if (passe_partout_ == shown) return;
+    passe_partout_ = shown;
+    update();
+}
+
 void CanvasWidget::setOnion(const OnionSettings& settings) {
     onion_settings_ = settings;
     onion_dirty_ = true;
@@ -226,10 +238,11 @@ void CanvasWidget::setPlaying(bool playing) {
 // second, and the solver's rule is that the newest question wins -- so without
 // it, every paint would call off the answer the last paint was waiting for and
 // no fill would ever be finished.
+// Every track and not only the one being edited, because every track is on
+// screen: a colour layer whose fill was never asked for simply does not draw,
+// so a background track would have arrived coloured and gone blank the moment
+// the character track was selected.
 void CanvasWidget::requestCtgFills() {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || image_ == kNoId) return;
-
     // Never during a stroke, whichever layer is being drawn on. Every dab bumps
     // the cel's revision, so asking whenever a fill looked stale would start a
     // solve per dab -- and each one would supersede the last, so the pen would
@@ -241,17 +254,22 @@ void CanvasWidget::requestCtgFills() {
     // trap either way: the solve belongs at the end of the stroke.
     if (stroking_) return;
 
-    dropStaleColourRequests(/*only_this_drawing=*/true);
+    dropStaleColourRequests(/*only_this_frame=*/true);
 
     const std::uint64_t generation = doc_.ctgCache().generation();
     const CtgSettings settings;
-    for (const Layer& layer : track->layers) {
+    for (const Track& track_here : doc_.scene().tracks) {
+      const TrackId track_id = track_here.id;
+      const ImageId image = track_here.imageAtSlot(slot_);
+      if (image == kNoId) continue;
+
+      for (const Layer& layer : track_here.layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
         // Nothing to solve for a layer showing its scribbles: the fill would be
         // computed and then not drawn.
         if (layer.show_scribbles) continue;
 
-        const CtgInputs wanted = ctgInputsFor(doc_, track_, image_, layer.id, settings);
+        const CtgInputs wanted = ctgInputsFor(doc_, track_id, image, layer.id, settings);
         if (!wanted.valid) continue;
 
         // Coarse first, then as fine as the drawing deserves. The first answer
@@ -264,7 +282,7 @@ void CanvasWidget::requestCtgFills() {
         // already had the largest allowance there is. Without the second half a
         // drawing too large for even the full budget would be re-solved for
         // ever, arriving at the same coarse answer every time.
-        const CtgFill* held = doc_.ctgFillFor(track_, image_, layer.id);
+        const CtgFill* held = doc_.ctgFillFor(track_id, image, layer.id);
         const bool current = held && held->valid && held->inputs == wanted.hash;
         if (current && (held->step <= std::max(1, settings.downscale) ||
                         held->budget >= kFullSolveBudget)) {
@@ -272,15 +290,16 @@ void CanvasWidget::requestCtgFills() {
         }
         const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
 
-        const ColourAsked asked{image_, layer.id, true};
+        const ColourAsked asked{image, layer.id, true};
         const auto already = ctg_asked_.find(asked);
         if (already != ctg_asked_.end() && already->second.inputs == wanted.hash) {
             continue;  // already being worked out
         }
 
         ctg_asked_[asked] = {wanted.hash, generation};
-        ctg_solver_.request({image_, layer.id},
-                            ctgJobFor(doc_, track_, image_, layer.id, settings, budget), true);
+        ctg_solver_.request({image, layer.id},
+                            ctgJobFor(doc_, track_id, image, layer.id, settings, budget), true);
+      }
     }
 
     noteColourPending();
@@ -304,19 +323,30 @@ void CanvasWidget::noteColourPending() {
     Q_EMIT colourChanged();
 }
 
+// Whether any track shows this drawing at the frame the playhead is on. "The
+// drawing on screen" is no longer one drawing: several tracks are composited
+// and each has its own, so leaving a frame means leaving all of them.
+bool CanvasWidget::isShownNow(ImageId image) const {
+    if (image == kNoId) return false;
+    for (const Track& track : doc_.scene().tracks) {
+        if (track.imageAtSlot(slot_) == image) return true;
+    }
+    return false;
+}
+
 // Requests whose answer nobody is waiting for any more.
 //
-// A fill for a drawing that has been left, or -- fill or judgement, on screen
+// A fill for a frame that has been left, or -- fill or judgement, on screen
 // or not -- one about a document that has since been thrown away. Playing a
 // coloured shot is twenty-four of the first a second against solves taking a
 // tenth of one, and a queue that fills faster than it drains never catches up.
 //
 // Judgements are not dropped for being about another drawing: being about the
 // drawings you are not looking at is the whole of what they are for.
-void CanvasWidget::dropStaleColourRequests(bool only_this_drawing) {
+void CanvasWidget::dropStaleColourRequests(bool only_this_frame) {
     const std::uint64_t generation = doc_.ctgCache().generation();
     for (auto it = ctg_asked_.begin(); it != ctg_asked_.end();) {
-        const bool left = only_this_drawing && it->first.tiles && it->first.image != image_;
+        const bool left = only_this_frame && it->first.tiles && !isShownNow(it->first.image);
         if (!left && it->second.generation == generation) {
             ++it;
             continue;
@@ -334,7 +364,7 @@ void CanvasWidget::dropStaleColourRequests(bool only_this_drawing) {
 // to the document stays on the thread that owns it.
 void CanvasWidget::collectColour() {
     bool filled = false;
-    dropStaleColourRequests(/*only_this_drawing=*/false);
+    dropStaleColourRequests(/*only_this_frame=*/false);
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
         const ColourAsked key{result.key.image, result.key.layer, result.wanted_tiles};
@@ -573,7 +603,10 @@ void CanvasWidget::markDirty(const PixelRect& region) {
 // Composites `region` and writes it into the cached sRGB image. This is the
 // only place the linear working space becomes display pixels.
 void CanvasWidget::refreshRegion(const PixelRect& region) {
-    if (display_.isNull() || track_ == kNoId || image_ == kNoId) return;
+    // No test for a current drawing any more: what is composited is the whole
+    // scene at this frame, so the track being edited having nothing here says
+    // nothing about whether there is a picture to draw.
+    if (display_.isNull()) return;
 
     PixelRect area = intersect(region, cached_region_);
     if (area.isEmpty()) return;
@@ -586,7 +619,7 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     area = intersect(snapToSampleGrid(cache_step_, area), cached_region_);
     if (area.isEmpty()) return;
 
-    compositor_.composite(doc_, track_, image_, area, scratch_, cache_step_);
+    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_);
 
     // Where this patch of entries sits in the cache.
     const long long first_column = cache_step_.entryAt(area.x);
@@ -758,13 +791,17 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 }
 
 // The canvas: the rectangle that will be exported, outlined, with everything
-// outside it veiled.
+// outside it veiled unless the veil has been turned off.
 //
 // Drawing outside stays allowed and is not discouraged -- roughs run off the
 // edge, and a surface with no edges is the point of the tile model. But the
 // picture has a boundary, and until it was drawn there was no way to know where
 // it was: the only rectangle on screen was the region a colour fill happened to
 // solve, which looked like a canvas and was not one.
+//
+// Which is why the outline is drawn whether or not the veil is. Hiding the veil
+// is about seeing what runs off the edge at full strength, not about forgetting
+// where the edge is.
 void CanvasWidget::drawCanvasFrame(QPainter& painter) {
     const PixelRect canvas = doc_.scene().canvas();
     if (canvas.isEmpty()) return;
@@ -776,15 +813,17 @@ void CanvasWidget::drawCanvasFrame(QPainter& painter) {
                          static_cast<double>(canvas.y + canvas.height)});
     const QRectF frame(top_left, bottom_right);
 
-    // Odd-even filling, so the inner rectangle punches a hole in the outer one
-    // and the veil covers everything except the picture.
-    QPainterPath outside;
-    outside.addRect(QRectF(rect()));
-    outside.addRect(frame);
-
     painter.save();
-    painter.setPen(Qt::NoPen);
-    painter.fillPath(outside, QColor(28, 28, 32, 150));
+    if (passe_partout_) {
+        // Odd-even filling, so the inner rectangle punches a hole in the outer
+        // one and the veil covers everything except the picture.
+        QPainterPath outside;
+        outside.addRect(QRectF(rect()));
+        outside.addRect(frame);
+
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(outside, QColor(28, 28, 32, 150));
+    }
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QColor(150, 150, 160), 1.0));
     painter.drawRect(frame);
@@ -810,13 +849,13 @@ void CanvasWidget::drawCanvasFrame(QPainter& painter) {
 //
 // The paper is not part of the drawing, so an empty pixel has nothing to pick
 // and the brush is left alone rather than being set to white.
+// Every track, because picking has to answer for the pixel you pointed at and
+// the pixel you pointed at may belong to a track you are not editing.
 bool CanvasWidget::pickColourAt(const QPointF& image_point) {
-    if (track_ == kNoId || image_ == kNoId) return false;
-
     const PixelRect one{static_cast<int>(std::floor(image_point.x())),
                         static_cast<int>(std::floor(image_point.y())), 1, 1};
     Framebuffer sample;
-    compositor_.composite(doc_, track_, image_, one, sample);
+    compositor_.compositeScene(doc_, slot_, one, sample);
     if (sample.isEmpty()) return false;
 
     // A CTG layer contributes the fill it last generated, which is what is on

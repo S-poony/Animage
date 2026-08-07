@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -10,6 +11,40 @@
 #include "layer.h"
 
 namespace animage {
+
+// A track's group-level properties: everything about a track that is not its
+// layers, its slots or its images. Those three have operations of their own
+// because they are large and change one at a time; these are small, they are
+// edited together in one panel, and one operation swapping the lot of them is
+// both cheaper and easier to reason about than five.
+struct TrackProperties {
+    std::string name;
+    float opacity = 1.0f;
+    BlendMode blend = BlendMode::Normal;
+    int time_offset = 0;
+
+    // Whether a new drawing lands *on* the playhead and takes over the rest of
+    // the hold it lands in, rather than going in after the hold and making the
+    // track a frame longer.
+    //
+    // Off, adding a drawing lengthens the shot. On, the shot is a fixed length
+    // and adding a drawing spends frames that were already there: the drawing
+    // you are standing on keeps the frames before the playhead and the new one
+    // takes the rest. Which of those is right is a question about the shot --
+    // animating to a soundtrack means the length is decided and holds are what
+    // you have to spend -- so it is a setting on the track and not a mode of
+    // the program.
+    //
+    // On by default, because spending a hold is the ordinary case: you block a
+    // shot out in holds and then break them down, and a default that lengthens
+    // the shot on every breakdown means retiming it by hand afterwards.
+    //
+    // It never takes a drawing's last frame. Standing on the first frame of a
+    // hold, the new drawing starts one frame later, and a hold of one frame has
+    // nothing to spare at all so the insert falls back to lengthening the
+    // track. See Track::overwriteRangeAt.
+    bool overwrite_drawings = true;
+};
 
 // Layers are shared by every image in the track; `slots` is time. Exposure
 // is the same ImageId appearing in several consecutive slots, so nothing in
@@ -22,11 +57,26 @@ struct Track {
     std::vector<ImageId> slots;
     std::unordered_map<ImageId, Image> images;
 
-    // Group-level properties. Not exposed in the prototype UI, but the format
-    // needs them: without a track opacity you cannot fade out a character.
+    // Group-level properties. Opacity, blend and the time offset are stored and
+    // not yet applied -- the format needs them, because without a track opacity
+    // you cannot fade out a character, and three layers at half opacity is a
+    // different picture from three layers faded as a group wherever two of them
+    // overlap.
     float opacity = 1.0f;
     BlendMode blend = BlendMode::Normal;
     int time_offset = 0;
+    bool overwrite_drawings = true;
+
+    TrackProperties properties() const {
+        return {name, opacity, blend, time_offset, overwrite_drawings};
+    }
+    void setProperties(const TrackProperties& p) {
+        name = p.name;
+        opacity = p.opacity;
+        blend = p.blend;
+        time_offset = p.time_offset;
+        overwrite_drawings = p.overwrite_drawings;
+    }
 
     // Counts up and is never reused, for the same reason CelIds are not: a
     // number that comes back means two drawings in one scene answer to it.
@@ -54,6 +104,16 @@ struct Track {
         return (it == images.end()) ? nullptr : &it->second;
     }
 
+    // What this track shows at one frame of the scene's timeline. Every surface
+    // that draws a track -- the canvas, the timeline, the export -- asks this
+    // and nothing else, which matters because tracks are not all the same
+    // length: past its last slot a track currently shows nothing at all.
+    //
+    // That is a policy and not a fact, and it is the only one on offer. Issue
+    // #20 wants it per track -- show nothing, hold the last drawing, or cycle --
+    // and this function is where that choice would be read, because it is the
+    // one place that knows a frame is past the end. Nothing else may compare a
+    // slot against `slots.size()` and decide for itself.
     ImageId imageAtSlot(std::size_t slot) const {
         return (slot < slots.size()) ? slots[slot] : kNoId;
     }
@@ -78,6 +138,24 @@ struct Track {
         std::size_t last = slot;
         while (last + 1 < slots.size() && slots[last + 1] == id) ++last;
         return {first, last};
+    }
+
+    // The slots a drawing put down at `slot` would take over on a track that
+    // overwrites, or nothing at all when there is no room for one.
+    //
+    // The rest of the hold from the playhead onwards, with one exception: never
+    // the first frame of that hold. Standing on it, the new drawing starts one
+    // frame later, so the drawing you are standing on always keeps a frame and
+    // no drawing is ever wiped out by putting another one down. A hold of one
+    // frame therefore has no room at all, and that is what nothing means --
+    // whoever asked has to decide what to do instead, because the alternatives
+    // differ: an insert lengthens the track and a move goes back to reordering.
+    std::optional<std::pair<std::size_t, std::size_t>> overwriteRangeAt(std::size_t slot) const {
+        if (slot >= slots.size()) return std::nullopt;
+        const auto [first, last] = runBounds(slot);
+        const std::size_t start = std::max(slot, first + 1);
+        if (start > last) return std::nullopt;
+        return std::make_pair(start, last);
     }
 
     // Distinct ImageIds walking outwards from `slot`, nearest first. An image

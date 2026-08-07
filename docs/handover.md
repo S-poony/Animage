@@ -21,6 +21,7 @@ did not before — and now survives not thinking about it at all.
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
 | M4 | LazyBrush solver and the CTG layer, in the app and usable. Solved on a worker thread. |
 | M5 | Save, open, Save As, autosave, New, and export as 16-bit PNG or half EXR. |
+| — | Several tracks in the interface, and an "overwrite drawings" setting per track. |
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
 All of it lives in the application now, in one place — `ProjectIO`, which is
@@ -304,6 +305,141 @@ coordinates signed, so the drawing surface has no edges at all, which is
 deliberate and stays true. Drawing outside the canvas is still allowed; what is
 out there simply is not in the picture, which is why a colour fill stops at the
 frame.
+
+## Several tracks, and a track that overwrites
+
+Issues #1 and #9, built together because the second needs somewhere to live and
+the first is what gives it one.
+
+**The model and the file always took several tracks; nothing could make a
+second one.** `writeTrack`/`readTrack`, `celsReferencedBy` and the whole export
+already looped over `scene.tracks` — so the round-trip half of #1 was a test to
+write rather than a bug to find, and it passed the first time it ran. That is
+worth saying plainly rather than quietly: the check was the deliverable, and
+`aMultiTrackProjectComesBackWhole` is now what stops it rotting. It builds three
+tracks of deliberately different shapes and puts each drawing's stroke at a
+height no other track uses, so a cel that came back attached to the wrong drawing
+shows up as a pixel in the wrong place and not merely as a missing one.
+
+What was single-track was the interface: `MainWindow::track_`, a canvas that
+composited one track, and a timeline that drew one strip.
+
+**The canvas shows every track and you draw on one.** `Compositor::compositeScene`
+resolves every track's layers into one flat `LayerPass` list and composites it
+once — not several tracks composited apart and blended, which is what the export's
+flattened pass does and what this deliberately does not. Flat is the definition:
+tracks stack as groups, and a group you could blend separately would need its own
+opacity applied to it. `Track::opacity` is stored and still not applied, and if it
+ever is, `compositeScene` is the function that stops being a flat list.
+
+The division that fell out of it is worth keeping: **what follows the picture and
+what follows the track.** Compositing, the eyedropper and which CTG fills get
+solved all follow the picture, because they answer for the pixel you are looking
+at. The brush, the onion skin and "fit to drawing" follow the current track,
+because they are about the drawing in your hand. Getting the colour solves onto
+the first list mattered — a background track's fill is never asked for otherwise,
+so it would have arrived coloured and gone blank the moment you selected the
+character.
+
+That also broke an assumption that was true while there was one track: "the
+drawing on screen" is no longer one drawing. `dropStaleColourRequests` cancelled
+anything whose image was not `image_`, which with several tracks cancels every
+other track's solve on every paint. It asks `isShownNow` now, which is the same
+question against all of them.
+
+**Tracks are not all the same length, and `Track::imageAtSlot` is the only place
+that knows it.** Past its last slot a track shows nothing. That is a policy and
+not a fact — issue #20 wants it per track: show nothing, hold the last drawing,
+or cycle — so everything that draws a track goes through that one function and
+nothing else compares a slot against `slots.size()` and decides for itself. The
+playhead, the timeline's length and playback are all `Scene::frameCount()`, the
+longest track, so a shot does not end where the track you happen to be editing
+does.
+
+**"Overwrite drawings" is a property of the track, so the buttons do not know
+about it.** `Document::addDrawing` and `duplicateDrawing` take the playhead's
+slot and place the drawing the way the track says; `MainWindow` asks
+`firstSlotOf` where it ended up rather than assuming, because under overwrite it
+lands neither where the playhead was nor after the hold.
+
+The rule is `Track::overwriteRangeAt`: the rest of the hold from the playhead
+onwards, **never including the hold's first frame**. That exception is the whole
+design and it was a decision, not an oversight — taking the rest of a hold from
+its first frame takes the entire drawing, and pressing Insert is not a way to
+delete one. It has a consequence that reaches further than it looks:
+
+- A hold of one frame has no room at all. An insert there falls back to
+  lengthening the track and a drop falls back to reordering, because those are
+  the length-preserving things each of them can still do.
+- **Nothing can retire a drawing, so nothing has to tidy one away.** The first
+  version of this carried a `dropUnusedImages` that swept up drawings no slot
+  showed any more. It could never fire: the run being landed in always keeps a
+  frame, and the frames a moved drawing vacates are always taken by a drawing
+  still in the track. It came out, and `overwritingNeverLosesADrawing` pins the
+  property instead — because it is exactly what a later change to the rule would
+  break silently.
+
+**Moving over a hold has two coordinate systems and neither derives from the
+other.** `moveDrawing` takes a position *between* drawings, counted with the
+drawing lifted out; `moveDrawingOver` takes the frame it was dropped *on*. One
+function with two meanings for its argument would have been a bug waiting on
+whichever caller guessed wrong, so there are two, and the widget picks — which it
+must anyway, since the drop caret is a line in one case and a range of cells in
+the other. Vacated frames go to the neighbour before them, or the one after when
+the drawing left the very start.
+
+**The timeline is rows now, one per track, under one ruler and one playhead.**
+Two things about it. The track names are a gutter down the left rather than a
+control on each row, because a widget on a row disables that row's own hit
+testing — the same trap the layer panel already records. And the blue rim marking
+the current frame is drawn on the current track's row only: there is one playhead
+and the ruler says where it is, but the rim means "this is the frame you are
+editing", and on every row it read as four selections the brush was not going to
+touch. Reported on a screenshot, which is the only thing that would have caught
+it.
+
+**Overwrite is on by default**, which was asked for after the first build of it
+and is the right way round: you block a shot out in holds and then break them
+down, so a default that lengthens the shot on every breakdown means retiming it
+by hand afterwards. `readTrack` falls back to *the track default* rather than to
+what the build that wrote the file did, so a project saved before the setting
+existed changes behaviour when it is opened. That is deliberate — a default that
+depended on the age of the file would be an invisible difference between two
+tracks that look identical — and it only touches projects from before the key
+existed, because every file this build writes carries it.
+
+**The timeline dock sizes itself to the number of tracks, and getting that right
+took three goes.** It was a fixed 96 px, which suited exactly one row and hid the
+second behind a scrollbar — and a scrollbar reads as "scrolled", not as "too
+small". Pinning `minimumHeight` and `maximumHeight` to the wanted height fixed
+that and welded the dock shut: it could no longer be dragged below whatever the
+track count last asked for, and Qt will not shrink a dock merely because the
+widget inside it wants less, so deleting a track left the panel at its old
+height.
+
+Two things fix it. The first is the distinction between *constraining* a size and
+*asking* for one: the scroll area keeps a small floor and no ceiling, so the dock
+drags freely both ways, and the height is requested through `resizeDocks` when
+the row count changes. `timeline_rows_shown_` is what stops every refresh — there
+is one per frame change — from shoving the dock back and undoing a drag the
+moment you scrubbed.
+
+The second is **asking for a difference rather than a total**, and it took two
+wrong versions to get there. Adding up what wraps the strip — the scroll area's
+frame, the horizontal scrollbar, the buttons above it, the dock's own title bar —
+forgot a different piece each time, and every miss put the bottom row underneath
+something. Then measuring the strip's own height to take a difference from,
+which looks like the careful version and is worse: a resizable scroll area
+stretches its widget to the viewport, so that height is the space *available* and
+never the space *wanted*, and comparing the two answers "no growth needed" every
+single time. What is left needs no measurement at all. A row is `kRowHeight` and
+the wrapping costs the same whatever the row count is, so the dock is asked to be
+exactly that much taller or shorter, and the first call takes the panel's own
+sizeHint because it has nothing to take a difference from.
+
+None of it was caught by a test. A harness prints the dock height as tracks are
+added, deleted and dragged, and it is the only reason the second version — which
+had passed a screenshot — was found to have stopped growing at all.
 
 And **`Timeline` is now `Track`** throughout, including the French
 specification. A `Track` is one stack of layers with its own time; the timeline
@@ -1049,11 +1185,16 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    what `CtgSolver`'s second priority is still there for.
 5. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-6. **The rest of the open issues**: several tracks (#1, which the timeline and
-   the model are both ready for and no interface exposes), deleting every layer
-   of a drawing (#2), an eraser cursor (#4), brush-resize feedback (#5), a
-   non-modal colour panel (the parked half of #8), and an "overwrite drawings"
-   checkbox (#9).
+6. **What a track does past its last drawing** (#20). It shows nothing, which is
+   one of the three answers that issue asks for; the other two are hold the last
+   drawing and cycle. It is a `TrackProperties` field and a branch in
+   `Track::imageAtSlot`, which is already the only place that knows a frame is
+   past the end — the work is deciding what playback and export mean for a
+   cycling track, not finding the seam.
+7. **The rest of the open issues**: deleting every layer of a drawing (#2), an
+   eraser cursor (#4), brush-resize feedback (#5), and a non-modal colour panel
+   (the parked half of #8). Several tracks (#1) and "overwrite drawings" (#9)
+   are built — see "Several tracks, and a track that overwrites".
 
 ## Two things to be careful of
 

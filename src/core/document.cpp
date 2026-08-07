@@ -44,6 +44,15 @@ void Document::removeTrack(TrackId id) {
     recordOp(std::make_unique<TrackOp>(index, std::move(removed)));
 }
 
+void Document::updateTrack(TrackId track_id, const TrackProperties& properties) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return;
+
+    ScopedCommand command(*this, "Change track");
+    recordOp(std::make_unique<TrackPropsOp>(track_id, track->properties()));
+    track->setProperties(properties);
+}
+
 void Document::setFramerate(int framerate) {
     if (framerate <= 0 || framerate == scene_.framerate) return;
     ScopedCommand command(*this, "Set framerate");
@@ -298,17 +307,13 @@ void Document::moveDrawing(TrackId track_id, ImageId image_id, std::size_t desti
     track->slots = std::move(moved);
 }
 
-ImageId Document::duplicateImage(TrackId track_id, std::size_t slot) {
-    Track* track = scene_.findTrack(track_id);
-    if (!track || slot >= track->slots.size()) return kNoId;
-    const Image* source = track->findImage(track->slots[slot]);
-    if (!source) return kNoId;
-
-    ScopedCommand command(*this, "Duplicate image");
+std::optional<Image> Document::copyOfImage(Track& track, ImageId source_id) {
+    const Image* source = track.findImage(source_id);
+    if (!source) return std::nullopt;
 
     Image copy;
     copy.id = image_ids_.next();
-    copy.number = track->next_drawing_number++;  // a copy is a new drawing
+    copy.number = track.next_drawing_number++;  // a copy is a new drawing
     copy.marker = source->marker;
     for (const auto& [layer_id, cel_id] : source->cels) {
         const Cel* original = cel(cel_id);
@@ -317,14 +322,131 @@ ImageId Document::duplicateImage(TrackId track_id, std::size_t slot) {
         copy.cels[layer_id] = fresh;
         addCelRef(fresh);
     }
+    return copy;
+}
 
-    const ImageId id = copy.id;
+ImageId Document::duplicateImage(TrackId track_id, std::size_t slot) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track || slot >= track->slots.size()) return kNoId;
+
+    ScopedCommand command(*this, "Duplicate image");
+    std::optional<Image> copy = copyOfImage(*track, track->slots[slot]);
+    if (!copy) return kNoId;
+
+    const ImageId id = copy->id;
     recordOp(std::make_unique<SlotsOp>(track_id, track->slots));
     recordOp(std::make_unique<ImageOp>(track_id, id, std::nullopt));
 
-    track->images.emplace(id, std::move(copy));
+    track->images.emplace(id, std::move(*copy));
     track->slots.insert(track->slots.begin() + static_cast<std::ptrdiff_t>(slot) + 1, id);
     return id;
+}
+
+ImageId Document::addDrawing(TrackId track_id, std::size_t slot) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return kNoId;
+    if (track->slots.empty()) return insertImage(track_id, 0);
+
+    const std::size_t here = std::min(slot, track->slots.size() - 1);
+    const auto range = track->overwriteRangeAt(here);
+
+    // No overwrite, or nothing to overwrite: after the whole hold, and the track
+    // is one frame longer. A hold of one frame lands here, because taking its
+    // only frame is the one thing overwriting will not do.
+    if (!track->overwrite_drawings || !range) {
+        return insertImage(track_id, track->runBounds(here).second + 1);
+    }
+
+    ScopedCommand command(*this, "Insert image");
+    recordOp(std::make_unique<SlotsOp>(track_id, track->slots));
+
+    Image image;
+    image.id = image_ids_.next();
+    image.number = track->next_drawing_number++;
+    const ImageId id = image.id;
+    recordOp(std::make_unique<ImageOp>(track_id, id, std::nullopt));
+    track->images.emplace(id, std::move(image));
+
+    for (std::size_t i = range->first; i <= range->second; ++i) track->slots[i] = id;
+    return id;
+}
+
+ImageId Document::duplicateDrawing(TrackId track_id, std::size_t slot) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track || track->slots.empty()) return kNoId;
+
+    const std::size_t here = std::min(slot, track->slots.size() - 1);
+    const auto range = track->overwriteRangeAt(here);
+
+    // duplicateImage puts the copy just after the slot it is given, so the last
+    // frame of the hold is what keeps the original whole.
+    if (!track->overwrite_drawings || !range) {
+        return duplicateImage(track_id, track->runBounds(here).second);
+    }
+
+    ScopedCommand command(*this, "Duplicate image");
+    std::optional<Image> copy = copyOfImage(*track, track->slots[here]);
+    if (!copy) return kNoId;
+
+    const ImageId id = copy->id;
+    recordOp(std::make_unique<SlotsOp>(track_id, track->slots));
+    recordOp(std::make_unique<ImageOp>(track_id, id, std::nullopt));
+    track->images.emplace(id, std::move(*copy));
+
+    for (std::size_t i = range->first; i <= range->second; ++i) track->slots[i] = id;
+    return id;
+}
+
+void Document::moveDrawingOver(TrackId track_id, ImageId image_id, std::size_t slot) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track || image_id == kNoId || slot >= track->slots.size()) return;
+
+    const std::size_t from = track->firstSlotOf(image_id);
+    if (from >= track->slots.size()) return;
+    const auto [first, last] = track->runBounds(from);
+
+    // The frames it is leaving go to whichever drawing is next to them -- the
+    // one before, or the one after when it is leaving the very start. Vacating
+    // them by erasing instead would shorten a track whose length is the whole
+    // point of the setting.
+    std::vector<ImageId> moved = track->slots;
+    const ImageId filler = (first > 0) ? moved[first - 1]
+                           : (last + 1 < moved.size()) ? moved[last + 1]
+                                                       : kNoId;
+    if (filler == kNoId) return;  // the only drawing in the track: nowhere to go
+    for (std::size_t i = first; i <= last; ++i) moved[i] = filler;
+
+    // Where it lands is read from the track it is landing in, which is the one
+    // it has just been lifted out of: dropping a drawing into the gap it left
+    // has to be the same as not moving it.
+    std::size_t start = slot;
+    std::size_t end = slot;
+    {
+        const ImageId there = moved[slot];
+        while (start > 0 && moved[start - 1] == there) --start;
+        while (end + 1 < moved.size() && moved[end + 1] == there) ++end;
+    }
+    const std::size_t at = std::max(slot, start + 1);
+    if (at > end) {
+        // A hold of one frame has nothing to spare, so this becomes the reorder
+        // it would have been on a track that does not overwrite.
+        std::size_t destination = 0;
+        for (std::size_t i = 0; i < slot; ++i) {
+            if (track->slots[i] != image_id) ++destination;
+        }
+        moveDrawing(track_id, image_id, destination);
+        return;
+    }
+    for (std::size_t i = at; i <= end; ++i) moved[i] = image_id;
+    if (moved == track->slots) return;
+
+    // Nothing here can retire a drawing, so nothing here has to tidy one away.
+    // The frames a drawing leaves are always taken by a drawing that is still in
+    // the track, and the run it lands in always keeps its first frame -- so
+    // every drawing that was in `slots` is still in it. There is a test.
+    ScopedCommand command(*this, "Move drawing");
+    recordOp(std::make_unique<SlotsOp>(track_id, track->slots));
+    track->slots = std::move(moved);
 }
 
 // --- pixels --------------------------------------------------------------

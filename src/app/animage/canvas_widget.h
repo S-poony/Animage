@@ -18,8 +18,15 @@ class QTimer;
 #include "ctg_solver.h"
 #include "document.h"
 
-// The drawing surface. Shows one image of one track, composited, and turns
-// tablet events into brush strokes.
+// The drawing surface. Shows the whole scene at one frame -- every track,
+// stacked, index 0 on top -- and turns tablet events into brush strokes on the
+// one track that is current.
+//
+// Looking at everything and editing one thing is the whole of the difference a
+// second track makes here. What is composited, what a colour is picked from and
+// what colour layers are solved all follow the picture; the brush, the onion
+// skin and "fit to drawing" all follow the track you are working on, because
+// they are about the drawing in your hand and not about the shot.
 //
 // Compositing is deferred: edits mark a region dirty and the flattening happens
 // once in paintEvent. Doing it eagerly meant a slider that emits fifty changes
@@ -66,6 +73,15 @@ public:
 
     void setBackground(Background background);
     Background background() const { return background_; }
+
+    // The veil over everything outside the exported rectangle. Worth being able
+    // to lift: it darkens the roughs that run off the edge, and judging a
+    // drawing whose action carries past the frame means seeing all of it at the
+    // strength it was drawn at. The outline stays either way -- the paper does
+    // not stop at the canvas, so with neither veil nor outline there would be
+    // nothing on screen saying where the picture ends.
+    void setPassePartout(bool shown);
+    bool passePartout() const { return passe_partout_; }
 
     void setOnion(const OnionSettings& settings);
     OnionSettings onion() const { return onion_settings_; }
@@ -183,7 +199,9 @@ private:
     void fitTo(const animage::PixelRect& bounds);
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
-    void dropStaleColourRequests(bool only_this_drawing);
+    void dropStaleColourRequests(bool only_this_frame);
+    // Whether any track shows this drawing at the frame the playhead is on.
+    bool isShownNow(animage::ImageId image) const;
     void noteColourPending();
     void setScribblePreview(animage::LayerId layer, bool previewing);
 
@@ -299,6 +317,7 @@ private:
     double zoom_at_press_ = 1.0;
 
     Background background_ = Background::White;
+    bool passe_partout_ = true;
 
     // When the pen was last heard from, used to recognise the mouse events
     // Windows Ink promotes from it. A count of tablet events was used for this

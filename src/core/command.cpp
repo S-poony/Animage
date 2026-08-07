@@ -83,6 +83,14 @@ void CelAssignOp::collectCelIds(std::vector<CelId>& out) const {
     if (cel_ != kNoId) out.push_back(cel_);
 }
 
+void TrackPropsOp::applySwap(Document& doc) {
+    Track* track = doc.mutableScene().findTrack(track_);
+    if (!track) return;
+    TrackProperties live = track->properties();
+    track->setProperties(state_);
+    state_ = std::move(live);
+}
+
 void TrackOp::applySwap(Document& doc) {
     Scene& scene = doc.mutableScene();
 

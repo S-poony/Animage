@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <vector>
 
 #include "track.h"
@@ -37,6 +39,16 @@ struct Scene {
     PixelRect canvas() const { return {0, 0, width, height}; }
 
     std::vector<Track> tracks;
+
+    // How long the shot is: the longest track, because the timeline is the
+    // scene's and every track shares it. Tracks are not obliged to be the same
+    // length, so a shorter one simply shows nothing over the frames it does not
+    // reach -- see Track::imageAtSlot, which is where that is decided.
+    std::size_t frameCount() const {
+        std::size_t frames = 0;
+        for (const Track& track : tracks) frames = std::max(frames, track.frameCount());
+        return frames;
+    }
 
     const Track* findTrack(TrackId id) const {
         for (const Track& t : tracks) {

@@ -178,6 +178,312 @@ void deleteDrawingThenUndo() {
     CHECK(!f.render().isNull());
 }
 
+// The paper is drawn over the whole view and not only over the canvas, so the
+// veil is the only thing telling the picture from what surrounds it. Which is
+// why hiding it has to leave the outline behind: otherwise turning the veil off
+// makes the exported rectangle invisible rather than unshaded.
+void hidingThePassePartoutKeepsTheCanvasEdge() {
+    TEST("hiding the passe-partout leaves the canvas outline");
+    Fixture f;
+    // Fits with a margin, which is what puts the canvas edge on screen at all.
+    f.canvas.fitToCanvas();
+
+    const PixelRect canvas = f.doc.scene().canvas();
+    const auto widgetFrom = [&](double x, double y) {
+        return QPointF((x - f.canvas.pan().x()) * f.canvas.zoom(),
+                       (y - f.canvas.pan().y()) * f.canvas.zoom());
+    };
+    // The same height on either side of the left edge, far enough from it that
+    // the outline itself lands on neither.
+    const QPoint outside = widgetFrom(canvas.x - 20.0, canvas.height / 2.0).toPoint();
+    const QPoint inside = widgetFrom(canvas.x + 20.0, canvas.height / 2.0).toPoint();
+
+    CHECK(f.canvas.passePartout());
+    const QImage veiled = f.render();
+    CHECK(qGray(veiled.pixel(outside)) < qGray(veiled.pixel(inside)));
+
+    f.canvas.setPassePartout(false);
+    CHECK(!f.canvas.passePartout());
+    const QImage bare = f.render();
+    // Nothing over the paper any more, so both sides of the edge are the paper.
+    CHECK_EQ(bare.pixel(outside), bare.pixel(inside));
+
+    // The edge is still drawn, within a pixel or two of where the canvas says
+    // it is. Which pixel exactly a one-pixel pen lands on is Qt's business.
+    const int edge = static_cast<int>(std::lround(widgetFrom(canvas.x, 0.0).x()));
+    bool outlined = false;
+    for (int x = edge - 2; x <= edge + 2; ++x) {
+        if (qGray(bare.pixel(x, inside.y())) < qGray(bare.pixel(inside))) outlined = true;
+    }
+    CHECK(outlined);
+
+    // And it comes back.
+    f.canvas.setPassePartout(true);
+    const QImage again = f.render();
+    CHECK(qGray(again.pixel(outside)) < qGray(again.pixel(inside)));
+}
+
+// The menu item is the whole feature as far as the issue is concerned: the
+// canvas could always have been told, and nothing could tell it.
+void theViewMenuHidesThePassePartout() {
+    TEST("the View menu turns the passe-partout off and on");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    QAction* toggle = nullptr;
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("&Passe-partout")) toggle = action;
+    }
+    CHECK(toggle != nullptr);
+    if (!toggle) return;
+
+    CHECK(toggle->isCheckable());
+    CHECK(toggle->isChecked());
+    CHECK(canvas->passePartout());
+
+    toggle->trigger();
+    QCoreApplication::processEvents();
+    CHECK(!canvas->passePartout());
+
+    toggle->trigger();
+    QCoreApplication::processEvents();
+    CHECK(canvas->passePartout());
+}
+
+// --- several tracks --------------------------------------------------------
+
+QAction* actionCalled(MainWindow& window, const QString& text) {
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == text) return action;
+    }
+    return nullptr;
+}
+
+// Defined with the saving tests further down, which is where it was first
+// needed. Declared here so these can use it without moving it.
+void strokeOn(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
+              float x1, float y1);
+
+// Issue #1's first half, through the interface that was the whole of what was
+// missing: the model and the file always took several tracks and nothing could
+// make a second one.
+void theTrackMenuAddsATrackYouCanDrawOn() {
+    TEST("the Track menu adds a track, and it arrives ready to draw on");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{1});
+
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    CHECK(add != nullptr);
+    if (!add) return;
+    add->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{2});
+    const Track& added = doc.scene().tracks.back();
+
+    // A track with no layer and no drawing is a row where the brush silently
+    // does nothing, which is indistinguishable from a bug.
+    CHECK_EQ(added.layers.size(), std::size_t{1});
+    CHECK_EQ(added.slots.size(), std::size_t{1});
+
+    // And it is the one being edited, because drawing on it is what comes next.
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    CHECK_EQ(canvas->currentImage(), added.slots.front());
+    CHECK_EQ(canvas->activeLayer(), added.layers.front().id);
+
+    // One undo step for the lot: a half-made track is not a state to land in.
+    const std::size_t depth = doc.undoDepth();
+    CHECK(doc.undo());
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{1});
+    CHECK_EQ(doc.undoDepth(), depth - 1);
+}
+
+// Everything downstream holds a track id, and pointing them at a track that has
+// just been deleted is the crash this is here to stop.
+void deletingATrackRebindsEverything() {
+    TEST("deleting a track leaves nothing pointing at it");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    CHECK(add != nullptr);
+    if (!add) return;
+    add->trigger();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{2});
+
+    const TrackId gone = doc.scene().tracks.back().id;
+    const TrackId kept = doc.scene().tracks.front().id;
+
+    // Straight at the document, because the menu item asks a question and a
+    // test cannot answer a dialog. What is being tested is the rebinding.
+    doc.removeTrack(gone);
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+    timeline->setTrack(kept);
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    CHECK_EQ(timeline->track(), kept);
+    // The active layer came from the track that has gone; it must not still.
+    const Track* left = doc.scene().findTrack(kept);
+    CHECK(left != nullptr);
+    if (!left) return;
+    CHECK(left->findLayer(canvas->activeLayer()) != nullptr);
+    CHECK(!canvas->grab().isNull());
+}
+
+// The canvas shows the whole scene. A track you cannot see is a track you
+// cannot use, and this is the one thing a single-track build could not do.
+void theCanvasCompositesEveryTrack() {
+    TEST("the canvas shows every track, stacked");
+    Document doc;
+    const TrackId back = doc.addTrack("background");
+    const TrackId front = doc.addTrack("character");
+    // addTrack appends, so `back` is index 0 and composites on top. Draw the
+    // two in places that do not overlap, so each is its own evidence.
+    const LayerId back_layer = doc.addLayer(back, "ink");
+    const LayerId front_layer = doc.addLayer(front, "ink");
+    const ImageId back_image = doc.insertImage(back, 0);
+    const ImageId front_image = doc.insertImage(front, 0);
+    strokeOn(doc, back, back_image, back_layer, 40.0f, 40.0f, 120.0f, 40.0f);
+    strokeOn(doc, front, front_image, front_layer, 40.0f, 200.0f, 120.0f, 200.0f);
+
+    const Compositor compositor;
+    Framebuffer frame;
+    compositor.compositeScene(doc, 0, PixelRect{0, 0, 300, 300}, frame);
+
+    CHECK(frame.pixel(80, 40).a > 0.5f);   // the track above
+    CHECK(frame.pixel(80, 200).a > 0.5f);  // and the one below it
+    CHECK_NEAR(frame.pixel(250, 250).a, 0.0, 1e-3);
+
+    // A track that does not reach this frame contributes nothing rather than
+    // clearing what is under it -- tracks are not all the same length.
+    doc.extendExposure(back, 0, 3);
+    CHECK_EQ(doc.scene().frameCount(), std::size_t{4});
+    compositor.compositeScene(doc, 3, PixelRect{0, 0, 300, 300}, frame);
+    CHECK(frame.pixel(80, 40).a > 0.5f);            // still held
+    CHECK_NEAR(frame.pixel(80, 200).a, 0.0, 1e-3);  // past the shorter track's end
+}
+
+// The playhead belongs to the timeline and not to any track on it, so it has to
+// reach the end of the longest one.
+void theTimelineIsAsLongAsTheLongestTrack() {
+    TEST("the timeline runs to the end of the longest track");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    const TrackId first = doc.scene().tracks.front().id;
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    CHECK(add != nullptr);
+    if (!add) return;
+    add->trigger();
+    QCoreApplication::processEvents();
+
+    // The first track runs to 10, the second still has its one frame.
+    doc.extendExposure(first, 0, 9);
+    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(timeline != nullptr && canvas != nullptr);
+    if (!timeline || !canvas) return;
+    timeline->refresh();
+
+    // Standing past the short track's end is a real frame of the shot, and the
+    // canvas still draws -- it just has nothing of this track to draw on.
+    timeline->setCurrentSlot(7);
+    QCoreApplication::processEvents();
+    CHECK_EQ(timeline->currentSlot(), std::size_t{7});
+    CHECK_EQ(canvas->frame(), std::size_t{7});
+    CHECK_EQ(canvas->currentImage(), kNoId);
+    CHECK(!canvas->grab().isNull());
+}
+
+// Issue #9 through the button that does it, because the button is where the
+// track's setting has to be read.
+void theInsertButtonObeysTheOverwriteSetting() {
+    TEST("the insert button spends the hold when the track overwrites");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 10);  // held 11
+    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), std::size_t{11});
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+    timeline->refresh();
+    timeline->setCurrentSlot(3);  // frame 4
+    QCoreApplication::processEvents();
+
+    QAction* overwrite = actionCalled(window, QStringLiteral("Overwrite drawings"));
+    QAction* insert = actionCalled(window, QStringLiteral("Insert drawing"));
+    CHECK(overwrite != nullptr && insert != nullptr);
+    if (!overwrite || !insert) return;
+
+    CHECK(overwrite->isCheckable());
+    CHECK(overwrite->isChecked());  // on is the default, and the menu says so
+    CHECK(doc.scene().findTrack(track)->overwrite_drawings);
+
+    insert->trigger();
+    QCoreApplication::processEvents();
+
+    const Track* after = doc.scene().findTrack(track);
+    CHECK_EQ(after->frameCount(), std::size_t{11});  // the shot did not grow
+    CHECK_EQ(after->images.size(), std::size_t{2});
+    // The playhead followed the new drawing to where it actually landed.
+    CHECK_EQ(timeline->currentSlot(), std::size_t{3});
+    CHECK_EQ(after->imageAtSlot(3), after->imageAtSlot(10));
+    CHECK(after->imageAtSlot(2) != after->imageAtSlot(3));
+
+    // Switched off, the same button lengthens the shot instead.
+    overwrite->trigger();
+    QCoreApplication::processEvents();
+    CHECK(!doc.scene().findTrack(track)->overwrite_drawings);
+
+    const std::size_t was = doc.scene().findTrack(track)->frameCount();
+    insert->trigger();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), was + 1);
+
+    // And the setting belongs to the track, not to the window: a second track
+    // arrives at the default rather than inheriting what this one was set to.
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    CHECK(add != nullptr);
+    if (!add) return;
+    add->trigger();
+    QCoreApplication::processEvents();
+    CHECK(doc.scene().tracks.back().overwrite_drawings);
+    CHECK(overwrite->isChecked());  // and the menu followed the new track
+}
+
 // Every frame gone, which leaves no image to composite at all.
 void emptyTimelineRenders() {
     TEST("a track with no frames still renders");
@@ -1408,6 +1714,105 @@ void aProjectSurvivesSavingAndLoading() {
 
     // A tile a long way into negative coordinates came back too.
     CHECK(alphaAt(loaded, track, before.slots.back(), before.layers.front().id, -450, -275) > 0.0f);
+}
+
+// Issue #1's second half. A scene holds several tracks and every one of them
+// has its own layers, its own timing and its own drawings -- so the thing to
+// check is not that the file parses but that nothing came back with one track's
+// worth of anything. A single-track project cannot fail this way at all, which
+// is why the round trip above does not cover it.
+void aMultiTrackProjectComesBackWhole() {
+    TEST("a project with several tracks loses no track, no order and no cel");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+
+    Document original;
+    struct Built {
+        TrackId id;
+        LayerId layer;
+        std::vector<ImageId> drawings;
+    };
+    std::vector<Built> built;
+
+    // Three tracks with deliberately different shapes: different layer counts,
+    // different lengths, and holds in different places. A reader that mixed two
+    // tracks up would have to get all of that right by accident.
+    const char* names[] = {"character", "background", "effects"};
+    for (int t = 0; t < 3; ++t) {
+        Built made;
+        made.id = original.addTrack(names[t]);
+        made.layer = original.addLayer(made.id, "ink");
+        for (int extra = 0; extra < t; ++extra) {
+            original.addLayer(made.id, "extra " + std::to_string(extra));
+        }
+        for (int d = 0; d < t + 2; ++d) {
+            made.drawings.push_back(original.insertImage(made.id, static_cast<std::size_t>(d)));
+        }
+        original.extendExposure(made.id, 0, t + 1);  // a hold of a different length each time
+        // One stroke per drawing, at a position no other track uses, so a cel
+        // that came back attached to the wrong drawing is visible as a pixel in
+        // the wrong place rather than only as a missing one.
+        for (std::size_t d = 0; d < made.drawings.size(); ++d) {
+            const float y = 100.0f * static_cast<float>(t) + 20.0f * static_cast<float>(d);
+            strokeOn(original, made.id, made.drawings[d], made.layer, 60.0f, y, 200.0f, y);
+        }
+        built.push_back(std::move(made));
+    }
+
+    // Away from the default on one track only, so the file has to carry the
+    // setting per track rather than getting it right by luck.
+    TrackProperties props = original.scene().findTrack(built[1].id)->properties();
+    props.overwrite_drawings = false;
+    original.updateTrack(built[1].id, props);
+
+    QString error;
+    CHECK(ProjectIO::save(original, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    Document loaded;
+    CHECK(ProjectIO::load(loaded, folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    CHECK_EQ(loaded.scene().tracks.size(), std::size_t{3});
+    for (std::size_t t = 0; t < built.size(); ++t) {
+        const Track* track = loaded.scene().findTrack(built[t].id);
+        CHECK(track != nullptr);
+        if (!track) continue;
+
+        // The track itself: which one it is, and in which order.
+        CHECK_EQ(track->name, std::string(names[t]));
+        CHECK_EQ(loaded.scene().tracks[t].id, built[t].id);
+        CHECK_EQ(track->layers.size(), std::size_t{static_cast<std::size_t>(t) + 1});
+        CHECK_EQ(track->overwrite_drawings, t != 1);
+
+        // Its timing: the slots in the order they were, holds included.
+        const Track* was = original.scene().findTrack(built[t].id);
+        CHECK_EQ(track->slots.size(), was->slots.size());
+        for (std::size_t i = 0; i < was->slots.size(); ++i) {
+            CHECK_EQ(track->slots[i], was->slots[i]);
+        }
+        CHECK_EQ(track->images.size(), built[t].drawings.size());
+
+        // And its pixels, on the drawing they belong to.
+        for (std::size_t d = 0; d < built[t].drawings.size(); ++d) {
+            const float y = 100.0f * static_cast<float>(t) + 20.0f * static_cast<float>(d);
+            const ImageId drawing = built[t].drawings[d];
+            CHECK(alphaAt(loaded, track->id, drawing, built[t].layer, 120,
+                          static_cast<int>(y)) > 0.0f);
+            // Nothing from the track above it landed on this one.
+            CHECK(alphaAt(loaded, track->id, drawing, built[t].layer, 120,
+                          static_cast<int>(y) + 100) <= 0.0f);
+        }
+    }
+
+    // Every cel in the document is a cel on disk: a track whose cels were not
+    // collected would save a scene naming files that are not there, and only
+    // show up as an empty drawing much later.
+    CHECK_EQ(ProjectIO::celsReferencedBy(loaded).size(),
+             ProjectIO::celsReferencedBy(original).size());
+    CHECK_EQ(QDir(folder + QStringLiteral("/cels")).entryList(QDir::Files).size(),
+             static_cast<int>(ProjectIO::celsReferencedBy(original).size()));
 }
 
 // A save that dies part way through must not take the last good one with it.
@@ -2931,6 +3336,7 @@ int main(int argc, char** argv) {
     movedMarksAgreeWithThemselvesInTheWindow();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
+    aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     abrokenProjectDoesNotReplaceTheOpenOne();
     savingTwiceWritesTheSameBytes();
@@ -2968,6 +3374,13 @@ int main(int argc, char** argv) {
     repeatedZoomAndPanStayConsistent();
     onionSkinAtLowZoom();
     deleteDrawingThenUndo();
+    hidingThePassePartoutKeepsTheCanvasEdge();
+    theViewMenuHidesThePassePartout();
     emptyTimelineRenders();
+    theTrackMenuAddsATrackYouCanDrawOn();
+    deletingATrackRebindsEverything();
+    theCanvasCompositesEveryTrack();
+    theTimelineIsAsLongAsTheLongestTrack();
+    theInsertButtonObeysTheOverwriteSetting();
     return testing::summarise("canvas");
 }

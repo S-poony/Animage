@@ -90,6 +90,22 @@ private:
     CelId cel_;
 };
 
+// Swaps a track's group-level properties: its name, its opacity, its blend, its
+// time offset and whether it overwrites drawings. Not its layers, its slots or
+// its images, each of which has an operation of its own -- and deliberately not
+// `next_drawing_number`, which counts up and is never reused, so undoing the
+// change that advanced it must not hand the number out twice.
+class TrackPropsOp final : public Op {
+public:
+    TrackPropsOp(TrackId track, TrackProperties state)
+        : track_(track), state_(std::move(state)) {}
+    void applySwap(Document& doc) override;
+
+private:
+    TrackId track_;
+    TrackProperties state_;
+};
+
 // Inserts or extracts a whole track at an index.
 class TrackOp final : public Op {
 public:
