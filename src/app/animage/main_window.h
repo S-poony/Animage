@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 #include "document.h"
+#include "export_sequence.h"
 #include "project_io.h"
 
 class CanvasWidget;
@@ -60,6 +61,7 @@ public:
     // a folder of their own. What exportSequences does once it knows where;
     // also how a test drives it.
     bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
+                           exporting::Format format = exporting::Format::Png,
                            QString* error = nullptr);
 
     // What that name is before the user changes it: the project's own, without

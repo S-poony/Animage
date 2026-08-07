@@ -20,7 +20,7 @@ did not before — and now survives not thinking about it at all.
 | M2 | Canvas, pressure brush, eraser, layers. Compositing is on the CPU, not the GPU. |
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
 | M4 | LazyBrush solver and the CTG layer, in the app and usable. Solved on a worker thread. |
-| M5 | Save, open, Save As, autosave, New, and PNG export. EXR is not written. |
+| M5 | Save, open, Save As, autosave, New, and export as 16-bit PNG or half EXR. |
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
 All of it lives in the application now, in one place — `ProjectIO`, which is
@@ -81,15 +81,47 @@ New then rebuilds the same document the application starts with, including the
 `clearHistory` that stops a fresh document arriving with three undoable setup
 steps on the stack, and opens Scene settings.
 
-**Export writes 16-bit PNG**, a folder per layer with
-`{track}_{layer}_{frame:04}.png` inside, plus an optional `composite/` of the
+**Export writes 16-bit PNG and EXR**, a folder per layer with
+`{track}_{layer}_{frame:04}.{ext}` inside, plus an optional `composite/` of the
 flattened picture, all over the canvas rectangle, and all inside a folder the
 export dialog asks you to name — defaulting to the project's. Hidden layers are
 not written at all, so the per-layer sequences and the flattened one agree about
-what the shot contains. It is lossy and knowingly so — the arithmetic is in
-`export_sequence.h` — and **EXR is the named next step** rather than a decision
-still open: PNG is right where the destination expects PNG, and the format list
-is easier to add to than the layout is to change.
+what the shot contains.
+
+**The two formats answer different questions and are not interchangeable.** PNG
+converts on purpose — sRGB, unpremultiplied, 16-bit integer — and loses about a
+third of the half values in [0,1] doing it; the arithmetic is in
+`export_sequence.h`. EXR converts not at all: half, linear, premultiplied, which
+is what a `Framebuffer` already holds. **So the same frame written both ways does
+not contain the same numbers**, and anyone comparing them channel by channel will
+conclude one is broken. That is why the dialog says so and not only this file.
+
+The EXR writer is `exr_writer.cpp`, which is the only place tinyexr is compiled —
+one vendored BSD-3 header in `third_party/`, included SYSTEM, and that one
+translation unit built with warnings off so the rest of the tree keeps `-Werror`
+meaning something. It is also the first thing here to link zlib directly: the cel
+format goes through Qt's `qCompress`, so the project never needed it before, and
+tinyexr wants a zlib-compatible compressor for ZIP. zlib is a transitive
+dependency of Qt, so `find_package(ZLIB)` cannot fail on a machine that has got
+this far.
+
+Three things about the writer that a round trip will not catch, which is why they
+are written down. It reads the `Framebuffer` directly and builds no QImage —
+`Rgba` is float32 and interleaved, EXR wants planar half, and Qt cannot write EXR
+anyway. The channel planes are named A, B, G, R alphabetically, because a wrong
+order produces a file that loads perfectly and shows a blue scribble; there is a
+test with an orange one, and it was checked that mislabelling the planes turns it
+red. And `requested_pixel_types` is HALF as well as `pixel_types` — a mismatch
+there is where a lossless writer quietly becomes a converting one.
+
+**What verified it, and what did not.** The round-trip test reads the file back
+with tinyexr, which is the library that wrote it — measuring twice on the same
+side of the event, and it proves less than it looks. The real check was
+OpenEXR's own `exrheader` and `exrmaketiled` (installed locally, never linked),
+which are a different implementation: the header reports four 16-bit
+floating-point channels, ZIP in blocks of 16 scan lines, and `dataWindow` equal
+to `displayWindow`, and re-tiling forces every pixel through OpenEXR's decoder.
+If you change the writer, run those again rather than trusting the test.
 
 **An export replaces what was in the folder, and "overwrite" had to be made
 true before it could be said.** The word was going to go on a confirmation
@@ -857,142 +889,37 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **More export formats**, the one piece of M5 deliberately left out. 16-bit
-   PNG throws pixels away. Everything around a second writer — the layout, the
-   naming, the canvas rectangle, the fill solving, the progress and cancellation
-   — already exists and is tested, so each one is a writer and a radio button.
+1. **TIFF export**, which is the half of the format list still missing. **EXR
+   is built** -- the decisions that used to sit here were taken and then acted
+   on; what they were and why is now in "export writes 16-bit PNG and EXR"
+   above. TIFF remains worth having for a different reason, and the reason is
+   worth keeping straight: it is the **compatibility** deliverable, not the
+   lossless one.
 
-   This used to read "EXR export" and name no alternative, which was an
-   assertion rather than a decision. It was raised that TIFF is the more common
-   deliverable in 2D animation, and that is true — TVPaint and Harmony both
-   write it and scanned-drawing pipelines have used it for decades. The
-   comparison is recorded here so the next person inherits an argument instead
-   of a preference.
+   It was raised that TIFF is the more common deliverable in 2D animation, and
+   that is true -- TVPaint and Harmony both write it and scanned-drawing
+   pipelines have used it for decades. Three things about it are easy to get
+   wrong, all measured against what it *can* do rather than what it usually
+   does:
 
-   **They answer different questions, and the list should hold both.**
-
-   - **TIFF is the compatibility deliverable.** If the destination is a 2D
-     pipeline that asks for TIFF, this is a radio button over the same integer
-     conversion PNG already does, and it should be offered. What it is *not* is
-     the lossless one — see below.
-   - **EXR is the lossless one.** Its default pixel type is half, premultiplied,
-     linear: bit for bit what the *tiles* hold, with no conversion at all. It
-     could also put every layer in one file per frame instead of a folder per
-     layer — that one is decided below, and the answer is not to.
-
-   Three things about TIFF that are easy to get wrong, all of them measured
-   against what it *can* do rather than what it usually does:
-
-   - A TIFF **can** hold our pixels losslessly — `SampleFormat = 3` and
+   - A TIFF **can** hold our pixels losslessly -- `SampleFormat = 3` and
      `BitsPerSample = 16` is half. `why-our-own-formats.md` used to say
      otherwise and has been corrected.
    - But half-float TIFF is a thinly supported corner. Writing it produces files
      a lot of applications will not open, and writing 32-bit float instead to be
      safely readable doubles the bytes for data that is natively 16-bit and buys
-     no precision whatever. EXR's half is the ordinary path rather than the
-     unusual one, which is most of the argument.
-   - And it is not the cheap option it sounds like. `tinyexr` is a single BSD
-     header; TIFF needs libtiff or Qt's `qtimageformats` add-on, which **this
-     build does not have** — the installed plugins are `qgif`, `qico`, `qjpeg`
-     and nothing else. The nearly-free version is Qt writing *integer* TIFF,
-     which is exactly as lossy as the PNG already written. The free TIFF is the
-     lossy TIFF.
+     no precision whatever.
+   - And it is not the cheap option it sounds like. TIFF needs libtiff or Qt's
+     `qtimageformats` add-on, and Qt cannot write TIFF in this build --
+     `QImageWriter::canWrite("tif")` is false. The nearly-free version is Qt
+     writing *integer* TIFF, which is exactly as lossy as the PNG already
+     written. The free TIFF is the lossy TIFF.
 
-   **`QImage::Format_RGBA16FPx4_Premultiplied` is not the shortcut it looks
-   like, and this was measured rather than reasoned about.** It exists in Qt
-   6.11, it is 8 bytes a pixel, and its halves are bit-identical to ours. It
-   still does not help, for three reasons, the first of which was an error in an
-   earlier draft of this file:
+   So it is a third entry in `exporting::Format`, an extension in
+   `extensionFor`, one more in `isFrameOf`'s list and an item in the dialog's
+   combo box. The writer converts exactly as `toSrgb16` does; that is the point
+   of it.
 
-   - **The framebuffer is not half.** `Rgba` is four `float32`. The *tiles* are
-     half; what the compositor hands the exporter is not. So there is no
-     already-half data to pass along and the conversion happens either way.
-   - **EXR wants planar and a QImage is interleaved.** Going framebuffer to
-     half-interleaved QImage to planes is strictly more work than framebuffer to
-     planes.
-   - **Qt cannot write either format here anyway.** `QImageWriter::canWrite` is
-     false for `exr` and for `tif`; the list is bmp cur ico jfif jpeg jpg pbm
-     pgm png ppm xbm xpm.
-
-   So the rule is: **a non-Qt writer reads the `Framebuffer` directly and never
-   builds a QImage.** The one in `toSrgb16` exists solely to reach Qt's PNG
-   writer.
-
-   That probe also turned up a real if invisible bug in `floatToHalfBits`, which
-   flushes to zero where IEEE rounds up — see the note on it in `half.h` if it
-   has been fixed by the time you read this, or measure `1.5 * 2^-25` against
-   `qfloat16` if it has not.
-
-   ### The EXR decisions, taken
-
-   Argued out before any of it was written, because the expensive half of this
-   is not the writer. Each says what would change it.
-
-   **Layout: a file per layer, as now — not every layer as channels in one file
-   per frame.** The specification asks for `un dossier par calque` and the
-   French documents are authoritative, so channels-in-one-file is a deviation
-   and needs an argument rather than a preference. It is also purely additive
-   later: multi-channel would be a third entry in the format list, not a
-   replacement, so nothing is foreclosed. Blender reads plain EXR sequences
-   perfectly well — what multilayer buys there is convenience in the Image node,
-   not capability — and After Effects is *specifically* awkward with
-   multi-channel (it needs the EXtractoR effect) and poor with multi-part, while
-   being perfectly happy with plain RGBA. **What would change it:** somebody
-   actually working in Blender and finding the folders annoying. Before building
-   it, check that Blender groups `layer.R`/`layer.G`/… into selectable layers by
-   testing a hand-made file; that is believed rather than known.
-
-   **Colour: linear, premultiplied, with neither conversion the PNG path makes.**
-   No sRGB transfer function and no unpremultiply. This is not really a choice —
-   it is what EXR's convention is, and it is the whole of why EXR is the lossless
-   option. **The consequence to plan for is that the same frame written as PNG
-   and as EXR will not contain the same numbers**, and whoever compares them will
-   conclude one is broken. That belongs in the dialog and not only in here.
-
-   **Colour, part two: do not write the `chromaticities` attribute.** It is a
-   wash in effect — absent means sRGB primaries by convention, so the file makes
-   that claim either way — and it comes down to whether we assert something the
-   codebase has not decided. The working space today is "linear light" and
-   nothing narrower; `fr/tablettes-couleur-licence.md` contemplates Rec.2020 or
-   ACEScg later. Leave the claim implicit rather than writing down a value
-   somebody has to remember to change. The same ambiguity is already in the
-   shipped PNG path, which applies the sRGB transfer function and assumes its
-   primaries too, so EXR does not introduce it. **What would change it:** pinning
-   the working space, at which point write it.
-
-   **Compression: ZIP.** Lossless, universally read, and line art is mostly
-   transparent so it crushes. Not DWAA, DWAB or B44, which are lossy and would
-   defeat the point of choosing EXR at all. A constant rather than a setting
-   until somebody asks for one.
-
-   **`dataWindow` equal to `displayWindow`, both the canvas.** EXR can store
-   less than the frame it declares, which would let an export keep only the drawn
-   bounding box while every frame stays logically identical — the sparse property
-   the cel format exists for, applied to export, and a real saving on typical
-   line art. It is not the default because a mismatch is handled badly by some
-   readers, After Effects historically among them, and because every frame being
-   the canvas rectangle is a deliberate promise the export tests pin. Worth
-   knowing it is there. A more radical version keeps what runs off the canvas,
-   which is a question about what an export *is* rather than about a format.
-
-   **Half channels, not float.** Exact match to storage, half the bytes, no
-   downside.
-
-   **`tinyexr` lives in the app layer, never in `animage_core`**, which has no
-   external dependencies deliberately. It is BSD-3, so GPL-compatible; it wants
-   the zlib `project_io` already links; include it as a SYSTEM header or
-   `-Werror` will fire on it, and budget an afternoon for what UBSan says about
-   it, since the tests run sanitised by default.
-
-   **Measure before threading the encode.** Now that solving is off the interface
-   thread, encoding is the largest thing left on it — but there is no
-   `bench_export`, and this file's own lesson is that a benchmark decides where
-   you will look next. Write that first and optimise second.
-
-   One behavioural difference to know: `toShort` clamps to [0,1] and EXR would
-   not. Nothing in a composited frame is out of range today — the transparent
-   label's negative light lives in scribble cels and the compositor resolves it —
-   but if one ever leaked, PNG would hide it and EXR would preserve it.
 2. **Rung three of scribbles that move**: one transform per *region* rather than
    one per drawing, from the previous fill's regions. Read
    [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and

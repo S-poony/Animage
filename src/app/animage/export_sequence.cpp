@@ -12,6 +12,7 @@
 #include "color.h"
 #include "compositor.h"
 #include "ctg.h"
+#include "exr_writer.h"
 
 using namespace animage;
 
@@ -76,14 +77,17 @@ std::size_t frameCount(const Document& doc) {
     return frames;
 }
 
-QString framePath(const QString& folder, const QString& sequence, std::size_t frame) {
+QString framePath(const QString& folder, const QString& sequence, std::size_t frame,
+                  Format format) {
     // One-based, because it is the frame number an animator says out loud.
-    return QStringLiteral("%1/%2/%2_%3.png")
-        .arg(folder, sequence,
-             QString::number(frame + 1).rightJustified(4, QLatin1Char('0')));
+    return QStringLiteral("%1/%2/%2_%3.%4")
+        .arg(folder, sequence, QString::number(frame + 1).rightJustified(4, QLatin1Char('0')),
+             extensionFor(format));
 }
 
-bool writeFrame(const Framebuffer& frame, const QString& path, QString* error) {
+bool writeFrame(const Framebuffer& frame, const QString& path, Format format, QString* error) {
+    if (format == Format::Exr) return writeExrFrame(frame, path, error);
+
     const QImage image = toSrgb16(frame);
     if (image.isNull() || !image.save(path, "PNG")) {
         if (error) *error = QStringLiteral("cannot write %1").arg(path);
@@ -135,7 +139,7 @@ bool isBrowserJunk(const QString& name) {
 // not recognise would be refused as somebody else's folder, which is a
 // confusing way to find out.
 bool isFrameOf(const QString& sequence, const QString& file) {
-    static const QStringList kExtensions = {QStringLiteral("png")};
+    static const QStringList kExtensions = {QStringLiteral("png"), QStringLiteral("exr")};
     const QRegularExpression pattern(
         QStringLiteral("^%1_\\d{4}\\.(%2)$")
             .arg(QRegularExpression::escape(sequence), kExtensions.join(QLatin1Char('|'))),
@@ -180,6 +184,10 @@ bool removeExport(const QString& folder, QString* error) {
         return false;
     }
     return true;
+}
+
+QLatin1String extensionFor(Format format) {
+    return format == Format::Exr ? QLatin1String("exr") : QLatin1String("png");
 }
 
 QString sequenceName(const std::string& track, const std::string& layer) {
@@ -386,7 +394,8 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
                 compositor.compositeLayers(doc, sequence.track, image, {sequence.layer}, canvas,
                                            frame);
             }
-            if (!writeFrame(frame, framePath(options.folder, sequence.name, slot), error)) {
+            if (!writeFrame(frame, framePath(options.folder, sequence.name, slot, options.format),
+                            options.format, error)) {
                 return false;
             }
             if (!step(writing)) return cancelled();
@@ -406,7 +415,10 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
                 for (int x = 0; x < frame.width(); ++x) below[x] = over(above[x], below[x]);
             }
         }
-        if (!writeFrame(frame, framePath(options.folder, composite, slot), error)) return false;
+        if (!writeFrame(frame, framePath(options.folder, composite, slot, options.format),
+                        options.format, error)) {
+            return false;
+        }
         if (!step(writing)) return cancelled();
     }
 

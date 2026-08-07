@@ -38,6 +38,10 @@
 #include "brush.h"
 #include "canvas_widget.h"
 #include "export_sequence.h"
+#include "half.h"
+
+// Declarations only; animage_ui compiles the implementation.
+#include "tinyexr.h"
 #include "main_window.h"
 #include "document.h"
 #include "project_io.h"
@@ -2147,7 +2151,7 @@ void theFileMenuExports() {
     CHECK_EQ(window.defaultExportName().toStdString(), std::string("shot"));
 
     QString error;
-    CHECK(window.exportSequencesTo(out, true, true, &error));
+    CHECK(window.exportSequencesTo(out, true, true, exporting::Format::Png, &error));
     CHECK_EQ(error.toStdString(), std::string());
     QCoreApplication::processEvents();
 
@@ -2227,6 +2231,105 @@ void anExportIsRecognisedBeforeAnythingIsDeleted() {
     CHECK(QFileInfo::exists(path("shot") + QStringLiteral("/main_ink/main_ink_0001.png")));
 }
 
+// EXR is the lossless half of the export, so what it has to prove is that
+// nothing was converted: the bits that went in are the bits that came out.
+//
+// Note what this test does *not* prove. It reads the file back with the same
+// library that wrote it, which is measuring twice on the same side of the
+// event -- a file both agree about can still be malformed for somebody else.
+// The independent check is `exrheader`, from OpenEXR proper, run by hand; see
+// the handover.
+void exrExportsThePixelsUnconverted() {
+    TEST("an EXR export converts nothing: the halves survive exactly");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc = buildDrawnScene();
+    exporting::Options options;
+    options.folder = out;
+    options.format = exporting::Format::Exr;
+    options.layers = true;
+    QString error;
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // The extension follows the format, and the layout does not otherwise
+    // change: a file per layer, same folders, same frame numbers.
+    const QString first = out + QStringLiteral("/main_ink/main_ink_0001.exr");
+    CHECK(QFileInfo::exists(first));
+    CHECK(!QFileInfo::exists(out + QStringLiteral("/main_ink/main_ink_0001.png")));
+
+    // Read it back and compare against the compositor's own output. Anything
+    // that converted -- an sRGB curve, an unpremultiply, a float32 round trip
+    // -- shows up here as pixels that are close rather than equal.
+    float* pixels = nullptr;
+    int width = 0, height = 0;
+    const char* why = nullptr;
+    CHECK_EQ(LoadEXR(&pixels, &width, &height, first.toUtf8().constData(), &why), TINYEXR_SUCCESS);
+    if (!pixels) return;
+    CHECK_EQ(width, doc.scene().width);
+    CHECK_EQ(height, doc.scene().height);
+
+    const PixelRect canvas = doc.scene().canvas();
+    Compositor compositor;
+    Framebuffer expected(canvas.width, canvas.height);
+    expected.clear();
+    const Track& track = doc.scene().tracks.front();
+    compositor.compositeLayers(doc, track.id, track.imageAtSlot(0), {track.layers.front().id},
+                               canvas, expected);
+    // The ink is black on nothing, so R, G and B all agree and a writer that
+    // swapped two of them would pass everything below. The colour layer's
+    // scribble is orange -- 0.9, 0.3, 0.05 -- so it is the one that can tell.
+    // Checked further down against the file written for it.
+    const QString coloured = out + QStringLiteral("/main_colour/main_colour_0001.exr");
+
+    // Every pixel, not a sample: "lossless" is a claim about all of them, and a
+    // sampled version of this test would have passed with the alpha channel
+    // dropped. Compared as halves, because half is what the file stores -- the
+    // float32 the compositor works in is the wider type here.
+    long long differing = 0, opaque = 0;
+    for (int y = 0; y < height && differing == 0; ++y) {
+        const Rgba* want = expected.row(y);
+        for (int x = 0; x < width; ++x) {
+            const float* got = pixels + 4 * (static_cast<std::size_t>(y) * width + x);
+            if (want[x].a > 0.5f) ++opaque;
+            const bool same = animage::Half(want[x].r).bits == animage::Half(got[0]).bits &&
+                              animage::Half(want[x].g).bits == animage::Half(got[1]).bits &&
+                              animage::Half(want[x].b).bits == animage::Half(got[2]).bits &&
+                              animage::Half(want[x].a).bits == animage::Half(got[3]).bits;
+            if (!same) ++differing;
+        }
+    }
+    CHECK_EQ(differing, 0LL);
+    // And the frame was not simply blank, which every check above would pass.
+    CHECK(opaque > 100);
+    free(pixels);
+
+    // Now the channel order, which needs a pixel whose channels differ. The
+    // scribble is orange, so the brightest pixel of the colour layer must come
+    // back red-most and blue-least; a writer that named its planes in the wrong
+    // order produces a blue scribble and an otherwise perfect file.
+    float* colour = nullptr;
+    int cw = 0, ch = 0;
+    CHECK_EQ(LoadEXR(&colour, &cw, &ch, coloured.toUtf8().constData(), &why), TINYEXR_SUCCESS);
+    if (!colour) return;
+    float best_r = 0.0f, best_g = 0.0f, best_b = 0.0f, best = -1.0f;
+    for (int i = 0; i < cw * ch; ++i) {
+        const float* p = colour + 4 * i;
+        if (p[3] > 0.5f && p[0] > best) {
+            best = p[0];
+            best_r = p[0];
+            best_g = p[1];
+            best_b = p[2];
+        }
+    }
+    CHECK(best > 0.0f);
+    CHECK(best_r > best_g);
+    CHECK(best_g > best_b);
+    free(colour);
+}
+
 // Exporting through the window hands its max-flows to a solver instead of
 // running them where the progress dialog is being drawn. What that buys, and
 // the only part of it a test can see from the outside, is the cap: a solve
@@ -2248,7 +2351,7 @@ void theWindowExportsAtFullResolution() {
     QCoreApplication::processEvents();
 
     QString error;
-    CHECK(window.exportSequencesTo(out, true, false, &error));
+    CHECK(window.exportSequencesTo(out, true, false, exporting::Format::Png, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     const Document& doc = window.documentForTesting();
@@ -2736,6 +2839,7 @@ int main(int argc, char** argv) {
     exportLeavesOutHiddenLayers();
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
+    exrExportsThePixelsUnconverted();
     theFileMenuExports();
     theWindowExportsAtFullResolution();
     anExportIsRecognisedBeforeAnythingIsDeleted();

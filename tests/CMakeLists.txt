@@ -31,6 +31,9 @@ if(TARGET animage_ui)
   add_executable(test_canvas test_canvas.cpp)
   target_link_libraries(test_canvas PRIVATE animage_ui)
   target_include_directories(test_canvas PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  # Declarations only -- the implementation is compiled once, in animage_ui.
+  # The EXR export test reads its own output back, which needs the loader.
+  target_include_directories(test_canvas SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
   add_test(NAME test_canvas COMMAND test_canvas -platform offscreen)
 
   add_executable(test_render test_render.cpp)

@@ -30,11 +30,34 @@ add_library(animage_ui STATIC
   animage/project_io.h
   animage/export_sequence.cpp
   animage/export_sequence.h
+  animage/exr_writer.cpp
+  animage/exr_writer.h
   animage/crash_report.cpp
   animage/crash_report.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
+
+# OpenEXR, via tinyexr: one vendored BSD-3 header, compiled in exr_writer.cpp
+# and nowhere else. SYSTEM so that -Werror does not police somebody else's
+# code, which is the whole reason the writer is a file of its own.
+target_include_directories(animage_ui SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+
+# tinyexr wants a zlib-compatible compressor. The project did not link zlib
+# before -- the cel format goes through Qt's qCompress -- but zlib is a
+# transitive dependency of Qt itself, so it is present wherever Qt is and
+# find_package cannot fail on a machine that got this far.
+find_package(ZLIB REQUIRED)
+target_link_libraries(animage_ui PRIVATE ZLIB::ZLIB)
+
+# SYSTEM headers still warn when the *implementation* is compiled, because at
+# that point it is our translation unit. Silence this one file rather than
+# lowering the bar for the tree: a warning in our code is still a build failure.
+if(MSVC)
+  set_source_files_properties(animage/exr_writer.cpp PROPERTIES COMPILE_OPTIONS "/w")
+else()
+  set_source_files_properties(animage/exr_writer.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 # Qt defines `signals`, `slots` and `emit` as macros, and Track has a member
 # called `slots` -- the name the design documents use for the track in time.

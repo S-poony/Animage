@@ -63,8 +63,23 @@
 // docs/handover.md and docs/why-our-own-formats.md.
 namespace exporting {
 
+// What the frames are written as. A file per layer either way -- the format
+// list and the layout are separate decisions, and this is only the first.
+enum class Format {
+    // 16-bit sRGB, unpremultiplied. Converts on purpose, and loses about a
+    // third of the half values in [0,1] doing it.
+    Png,
+    // Half, linear, premultiplied: exactly what the compositor produced, with
+    // no conversion at all. **Not the same numbers as the PNG**, deliberately.
+    Exr,
+};
+
+// The file extension, which is also the whole of what the layout cares about.
+QLatin1String extensionFor(Format format);
+
 struct Options {
     QString folder;
+    Format format = Format::Png;
     // One sequence per layer, which is what a compositor is for. Hidden layers
     // are not written: hidden means not in the picture, and the per-layer
     // sequences and the flattened one have to agree about what the shot is.

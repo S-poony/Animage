@@ -828,10 +828,29 @@ void MainWindow::exportSequences() {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Export sequences"));
     auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(
-        QStringLiteral("16-bit PNG, over the canvas rectangle.\n"
-                       "Hidden layers are not written."),
-        &dialog));
+    layout->addWidget(new QLabel(QStringLiteral("Over the canvas rectangle.\n"
+                                                "Hidden layers are not written."),
+                                 &dialog));
+
+    // The two formats answer different questions and the label says which,
+    // because the difference is invisible until somebody compares two files and
+    // concludes one of them is broken.
+    auto* format = new QComboBox(&dialog);
+    format->addItem(QStringLiteral("16-bit PNG"), static_cast<int>(exporting::Format::Png));
+    format->addItem(QStringLiteral("OpenEXR (half, linear)"),
+                    static_cast<int>(exporting::Format::Exr));
+    auto* format_note = new QLabel(&dialog);
+    format_note->setWordWrap(true);
+    const auto describe = [format_note](int index) {
+        format_note->setText(index == 1
+                                 ? QStringLiteral("Lossless: the pixels as they were composited, "
+                                                  "linear light with premultiplied alpha. Not the "
+                                                  "same numbers as the PNG.")
+                                 : QStringLiteral("sRGB, unpremultiplied. Converts on purpose, and "
+                                                  "loses some of what a drawing holds."));
+    };
+    connect(format, &QComboBox::currentIndexChanged, &dialog, describe);
+    describe(0);
 
     auto* per_layer = new QCheckBox(QStringLiteral("One sequence per layer"), &dialog);
     per_layer->setChecked(true);
@@ -846,6 +865,8 @@ void MainWindow::exportSequences() {
     auto* form = new QFormLayout;
     auto* name = new QLineEdit(defaultExportName(), &dialog);
     name->selectAll();
+    form->addRow(QStringLiteral("Format"), format);
+    form->addRow(QString(), format_note);
     form->addRow(QStringLiteral("Folder name"), name);
     layout->addLayout(form);
 
@@ -878,8 +899,10 @@ void MainWindow::exportSequences() {
     const QString folder = QDir(parent).filePath(called);
     if (!clearTheWayFor(folder, called)) return;
 
+    const auto chosen = static_cast<exporting::Format>(format->currentData().toInt());
     QString error;
-    if (!exportSequencesTo(folder, per_layer->isChecked(), flattened->isChecked(), &error)) {
+    if (!exportSequencesTo(folder, per_layer->isChecked(), flattened->isChecked(), chosen,
+                           &error)) {
         QMessageBox::warning(this, QStringLiteral("Cannot export"), error);
         return;
     }
@@ -887,9 +910,10 @@ void MainWindow::exportSequences() {
 }
 
 bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flattened,
-                                   QString* error) {
+                                   exporting::Format format, QString* error) {
     exporting::Options options;
     options.folder = folder;
+    options.format = format;
     options.layers = layers;
     options.flattened = flattened;
 

@@ -23,9 +23,9 @@ boundary, tolerating gaps in the line art. Because only the scribbles are
 stored, the fill regenerates whenever the drawing or the scribble changes.
 
 Status: **prototype**. You can draw, animate, colour, save and export. M0 through
-M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG,
-with TIFF and EXR the named next formats — one for compatibility and one for
-losslessness, which are not the same question. Colour carries from drawing to drawing and moves with the
+M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG
+or lossless half-float EXR, with TIFF the named next format for the pipelines
+that ask for it. Colour carries from drawing to drawing and moves with the
 drawing when it does — see below.
 
 A project is a folder — `scene.json` beside one file per cel — under File ▸
@@ -80,7 +80,8 @@ when there is something worth shipping.
 ## Building
 
 Requires a C++20 compiler, CMake 3.21+, and (for the application, not the core
-library) Qt 6.5+.
+library) Qt 6.5+ and zlib. zlib is a transitive dependency of Qt, so anywhere
+Qt is found it is too; the EXR writer is the only thing that links it directly.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -112,9 +113,10 @@ Then run the CMake commands above from a UCRT64 shell.
 |---|---|
 | `src/core/` | Data model, tiles, brush, compositor, undo, colour. Pure C++20, no Qt. |
 | `src/app/animage/` | The application. |
-| `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and zlib included. |
+| `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests, for the core and for the application's save and load. |
+| `third_party/` | tinyexr, vendored: one BSD-3 header, compiled only in `exr_writer.cpp`. |
 | `docs/fr/` | Original design documents. |
 
 ## Running it
@@ -235,11 +237,11 @@ colour was perfectly good. What it was measuring, and why the measurement cannot
 carry a flag, is in [docs/handover.md](docs/handover.md).
 
 **Exporting.** File ▸ Export sequences asks what to write — a sequence per
-layer, the flattened picture, or both — and what to call the export, then where
-to put it. The name is a folder of its own, so a shot's dozen sequence folders
+layer, the flattened picture, or both — in which format, and what to call the
+export, then where to put it. The name is a folder of its own, so a shot's dozen sequence folders
 arrive together instead of loose among whatever else was in the directory you
-picked; it starts as the project's own name. Inside are 16-bit PNGs over the
-canvas rectangle, a folder per layer:
+picked; it starts as the project's own name. Inside are the frames over the canvas
+rectangle, a folder per layer:
 
 ```
 the-shot/
@@ -251,7 +253,14 @@ the-shot/
 The underscore separates the track from the layer from the frame number and
 nothing else in a name is allowed to be one, so a layer called "layer 1" is
 `layer-1` and the last number is always the frame. Hidden layers are not
-written at all. Colouring is solved for drawings nobody has opened — otherwise a
+written at all.
+
+**16-bit PNG or EXR, and they are not the same picture.** PNG converts on
+purpose — sRGB, unpremultiplied — and throws away about a third of what a
+drawing holds; it is right where the destination expects PNG. EXR converts
+nothing: half-float, linear light, premultiplied alpha, exactly the pixels the
+compositor produced. So a frame written both ways holds different numbers, and
+comparing them channel by channel will suggest one is broken when neither is. Colouring is solved for drawings nobody has opened — otherwise a
 project straight off disk would export blank colour sequences — and it is solved
 off the interface thread, so the progress dialog moves and Cancel answers.
 
