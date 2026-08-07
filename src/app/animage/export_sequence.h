@@ -33,9 +33,26 @@
 // relatively and an integer spends it evenly, so of the 15362 half values in
 // [0,1] an sRGB-encoded 16-bit image keeps 10871. That is the same arithmetic
 // that decided cels are not saved as PNG -- but a save that loses pixels is not
-// a save, while an export that converts is doing what it was asked. EXR is what
-// a lossless deliverable wants and is the named next step; the format list is
-// easier to add to than the layout is to change.
+// a save, while an export that converts is doing what it was asked.
+//
+// This is the format list, and it is easier to add to than the layout is to
+// change. Two formats are wanted and they answer different questions, which is
+// worth keeping straight before either is written:
+//
+//   - **TIFF, for compatibility.** The common deliverable in 2D animation, and
+//     from here a radio button over the same integer conversion PNG does. Note
+//     it does *not* make the export lossless: a TIFF can hold a half
+//     (`SampleFormat = 3`, `BitsPerSample = 16`), but that corner is thinly
+//     supported by readers, and the cheap route -- Qt's imageformats add-on --
+//     writes integers exactly as lossy as the PNG above.
+//   - **EXR, for losslessness.** Its default pixel type is half, premultiplied,
+//     linear, which is bit for bit what the tiles hold. `tinyexr` is a single
+//     BSD header. It could also put every layer in one file per frame, which is
+//     a change to the *layout* and so wants deciding before more is built on
+//     the folder-per-layer one.
+//
+// The full comparison, and the correction to the claim that TIFF could not hold
+// our pixels at all, is in docs/handover.md and docs/why-our-own-formats.md.
 namespace exporting {
 
 struct Options {

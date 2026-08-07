@@ -23,8 +23,9 @@ boundary, tolerating gaps in the line art. Because only the scribbles are
 stored, the fill regenerates whenever the drawing or the scribble changes.
 
 Status: **prototype**. You can draw, animate, colour, save and export. M0 through
-M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG
-and not yet EXR. Colour carries from drawing to drawing and moves with the
+M5 of [the plan](docs/fr/plan-de-prototype.md) exist; export writes 16-bit PNG,
+with TIFF and EXR the named next formats — one for compatibility and one for
+losslessness, which are not the same question. Colour carries from drawing to drawing and moves with the
 drawing when it does — see below.
 
 A project is a folder — `scene.json` beside one file per cel — under File ▸

@@ -857,12 +857,54 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **EXR export**, the one piece of M5 deliberately left out. 16-bit PNG throws
-   pixels away, so a lossless deliverable needs it; `tinyexr` is a single BSD
-   header and the format list in `export_sequence.h` is where it goes.
-   Everything around it — the layout, the naming, the canvas rectangle, the fill
-   solving, the progress and cancellation — already exists and is tested, so this
-   is a writer and a radio button.
+1. **More export formats**, the one piece of M5 deliberately left out. 16-bit
+   PNG throws pixels away. Everything around a second writer — the layout, the
+   naming, the canvas rectangle, the fill solving, the progress and cancellation
+   — already exists and is tested, so each one is a writer and a radio button.
+
+   This used to read "EXR export" and name no alternative, which was an
+   assertion rather than a decision. It was raised that TIFF is the more common
+   deliverable in 2D animation, and that is true — TVPaint and Harmony both
+   write it and scanned-drawing pipelines have used it for decades. The
+   comparison is recorded here so the next person inherits an argument instead
+   of a preference.
+
+   **They answer different questions, and the list should hold both.**
+
+   - **TIFF is the compatibility deliverable.** If the destination is a 2D
+     pipeline that asks for TIFF, this is a radio button over the same integer
+     conversion PNG already does, and it should be offered. What it is *not* is
+     the lossless one — see below.
+   - **EXR is the lossless one.** Its default pixel type is half, premultiplied,
+     linear: bit for bit what our tiles hold, with no conversion at all. It can
+     also put every layer in one file per frame, which would replace "a folder
+     per layer" with something a compositor likes better — and the layout is the
+     part this file says is harder to change than the format list, so that is
+     worth knowing before the layout hardens further.
+
+   Three things about TIFF that are easy to get wrong, all of them measured
+   against what it *can* do rather than what it usually does:
+
+   - A TIFF **can** hold our pixels losslessly — `SampleFormat = 3` and
+     `BitsPerSample = 16` is half. `why-our-own-formats.md` used to say
+     otherwise and has been corrected.
+   - But half-float TIFF is a thinly supported corner. Writing it produces files
+     a lot of applications will not open, and writing 32-bit float instead to be
+     safely readable doubles the bytes for data that is natively 16-bit and buys
+     no precision whatever. EXR's half is the ordinary path rather than the
+     unusual one, which is most of the argument.
+   - And it is not the cheap option it sounds like. `tinyexr` is a single BSD
+     header; TIFF needs libtiff or Qt's `qtimageformats` add-on, which **this
+     build does not have** — the installed plugins are `qgif`, `qico`, `qjpeg`
+     and nothing else. The nearly-free version is Qt writing *integer* TIFF,
+     which is exactly as lossy as the PNG already written. The free TIFF is the
+     lossy TIFF.
+
+   One thing to check before building either, rather than assume: Qt 6.2 added
+   `QImage::Format_RGBA16FPx4_Premultiplied`, which is our exact pixel layout.
+   `toSrgb16` currently converts to `Format_RGBA64`, an integer format, because
+   PNG is where it is going — a writer that does not need that round trip may be
+   able to skip it.
 2. **Rung three of scribbles that move**: one transform per *region* rather than
    one per drawing, from the previous fill's regions. Read
    [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and

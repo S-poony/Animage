@@ -131,9 +131,9 @@ bool isBrowserJunk(const QString& name) {
 
 // One frame of the sequence its folder is named after: `{stem}_{0007}.png`,
 // and the stem has to be the folder's own name. Add to the extensions here when
-// the format list in export_sequence.h grows -- an EXR export this did not
-// recognise would be refused as somebody else's folder, which is a confusing
-// way to find out.
+// the format list in export_sequence.h grows -- a TIFF or EXR export this did
+// not recognise would be refused as somebody else's folder, which is a
+// confusing way to find out.
 bool isFrameOf(const QString& sequence, const QString& file) {
     static const QStringList kExtensions = {QStringLiteral("png")};
     const QRegularExpression pattern(
