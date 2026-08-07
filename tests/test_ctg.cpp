@@ -18,7 +18,10 @@
 // assumes the reference could point at one of the by-value arguments. It
 // cannot, so all seventeen of these are false positives, silenced here rather
 // than at each site.
-#if defined(__GNUC__) && !defined(__clang__)
+// The warning itself only exists from GCC 13, and asking an older one to
+// ignore it is a diagnostic in its own right -- which -Werror then turns into
+// a failure, on a compiler that had nothing to complain about.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
 #pragma GCC diagnostic ignored "-Wdangling-reference"
 #endif
 

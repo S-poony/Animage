@@ -23,6 +23,12 @@ option(ANIMAGE_SANITIZE "Build with ASan and UBSan" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive-)
+  # C4458: a parameter named `id` in a struct whose own field is `id`. Forty-odd
+  # of them, all of the form `findLayer(LayerId id)`, and none is a bug: the
+  # member is never named inside those functions, so there is nothing for the
+  # parameter to hide. The alternative is renaming every one to say twice what
+  # its type already says.
+  add_compile_options(/wd4458)
   if(ANIMAGE_WERROR)
     add_compile_options(/WX)
   endif()
