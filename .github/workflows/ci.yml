@@ -115,7 +115,7 @@ jobs:
         if: matrix.name == 'macos'
         run: |
           set -euo pipefail
-          app=build/src/app/animage.app
+          app=build/bin/animage.app
           "$QT_ROOT_DIR/bin/macdeployqt" "$app"
           # macdeployqt rewrites load paths, which invalidates the linker's
           # signature. arm64 refuses to run unsigned code, so sign it again --
@@ -132,7 +132,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $stage = 'stage/Animage'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "build/src/app/$env:BUILD_TYPE/animage.exe" $stage
+          Copy-Item "build/bin/$env:BUILD_TYPE/animage.exe" $stage
           Copy-Item README.md, LICENSE $stage
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
               --no-system-d3d-compiler --no-opengl-sw "$stage/animage.exe"

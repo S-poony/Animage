@@ -212,25 +212,21 @@ void newProjectHandshakeOnAnUntitledDocument() {
     CHECK(QFileInfo::exists(scratch.filePath(QStringLiteral("untitled.animage"))));
 }
 
-// The old code assigned Pending::Close after a failed save no matter what the
-// leave was for. The action must survive the failed save untouched: the leave
-// drops, and the state machine is still usable afterwards. The save is made to
-// fail by taking write permission away from the project's own directory, which
-// ProjectIO needs to move the old project aside.
+    // The old code assigned Pending::Close after a failed save no matter what the
+    // leave was for. The action must survive the failed save untouched: the leave
+    // drops, and the state machine is still usable afterwards. The save is made
+    // to fail by taking the project's parent directory away -- a save stages in a
+    // sibling folder before swapping, so it cannot even start -- and doing it as
+    // a file (not a permission change) because a read-only directory only stops
+    // writes on POSIX.
 void aFailedSaveDropsTheLeaveWithoutInventingAnAction() {
     TEST("a failed save during a leave drops the leave instead of guessing");
 
-    // Running as root, permissions do not block anything and the "failure"
-    // would silently succeed. Skip rather than assert something untrue.
-    QTemporaryDir probe;
-    if (probe.isValid() && QFileInfo(probe.path()).ownerId() == 0) {
-        testing::skip("running as root; file permissions cannot force a save failure");
-        return;
-    }
-
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
-    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    const QString parent = scratch.filePath(QStringLiteral("parent"));
+    CHECK(QDir().mkpath(parent));
+    const QString folder = parent + QStringLiteral("/shot.animage");
     CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
     MainWindow window;
@@ -251,13 +247,14 @@ void aFailedSaveDropsTheLeaveWithoutInventingAnAction() {
                      [&asked](const QString&) { asked = true; });
     QObject::connect(&window, &AppController::closeRequested, [&closed]() { closed = true; });
 
-    // Take the project's own directory away: the save cannot land in it.
-    const QString dir = scratch.path();
-    const QFileDevice::Permissions old_perms = QFile::permissions(dir);
-    const QFileDevice::Permissions locked = QFileDevice::ReadOwner | QFileDevice::ExeOwner |
-                                            QFileDevice::ReadGroup | QFileDevice::ExeGroup |
-                                            QFileDevice::ReadOther | QFileDevice::ExeOther;
-    CHECK(QFile::setPermissions(dir, locked));
+    // Take the project's parent away: a save stages in a sibling folder and
+    // then swaps, so it cannot even start. Replace the parent with a file of
+    // the same name -- writing into a path that is a file fails everywhere.
+    CHECK(QDir(parent).removeRecursively());
+    QFile blocker(parent);
+    CHECK(blocker.open(QIODevice::WriteOnly));
+    blocker.write("x");
+    blocker.close();
     CHECK(!window.saveTo(folder));  // sanity: the save really does fail
     CHECK(window.windowTitle().contains(QLatin1Char('*')));
 
@@ -273,7 +270,6 @@ void aFailedSaveDropsTheLeaveWithoutInventingAnAction() {
     CHECK(window.windowTitle().contains(QLatin1Char('*')));
 
     // The handshake still works afterwards: Discard carries the leave out.
-    QFile::setPermissions(dir, old_perms);
     window.requestClose();
     QCoreApplication::processEvents();
     window.respondSaveDecision(AppController::Discard);
