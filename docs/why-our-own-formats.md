@@ -4,10 +4,13 @@ Written because this is the first question people ask about the repository, and
 it is a fair one. Rolling your own file format is usually a mistake, so the
 burden of proof is on us.
 
-This document is meant to be readable without knowing the codebase. It covers
-the cel (drawing) format in detail, and the JSON parser more briefly — because
-the two decisions are not equally strong, and pretending otherwise would waste
-your time.
+This document is meant to be readable without knowing the codebase.
+
+It covers the cel (drawing) format, which we still have and would choose again.
+The repository also used to contain a hand-written JSON reader, and **it no
+longer does** — that was the weaker of the two decisions, it was challenged, and
+the challenge was right. The last section says what happened, because a document
+that only defends things is not worth reading.
 
 ## The short answer
 
@@ -138,10 +141,10 @@ tile really is completely painted.
 
 The file starts with magic bytes, a version and the numbers needed to read the
 rest, all little-endian. The layout is written out byte by byte at the top of
-[`src/core/celfile.h`](../src/core/celfile.h). Anything that can decompress a
-zlib stream can recover a drawing from it with that comment in hand. That
-documentation is deliberate: it is standing in for "any image viewer can open
-it", which is what we gave up.
+[`src/app/animage/project_io.h`](../src/app/animage/project_io.h). Anything that
+can decompress a zlib stream can recover a drawing from it with that comment in
+hand. That documentation is deliberate: it is standing in for "any image viewer
+can open it", which is what we gave up.
 
 ## The numbers
 
@@ -266,44 +269,70 @@ Not dogma. Any of these would reopen it:
 Note that the third needs *both*. Changing the pixel type alone buys nothing,
 which is the most common misunderstanding about this decision.
 
-## The JSON parser, which is a weaker case
+## The JSON parser, which we no longer have
 
-The same repository also contains a small JSON reader and writer, and it should
-be judged separately, because the argument for it is not as strong.
+This section is kept because the episode is more instructive than the outcome.
 
-**Why it exists.** `animage_core` — the data model, undo, compositing, the
+The repository used to contain a hand-written JSON reader and writer, about 350
+lines with its own tests. It was removed in
+[#19](https://github.com/S-poony/Animage/pull/19); the scene file is read and
+written with Qt's JSON now.
+
+**Why it existed.** `animage_core` — the data model, undo, compositing, the
 colour solver — has no external dependencies at all, deliberately, and that
-includes Qt. That rule is what lets the model be tested headlessly, and the
-tests it enables are the reason the trickiest parts of the model are trustworthy.
-The scene structure is saved by `core`, so its serialiser cannot reach for Qt's
-JSON, and taking a third-party library into `core` would be the first crack in a
-rule that has otherwise paid for itself.
+includes Qt. That rule is what lets the model be tested headlessly, and it is
+why the trickiest parts of the model are trustworthy. The scene structure was
+saved by `core`, so its serialiser could not reach for Qt's JSON.
 
-There are two real requirements beyond "parse JSON": object keys must keep their
-insertion order, so that saving twice produces identical files and a diff shows
-what changed rather than where a hash moved; and numbers must be written in the
-shortest form that reads back exactly, so an opacity of 0.6 does not appear in
-the file as `0.6000000238418579`.
+That reasoning was sound and the conclusion was still wrong, which is worth
+sitting with. The premise nobody questioned was that the *serialiser* belonged in
+`core`. It did not. Files are an application concern, and once the whole of
+saving and loading moved out — which is what #19 did — `core` became more purely
+the model than it was before, and the JSON question simply evaporated. **The
+argument was won on the wrong ground.**
 
-**Why the criticism has more force here.** `scene.json` is small and structural
-— no pixels — so nothing about it is performance-critical, and a header-only
-library such as nlohmann/json would satisfy both requirements above. The honest
-summary is that this one follows from a project rule rather than from a property
-of the data, and if that rule were relaxed it is the first thing that should go.
-It is about 350 lines with its own tests, and deleting it in favour of a library
-would be an afternoon.
+**It also had two real bugs**, both found by writing hostile files at it, and
+both of the kind hand-written parsers are known for:
 
-The cel format is not in that position. No library choice would have worked.
+- **Unbounded recursion.** The parser descended one stack frame per nesting
+  level with no limit. A file of a hundred thousand open brackets — about 200 KB
+  — crashed the program outright. Opening a project you were sent is reading
+  somebody else's data, so this was a genuine defect and not a curiosity.
+- **Undefined behaviour on out-of-range numbers.** A canvas width of `1e300` was
+  converted straight to an integer. In C++ that conversion is undefined when the
+  value does not fit, which means the compiler is entitled to do anything at all.
+
+Neither would have existed in a library that thousands of projects have already
+attacked. Both are now pinned as tests
+([`tests/test_hostile.cpp`](../tests/test_hostile.cpp)) so they cannot return by
+another route.
+
+**What survived the change**, because they were requirements rather than
+preferences: numbers are still written in the shortest form that reads back
+exactly, so an opacity of 0.6 appears as `0.6` and not `0.6000000238418579`; and
+saving the same scene twice still produces identical bytes, so a diff shows what
+changed. Key order is alphabetical now rather than the order we wrote them —
+still deterministic, slightly less nicely grouped, and not worth 350 lines.
+
+**The general lesson.** "Our constraints rule out the library" deserves the
+follow-up question "are these the right constraints, in the right place?". Here
+they were the right constraints applied to the wrong module, and the fix was to
+move the module rather than to keep the code.
+
+The cel format is not in that position, and the distinction is the whole point of
+this document: no library choice would have worked, because the objection is to
+the *shape* of the data and not to who wrote the parser.
 
 ## Where to look
 
 | | |
 |---|---|
-| [`src/core/celfile.h`](../src/core/celfile.h) | The cel format, documented byte by byte |
+| [`src/app/animage/project_io.h`](../src/app/animage/project_io.h) | All of saving and loading: the cel format documented byte by byte, `scene.json`, and the folder |
 | [`src/core/tile.h`](../src/core/tile.h) | Sparse tiles: where the infinite canvas comes from |
-| [`src/core/serialise.h`](../src/core/serialise.h) | `scene.json` — structure, no pixels |
-| [`src/core/json.h`](../src/core/json.h) | The JSON reader and writer |
-| [`src/app/animage/project_files.h`](../src/app/animage/project_files.h) | The folder, and compression |
 | [`tests/bench_save.cpp`](../tests/bench_save.cpp) | The measurements quoted here |
 | [`tests/test_serialise.cpp`](../tests/test_serialise.cpp) | Round trips, and the corrupt-file cases |
+| [`tests/test_hostile.cpp`](../tests/test_hostile.cpp) | Files nobody sane wrote, and the crashes they used to cause |
 | [`docs/handover.md`](handover.md) | The short version, among the other departures from the plan |
+
+Note that `core` no longer contains any of this. It holds the model and nothing
+about files, which is the arrangement the JSON episode above arrived at.
