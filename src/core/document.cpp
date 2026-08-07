@@ -405,10 +405,9 @@ void Document::moveDrawingOver(TrackId track_id, ImageId image_id, std::size_t s
     if (from >= track->slots.size()) return;
     const auto [own_first, own_last] = track->runBounds(from);
 
-    // Dropped somewhere inside its own hold, which has not retimed anything.
-    // Shortening a hold from the front is what Hold - is for, and a drag that
-    // lands on the drawing you picked up should do nothing at all.
-    if (slot >= own_first && slot <= own_last) return;
+    // Dropped exactly where it already starts: nothing to do.
+    if (slot == own_first) return;
+    const bool inside_itself = slot > own_first && slot <= own_last;
 
     // Where it lands, read from the track as it stands -- *not* from a copy it
     // has already been lifted out of.
@@ -434,22 +433,36 @@ void Document::moveDrawingOver(TrackId track_id, ImageId image_id, std::size_t s
     std::vector<ImageId> moved = track->slots;
     for (std::size_t i = range->first; i <= range->second; ++i) moved[i] = image_id;
 
-    // The frames it came from. They are only vacated when they are not already
-    // touching where it landed: a drawing moved up against its old hold simply
-    // keeps them, which is what makes the issue's own example come out at nine
-    // frames rather than eight.
-    const bool joins = (own_last + 1 == range->first) || (range->second + 1 == own_first);
-    if (!joins) {
-        // Given to whichever drawing is beside them -- the one before, or the
-        // one after when they were at the very start. Erasing them instead
-        // would shorten a track whose fixed length is the point of the setting.
+    if (inside_itself) {
+        // Dragged along its own hold, which means "start here". The frames
+        // before the drop belong to the drawing before this one now, so the
+        // hold in front simply grows by what this one gave up.
+        //
+        // Unless there is no drawing in front, which is the whole of the
+        // reported bug: the first drawing of a track has nowhere to put the
+        // frames it would be vacating, so it cannot move forward and nothing
+        // happens. Every other drawing can.
         const ImageId before = (own_first > 0) ? moved[own_first - 1] : kNoId;
-        const ImageId after = (own_last + 1 < moved.size()) ? moved[own_last + 1] : kNoId;
-        const ImageId filler = (before != kNoId && before != image_id) ? before
-                               : (after != kNoId && after != image_id) ? after
-                                                                       : kNoId;
-        if (filler == kNoId) return;  // the only drawing in the track: nowhere to go
-        for (std::size_t i = own_first; i <= own_last; ++i) moved[i] = filler;
+        if (before == kNoId || before == image_id) return;
+        for (std::size_t i = own_first; i < range->first; ++i) moved[i] = before;
+    } else {
+        // Moved into another drawing's hold. The frames it came from are only
+        // vacated when they are not already touching where it landed: a drawing
+        // that ended up against its old hold simply keeps them, which is what
+        // makes the issue's own example come out at nine frames and not eight.
+        const bool joins = (own_last + 1 == range->first) || (range->second + 1 == own_first);
+        if (!joins) {
+            // Given to whichever drawing is beside them -- the one before, or
+            // the one after when they were at the very start. Erasing them
+            // would shorten a track whose fixed length is the point of it.
+            const ImageId before = (own_first > 0) ? moved[own_first - 1] : kNoId;
+            const ImageId after = (own_last + 1 < moved.size()) ? moved[own_last + 1] : kNoId;
+            const ImageId filler = (before != kNoId && before != image_id) ? before
+                                   : (after != kNoId && after != image_id) ? after
+                                                                           : kNoId;
+            if (filler == kNoId) return;  // the only drawing in the track
+            for (std::size_t i = own_first; i <= own_last; ++i) moved[i] = filler;
+        }
     }
     if (moved == track->slots) return;
 

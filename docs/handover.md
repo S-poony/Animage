@@ -379,21 +379,37 @@ delete one. It has a consequence that reaches further than it looks:
   property instead — because it is exactly what a later change to the rule would
   break silently.
 
-**Read the run before you move anything.** Reported on `1...2....3.....`: nudging
-the first drawing one frame swapped it with the second, leaving drawing 2 holding
-a single frame and drawing 1 holding everything up to drawing 3. Two faults, one
-of them subtle. The subtle one is an ordering mistake — `moveDrawingOver` lifted
-the drawing out first, which hands the frames it is leaving to the neighbour, so
-the neighbour's run then measures as *both* runs together and "take the rest of
-the hold it lands in" swallows the lot. The run has to be read from the track as
-it stands. The blunt one is that a drop inside the drawing's own hold was treated
-as a move at all; it now does nothing, because a drag that lands on the drawing
-you picked up has not retimed anything and shortening a hold from the front is
-what Hold - is for.
+**Read the run before you move anything, and the first drawing is the one that
+cannot move.** Reported on `1...2....3.....`: nudging the first drawing one frame
+swapped it with the second, leaving drawing 2 holding a single frame and drawing
+1 holding everything up to drawing 3.
+
+The cause is an ordering mistake. `moveDrawingOver` lifted the drawing out first,
+handing the frames it was leaving to a neighbour — so the neighbour's run then
+measured as *both* runs together, and "take the rest of the hold it lands in"
+swallowed the lot. The run has to be read from the track as it stands.
+
+**Which drawing it happened to is the interesting part, and it was the reporter
+who worked it out rather than me.** The frames a drawing vacates go to the
+drawing *before* it, and merging them backwards leaves the run's remainder from
+any drop point exactly what it should be — so for every drawing with something in
+front of it, lifting-out-first gave the right answer by luck. Only when the
+drawing starts at slot 0 is there nothing in front, the frames go to the drawing
+*after* instead, and the merged run then runs forwards through the neighbour.
+That is the swap, and it can only ever have happened to the first drawing of a
+track.
+
+Worth recording because the first fix for it was too broad: it made every drop
+inside a drawing's own hold do nothing, which is right for the first drawing and
+wrong for all the others — it stopped drawings being nudged along their own holds
+at all, which had always worked. Dragging along your own hold means "start here",
+and the hold in front grows by what you gave up; the first drawing of a track has
+no hold in front to grow, so it alone stays put. One case, not a rule.
 
 The general shape is worth keeping: **an operation defined in terms of "the run
 at X" cannot compute X from a strip it has already modified.** The intermediate
-state has runs in it that were never really there.
+state has runs in it that were never really there — and it will agree with the
+right answer often enough to look correct.
 
 **Moving over a hold has two coordinate systems and neither derives from the
 other.** `moveDrawing` takes a position *between* drawings, counted with the

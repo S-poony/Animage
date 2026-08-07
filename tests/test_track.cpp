@@ -541,8 +541,8 @@ void movingOverAHoldTakesTheRestOfItAndLeavesNoGap() {
 // Two faults in one. The run being landed in was read from a copy the drawing
 // had already been lifted out of, so it measured as both runs together; and a
 // drag that lands inside the drawing's own hold was treated as a move at all.
-void nudgingADrawingInsideItsOwnHoldDoesNothing() {
-    TEST("a drawing dropped inside its own hold is not retimed");
+void nudgingADrawingAlongItsOwnHold() {
+    TEST("a drawing dragged along its own hold starts where it was dropped");
     Fixture f;
     const ImageId one = f.doc.insertImage(f.track, 0);
     f.doc.extendExposure(f.track, 0, 3);  // 1 held 4
@@ -553,30 +553,37 @@ void nudgingADrawingInsideItsOwnHoldDoesNothing() {
     CHECK_EQ(f.tl().frameCount(), std::size_t{15});
     CHECK(f.tl().overwrite_drawings);
 
+    // The reported case, and the one thing this cannot do: the first drawing
+    // has nowhere to put the frames it would give up, so it does not move.
     const std::size_t before = f.doc.undoDepth();
-    // One frame along, which is still inside its own hold.
     f.doc.moveDrawingOver(f.track, one, 1);
-
     CHECK_EQ(f.doc.undoDepth(), before);  // nothing happened, not even an undo step
     CHECK_EQ(f.tl().exposureOf(one), std::size_t{4});
-    CHECK_EQ(f.tl().exposureOf(two), std::size_t{5});
-    CHECK_EQ(f.tl().exposureOf(three), std::size_t{6});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{5});  // and no swap
     CHECK_EQ(f.tl().firstSlotOf(one), std::size_t{0});
 
-    // Anywhere else in its own hold, the same.
-    f.doc.moveDrawingOver(f.track, one, 3);
-    CHECK_EQ(f.doc.undoDepth(), before);
-    CHECK_EQ(f.tl().exposureOf(two), std::size_t{5});
-
-    // Dragged clear of its own hold it does move, and takes the rest of the
-    // hold it lands in rather than the whole of it.
-    f.doc.moveDrawingOver(f.track, one, 6);
+    // Every other drawing moves along its own hold one frame at a time, and the
+    // hold in front grows by exactly what this one gave up.
+    f.doc.moveDrawingOver(f.track, two, 5);
     CHECK_EQ(f.tl().frameCount(), std::size_t{15});
-    CHECK_EQ(f.tl().firstSlotOf(one), std::size_t{6});
-    CHECK_EQ(f.tl().exposureOf(one), std::size_t{3});    // slots 6..8, the rest of 2's hold
-    CHECK_EQ(f.tl().exposureOf(two), std::size_t{6});    // took the frames 1 left behind
+    CHECK_EQ(f.tl().firstSlotOf(two), std::size_t{5});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{4});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{5});
     CHECK_EQ(f.tl().exposureOf(three), std::size_t{6});  // untouched
-    CHECK_EQ(f.tl().imageAtSlot(0), two);
+
+    // Dropped exactly where it starts, nothing happens.
+    const std::size_t settled = f.doc.undoDepth();
+    f.doc.moveDrawingOver(f.track, two, 5);
+    CHECK_EQ(f.doc.undoDepth(), settled);
+
+    // And dragged clear of its own hold it takes the rest of the hold it lands
+    // in, rather than the whole of it.
+    f.doc.moveDrawingOver(f.track, three, 6);
+    CHECK_EQ(f.tl().frameCount(), std::size_t{15});
+    CHECK_EQ(f.tl().firstSlotOf(three), std::size_t{6});
+    CHECK_EQ(f.tl().exposureOf(three), std::size_t{9});
+    CHECK_EQ(f.tl().exposureOf(two), std::size_t{1});
+    CHECK_EQ(f.tl().exposureOf(one), std::size_t{5});
 }
 
 // Leaving from the very start there is no drawing before to take the frames, so
@@ -711,7 +718,7 @@ int main() {
     overwritingNeverTakesADrawingsLastFrame();
     duplicatingOverwritesTheSameWay();
     movingOverAHoldTakesTheRestOfItAndLeavesNoGap();
-    nudgingADrawingInsideItsOwnHoldDoesNothing();
+    nudgingADrawingAlongItsOwnHold();
     framesLeftAtTheStartGoToTheDrawingAfterThem();
     movingOverToWhereItAlreadyIsDoesNothing();
     overwritingNeverLosesADrawing();
