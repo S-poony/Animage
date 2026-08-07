@@ -225,41 +225,52 @@ void CanvasView::setPlaying(bool playing) {
 // somewhere else. Nothing is computed here: the solve happens on a worker
 // thread, and what stays on screen is the last answer until the new one lands.
 // See the widget this was ported from for the full reasoning.
+bool CanvasView::isShownNow(ImageId image) const {
+    if (image == kNoId || !doc_) return false;
+    for (const Track& track : doc_->scene().tracks) {
+        if (track.imageShownAt(slot_) == image) return true;
+    }
+    return false;
+}
+
 void CanvasView::requestCtgFills() {
     if (!doc_) return;
-    const Track* track = doc_->scene().findTrack(track_);
-    if (!track || image_ == kNoId) return;
-
     if (stroking_) return;
 
-    dropStaleColourRequests(/*only_this_drawing=*/true);
+    dropStaleColourRequests(/*only_this_frame=*/true);
 
     const std::uint64_t generation = doc_->ctgCache().generation();
     const CtgSettings settings;
-    for (const Layer& layer : track->layers) {
-        if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
-        if (layer.show_scribbles) continue;
+    for (const Track& track_here : doc_->scene().tracks) {
+        const TrackId track_id = track_here.id;
+        const ImageId image = track_here.imageShownAt(slot_);
+        if (image == kNoId) continue;
 
-        const CtgInputs wanted = ctgInputsFor(*doc_, track_, image_, layer.id, settings);
-        if (!wanted.valid) continue;
+        for (const Layer& layer : track_here.layers) {
+            if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
+            if (layer.show_scribbles) continue;
 
-        const CtgFill* held = doc_->ctgFillFor(track_, image_, layer.id);
-        const bool current = held && held->valid && held->inputs == wanted.hash;
-        if (current && (held->step <= std::max(1, settings.downscale) ||
-                        held->budget >= kFullSolveBudget)) {
-            continue;
+            const CtgInputs wanted = ctgInputsFor(*doc_, track_id, image, layer.id, settings);
+            if (!wanted.valid) continue;
+
+            const CtgFill* held = doc_->ctgFillFor(track_id, image, layer.id);
+            const bool current = held && held->valid && held->inputs == wanted.hash;
+            if (current && (held->step <= std::max(1, settings.downscale) ||
+                            held->budget >= kFullSolveBudget)) {
+                continue;
+            }
+            const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
+
+            const ColourAsked asked{image, layer.id, true};
+            const auto already = ctg_asked_.find(asked);
+            if (already != ctg_asked_.end() && already->second.inputs == wanted.hash) {
+                continue;  // already being worked out
+            }
+
+            ctg_asked_[asked] = {wanted.hash, generation};
+            ctg_solver_.request({image, layer.id},
+                                ctgJobFor(*doc_, track_id, image, layer.id, settings, budget), true);
         }
-        const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
-
-        const ColourAsked asked{image_, layer.id, true};
-        const auto already = ctg_asked_.find(asked);
-        if (already != ctg_asked_.end() && already->second.inputs == wanted.hash) {
-            continue;  // already being worked out
-        }
-
-        ctg_asked_[asked] = {wanted.hash, generation};
-        ctg_solver_.request({image_, layer.id},
-                            ctgJobFor(*doc_, track_, image_, layer.id, settings, budget), true);
     }
 
     noteColourPending();
@@ -295,10 +306,10 @@ void CanvasView::noteColourPending() {
     Q_EMIT colourChanged();
 }
 
-void CanvasView::dropStaleColourRequests(bool only_this_drawing) {
+void CanvasView::dropStaleColourRequests(bool only_this_frame) {
     const std::uint64_t generation = doc_->ctgCache().generation();
     for (auto it = ctg_asked_.begin(); it != ctg_asked_.end();) {
-        const bool left = only_this_drawing && it->first.tiles && it->first.image != image_;
+        const bool left = only_this_frame && it->first.tiles && !isShownNow(it->first.image);
         if (!left && it->second.generation == generation) {
             ++it;
             continue;
@@ -491,7 +502,7 @@ void CanvasView::markDirty(const PixelRect& region) {
 }
 
 void CanvasView::refreshRegion(const PixelRect& region) {
-    if (display_.isNull() || track_ == kNoId || image_ == kNoId) return;
+    if (display_.isNull() || !doc_) return;
 
     PixelRect area = rectIntersect(region, cached_region_);
     if (area.isEmpty()) return;
@@ -499,7 +510,7 @@ void CanvasView::refreshRegion(const PixelRect& region) {
     area = rectIntersect(snapToSampleGrid(cache_step_, area), cached_region_);
     if (area.isEmpty()) return;
 
-    compositor_.composite(*doc_, track_, image_, area, scratch_, cache_step_);
+    compositor_.compositeScene(*doc_, slot_, area, scratch_, cache_step_);
 
     const long long first_column = cache_step_.entryAt(area.x);
     const long long first_row = cache_step_.entryAt(area.y);
@@ -704,12 +715,12 @@ QImage CanvasView::grab() const {
 // --- picking -------------------------------------------------------------
 
 bool CanvasView::pickColourAt(const QPointF& image_point) {
-    if (track_ == kNoId || image_ == kNoId) return false;
+    if (!doc_) return false;
 
     const PixelRect one{static_cast<int>(std::floor(image_point.x())),
                         static_cast<int>(std::floor(image_point.y())), 1, 1};
     Framebuffer sample;
-    compositor_.composite(*doc_, track_, image_, one, sample);
+    compositor_.compositeScene(*doc_, slot_, one, sample);
     if (sample.isEmpty()) return false;
 
     const Rgba pixel = sample.pixel(0, 0);

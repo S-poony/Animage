@@ -14,6 +14,7 @@
 #include "canvas_view.h"
 #include "document.h"
 #include "layers_model.h"
+#include "tracks_model.h"
 #include "project_io.h"
 #include "scene_settings_model.h"
 #include "timeline_model.h"
@@ -73,6 +74,7 @@ class AppController : public QObject {
 
     // --- the models -----------------------------------------------------
     Q_PROPERTY(LayersModel* layersModel READ layersModel CONSTANT)
+    Q_PROPERTY(TracksModel* tracksModel READ tracksModel CONSTANT)
     Q_PROPERTY(TimelineModel* timelineModel READ timelineModel CONSTANT)
     Q_PROPERTY(CtgSourcesModel* ctgSourcesModel READ ctgSourcesModel CONSTANT)
     Q_PROPERTY(SceneSettingsModel* sceneSettingsModel READ sceneSettingsModel CONSTANT)
@@ -117,10 +119,20 @@ class AppController : public QObject {
     Q_PROPERTY(int ctgDirection READ ctgDirection WRITE setCtgDirection NOTIFY layerStateChanged)
     Q_PROPERTY(bool ctgFollow READ ctgFollow WRITE setCtgFollow NOTIFY layerStateChanged)
 
+    // --- the tracks ------------------------------------------------------
+    Q_PROPERTY(int currentTrackIndex READ currentTrackIndex WRITE setCurrentTrackIndex NOTIFY trackChanged)
+    Q_PROPERTY(int trackCount READ trackCount NOTIFY stateChanged)
+    Q_PROPERTY(bool overwrite READ overwrite WRITE setOverwrite NOTIFY trackChanged)
+    Q_PROPERTY(int trackEnd READ trackEnd WRITE setTrackEnd NOTIFY trackChanged)
+    Q_PROPERTY(int sceneLength READ sceneLength WRITE setSceneLength NOTIFY stateChanged)
+
     // --- the timeline ----------------------------------------------------
     Q_PROPERTY(int currentSlot READ currentSlot WRITE setCurrentSlot NOTIFY slotChanged)
-    Q_PROPERTY(int currentHold READ currentHold NOTIFY stateChanged)
+    Q_PROPERTY(int currentHold READ currentHold WRITE setCurrentHold NOTIFY stateChanged)
     Q_PROPERTY(int onionCount READ onionCount WRITE setOnionCount NOTIFY onionChanged)
+    Q_PROPERTY(int onionBefore READ onionBefore WRITE setOnionBefore NOTIFY onionChanged)
+    Q_PROPERTY(int onionAfter READ onionAfter WRITE setOnionAfter NOTIFY onionChanged)
+    Q_PROPERTY(qreal onionOpacity READ onionOpacity WRITE setOnionOpacity NOTIFY onionChanged)
 
     // --- saving ----------------------------------------------------------
     Q_PROPERTY(QString projectName READ projectName NOTIFY stateChanged)
@@ -143,6 +155,7 @@ public:
     animage::Document& documentForTesting() { return doc_; }
     SceneSettingsModel* sceneSettingsModel() { return &scene_settings_model_; }
     LayersModel* layersModel() const { return layers_model_; }
+    TracksModel* tracksModel() const { return tracks_model_; }
     TimelineModel* timelineModel() const { return timeline_model_; }
     CtgSourcesModel* ctgSourcesModel() const { return ctg_sources_model_; }
 
@@ -152,6 +165,8 @@ public:
     Q_INVOKABLE bool openProjectAt(const QString& folder, QString* error = nullptr);
     Q_INVOKABLE bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
                                        QString* error = nullptr);
+    Q_INVOKABLE bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
+                                       int format, QString* error = nullptr);
     bool waitForColour();
     void onAutosaveTick();
 
@@ -168,15 +183,23 @@ public:
     int frameCount() const;
     int drawingCount() const;
     int layerCount() const;
+    int trackCount() const { return static_cast<int>(doc_.scene().tracks.size()); }
+    int currentTrackIndex() const;
     int tileCount() const { return static_cast<int>(doc_.totalTileCount()); }
     int framerate() const { return doc_.scene().framerate; }
     int sceneWidth() const { return doc_.scene().width; }
     int sceneHeight() const { return doc_.scene().height; }
+    int sceneLength() const;
+    bool overwrite() const;
+    int trackEnd() const;
     int currentSlot() const { return static_cast<int>(current_slot_); }
     // How many frames the drawing in front of you is held for. The frame
     // duration control in the timeline reads and changes this.
     int currentHold() const;
     int onionCount() const { return onion_count_; }
+    int onionBefore() const { return onion_before_; }
+    int onionAfter() const { return onion_after_; }
+    qreal onionOpacity() const;
 
     int tool() const { return erasing_ ? Eraser : Brush; }
     double brushRadius() const;
@@ -257,6 +280,15 @@ public Q_SLOTS:
     void setCtgDirection(int direction);
     void setCtgFollow(bool on);
 
+    // --- the tracks ------------------------------------------------------
+    void addTrack();
+    void removeCurrentTrack();
+    void renameCurrentTrack(const QString& name);
+    void setCurrentTrackIndex(int index);
+    void setOverwrite(bool on);
+    void setTrackEnd(int end);
+    void setSceneLength(int length);
+
     // --- the timeline ----------------------------------------------------
     void setCurrentSlot(int slot);
     void stepFrame(int delta);
@@ -266,16 +298,20 @@ public Q_SLOTS:
     void deleteDrawing();
     void holdLonger();
     void holdShorter();
+    void setCurrentHold(int frames);
+    void setOnionCount(int count);
+    void setOnionBefore(int count);
+    void setOnionAfter(int count);
+    void setOnionOpacity(qreal opacity);
     void togglePlayback();
     void stopPlayback();
-    void setOnionCount(int count);
     void setCanvasSize(int width, int height);
     // Scene settings previews write to the scene directly, around the history:
     // nothing is recorded until the dialog is accepted, and the controller
     // puts the scene back on the way out.
-    void previewSceneSettings(int framerate, int width, int height);
-    void restoreSceneSettings(int framerate, int width, int height);
-    void commitSceneSettings(int framerate, int width, int height);
+    void previewSceneSettings(int framerate, int width, int height, int length = 0);
+    void restoreSceneSettings(int framerate, int width, int height, int length = 0);
+    void commitSceneSettings(int framerate, int width, int height, int length = 0);
 
     // --- timeline gestures -----------------------------------------------
     void beginStretch(int run_start_slot);
@@ -292,6 +328,7 @@ Q_SIGNALS:
     void brushChanged();
     void brushColourChanged();
     void layerStateChanged();
+    void trackChanged();
     void slotChanged();
     void onionChanged();
     void colourPendingChanged();
@@ -346,6 +383,7 @@ private:
     CanvasView* canvas_ = nullptr;
 
     LayersModel* layers_model_ = nullptr;
+    TracksModel* tracks_model_ = nullptr;
     TimelineModel* timeline_model_ = nullptr;
     CtgSourcesModel* ctg_sources_model_ = nullptr;
 
@@ -378,6 +416,9 @@ private:
 
     std::size_t current_slot_ = 0;
     int onion_count_ = 0;
+    int onion_before_ = 0;
+    int onion_after_ = 0;
+    qreal onion_opacity_ = 0.45;
     bool erasing_ = false;
     bool export_cancel_ = false;
     std::size_t stretch_run_start_ = 0;

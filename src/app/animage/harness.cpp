@@ -11,26 +11,38 @@
 //     The window is given a moment to settle, a frame is grabbed through the
 //     scene graph, and the png lands where asked.
 #include <QGuiApplication>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlError>
-#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
 #include <QStringList>
+#include <QEventLoop>
 #include <cstdio>
 
 #include "qml_registry.h"
+#include "app_controller.h"
 
 int main(int argc, char** argv) {
-    // Same style contract as main.cpp: the QML paints itself from Theme.qml,
-    // the few raw Qt Quick Controls underneath are Basic, and the palette is
-    // the mirror of Theme.qml so nothing renders as a default OS widget.
-    QQuickStyle::setStyle(QStringLiteral("Basic"));
+    // Native platform style — same as main.cpp, no forced Basic.
 
     QGuiApplication app(argc, argv);
+    // Ensure themed icons are found in offscreen (headless has empty search path)
+    // and provide fallback for Windows/macOS where Freedesktop theme not installed.
+    {
+        auto paths = QIcon::themeSearchPaths();
+        if (!paths.contains(QStringLiteral("/usr/share/icons")))
+            paths << QStringLiteral("/usr/share/icons");
+        QIcon::setThemeSearchPaths(paths);
+        QIcon::setFallbackSearchPaths(QIcon::fallbackSearchPaths() << QStringLiteral(":/icons") << QStringLiteral(":/Animage/animage/icons"));
+        if (QIcon::themeName().isEmpty())
+            QIcon::setThemeName(QStringLiteral("Adwaita"));
+        if (QIcon::fallbackThemeName().isEmpty())
+            QIcon::setFallbackThemeName(QStringLiteral("hicolor"));
+    }
     // A trailing "light" argument forces the light theme to render, so it can
     // be screenshotted on a platform that does not report one (offscreen
     // colorScheme is Unknown, which Theme.qml treats as dark). Scan the whole
@@ -92,6 +104,9 @@ int main(int argc, char** argv) {
         //            panels and overflowing inspectors show up;
         //   "popup"  opens the brush-size popup before grabbing, so the
         //            popover itself can be inspected;
+        //   "onion"  turns some onion skin and a longer hold on (and opens
+        //            the temporal-strip popover when "popup" is argv[3]) so
+        //            the active ghost trail can be inspected;
         //   "geometry" prints the mapped geometry of key named items and
         //            exits without saving a picture (for layout checks);
         //   anything else grabs at the designed size.
@@ -111,10 +126,48 @@ int main(int argc, char** argv) {
                             qPrintable(y.toString()), qPrintable(w.toString()),
                             qPrintable(h.toString()));
             }
+        } else if (mode == QLatin1String("onion")) {
+            // Verification mode for the unified temporal strip: turn some
+            // onion skin on (previous and next), make the hold a bit longer,
+            // and open the advanced popover, then grab the result.
+            if (QObject* strip = window->findChild<QObject*>("temporalStrip")) {
+                if (auto* ctl = qobject_cast<AppController*>(
+                        qvariant_cast<QObject*>(strip->property("controller")))) {
+                    ctl->setOnionBefore(2);
+                    ctl->setOnionAfter(1);
+                    ctl->setCurrentHold(3);
+                    std::printf("onion before=%d after=%d hold=%d\n",
+                                ctl->onionBefore(), ctl->onionAfter(),
+                                ctl->currentHold());
+                } else {
+                    std::printf("onion: no controller\n");
+                }
+            } else {
+                std::printf("onion: no strip\n");
+            }
+            // Optionally open the advanced popover when the mode requests it,
+            // so the states can be checked with and without the scrim.
+            if (argc > 3 && QLatin1String(argv[3]) == QLatin1String("popup")) {
+                if (QObject* p = window->findChild<QObject*>("onionSettingsPopup")) {
+                    QMetaObject::invokeMethod(p, "open");
+                }
+            }
+            QCoreApplication::processEvents();
+            // Let any on-screen state animations settle so the grab shows the
+            // final look rather than a mid-fling frame.
+            {
+                // Real wall-clock wait: processEvents alone can spin faster than
+                // the opacity/colour Behaviour animations, leaving them mid-flight.
+                QEventLoop waiter;
+                QTimer::singleShot(350, &waiter, &QEventLoop::quit);
+                waiter.exec();
+            }
+            QCoreApplication::processEvents();
         } else if (mode == QLatin1String("geometry")) {
             const QStringList names = {
                 "brushSizePopup", "sizeTrigger", "brushToolButton",
-                "toolOptionsBar", "sizeValueField", "sizeValueEditor"
+                "toolOptionsBar", "sizeValueField", "sizeValueEditor",
+                "temporalStrip", "onionSettingsPopup"
             };
             for (const QString& n : names) {
                 QObject* o = window->findChild<QObject*>(n);

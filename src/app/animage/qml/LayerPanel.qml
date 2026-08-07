@@ -99,8 +99,11 @@ Item {
                     // The eye: show or hide the layer in the picture.
                     AppToolButton {
                         small: true
-                        iconName: model.visible ? "visibility" : "visibilityOff"
-                        iconColor: model.visible ? Theme.textSecondary : Theme.textTertiary
+                        text: model.visible ? "Hide" : "Show"
+                        icon.name: model.visible ? "view-reveal-symbolic" : "view-conceal-symbolic"
+                        icon.source: model.visible ? "qrc:/Animage/animage/icons/view-reveal-symbolic.svg" : "qrc:/Animage/animage/icons/view-conceal-symbolic.svg"
+                        display: AbstractButton.IconOnly
+                        checkable: true
                         checked: model.visible
                         onClicked: controller.setLayerVisible(index, !model.visible)
                         ToolTip.text: model.visible ? "Hide layer" : "Show layer"
@@ -194,8 +197,11 @@ Item {
                     // not drawn on until they are unlocked.
                     AppToolButton {
                         small: true
-                        iconName: model.locked ? "lock" : "lockOpen"
-                        iconColor: model.locked ? Theme.textSecondary : Theme.textTertiary
+                        text: model.locked ? "Unlock" : "Lock"
+                        icon.name: model.locked ? "system-lock-screen-symbolic" : "changes-allow-symbolic"
+                        icon.source: model.locked ? "qrc:/Animage/animage/icons/system-lock-screen-symbolic.svg" : "qrc:/Animage/animage/icons/changes-allow-symbolic.svg"
+                        display: AbstractButton.IconOnly
+                        checkable: true
                         checked: model.locked
                         onClicked: controller.setLayerLocked(index, !model.locked)
                         ToolTip.text: model.locked ? "Unlock layer" :
@@ -210,7 +216,7 @@ Item {
                     if (!row.editing) return
                     row.editing = false
                     let name = nameField.text.replace(/^\u2190 /, "")
-                    if (name.trimmed() !== "" && name !== model.name)
+                    if (name.trim() !== "" && name !== model.name)
                         controller.setLayerName(index, name)
                 }
             }
@@ -223,27 +229,34 @@ Item {
 
             AppToolButton {
                 small: true
-                iconName: "plus"
+                text: "Add"
+                icon.name: "list-add"
+                display: AbstractButton.IconOnly
                 onClicked: controller.addLayer()
                 ToolTip.text: "New raster layer — draw on it"
             }
             AppToolButton {
                 small: true
-                iconName: "palette"
-                iconColor: Theme.flag
+                text: "Colour"
+                icon.name: "applications-graphics"
+                display: AbstractButton.IconOnly
                 onClicked: controller.addColourLayer()
                 ToolTip.text: "New colourize layer — scribble colour hints\nthat fill the regions bounded by the line art below"
             }
             AppToolButton {
                 small: true
-                iconName: "chevronUp"
+                text: "Up"
+                icon.name: "go-up"
+                display: AbstractButton.IconOnly
                 enabled: controller.currentLayerIndex > 0
                 onClicked: controller.moveCurrentLayer(-1)
                 ToolTip.text: "Move the layer up (in front)"
             }
             AppToolButton {
                 small: true
-                iconName: "chevronDown"
+                text: "Down"
+                icon.name: "go-down"
+                display: AbstractButton.IconOnly
                 enabled: controller.currentLayerIndex >= 0 &&
                          controller.currentLayerIndex < controller.layerCount - 1
                 onClicked: controller.moveCurrentLayer(1)
@@ -251,7 +264,10 @@ Item {
             }
             AppToolButton {
                 small: true
-                iconName: "trash"
+                text: "Delete"
+                icon.name: "user-trash-symbolic"
+                icon.source: "qrc:/Animage/animage/icons/user-trash-symbolic.svg"
+                display: AbstractButton.IconOnly
                 enabled: controller.layerCount > 1
                 onClicked: controller.removeCurrentLayer()
                 ToolTip.text: "Delete this layer from every frame"
@@ -422,7 +438,6 @@ Item {
                             AppToolButton {
                                 Layout.topMargin: Theme.spaceXS
                                 text: "Add raster layer"
-                                iconName: "plus"
                                 small: true
                                 onClicked: controller.addLayer()
                             }

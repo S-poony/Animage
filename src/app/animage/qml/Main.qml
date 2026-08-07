@@ -16,8 +16,8 @@ ApplicationWindow {
     minimumHeight: 680
     color: Theme.background
 
-    // The interface paints itself from Theme.qml and the App* wrappers; the
-    // underlying Quick Controls style is Basic (see main.cpp). No Material.
+    // Native platform style (see main.cpp): macOS on mac, Windows on Windows,
+    // Fusion/Basic on Linux — no custom chrome for standard controls.
 
     // --- the brain ----------------------------------------------------------
     AppController {
@@ -43,6 +43,41 @@ ApplicationWindow {
     }
     ShortcutPalette {
         id: shortcutPalette
+    }
+
+    AppDialog {
+        id: renameTrackDialog
+        title: "Rename track"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: controller.renameCurrentTrack(trackNameField.text)
+        contentItem: ColumnLayout {
+            width: renameTrackDialog.availableWidth
+            spacing: Theme.spaceM
+            Text {
+                text: "Track name:"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontM
+            }
+            AppTextField {
+                id: trackNameField
+                Layout.fillWidth: true
+                placeholderText: "Track name"
+                onAccepted: renameTrackDialog.accept()
+            }
+        }
+        onOpened: {
+            trackNameField.text = ""
+            if (controller.trackCount > 0 && controller.tracksModel) {
+                // Try to get current track name via model
+                const idx = controller.currentTrackIndex
+                if (idx >= 0) {
+                    const m = controller.tracksModel
+                    // Access via data() is not directly exposed, use a helper property
+                    // Fall back to empty and let user type
+                }
+            }
+            trackNameField.forceActiveFocus()
+        }
     }
 
     // "May I leave the unsaved document?" -- raised by the controller when New,
@@ -82,7 +117,6 @@ ApplicationWindow {
                 }
                 AppToolButton {
                     text: "Discard"
-                    iconName: "trash"
                     onClicked: {
                         controller.respondSaveDecision(AppController.Discard)
                         leaveDialog.close()
@@ -90,7 +124,6 @@ ApplicationWindow {
                 }
                 AppToolButton {
                     text: "Save"
-                    iconName: "save"
                     highlighted: true
                     onClicked: {
                         controller.respondSaveDecision(AppController.Save)
@@ -160,130 +193,58 @@ ApplicationWindow {
         }
     }
 
-    // --- the workspace ---------------------------------------------------------
-    header: ToolBar {
-        height: 46
-        background: Rectangle {
-            color: Theme.surfaceHigh
-            border.width: 0
+    // --- native menu ---------------------------------------------------------
+    // Platform-native MenuBar: macOS on mac, Windows on Windows, Fusion on Linux.
+    // Uses Action.icon.name for native icons; no custom ToolBar.
+    menuBar: MenuBar {
+        background: Rectangle { color: Theme.background }
+        palette.window: Theme.background
+        palette.windowText: Theme.text
+
+        Menu {
+            title: qsTr("&File")
+            Action { text: qsTr("&New"); icon.name: "document-new"; shortcut: "Ctrl+N"; onTriggered: controller.newProject() }
+            Action { text: qsTr("&Open…"); icon.name: "document-open"; shortcut: "Ctrl+O"; onTriggered: controller.openProject() }
+            MenuSeparator {}
+            Action { text: qsTr("&Save"); icon.name: "document-save"; shortcut: "Ctrl+S"; onTriggered: controller.saveProject() }
+            Action { text: qsTr("Save &As…"); icon.name: "document-save-as"; shortcut: "Ctrl+Shift+S"; onTriggered: controller.saveProjectAs() }
+            MenuSeparator {}
+            Action { text: qsTr("&Export…"); icon.name: "document-send"; shortcut: "Ctrl+E"; onTriggered: controller.exportSequences() }
+            MenuSeparator {}
+            Action { text: qsTr("&Quit"); shortcut: "Ctrl+Q"; onTriggered: window.close() }
         }
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: Theme.spaceS
-            anchors.rightMargin: Theme.spaceS
-            spacing: Theme.spaceXS
-
-            Text {
-                text: "Animage"
-                color: Theme.accent
-                font.pixelSize: Theme.fontL
-                font.weight: Font.DemiBold
-                Layout.rightMargin: Theme.spaceS
+        Menu {
+            title: qsTr("&Edit")
+            Action { text: qsTr("&Undo"); icon.name: "edit-undo"; shortcut: "Ctrl+Z"; enabled: controller.canUndo; onTriggered: controller.undo() }
+            Action { text: qsTr("&Redo"); icon.name: "edit-redo"; shortcut: "Ctrl+Shift+Z"; enabled: controller.canRedo; onTriggered: controller.redo() }
+        }
+        Menu {
+            title: qsTr("&Scene")
+            Action { text: qsTr("Scene &Settings…"); icon.name: "preferences-system"; onTriggered: sceneSettingsDialog.present(controller.framerate, controller.sceneWidth, controller.sceneHeight, controller.sceneLength) }
+        }
+        Menu {
+            title: qsTr("&Track")
+            Action { text: qsTr("&Add Track"); icon.name: "list-add"; onTriggered: controller.addTrack() }
+            Action { text: qsTr("&Rename Track…"); onTriggered: renameTrackDialog.open() }
+            Action { text: qsTr("&Delete Track"); enabled: controller.trackCount > 1; onTriggered: controller.removeCurrentTrack() }
+            MenuSeparator {}
+            Action { text: qsTr("&Overwrite Drawings"); checkable: true; checked: controller.overwrite; onTriggered: controller.setOverwrite(checked) }
+            Menu {
+                title: qsTr("Past the &Last Drawing")
+                Action { text: qsTr("Show &Nothing"); checkable: true; checked: controller.trackEnd === 0; onTriggered: controller.setTrackEnd(0) }
+                Action { text: qsTr("&Hold Last"); checkable: true; checked: controller.trackEnd === 1; onTriggered: controller.setTrackEnd(1) }
+                Action { text: qsTr("&Cycle"); checkable: true; checked: controller.trackEnd === 2; onTriggered: controller.setTrackEnd(2) }
             }
-
-            AppToolButton {
-                iconName: "plus"
-                text: "New"
-                shortcutHint: "Ctrl+N"
-                onClicked: controller.newProject()
-                ToolTip.text: "New animation (Ctrl+N)"
-            }
-            AppToolButton {
-                iconName: "folderOpen"
-                text: "Open"
-                shortcutHint: "Ctrl+O"
-                onClicked: controller.openProject()
-                ToolTip.text: "Open a project (Ctrl+O)"
-            }
-            AppToolButton {
-                iconName: "save"
-                text: "Save"
-                shortcutHint: "Ctrl+S"
-                onClicked: controller.saveProject()
-                ToolTip.text: "Save (Ctrl+S)"
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                Layout.topMargin: 8
-                Layout.bottomMargin: 8
-                color: Theme.border
-            }
-
-            AppToolButton {
-                iconName: "undo"
-                enabled: controller.canUndo
-                shortcutHint: "Ctrl+Z"
-                onClicked: controller.undo()
-                ToolTip.text: "Undo (Ctrl+Z)"
-            }
-            AppToolButton {
-                iconName: "redo"
-                enabled: controller.canRedo
-                shortcutHint: "Ctrl+Shift+Z"
-                onClicked: controller.redo()
-                ToolTip.text: "Redo (Ctrl+Shift+Z)"
-            }
-
-            Item { Layout.fillWidth: true }
-
-            Text {
-                text: controller.title
-                elide: Text.ElideMiddle
-                color: Theme.textTertiary
-                font.pixelSize: Theme.fontS
-                Layout.maximumWidth: 300
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                Layout.topMargin: 8
-                Layout.bottomMargin: 8
-                Layout.leftMargin: Theme.spaceS
-                Layout.rightMargin: Theme.spaceS
-                color: Theme.border
-            }
-
-            // The frame rate, as a scene-level setting, at the right edge.
-            Text {
-                text: "fps"
-                color: Theme.textTertiary
-                font.pixelSize: Theme.fontM
-            }
-            AppSpinBox {
-                Layout.preferredWidth: 84
-                from: 1
-                to: 120
-                value: controller.framerate
-                onValueModified: controller.setFramerate(value)
-                ToolTip.visible: hovered
-                ToolTip.text: "Frames per second \u2014 how fast the animation plays"
-            }
-
-            AppToolButton {
-                iconName: "export"
-                text: "Export"
-                highlighted: true
-                shortcutHint: "Ctrl+E"
-                onClicked: controller.exportSequences()
-                ToolTip.text: "Export sequences (Ctrl+E)"
-            }
-            AppToolButton {
-                iconName: "tune"
-                onClicked: sceneSettingsDialog.present(controller.framerate,
-                                                       controller.sceneWidth,
-                                                       controller.sceneHeight)
-                ToolTip.text: "Scene settings: framerate and canvas"
-            }
-            AppToolButton {
-                iconName: "help"
-                shortcutHint: "Ctrl+/"
-                onClicked: shortcutPalette.open()
-                ToolTip.text: "Shortcuts (Ctrl+/)"
-            }
+        }
+        Menu {
+            title: qsTr("&View")
+            Action { text: qsTr("Zoom &100%"); icon.name: "zoom-original"; shortcut: "1"; onTriggered: canvas.resetView() }
+            Action { text: qsTr("&Fit Canvas"); icon.name: "zoom-fit-best"; shortcut: "0"; onTriggered: canvas.fitToCanvas() }
+            Action { text: qsTr("Fit &Artwork"); shortcut: "Shift+0"; onTriggered: canvas.fitToDrawing() }
+        }
+        Menu {
+            title: qsTr("&Help")
+            Action { text: qsTr("&Shortcuts"); icon.name: "help-contents"; shortcut: "Ctrl+/"; onTriggered: shortcutPalette.open() }
         }
     }
 
@@ -318,7 +279,11 @@ ApplicationWindow {
 
             AppToolButton {
                 Layout.alignment: Qt.AlignHCenter
-                iconName: "brush"
+                text: "Brush"
+                icon.name: "document-edit-symbolic"
+                icon.source: "qrc:/Animage/animage/icons/document-edit-symbolic.svg"
+                display: AbstractButton.IconOnly
+                checkable: true
                 checked: controller.tool === AppController.Brush
                 shortcutHint: "B"
                 onClicked: controller.setTool(AppController.Brush)
@@ -326,7 +291,11 @@ ApplicationWindow {
             }
             AppToolButton {
                 Layout.alignment: Qt.AlignHCenter
-                iconName: "eraser"
+                text: "Eraser"
+                icon.name: "edit-cut-symbolic"
+                icon.source: "qrc:/Animage/animage/icons/edit-cut-symbolic.svg"
+                display: AbstractButton.IconOnly
+                checkable: true
                 checked: controller.tool === AppController.Eraser
                 shortcutHint: "E"
                 onClicked: controller.setTool(AppController.Eraser)
@@ -427,7 +396,11 @@ ApplicationWindow {
                     visible: controller.onColourLayer
                     Layout.alignment: Qt.AlignHCenter
                     small: true
-                    iconName: controller.transparentSelected ? "eraser" : "brush"
+                    text: controller.transparentSelected ? "Erase" : "Hint"
+                    icon.name: controller.transparentSelected ? "edit-cut-symbolic" : "document-edit-symbolic"
+                    icon.source: controller.transparentSelected ? "qrc:/Animage/animage/icons/edit-cut-symbolic.svg" : "qrc:/Animage/animage/icons/document-edit-symbolic.svg"
+                    display: AbstractButton.IconOnly
+                    checkable: true
                     checked: controller.transparentSelected
                     onClicked: {
                         if (controller.transparentSelected) controller.chooseSolidColour()
@@ -443,6 +416,18 @@ ApplicationWindow {
                     font.pixelSize: Theme.fontXS
                     font.letterSpacing: 0.4
                 }
+            }
+
+            // Empty frame — previously "Clear" in the timeline, now a left-rail tool
+            // with an icon distinct from the eraser (edit-cut vs edit-clear-all).
+            AppToolButton {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Clear Frame"
+                icon.name: "edit-clear-all-symbolic"
+                icon.source: "qrc:/Animage/animage/icons/edit-clear-all-symbolic.svg"
+                display: AbstractButton.IconOnly
+                onClicked: controller.clearCurrentCel()
+                ToolTip.text: "Empty the current layer on this frame only."
             }
 
             Item { Layout.fillHeight: true }
@@ -533,6 +518,17 @@ ApplicationWindow {
             color: Theme.border
         }
 
+        TracksPanel {
+            width: parent.width
+            controller: controller
+        }
+
+        Rectangle {
+            width: parent.width
+            height: 1
+            color: Theme.border
+        }
+
         TimelinePanel {
             width: parent.width
             controller: controller
@@ -546,8 +542,7 @@ ApplicationWindow {
 
         // --- the status line ---------------------------------------------------
         // What the user needs to navigate, not what the developer needs to
-        // debug: where they are in the animation, and the zoom. The frame
-        // rate lives in the top bar where it can be changed.
+        // debug: where they are in the animation, the zoom and the frame rate.
         RowLayout {
             width: parent.width
             height: 26
@@ -579,10 +574,27 @@ ApplicationWindow {
                 font.pixelSize: Theme.fontXS
             }
 
+            Text {
+                text: "fps"
+                color: Theme.textTertiary
+                font.pixelSize: Theme.fontXS
+            }
+            AppSpinBox {
+                Layout.preferredWidth: 72
+                from: 1
+                to: 120
+                value: controller.framerate
+                onValueModified: controller.setFramerate(value)
+                ToolTip.visible: hovered
+                ToolTip.text: "Frames per second"
+            }
+
             AppToolButton {
                 small: true
                 Layout.rightMargin: Theme.spaceXS
-                iconName: "image"
+                text: "Fit"
+                icon.name: "zoom-fit-best"
+                display: AbstractButton.IconOnly
                 onClicked: canvas.fitToCanvas()
                 ToolTip.text: "Fit the canvas to the window (0)"
             }
@@ -635,7 +647,8 @@ ApplicationWindow {
         function onSceneSettingsRequested() {
             sceneSettingsDialog.present(controller.framerate,
                                         controller.sceneWidth,
-                                        controller.sceneHeight)
+                                        controller.sceneHeight,
+                                        controller.sceneLength)
         }
         function onLeaveDecisionRequested(question) {
             leaveDialog.question = question

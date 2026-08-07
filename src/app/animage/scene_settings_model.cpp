@@ -22,16 +22,27 @@ const double kNamedRatios[3][2] = {{16.0, 9.0}, {4.0, 3.0}, {1.0, 1.0}};
 
 SceneSettingsModel::SceneSettingsModel(QObject* parent) : QObject(parent) {}
 
+int SceneSettingsModel::length() const { return length_; }
+double SceneSettingsModel::seconds() const {
+    return framerate_ > 0 ? static_cast<double>(length_) / framerate_ : 0.0;
+}
+
 void SceneSettingsModel::setAll(int framerate, int width, int height) {
+    setAll(framerate, width, height, length_);
+}
+
+void SceneSettingsModel::setAll(int framerate, int width, int height, int length) {
     framerate_ = std::clamp(framerate, 1, 120);
     width_ = std::clamp(width, 16, 16384);
     height_ = std::clamp(height, 16, 16384);
+    length_ = std::clamp(length, 0, 10000);
     readPixels();
     Q_EMIT framerateChanged();
     Q_EMIT pixelsChanged();
     Q_EMIT aspectChanged();
     Q_EMIT ratioChanged();
     Q_EMIT resolutionChanged();
+    Q_EMIT lengthChanged();
 }
 
 void SceneSettingsModel::setFramerate(int fps) {
@@ -39,6 +50,14 @@ void SceneSettingsModel::setFramerate(int fps) {
     if (clamped == framerate_) return;
     framerate_ = clamped;
     Q_EMIT framerateChanged();
+    Q_EMIT lengthChanged();
+}
+
+void SceneSettingsModel::setLength(int length) {
+    const int clamped = std::clamp(length, 0, 10000);
+    if (clamped == length_) return;
+    length_ = clamped;
+    Q_EMIT lengthChanged();
 }
 
 // Ratio and slider -> pixels. The slider is the height, so the number on it is

@@ -66,6 +66,22 @@ Item {
         }
     }
 
+    // Colour on this frame (hasColour) — small dot at top-right, distinct from
+    // the carried bar. Restores the regressed color indicator.
+    Rectangle {
+        visible: cell.hasColour && !cell.held
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: 3
+        anchors.rightMargin: 3
+        width: 6
+        height: 6
+        radius: 3
+        color: Theme.flag
+        border.width: 1
+        border.color: Theme.surfaceHigh
+    }
+
     // Marks that were made on another drawing and carried here. Invisible when
     // it works, so it has to be told: a bar under the number.
     Rectangle {

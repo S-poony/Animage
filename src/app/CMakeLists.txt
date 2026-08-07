@@ -33,6 +33,8 @@ add_library(animage_ui STATIC
   animage/canvas_view.h
   animage/layers_model.cpp
   animage/layers_model.h
+  animage/tracks_model.cpp
+  animage/tracks_model.h
   animage/timeline_model.cpp
   animage/timeline_model.h
   animage/scene_settings_model.cpp
@@ -47,6 +49,15 @@ add_library(animage_ui STATIC
   animage/crash_report.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Quick Qt6::QuickControls2 animage::core)
+# DBus is needed for synchronous dark-mode detection (portal Settings Read).
+# It is optional: Windows/macOS and some headless environments have no DBus,
+# and the resolver falls back to palette luminance. When present, it gives a
+# correct answer before Qt's async styleHintscolorScheme round-trip.
+find_package(Qt6 6.5 COMPONENTS DBus QUIET)
+if(Qt6DBus_FOUND)
+  target_link_libraries(animage_ui PUBLIC Qt6::DBus)
+  target_compile_definitions(animage_ui PUBLIC ANIMAGE_HAVE_DBUS=1)
+endif()
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
 
 # OpenEXR, via tinyexr: one vendored BSD-3 header, compiled in exr_writer.cpp
@@ -98,8 +109,6 @@ qt_add_qml_module(animage_ui
   QML_FILES
     animage/qml/Main.qml
     animage/qml/Theme.qml
-    animage/qml/Icons.qml
-    animage/qml/Icon.qml
     animage/qml/AppToolButton.qml
     animage/qml/AppCheckBox.qml
     animage/qml/AppDialog.qml
@@ -114,11 +123,95 @@ qt_add_qml_module(animage_ui
     animage/qml/LayerPanel.qml
     animage/qml/TimelinePanel.qml
     animage/qml/TimelineCell.qml
+    animage/qml/TracksPanel.qml
+    animage/qml/TemporalStrip.qml
+    animage/qml/GhostMark.qml
     animage/qml/ToolOptionsBar.qml
     animage/qml/SceneSettingsDialog.qml
     animage/qml/ExportDialog.qml
     animage/qml/ShortcutPalette.qml
     animage/qml/PaletteDialog.qml
+)
+
+# Fallback icons for platforms where Freedesktop theme not available (Windows/macOS
+# and headless offscreen). Bundled Adwaita symbolic icons used when icon.name not found.
+# Flat copies for direct icon.source fallback (qrc:/Animage/...)
+qt_add_resources(animage_ui "fallback_icons"
+  PREFIX "/Animage"
+  BASE "animage"
+  FILES
+    animage/icons/input-tablet.svg
+    animage/icons/edit-delete.svg
+    animage/icons/user-trash-symbolic.svg
+    animage/icons/edit-clear-symbolic.svg
+    animage/icons/edit-clear-all-symbolic.svg
+    animage/icons/edit-cut-symbolic.svg
+    animage/icons/document-edit-symbolic.svg
+    animage/icons/view-reveal-symbolic.svg
+    animage/icons/view-conceal-symbolic.svg
+    animage/icons/system-lock-screen-symbolic.svg
+    animage/icons/changes-allow-symbolic.svg
+    animage/icons/list-add.svg
+    animage/icons/edit-copy.svg
+    animage/icons/media-playback-start.svg
+    animage/icons/media-playback-stop.svg
+    animage/icons/document-new.svg
+    animage/icons/document-open.svg
+    animage/icons/document-save.svg
+    animage/icons/document-save-as.svg
+    animage/icons/document-send.svg
+    animage/icons/edit-undo.svg
+    animage/icons/edit-redo.svg
+    animage/icons/preferences-system.svg
+    animage/icons/zoom-original.svg
+    animage/icons/zoom-fit-best.svg
+    animage/icons/help-contents.svg
+    animage/icons/applications-graphics.svg
+    animage/icons/go-up.svg
+    animage/icons/go-down.svg
+    animage/icons/view-refresh-symbolic.svg
+    animage/icons/color-select-symbolic.svg
+)
+
+# Hicolor fallback theme for QIcon::fromTheme on Windows/macOS/headless.
+# Provides the same Adwaita icons under the standard theme path
+# so hasThemeIcon resolves via fallback theme.
+qt_add_resources(animage_ui "hicolor_fallback"
+  PREFIX "/icons"
+  BASE "animage/icons"
+  FILES
+    animage/icons/hicolor/index.theme
+    animage/icons/hicolor/scalable/actions/document-edit-symbolic.svg
+    animage/icons/hicolor/scalable/actions/document-new.svg
+    animage/icons/hicolor/scalable/actions/document-open.svg
+    animage/icons/hicolor/scalable/actions/document-save.svg
+    animage/icons/hicolor/scalable/actions/document-save-as.svg
+    animage/icons/hicolor/scalable/actions/document-send.svg
+    animage/icons/hicolor/scalable/actions/edit-clear-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-clear-all-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-copy.svg
+    animage/icons/hicolor/scalable/actions/edit-cut-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-delete.svg
+    animage/icons/hicolor/scalable/actions/user-trash-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-redo.svg
+    animage/icons/hicolor/scalable/actions/edit-undo.svg
+    animage/icons/hicolor/scalable/actions/go-down.svg
+    animage/icons/hicolor/scalable/actions/go-up.svg
+    animage/icons/hicolor/scalable/actions/help-contents.svg
+    animage/icons/hicolor/scalable/actions/list-add.svg
+    animage/icons/hicolor/scalable/actions/media-playback-start.svg
+    animage/icons/hicolor/scalable/actions/media-playback-stop.svg
+    animage/icons/hicolor/scalable/actions/preferences-system.svg
+    animage/icons/hicolor/scalable/actions/view-conceal-symbolic.svg
+    animage/icons/hicolor/scalable/actions/view-refresh-symbolic.svg
+    animage/icons/hicolor/scalable/actions/color-select-symbolic.svg
+    animage/icons/hicolor/scalable/actions/view-reveal-symbolic.svg
+    animage/icons/hicolor/scalable/actions/zoom-fit-best.svg
+    animage/icons/hicolor/scalable/actions/zoom-original.svg
+    animage/icons/hicolor/scalable/categories/applications-graphics.svg
+    animage/icons/hicolor/scalable/devices/input-tablet.svg
+    animage/icons/hicolor/scalable/status/changes-allow-symbolic.svg
+    animage/icons/hicolor/scalable/status/system-lock-screen-symbolic.svg
 )
 
 add_executable(animage animage/main.cpp)

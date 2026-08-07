@@ -23,7 +23,6 @@ Item {
         RowLayout {
             visible: controller && controller.onColourLayer
             spacing: Theme.spaceS
-            Icon { size: Theme.iconSize; name: "palette"; color: Theme.flag }
             Text {
                 text: "Colourize — scribble hints fill inside ticked line layers (see Inspector)."
                 color: Theme.textSecondary
@@ -172,10 +171,10 @@ Item {
 
                                 Item { Layout.fillWidth: true }
 
-                                // Normalized, capped preview circle
+                                // Normalized, capped preview circle — keep inside 32px row
                                 Rectangle {
                                     readonly property real rVal: controller ? controller.brushRadius : 6
-                                    readonly property real previewDiam: Math.min(32, Math.max(8, Math.round(8 + 24 * (Math.log2(Math.max(1, rVal)) / 9))))
+                                    readonly property real previewDiam: Math.min(24, Math.max(8, Math.round(8 + 16 * (Math.log2(Math.max(1, rVal)) / 9))))
                                     width: previewDiam
                                     height: previewDiam
                                     radius: previewDiam / 2
@@ -285,20 +284,20 @@ Item {
                                         border.width: isSelected ? 1 : 0
                                         border.color: isSelected ? Theme.accentBorder : "transparent"
 
-                                        Text {
-                                            anchors.centerIn: parent
-                                            text: chip.modelData
-                                            color: chip.isSelected ? Theme.accent : (chipMouse.containsMouse ? Theme.text : Theme.textSecondary)
-                                            font.pixelSize: Theme.fontM
-                                            font.weight: chip.isSelected ? Font.DemiBold : Font.Normal
-                                        }
-
                                         MouseArea {
                                             id: chipMouse
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
                                             onClicked: controller.setBrushRadius(chip.modelData)
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: chip.modelData
+                                            color: chip.isSelected ? Theme.accent : (chipMouse.containsMouse ? Theme.text : Theme.textSecondary)
+                                            font.pixelSize: Theme.fontM
+                                            font.weight: chip.isSelected ? Font.DemiBold : Font.Normal
                                         }
                                     }
                                 }
@@ -318,9 +317,13 @@ Item {
                 Layout.alignment: Qt.AlignVCenter
             }
 
-            // Pressure -> opacity checkbox
-            AppCheckBox {
-                labelText: "Pressure → opacity"
+            // Pressure -> opacity: square icon toggle (was checkbox) — view-refresh is distinctive and exists on all themes, unlike input-tablet white square
+            AppToolButton {
+                text: "Pressure"
+                icon.name: "view-refresh-symbolic"
+                icon.source: "qrc:/Animage/animage/icons/view-refresh-symbolic.svg"
+                display: AbstractButton.IconOnly
+                checkable: true
                 checked: controller ? controller.pressureOpacity : true
                 onToggled: controller.setPressureOpacity(checked)
                 Layout.alignment: Qt.AlignVCenter

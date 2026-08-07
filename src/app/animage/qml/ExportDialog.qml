@@ -86,7 +86,6 @@ AppDialog {
             }
             AppToolButton {
                 text: "Export\u2026"
-                iconName: "export"
                 highlighted: true
                 onClicked: dialog.accept()
             }

@@ -20,6 +20,7 @@ AppDialog {
     property int originalFramerate: 24
     property int originalWidth: 1920
     property int originalHeight: 1080
+    property int originalLength: 0
 
     title: "Scene settings"
 
@@ -32,20 +33,22 @@ AppDialog {
     }
 
     function pushPreview() {
-        controller.previewSceneSettings(model.framerate, model.width, model.height)
+        controller.previewSceneSettings(model.framerate, model.width, model.height, model.length)
     }
 
-    function present(fps, w, h) {
+    function present(fps, w, h, len) {
         originalFramerate = fps
         originalWidth = w
         originalHeight = h
-        model.setAll(fps, w, h)
+        originalLength = len !== undefined ? len : 0
+        if (len !== undefined) model.setAll(fps, w, h, len)
+        else model.setAll(fps, w, h)
         open()
     }
 
     onOpened: pushPreview()
-    onRejected: controller.restoreSceneSettings(originalFramerate, originalWidth, originalHeight)
-    onAccepted: controller.commitSceneSettings(model.framerate, model.width, model.height)
+    onRejected: controller.restoreSceneSettings(originalFramerate, originalWidth, originalHeight, originalLength)
+    onAccepted: controller.commitSceneSettings(model.framerate, model.width, model.height, model.length)
 
     contentItem: ColumnLayout {
         width: dialog.availableWidth
@@ -95,6 +98,48 @@ AppDialog {
                             previewTimer.restart()
                         }
                     }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceL
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spaceXS
+                Text {
+                    text: "Length (frames)"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontM
+                }
+                AppSpinBox {
+                    Layout.fillWidth: true
+                    from: 0
+                    to: model ? model.maxLength : 10000
+                    value: model ? model.length : 0
+                    onValueModified: {
+                        model.setLength(value)
+                        previewTimer.restart()
+                    }
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spaceXS
+                Text {
+                    text: "Duration"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontM
+                }
+                Text {
+                    text: model && model.length > 0 ? model.seconds.toFixed(2) + " s" : "Auto (longest track)"
+                    color: Theme.textTertiary
+                    font.pixelSize: Theme.fontM
+                    verticalAlignment: Text.AlignVCenter
+                    Layout.preferredHeight: 32
                 }
             }
         }
@@ -240,7 +285,6 @@ AppDialog {
             }
             AppToolButton {
                 text: "Apply"
-                iconName: "check"
                 highlighted: true
                 onClicked: dialog.accept()
             }

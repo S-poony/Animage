@@ -31,6 +31,9 @@ class SceneSettingsModel : public QObject {
     Q_PROPERTY(int resolution READ resolution WRITE setResolution NOTIFY resolutionChanged)
     Q_PROPERTY(int minResolution READ minResolution CONSTANT)
     Q_PROPERTY(int maxResolution READ maxResolution CONSTANT)
+    Q_PROPERTY(int length READ length WRITE setLength NOTIFY lengthChanged)
+    Q_PROPERTY(double seconds READ seconds NOTIFY lengthChanged)
+    Q_PROPERTY(int maxLength READ maxLength CONSTANT)
 
 public:
     explicit SceneSettingsModel(QObject* parent = nullptr);
@@ -45,10 +48,14 @@ public:
     int resolution() const { return height_; }
     int minResolution() const { return 16; }
     int maxResolution() const { return 16384; }
+    int length() const;
+    double seconds() const;
+    int maxLength() const { return 10000; }
 
     // Whole scene settings, for the preview and for committing. Called from
     // QML when the scene-settings dialog opens, so it must be invokable.
     Q_INVOKABLE void setAll(int framerate, int width, int height);
+    Q_INVOKABLE void setAll(int framerate, int width, int height, int length);
 
 public Q_SLOTS:
     void setFramerate(int fps);
@@ -58,6 +65,7 @@ public Q_SLOTS:
     void setRatioWidth(double w);
     void setRatioHeight(double h);
     void setResolution(int height);
+    void setLength(int length);
 
 Q_SIGNALS:
     void framerateChanged();
@@ -65,6 +73,7 @@ Q_SIGNALS:
     void aspectChanged();
     void ratioChanged();
     void resolutionChanged();
+    void lengthChanged();
 
 private:
     void applyRatioToPixels();
@@ -78,6 +87,7 @@ private:
     int framerate_ = 24;
     int width_ = 1920;
     int height_ = 1080;
+    int length_ = 0;
     double ratio_w_ = 16.0;
     double ratio_h_ = 9.0;
     int aspect_ = 0;

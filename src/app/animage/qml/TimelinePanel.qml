@@ -16,10 +16,10 @@ Item {
 
     property var controller: null
     readonly property int cellWidth: 26
-    readonly property int rulerHeight: 20
-    readonly property int stripHeight: 52
+    readonly property int rulerHeight: 14
+    readonly property int stripHeight: 28
 
-    height: 190
+    height: 110
 
     // A gesture on the strip stops the flicker, so a drag does not become a
     // scroll the moment the pointer moves a pixel too far.
@@ -31,22 +31,24 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spaceM
-        anchors.topMargin: Theme.spaceS
-        spacing: Theme.spaceS
+        anchors.margins: Theme.spaceS
+        anchors.topMargin: Theme.spaceXS
+        spacing: Theme.spaceXS
 
-        // --- transport and the drawing verbs ---------------------------------
-        // The words say what the buttons do; an animation program's most
-        // important action is the one that cannot be mistaken. A drawing (an
-        // image/cel) is the thing a frame shows; a frame is a slot in time, and
-        // one drawing can be held across several frames -- see Exposure below.
+        // --- transport — thin line, distinct compartments -----------------------
+        // [ play ] | [ drawing: add duplicate delete ] [ onion ]
         RowLayout {
             Layout.fillWidth: true
-            spacing: Theme.spaceXS
+            spacing: Theme.spaceS
 
+            // [ play ]
             AppToolButton {
-                iconName: controller.playing ? "stop" : "play"
-                iconColor: Theme.accent
+                Layout.preferredHeight: Theme.toolButton
+                Layout.preferredWidth: Theme.toolButton
+                text: controller.playing ? "Stop" : "Play"
+                icon.name: controller.playing ? "media-playback-stop" : "media-playback-start"
+                display: AbstractButton.IconOnly
+                checkable: true
                 checked: controller.playing
                 onClicked: controller.togglePlayback()
                 ToolTip.text: controller.playing ? "Stop (Enter)" : "Play the timeline in a loop (Enter)"
@@ -54,35 +56,66 @@ Item {
 
             Rectangle {
                 Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                Layout.topMargin: 4
-                Layout.bottomMargin: 4
+                Layout.preferredHeight: Theme.toolButton
                 color: Theme.border
             }
 
-            AppToolButton {
-                iconName: "plus"
-                text: "Add Drawing"
-                onClicked: controller.insertDrawing()
-                ToolTip.text: "Add a new empty drawing after this one (Insert)\nA drawing is one image; a frame is a slot in time."
+            // [ drawing: add duplicate delete ]
+            Rectangle {
+                color: Theme.surfaceHigh
+                border.color: Theme.border
+                border.width: 1
+                radius: Theme.radiusSmall
+                Layout.preferredHeight: Theme.toolButton
+                Layout.preferredWidth: drawingRow.implicitWidth + Theme.spaceS * 2
+                RowLayout {
+                    id: drawingRow
+                    anchors.centerIn: parent
+                    spacing: Theme.spaceXS
+                    Text {
+                        text: "Drawing"
+                        color: Theme.textTertiary
+                        font.pixelSize: Theme.fontXS
+                        font.letterSpacing: 0.8
+                    }
+                    AppToolButton {
+                        Layout.preferredHeight: Theme.iconButton
+                        Layout.preferredWidth: Theme.iconButton
+                        text: "Add Drawing"
+                        icon.name: "list-add"
+                        display: AbstractButton.IconOnly
+                        onClicked: controller.insertDrawing()
+                        ToolTip.text: "Add a new empty drawing after this one (Insert)\nA drawing is one image; a frame is a slot in time."
+                    }
+                    AppToolButton {
+                        Layout.preferredHeight: Theme.iconButton
+                        Layout.preferredWidth: Theme.iconButton
+                        text: "Duplicate Drawing"
+                        icon.name: "edit-copy"
+                        display: AbstractButton.IconOnly
+                        onClicked: controller.duplicateDrawing()
+                        ToolTip.text: "Copy this drawing into a new one (Ctrl+D)\nA real copy, not a hold."
+                    }
+                    AppToolButton {
+                        Layout.preferredHeight: Theme.iconButton
+                        Layout.preferredWidth: Theme.iconButton
+                        text: "Delete Drawing"
+                        icon.name: "user-trash-symbolic"
+                        icon.source: "qrc:/Animage/animage/icons/user-trash-symbolic.svg"
+                        display: AbstractButton.IconOnly
+                        enabled: controller.drawingCount > 1
+                        onClicked: controller.deleteDrawing()
+                        ToolTip.text: "Delete this drawing (Delete).\nTo keep it for fewer frames instead, shorten its exposure below."
+                    }
+                }
             }
-            AppToolButton {
-                iconName: "duplicate"
-                text: "Duplicate Drawing"
-                onClicked: controller.duplicateDrawing()
-                ToolTip.text: "Copy this drawing into a new one (Ctrl+D)\nA real copy, not a hold."
-            }
-            AppToolButton {
-                iconName: "trash"
-                text: "Delete Drawing"
-                enabled: controller.drawingCount > 1
-                onClicked: controller.deleteDrawing()
-                ToolTip.text: "Delete this drawing (Delete).\nTo keep it for fewer frames instead, shorten its exposure below."
-            }
-            AppToolButton {
-                iconName: "clear"
-                onClicked: controller.clearCurrentCel()
-                ToolTip.text: "Empty the current layer on this frame only."
+
+            // [ onion ]
+            TemporalStrip {
+                id: temporalStrip
+                controller: root.controller
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredHeight: Theme.toolButton
             }
 
             Item { Layout.fillWidth: true }
@@ -206,56 +239,5 @@ Item {
             }
         }
 
-        // --- the frame controls ---------------------------------------------
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.spaceS
-
-            // Onion skin: how many frames on either side are shown ghosted.
-            Text {
-                text: "Onion skin"
-                color: Theme.textSecondary
-                font.pixelSize: Theme.fontM
-            }
-            AppComboBox {
-                id: onionCombo
-                implicitWidth: 62
-                model: ["Off", "1", "2", "3", "4", "5"]
-                currentIndex: controller ? controller.onionCount : 0
-                onActivated: controller.setOnionCount(currentIndex)
-                ToolTip.visible: hovered
-                ToolTip.text: "Ghost the drawings on the frames either side of this\n" +
-                              "one so you can see where the motion is going. Off shows none."
-            }
-
-            Item { Layout.fillWidth: true }
-
-            // Exposure: how many frames the drawing in front of you is held for.
-            Text {
-                text: "Exposure"
-                color: Theme.textSecondary
-                font.pixelSize: Theme.fontM
-            }
-            AppToolButton {
-                text: "\u2212"
-                enabled: controller.currentHold > 1
-                onClicked: controller.holdShorter()
-                ToolTip.text: "Hold this drawing one frame less"
-            }
-            Text {
-                text: controller ? (controller.currentHold === 1
-                                   ? "1 frame" : controller.currentHold + " frames") : ""
-                color: Theme.text
-                font.pixelSize: Theme.fontM
-                font.weight: Font.DemiBold
-                horizontalAlignment: Text.AlignHCenter
-                Layout.preferredWidth: 56
-            }
-            AppToolButton {
-                text: "+"
-                onClicked: controller.holdLonger()
-                ToolTip.text: "Hold this drawing one frame longer (+)\nRepeats the same drawing across time; costs nothing."
-            }
-        }
     }
 }

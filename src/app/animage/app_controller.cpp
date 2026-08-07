@@ -11,6 +11,7 @@
 #include "canvas_view.h"
 #include "export_sequence.h"
 #include "layers_model.h"
+#include "tracks_model.h"
 #include "scene_settings_model.h"
 #include "scribble.h"
 #include "timeline_model.h"
@@ -33,9 +34,11 @@ constexpr int kAutosaveRetryMs = 5 * 1000;
 
 AppController::AppController(QObject* parent) : QObject(parent) {
     layers_model_ = new LayersModel(this);
+    tracks_model_ = new TracksModel(this);
     timeline_model_ = new TimelineModel(this);
     ctg_sources_model_ = new CtgSourcesModel(this);
     layers_model_->setDocument(&doc_);
+    tracks_model_->setDocument(&doc_);
     timeline_model_->setDocument(&doc_);
     ctg_sources_model_->setDocument(&doc_);
 
@@ -60,12 +63,13 @@ AppController::~AppController() = default;
 
 void AppController::buildInitialDocument() {
     doc_ = Document();
-    track_ = doc_.addTrack("main");
+    track_ = doc_.addTrack("track 1");
     const LayerId first = doc_.addLayer(track_, "layer 1");
     doc_.insertImage(track_, 0);
     doc_.clearHistory();  // an empty scene is the starting point, not an edit
 
     layers_model_->setTrack(track_);
+    tracks_model_->setCurrentTrack(track_);
     timeline_model_->setTrack(track_);
     ctg_sources_model_->setTrack(track_);
     current_slot_ = 0;
@@ -214,9 +218,13 @@ bool AppController::openProjectAt(const QString& folder_or_url, QString* error) 
 
 void AppController::afterProjectLoaded() {
     const Scene& scene = doc_.scene();
-    track_ = scene.tracks.empty() ? kNoId : scene.tracks.front().id;
+    // Keep current track if it still exists, otherwise fall back to first
+    if (!doc_.scene().findTrack(track_)) {
+        track_ = scene.tracks.empty() ? kNoId : scene.tracks.front().id;
+    }
 
     layers_model_->setTrack(track_);
+    tracks_model_->setCurrentTrack(track_);
     timeline_model_->setTrack(track_);
     if (canvas_) {
         canvas_->setTrack(track_);
@@ -302,6 +310,11 @@ void AppController::exportSequences() {
 
 bool AppController::exportSequencesTo(const QString& folder_or_url, bool layers, bool flattened,
                                       QString* error) {
+    return exportSequencesTo(folder_or_url, layers, flattened, 0, error);
+}
+
+bool AppController::exportSequencesTo(const QString& folder_or_url, bool layers, bool flattened,
+                                      int format, QString* error) {
     const QString folder = QUrl(folder_or_url).isLocalFile()
                                ? QUrl(folder_or_url).toLocalFile()
                                : folder_or_url;
@@ -310,18 +323,19 @@ bool AppController::exportSequencesTo(const QString& folder_or_url, bool layers,
     options.folder = folder;
     options.layers = layers;
     options.flattened = flattened;
+    options.format = static_cast<exporting::Format>(format);
 
     const int total = exporting::fileCount(doc_, options);
     const bool ok = exporting::write(
         doc_, options,
-        [this, total](int done, int count) {
+        [this, total](int done, int count, const QString&) {
             Q_EMIT exportProgress(done, std::max(count, total));
             // Keeps the progress dialog alive: the export runs on this thread,
             // and nothing would repaint otherwise.
             QCoreApplication::processEvents();
             return !export_cancel_;
         },
-        error);
+        nullptr, error);
 
     Q_EMIT exportFinished(ok, ok ? QString() : (error ? *error : QString()));
     return ok;
@@ -362,10 +376,25 @@ void AppController::onAutosaveTick() {
 }
 
 void AppController::refreshEverything() {
+    // If the current track was removed (undo, load), fall back to first
+    if (!doc_.scene().findTrack(track_) && !doc_.scene().tracks.empty()) {
+        track_ = doc_.scene().tracks.front().id;
+        layers_model_->setTrack(track_);
+        tracks_model_->setCurrentTrack(track_);
+        timeline_model_->setTrack(track_);
+        if (canvas_) {
+            canvas_->setTrack(track_);
+            const Track* t = doc_.scene().findTrack(track_);
+            if (t && !t->layers.empty()) canvas_->setActiveLayer(t->layers.front().id);
+        }
+    }
+    tracks_model_->refresh();
     timeline_model_->refresh();
+    layers_model_->refresh();
     if (canvas_) canvas_->setFrame(current_slot_);
     rebuildLayerList();
     syncStatus();
+    Q_EMIT trackChanged();
 }
 
 void AppController::syncStatus() {
@@ -398,8 +427,29 @@ void AppController::syncStatus() {
 // --- time ----------------------------------------------------------------
 
 int AppController::frameCount() const {
+    return static_cast<int>(doc_.scene().frameCount());
+}
+
+int AppController::currentTrackIndex() const {
+    const auto& tracks = doc_.scene().tracks;
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+        if (tracks[i].id == track_) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool AppController::overwrite() const {
     const Track* track = doc_.scene().findTrack(track_);
-    return track ? static_cast<int>(track->frameCount()) : 0;
+    return track ? track->overwrite_drawings : true;
+}
+
+int AppController::trackEnd() const {
+    const Track* track = doc_.scene().findTrack(track_);
+    return track ? static_cast<int>(track->end) : 0;
+}
+
+int AppController::sceneLength() const {
+    return doc_.scene().length;
 }
 
 int AppController::drawingCount() const {
@@ -413,10 +463,10 @@ int AppController::layerCount() const {
 }
 
 void AppController::setCurrentSlot(int slot) {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.empty()) return;
+    const std::size_t frames = doc_.scene().frameCount();
+    if (frames == 0) return;
 
-    const int clamped = std::min(slot, static_cast<int>(track->slots.size()) - 1);
+    const int clamped = std::min(slot, static_cast<int>(frames) - 1);
     if (clamped < 0) return;
     const std::size_t next = static_cast<std::size_t>(clamped);
     if (next == current_slot_) return;
@@ -516,6 +566,15 @@ void AppController::holdShorter() {
     refreshEverything();
 }
 
+// Set the hold to an exact number of frames, guarded like the step verbs so
+// it never shortens a drawing out of existence. The timeline's unified
+// temporal strip types a concrete value here; plus/minus go through
+// holdLonger/holdShorter one frame at a time.
+void AppController::setCurrentHold(int frames) {
+    while (currentHold() > frames) holdShorter();
+    while (currentHold() < frames) holdLonger();
+}
+
 void AppController::setFramerate(int fps) {
     doc_.setFramerate(fps);
     if (playback_timer_->isActive()) {
@@ -535,33 +594,39 @@ void AppController::setCanvasSize(int width, int height) {
 // the history: choosing a resolution means looking at it, and it is not worth
 // an undo entry per number tried on the way. Nothing is recorded until the
 // dialog is accepted, and cancelling puts back exactly what was there.
-void AppController::previewSceneSettings(int framerate, int width, int height) {
+void AppController::previewSceneSettings(int framerate, int width, int height, int length) {
     Scene& scene = doc_.mutableScene();
     scene.framerate = framerate;
     scene.width = width;
     scene.height = height;
+    scene.length = length;
+    timeline_model_->refresh();
     if (canvas_) canvas_->refreshAll();
     syncStatus();
 }
 
-void AppController::restoreSceneSettings(int framerate, int width, int height) {
+void AppController::restoreSceneSettings(int framerate, int width, int height, int length) {
     Scene& scene = doc_.mutableScene();
     scene.framerate = framerate;
     scene.width = width;
     scene.height = height;
+    scene.length = length;
+    timeline_model_->refresh();
     if (canvas_) canvas_->refreshAll();
     syncStatus();
 }
 
 // Committed as one command: changing both numbers and then changing your mind
 // is one undo rather than two.
-void AppController::commitSceneSettings(int framerate, int width, int height) {
+void AppController::commitSceneSettings(int framerate, int width, int height, int length) {
     doc_.beginCommand("Scene settings");
     doc_.setCanvasSize(width, height);
     doc_.setFramerate(framerate);
+    doc_.setSceneLength(length);
     doc_.endCommand();
 
     // The canvas bounds the colour fills, so they have to be solved again.
+    timeline_model_->refresh();
     if (canvas_) canvas_->refreshAll();
     syncStatus();
 }
@@ -599,8 +664,8 @@ void AppController::stopPlayback() {
 // must not make the whole take run slow, which is exactly the thing playback
 // exists to let you judge.
 void AppController::onPlaybackTick() {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track || track->slots.empty()) {
+    const std::size_t count = doc_.scene().frameCount();
+    if (count == 0) {
         stopPlayback();
         return;
     }
@@ -608,7 +673,6 @@ void AppController::onPlaybackTick() {
     const int fps = std::max(1, doc_.scene().framerate);
     const qint64 elapsed = playback_clock_.elapsed();
     const qint64 advanced = elapsed * fps / 1000;
-    const std::size_t count = track->slots.size();
     const std::size_t slot =
         (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
 
@@ -1065,6 +1129,100 @@ void AppController::setCtgFollow(bool on) {
     Q_EMIT layerStateChanged();
 }
 
+// --- tracks ----------------------------------------------------------------
+
+void AppController::addTrack() {
+    stopPlayback();
+    const std::string name = "track " + std::to_string(doc_.scene().tracks.size() + 1);
+    doc_.beginCommand("Add track");
+    const TrackId added = doc_.addTrack(name);
+    doc_.addLayer(added, "layer 1");
+    doc_.insertImage(added, 0);
+    doc_.endCommand();
+    setCurrentTrackIndex(static_cast<int>(doc_.scene().tracks.size() - 1));
+}
+
+void AppController::removeCurrentTrack() {
+    if (doc_.scene().tracks.size() <= 1) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
+    const std::size_t index = static_cast<std::size_t>(
+        std::distance(doc_.scene().tracks.data(), track));
+    doc_.beginCommand("Remove track");
+    doc_.removeTrack(track_);
+    doc_.endCommand();
+    const auto& left = doc_.scene().tracks;
+    if (left.empty()) {
+        track_ = kNoId;
+    } else {
+        track_ = left[std::min(index, left.size() - 1)].id;
+    }
+    refreshEverything();
+}
+
+void AppController::renameCurrentTrack(const QString& name) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return;
+    TrackProperties props = track->properties();
+    props.name = trimmed.toStdString();
+    doc_.updateTrack(track_, props);
+    refreshEverything();
+}
+
+void AppController::setCurrentTrackIndex(int index) {
+    const auto& tracks = doc_.scene().tracks;
+    if (index < 0 || static_cast<std::size_t>(index) >= tracks.size()) return;
+    const TrackId id = tracks[static_cast<std::size_t>(index)].id;
+    if (id == track_) return;
+    track_ = id;
+    layers_model_->setTrack(track_);
+    tracks_model_->setCurrentTrack(track_);
+    timeline_model_->setTrack(track_);
+    if (canvas_) {
+        canvas_->setTrack(track_);
+        canvas_->setFrame(current_slot_);
+        const Track* t = doc_.scene().findTrack(track_);
+        if (t && !t->layers.empty()) canvas_->setActiveLayer(t->layers.front().id);
+    }
+    refreshEverything();
+    Q_EMIT trackChanged();
+}
+
+void AppController::setOverwrite(bool on) {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || track->overwrite_drawings == on) return;
+    TrackProperties props = track->properties();
+    props.overwrite_drawings = on;
+    doc_.updateTrack(track_, props);
+    timeline_model_->refresh();
+    Q_EMIT trackChanged();
+    syncStatus();
+}
+
+void AppController::setTrackEnd(int end) {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || static_cast<int>(track->end) == end) return;
+    TrackProperties props = track->properties();
+    props.end = static_cast<TrackEnd>(end);
+    doc_.updateTrack(track_, props);
+    timeline_model_->refresh();
+    if (canvas_) canvas_->refreshAll();
+    Q_EMIT trackChanged();
+    syncStatus();
+}
+
+void AppController::setSceneLength(int length) {
+    if (doc_.scene().length == length) return;
+    doc_.beginCommand("Scene length");
+    doc_.setSceneLength(length);
+    doc_.endCommand();
+    timeline_model_->refresh();
+    if (canvas_) canvas_->refreshAll();
+    Q_EMIT stateChanged();
+}
+
 void AppController::refreshLayerFlags() {
     layers_model_->refresh();
 }
@@ -1078,11 +1236,43 @@ void AppController::syncColourControls() {
 // --- onion skin ----------------------------------------------------------
 
 void AppController::setOnionCount(int count) {
-    onion_count_ = count;
+    // Kept for callers that think of onion skin as one symmetric value; sets
+    // both directions so the interface and the canvas see the same thing.
+    setOnionBefore(count);
+    setOnionAfter(count);
+}
+
+void AppController::setOnionBefore(int count) {
+    onion_before_ = count;
+    onion_count_ = onion_before_;
     if (canvas_) {
         CanvasView::OnionSettings settings = canvas_->onion();
         settings.before = count;
+        canvas_->setOnion(settings);
+    }
+    Q_EMIT onionChanged();
+}
+
+void AppController::setOnionAfter(int count) {
+    onion_after_ = count;
+    onion_count_ = onion_after_;
+    if (canvas_) {
+        CanvasView::OnionSettings settings = canvas_->onion();
         settings.after = count;
+        canvas_->setOnion(settings);
+    }
+    Q_EMIT onionChanged();
+}
+
+qreal AppController::onionOpacity() const {
+    return onion_opacity_;
+}
+
+void AppController::setOnionOpacity(qreal opacity) {
+    onion_opacity_ = opacity;
+    if (canvas_) {
+        CanvasView::OnionSettings settings = canvas_->onion();
+        settings.opacity = opacity;
         canvas_->setOnion(settings);
     }
     Q_EMIT onionChanged();

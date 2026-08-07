@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QGuiApplication>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlError>
-#include <QQuickStyle>
 #include <QStyleHints>
 #include <QUrl>
 #include <cstdio>
@@ -14,16 +14,27 @@
 int main(int argc, char** argv) {
     installCrashHandler();
 
-    // The whole interface is painted from Theme.qml: our own buttons, dialogs,
-    // panels and wrappers. The remaining Qt Quick Controls -- ComboBox, SpinBox,
-    // Slider, TextField -- get their behaviour from the controls module and
-    // their looks from Animage wrappers (AppSpinBox, AppComboBox, ...), which
-    // only makes sense if the underlying style is predictable. Basic is exactly
-    // that: deliberately neutral, with no Material or native geometry to fight.
-    // The style must be chosen before any control is instantiated.
-    QQuickStyle::setStyle(QStringLiteral("Basic"));
+    // No QQuickStyle::setStyle() call — let Qt pick the native platform style:
+    // macOS style on macOS, Windows style on Windows, Fusion/Basic on Linux.
+    // This gives menu bars, buttons, sliders and form controls their OS-native
+    // look without custom chrome.
 
     QGuiApplication app(argc, argv);
+
+    // Ensure themed icons (Adwaita) are found in headless/offscreen and provide
+    // a fallback theme from bundled resources for Windows/macOS where the
+    // system theme may not contain Freedesktop names like input-tablet/edit-delete.
+    {
+        auto paths = QIcon::themeSearchPaths();
+        if (!paths.contains(QStringLiteral("/usr/share/icons")))
+            paths << QStringLiteral("/usr/share/icons");
+        QIcon::setThemeSearchPaths(paths);
+        QIcon::setFallbackSearchPaths(QIcon::fallbackSearchPaths() << QStringLiteral(":/icons") << QStringLiteral(":/Animage/animage/icons"));
+        if (QIcon::themeName().isEmpty())
+            QIcon::setThemeName(QStringLiteral("Adwaita"));
+        if (QIcon::fallbackThemeName().isEmpty())
+            QIcon::setFallbackThemeName(QStringLiteral("hicolor"));
+    }
 
     QCoreApplication::setApplicationName(QStringLiteral("Animage"));
     QCoreApplication::setOrganizationName(QStringLiteral("Animage"));
@@ -33,22 +44,16 @@ int main(int argc, char** argv) {
     QQmlApplicationEngine engine;
     engine.addImportPath(QStringLiteral("qrc:/"));
 
-    // Theme.qml reads a top-level boolean `animageDark` (see Theme.qml); the
-    // scheme for the underlying controls' palette is the same decision. It is
-    // resolved synchronously here -- resolveColorScheme() guesses from the OS
-    // palette luminance while Qt.styleHints.colorScheme is still Unknown, so
-    // the first frame matches the user's theme instead of flashing light --
-    // and brought up to date below every time the OS reports a real scheme.
+    // Theme.qml uses SystemPalette (platform native). Keep palette in sync
+    // with the OS so dark really is dark (SystemPalette follows app palette).
     const auto reapply = [&](Qt::ColorScheme s) {
-        const bool dark = s != Qt::ColorScheme::Light;  // Unknown, Dark -> dark
+        const bool dark = s != Qt::ColorScheme::Light;
         app.setPalette(animagePalette(dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light));
         engine.rootContext()->setContextProperty(QStringLiteral("animageDark"), dark);
     };
     QObject::connect(app.styleHints(), &QStyleHints::colorSchemeChanged, &app,
                      [&reapply](Qt::ColorScheme s) { reapply(s); });
 
-    // Seed the scheme now, before any QML is evaluated, from the synchronous
-    // resolver so the first frame already matches the user's theme.
     const Qt::ColorScheme initial = resolveColorScheme();
     app.setPalette(animagePalette(initial));
     engine.rootContext()->setContextProperty(QStringLiteral("animageDark"),

@@ -22,12 +22,12 @@ Slider {
         color: Theme.borderStrong
         border.width: 0
 
-        // The filled part: how much of the range has been used.
+        // The filled part — muted so the timeline/canvas stay primary.
         Rectangle {
             width: root.visualPosition * parent.width
             height: parent.height
             radius: 2
-            color: Theme.accent
+            color: Theme.textTertiary
         }
     }
 
@@ -37,7 +37,7 @@ Slider {
         width: 14
         height: 14
         radius: 7
-        color: root.pressed ? Theme.accentHover : Theme.accent
+        color: root.pressed ? Theme.textSecondary : Theme.textTertiary
         border.width: 0
         scale: root.pressed ? 1.15 : (root.hovered ? 1.08 : 1.0)
 
