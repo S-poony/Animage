@@ -2155,6 +2155,78 @@ void theFileMenuExports() {
     CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
 }
 
+// The guard on a recursive delete, so it is worth being exact about. An export
+// replaces what was in the folder rather than merging into it -- a merge leaves
+// a shortened shot's old tail sitting after the new frames, which downstream is
+// a well-formed sequence of the wrong length -- and the price of replacing is
+// that something has to decide what may be deleted.
+void anExportIsRecognisedBeforeAnythingIsDeleted() {
+    TEST("only a folder that really is an export is offered for overwriting");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const auto path = [&](const char* name) { return scratch.filePath(QLatin1String(name)); };
+    const auto touch = [&](const QString& file) {
+        QDir().mkpath(QFileInfo(file).path());
+        QFile handle(file);
+        CHECK(handle.open(QIODevice::WriteOnly));
+        handle.write("x");
+    };
+
+    // Nothing there, and a folder with nothing in it, are both somewhere to
+    // write rather than something to ask about.
+    CHECK(exporting::occupantOf(path("missing")) == exporting::Occupant::Nothing);
+    CHECK(QDir().mkpath(path("empty")));
+    CHECK(exporting::occupantOf(path("empty")) == exporting::Occupant::Nothing);
+
+    // A real one, written by the real thing.
+    Document doc = buildDrawnScene();
+    exporting::Options options;
+    options.folder = path("shot");
+    options.layers = true;
+    options.flattened = true;
+    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::AnExport);
+
+    // Junk a file browser drops in it does not stop it being one, or a folder
+    // anybody had opened would become undeletable.
+    touch(path("shot") + QStringLiteral("/.DS_Store"));
+    touch(path("shot") + QStringLiteral("/main_ink/Thumbs.db"));
+    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::AnExport);
+
+    // A loose file in it is somebody else's folder.
+    touch(path("shot") + QStringLiteral("/notes.txt"));
+    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::SomethingElse);
+
+    // So is a sequence folder holding something that is not its own frames --
+    // including a frame belonging to a different sequence, which is what a
+    // renamed layer would leave behind.
+    touch(path("mixed") + QStringLiteral("/main_ink/main_ink_0001.png"));
+    CHECK(exporting::occupantOf(path("mixed")) == exporting::Occupant::AnExport);
+    touch(path("mixed") + QStringLiteral("/main_ink/main_colour_0001.png"));
+    CHECK(exporting::occupantOf(path("mixed")) == exporting::Occupant::SomethingElse);
+
+    // And so, emphatically, is a project folder. It is the obvious way to point
+    // a recursive delete at every drawing in the shot.
+    const QString project = path("project.animage");
+    CHECK(ProjectIO::save(buildDrawnScene(), project, nullptr));
+    CHECK(exporting::occupantOf(project) == exporting::Occupant::SomethingElse);
+
+    // Overwriting leaves nothing of what was there. The stale tail is the whole
+    // point: a shorter shot must not inherit the longer one's later frames.
+    const QString stale =
+        path("shot") + QStringLiteral("/main_ink/main_ink_9999.png");
+    touch(stale);
+    QString error;
+    CHECK(exporting::removeExport(path("shot"), &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    CHECK(!QFileInfo::exists(stale));
+    CHECK(!QDir(path("shot")).exists());
+
+    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    CHECK(!QFileInfo::exists(stale));
+    CHECK(QFileInfo::exists(path("shot") + QStringLiteral("/main_ink/main_ink_0001.png")));
+}
+
 // Exporting through the window hands its max-flows to a solver instead of
 // running them where the progress dialog is being drawn. What that buys, and
 // the only part of it a test can see from the outside, is the cap: a solve
@@ -2666,6 +2738,7 @@ int main(int argc, char** argv) {
     exportNamesSurviveAwkwardLayerNames();
     theFileMenuExports();
     theWindowExportsAtFullResolution();
+    anExportIsRecognisedBeforeAnythingIsDeleted();
     aCarriedMarkSaysSoInThePanel();
     theColourLayerBoxEditsWhatTheLayerDoes();
     transparencyIsOfferedOnlyWhereItMeansSomething();

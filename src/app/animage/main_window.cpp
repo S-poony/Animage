@@ -771,6 +771,55 @@ QString MainWindow::defaultExportName() const {
     return name.isEmpty() ? QStringLiteral("untitled") : name;
 }
 
+// Makes `folder` somewhere an export can be written, or says no.
+//
+// An export replaces what was there rather than merging into it, because a
+// merge is silent and produces something that looks right: re-export a shot you
+// have cut short and the old export's later frames sit after the new ones,
+// reading downstream as a well-formed sequence of the wrong length. So the
+// answer to "there is already an export here" is to delete it, once.
+//
+// And the answer to "there is something here that is not an export" is no. A
+// recursive delete is not a thing to weigh up against a folder we do not
+// recognise -- the project folder itself is the obvious way to point this at
+// hundreds of drawings -- so it is refused and another name is asked for.
+bool MainWindow::clearTheWayFor(const QString& folder, const QString& called) {
+    switch (exporting::occupantOf(folder)) {
+        case exporting::Occupant::Nothing:
+            return true;
+
+        case exporting::Occupant::SomethingElse:
+            QMessageBox::warning(
+                this, QStringLiteral("Cannot export"),
+                QStringLiteral("There is already something in \"%1\" that is not an export, so "
+                               "it will not be written over.\n\nChoose another name.")
+                    .arg(called));
+            return false;
+
+        case exporting::Occupant::AnExport:
+            break;
+    }
+
+    QMessageBox ask(QMessageBox::Question, QStringLiteral("Overwrite the export?"),
+                    QStringLiteral("\"%1\" already has an export in it. Overwrite it?\n\n"
+                                   "Everything currently in the folder will be deleted.")
+                        .arg(called),
+                    QMessageBox::Cancel, this);
+    QPushButton* overwrite =
+        ask.addButton(QStringLiteral("Overwrite"), QMessageBox::DestructiveRole);
+    // Cancel is the default, because the other button deletes a folder.
+    ask.setDefaultButton(QMessageBox::Cancel);
+    ask.exec();
+    if (ask.clickedButton() != overwrite) return false;
+
+    QString error;
+    if (!exporting::removeExport(folder, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Cannot export"), error);
+        return false;
+    }
+    return true;
+}
+
 void MainWindow::exportSequences() {
     stopPlayback();
 
@@ -825,7 +874,10 @@ void MainWindow::exportSequences() {
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (parent.isEmpty()) return;
 
-    const QString folder = QDir(parent).filePath(name->text().trimmed());
+    const QString called = name->text().trimmed();
+    const QString folder = QDir(parent).filePath(called);
+    if (!clearTheWayFor(folder, called)) return;
+
     QString error;
     if (!exportSequencesTo(folder, per_layer->isChecked(), flattened->isChecked(), &error)) {
         QMessageBox::warning(this, QStringLiteral("Cannot export"), error);

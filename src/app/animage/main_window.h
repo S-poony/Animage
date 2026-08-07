@@ -160,6 +160,10 @@ private:
     // progress dialog. Exposed the same way openProjectAt is, for the same
     // reason: a test cannot answer a file dialog.
     void exportSequences();
+    // Asks about, and then empties, an export folder that already has an export
+    // in it; refuses outright if what is in it is not one. False means do not
+    // export. See the comment on it: an export replaces rather than merges.
+    bool clearTheWayFor(const QString& folder, const QString& called);
     void saveProject();
     void saveProjectAs();
     bool saveTo(const QString& folder);

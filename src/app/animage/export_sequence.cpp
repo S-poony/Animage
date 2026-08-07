@@ -2,7 +2,9 @@
 #include "export_sequence.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QImage>
+#include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -118,7 +120,67 @@ bool fillIsCurrent(const Document& doc, TrackId track, ImageId image, LayerId la
     return held->step <= 1 || held->budget >= budget;
 }
 
+// What a file browser leaves lying about. Ignored when deciding whether a
+// folder is an export, and deleted along with it -- otherwise a folder anybody
+// had so much as looked at would stop being recognisable as one.
+bool isBrowserJunk(const QString& name) {
+    static const QStringList kJunk = {QStringLiteral(".DS_Store"), QStringLiteral("Thumbs.db"),
+                                      QStringLiteral("desktop.ini")};
+    return kJunk.contains(name, Qt::CaseInsensitive);
+}
+
+// One frame of the sequence its folder is named after: `{stem}_{0007}.png`,
+// and the stem has to be the folder's own name. Add to the extensions here when
+// the format list in export_sequence.h grows -- an EXR export this did not
+// recognise would be refused as somebody else's folder, which is a confusing
+// way to find out.
+bool isFrameOf(const QString& sequence, const QString& file) {
+    static const QStringList kExtensions = {QStringLiteral("png")};
+    const QRegularExpression pattern(
+        QStringLiteral("^%1_\\d{4}\\.(%2)$")
+            .arg(QRegularExpression::escape(sequence), kExtensions.join(QLatin1Char('|'))),
+        QRegularExpression::CaseInsensitiveOption);
+    return pattern.match(file).hasMatch();
+}
+
 }  // namespace
+
+Occupant occupantOf(const QString& folder) {
+    const QDir root(folder);
+    if (!root.exists()) return Occupant::Nothing;
+
+    const auto flags = QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System;
+    const QFileInfoList entries = root.entryInfoList(flags);
+
+    int sequences = 0;
+    for (const QFileInfo& entry : entries) {
+        if (entry.isFile() && isBrowserJunk(entry.fileName())) continue;
+        // A loose file, a symlink, anything that is not a folder of frames.
+        if (!entry.isDir() || entry.isSymLink()) return Occupant::SomethingElse;
+
+        const QString sequence = entry.fileName();
+        for (const QFileInfo& inside : QDir(entry.absoluteFilePath()).entryInfoList(flags)) {
+            if (inside.isFile() && isBrowserJunk(inside.fileName())) continue;
+            if (!inside.isFile() || inside.isSymLink()) return Occupant::SomethingElse;
+            if (!isFrameOf(sequence, inside.fileName())) return Occupant::SomethingElse;
+        }
+        ++sequences;
+    }
+
+    // Nothing but junk in it is nothing in it. An empty folder is somewhere to
+    // write, not something to ask about.
+    return sequences == 0 ? Occupant::Nothing : Occupant::AnExport;
+}
+
+bool removeExport(const QString& folder, QString* error) {
+    QDir root(folder);
+    if (!root.exists()) return true;
+    if (!root.removeRecursively()) {
+        if (error) *error = QStringLiteral("cannot empty %1").arg(folder);
+        return false;
+    }
+    return true;
+}
 
 QString sequenceName(const std::string& track, const std::string& layer) {
     return sanitise(track) + QLatin1Char('_') + sanitise(layer);

@@ -106,6 +106,39 @@ int fileCount(const animage::Document& doc, const Options& options);
 bool write(animage::Document& doc, const Options& options, const Progress& progress,
            const Solve& solve, QString* error);
 
+// What is already in the folder an export is about to be written to.
+//
+// Exporting twice into one folder used to merge, silently, and a merge is the
+// wrong shape of thing: writing a shot you have since cut short leaves the old
+// export's later frames sitting after the new ones, and downstream that reads
+// as a perfectly well-formed sequence of the wrong length. Cancelling halfway
+// splices two shots together at the seam. So an export replaces what was there,
+// and this is what the window asks before it does.
+enum class Occupant {
+    Nothing,        // no folder, or an empty one: write into it and say nothing
+    AnExport,       // one of ours, and safe to delete once somebody has said so
+    SomethingElse,  // somebody's files. Refuse; never offer to delete these.
+};
+
+// Whether `folder` is one of ours: sequence folders, holding frames named after
+// them, and nothing else whatever.
+//
+// This is a delete guard, so it is strict on purpose and errs towards
+// SomethingElse. A loose file, a folder of anything but frames, a project
+// folder that happens to share the name -- none of those is an export, and the
+// answer to a folder we do not recognise is to leave it alone and ask for
+// another name, never to weigh up deleting it.
+//
+// The one indulgence is the junk a file browser leaves behind (`.DS_Store` and
+// friends), which is ignored here and deleted with the rest. Without it a
+// folder anybody had opened would stop being recognisable as an export.
+Occupant occupantOf(const QString& folder);
+
+// Deletes the folder and everything in it. Only ever call this on a folder
+// `occupantOf` called AnExport -- it is `rm -r` and it has no opinion of its
+// own about what it is pointed at.
+bool removeExport(const QString& folder, QString* error);
+
 // `{track}_{layer}`, with every character that is not a letter or a digit
 // replaced by a hyphen, runs of them collapsed, and the ends trimmed. This is
 // both the folder name and the stem of every file in it.

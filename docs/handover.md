@@ -91,6 +91,27 @@ what the shot contains. It is lossy and knowingly so — the arithmetic is in
 still open: PNG is right where the destination expects PNG, and the format list
 is easier to add to than the layout is to change.
 
+**An export replaces what was in the folder, and "overwrite" had to be made
+true before it could be said.** The word was going to go on a confirmation
+dialog over the merge that was already happening, and it would have been a lie —
+`write` creates folders and writes files into them, and nothing clears what was
+there. Same-named files are replaced and everything else stays, so re-exporting
+a shot you have since cut short leaves the old export's later frames after the
+new ones, which downstream is a well-formed sequence of the wrong length, and
+cancelling halfway splices two shots at the seam. Both are silent and both look
+right. The dialog would have been reassuring in exactly the cases that were
+wrong.
+
+So the folder is emptied first, and the price of that is a recursive delete
+needing a guard. `exporting::occupantOf` answers Nothing, AnExport or
+SomethingElse, and it is strict on purpose: an export is folders of frames named
+after their folder and *nothing else whatever*, bar the junk a file browser
+leaves (`.DS_Store` and friends), which is ignored and deleted with the rest.
+SomethingElse is refused rather than weighed up — the project folder is the
+obvious way to point `rm -r` at every drawing in the shot, and it is tested that
+one is not mistaken for an export. Save's build-alongside-and-swap is still not
+what export does; this only decides what the folder holds before it starts.
+
 **The underscore in an exported name means one thing.** It separates the track
 from the layer from the frame number, so every other character that is not a
 letter or a digit — spaces, punctuation, and an underscore somebody typed —

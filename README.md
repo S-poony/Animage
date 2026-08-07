@@ -254,6 +254,14 @@ written at all. Colouring is solved for drawings nobody has opened — otherwise
 project straight off disk would export blank colour sequences — and it is solved
 off the interface thread, so the progress dialog moves and Cancel answers.
 
+**Exporting again over an old export replaces it**, after asking, rather than
+writing in among it. Merging is the dangerous one: re-export a shot you have
+since cut short and the old export's later frames sit after the new ones,
+reading downstream as a perfectly well-formed sequence of the wrong length.
+Cancelling halfway would splice two shots together at the seam. A folder that is
+*not* an export — the project folder itself, most obviously — is never offered
+for deletion; it asks for another name instead.
+
 The layer panel on the right adds, removes, reorders, hides and fades layers.
 Layers belong to the track rather than to the image, which is the point of the
 whole model: adding a layer touches no drawing, and a drawing held over five
