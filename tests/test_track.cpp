@@ -743,6 +743,47 @@ void anEmptyTrackShowsNothingWhateverItsEnd() {
     CHECK_EQ(f.tl().imageShownAt(3), kNoId);
 }
 
+// A shot's length said outright, which is what makes a cycle worth having: a
+// four-drawing walk cycles over sixty frames because the scene says sixty, and
+// with nothing to say it the walk is the longest track and cycles over nothing.
+void theSceneCanBeToldHowLongTheShotIs() {
+    TEST("the shot is as long as it is told, or as its longest track");
+    Fixture f;
+    f.doc.insertImage(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 3);  // four frames of walk
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+
+    TrackProperties props = f.tl().properties();
+    props.end = TrackEnd::Cycle;
+    f.doc.updateTrack(f.track, props);
+    // Cycling over nothing, because this track is the whole shot.
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+
+    f.doc.setSceneLength(60);
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{60});
+    CHECK_EQ(f.tl().imageShownAt(59), f.tl().imageAtSlot(3));  // 59 % 4 is 3
+    CHECK_EQ(f.tl().frameCount(), std::size_t{4});             // the track is untouched
+
+    // Never shorter than its own contents: a shot set shorter than the tracks in
+    // it would leave drawings past the end of the timeline, where nothing but
+    // the file knows they are there.
+    f.doc.setSceneLength(2);
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+
+    // Zero is "as long as the longest track", which is the default and what
+    // happened before it could be said.
+    f.doc.setSceneLength(0);
+    CHECK_EQ(f.doc.scene().length, 0);
+    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+
+    // And it is one undo step like any other scene setting.
+    f.doc.setSceneLength(30);
+    const std::size_t depth = f.doc.undoDepth();
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.doc.scene().length, 0);
+    CHECK_EQ(f.doc.undoDepth(), depth - 1);
+}
+
 void layerNamesStayUnique() {
     TEST("layer names cannot collide");
     Fixture f;  // starts with "layer 1"
@@ -788,5 +829,6 @@ int main() {
     undoingADeletionPutsItsNumberBackInUse();
     whatATrackShowsPastItsEnd();
     anEmptyTrackShowsNothingWhateverItsEnd();
+    theSceneCanBeToldHowLongTheShotIs();
     return testing::summarise("track");
 }

@@ -31,6 +31,12 @@ public:
     void updateTrack(TrackId track, const TrackProperties& properties);
     void setFramerate(int framerate);
 
+    // How long the shot is, in frames. Zero means "as long as the longest
+    // track", which is the default and what happened before it could be said.
+    // Clamped rather than validated, like the canvas: a negative length has
+    // nothing to mean.
+    void setSceneLength(int frames);
+
     // The exported rectangle. Clamped to something sane rather than validated:
     // a scene with a zero-width canvas has nothing to show and nothing to
     // write, and there is no reason for the rest of the code to carry the case.

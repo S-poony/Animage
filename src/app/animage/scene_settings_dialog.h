@@ -5,6 +5,7 @@
 
 class QComboBox;
 class QDoubleSpinBox;
+class QLabel;
 class QSlider;
 class QSpinBox;
 class QTimer;
@@ -21,11 +22,17 @@ class SceneSettingsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    SceneSettingsDialog(int framerate, int width, int height, QWidget* parent = nullptr);
+    // `length` is the shot in frames, zero meaning "as long as the longest
+    // track". `shortest` is how long the tracks already make it, which the
+    // length cannot go below -- a shot shorter than its own contents would put
+    // drawings past the end of the timeline where nothing can reach them.
+    SceneSettingsDialog(int framerate, int width, int height, int length, int shortest,
+                        QWidget* parent = nullptr);
 
     int framerate() const;
     int canvasWidth() const;
     int canvasHeight() const;
+    int sceneLength() const;
 
 Q_SIGNALS:
     // The settings as they stand, for showing on the canvas while the dialog is
@@ -55,8 +62,16 @@ private:
     // Selects the named ratio if the numbers are one, and Custom if they are
     // not. The menu follows the numbers rather than constraining them.
     void syncAspectToRatio();
+    // The length in frames, said again as a duration. Frames are what an
+    // exposure sheet counts in and seconds are what a brief is written in, and
+    // the framerate is the only thing that connects them -- so it is worth
+    // showing rather than leaving to be worked out.
+    void syncLengthSeconds();
 
     QSpinBox* framerate_ = nullptr;
+    QSpinBox* length_ = nullptr;
+    QLabel* length_seconds_ = nullptr;
+    int shortest_ = 0;
     QComboBox* aspect_ = nullptr;
     QDoubleSpinBox* ratio_w_ = nullptr;
     QDoubleSpinBox* ratio_h_ = nullptr;

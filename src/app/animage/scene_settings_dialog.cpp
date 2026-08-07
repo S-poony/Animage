@@ -60,8 +60,9 @@ bool sameShape(double a_w, double a_h, double b_w, double b_h) {
 
 }  // namespace
 
-SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, QWidget* parent)
-    : QDialog(parent) {
+SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, int length,
+                                         int shortest, QWidget* parent)
+    : QDialog(parent), shortest_(std::max(0, shortest)) {
     setWindowTitle(QStringLiteral("Scene settings"));
 
     auto* layout = new QVBoxLayout(this);
@@ -73,6 +74,29 @@ SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, Q
     framerate_->setValue(framerate);
     framerate_->setSuffix(QStringLiteral(" fps"));
     timing_form->addRow(QStringLiteral("Framerate"), framerate_);
+
+    // The shot's length, in frames, because that is what an exposure sheet
+    // counts in. It cannot go below what the tracks already make it: a shot
+    // shorter than its own contents would leave drawings past the end of the
+    // timeline, reachable by nothing but the file.
+    length_ = new QSpinBox(timing);
+    length_->setRange(std::max(1, shortest_), 100000);
+    length_->setValue(std::max(length, shortest_));
+    length_->setSuffix(QStringLiteral(" frames"));
+    length_->setToolTip(
+        QStringLiteral("How long the shot is.\n"
+                       "A track that cycles or holds fills the frames up to here, so this is\n"
+                       "what makes a short cycling track worth having. It cannot be set\n"
+                       "shorter than the longest track -- shorten the track instead."));
+    timing_form->addRow(QStringLiteral("Length"), length_);
+
+    length_seconds_ = new QLabel(timing);
+    length_seconds_->setEnabled(false);  // a readout, not a control
+    timing_form->addRow(QString(), length_seconds_);
+    syncLengthSeconds();
+    connect(length_, &QSpinBox::valueChanged, this, &SceneSettingsDialog::syncLengthSeconds);
+    connect(framerate_, &QSpinBox::valueChanged, this, &SceneSettingsDialog::syncLengthSeconds);
+
     layout->addWidget(timing);
 
     auto* canvas = new QGroupBox(QStringLiteral("Canvas"), this);
@@ -205,6 +229,17 @@ void SceneSettingsDialog::mousePressEvent(QMouseEvent* event) {
     setFocus(Qt::MouseFocusReason);
     QDialog::mousePressEvent(event);
 }
+
+void SceneSettingsDialog::syncLengthSeconds() {
+    if (!length_seconds_ || !length_ || !framerate_) return;
+    const int fps = std::max(1, framerate_->value());
+    const double seconds = static_cast<double>(length_->value()) / fps;
+    length_seconds_->setText(QStringLiteral("%1 s at %2 fps")
+                                 .arg(seconds, 0, 'f', 2)
+                                 .arg(fps));
+}
+
+int SceneSettingsDialog::sceneLength() const { return length_->value(); }
 
 int SceneSettingsDialog::framerate() const { return framerate_->value(); }
 int SceneSettingsDialog::canvasWidth() const { return pixels_w_->value(); }

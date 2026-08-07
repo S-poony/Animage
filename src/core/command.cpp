@@ -122,6 +122,10 @@ void SceneFramerateOp::applySwap(Document& doc) {
     std::swap(doc.mutableScene().framerate, framerate_);
 }
 
+void SceneLengthOp::applySwap(Document& doc) {
+    std::swap(doc.mutableScene().length, length_);
+}
+
 void SceneCanvasOp::applySwap(Document& doc) {
     std::swap(doc.mutableScene().width, width_);
     std::swap(doc.mutableScene().height, height_);

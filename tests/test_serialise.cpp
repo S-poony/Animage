@@ -59,6 +59,7 @@ Document buildScene() {
 
     doc.setCanvasSize(1280, 720);
     doc.setFramerate(12);
+    doc.setSceneLength(96);
     return doc;
 }
 
@@ -66,6 +67,7 @@ Document buildScene() {
 // preserve. Cel *contents* are not here; those are the application's half.
 void checkSameScene(const Document& a, const Document& b) {
     CHECK_EQ(a.scene().framerate, b.scene().framerate);
+    CHECK_EQ(a.scene().length, b.scene().length);
     CHECK_EQ(a.scene().width, b.scene().width);
     CHECK_EQ(a.scene().height, b.scene().height);
     CHECK_EQ(a.scene().tracks.size(), b.scene().tracks.size());

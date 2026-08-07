@@ -1166,7 +1166,7 @@ void colourLayerIsCreatedAtTheBottom() {
 // most likely to be right in the screenshot and wrong two edits later.
 void sceneSettingsKeepsRatioAndPixelsAgreeing() {
     TEST("scene settings keeps the ratio, the slider and the pixels agreeing");
-    SceneSettingsDialog dialog(24, 1920, 1080);
+    SceneSettingsDialog dialog(24, 1920, 1080, 0, 1);
 
     auto* aspect = dialog.findChild<QComboBox*>(QStringLiteral("aspect"));
     auto* ratio_w = dialog.findChild<QDoubleSpinBox*>(QStringLiteral("ratioWidth"));

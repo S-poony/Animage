@@ -60,6 +60,14 @@ void Document::setFramerate(int framerate) {
     scene_.framerate = framerate;
 }
 
+void Document::setSceneLength(int frames) {
+    const int wanted = std::max(0, frames);
+    if (wanted == scene_.length) return;
+    ScopedCommand command(*this, "Scene length");
+    recordOp(std::make_unique<SceneLengthOp>(scene_.length));
+    scene_.length = wanted;
+}
+
 void Document::loadScene(Scene scene) {
     scene_ = std::move(scene);
     cels_.clear();

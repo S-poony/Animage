@@ -15,8 +15,7 @@ A **track** is one stack of layers with its own time. The **timeline** is the
 scene's shared time axis and the panel that shows it: a scene has several tracks
 and one timeline. The timeline shows one row per track under a single playhead,
 tracks stack as flat groups with track 1 on top, and the canvas shows all of
-them while you draw on one. Tracks need not be the same length; a track shows
-nothing past its last drawing.
+them while you draw on one. Tracks need not be the same length.
 
 **A colour layer stores scribbles, not pixels.** The CTG layer is an
 implementation of LazyBrush (Sýkora et al., Eurographics 2009): you scrawl a
@@ -166,19 +165,20 @@ same drawing still showing, not a thing of their own, and they travel with it.
 on that track: the layer panel, the brush and every timing button follow it,
 while the canvas goes on showing all of them. The Track menu adds, renames and
 deletes them; a new track arrives at the bottom of the stack, with a layer and a
-drawing so there is something to draw on. Rows can be different lengths, and what a track does
-once the playhead is past its last drawing is set under Track ▸ Past the last
-drawing: show nothing (the default), hold the last drawing, or cycle. It never
-makes the shot longer -- the timeline is as long as the longest track, so a cycle
-fills frames that are already there. You can see a held or cycled drawing but not
-draw on it: out there the track has no frame of its own, which the status bar
-says and the timeline shows as dotted, faint cells.
+drawing so there is something to draw on.
 
-That setting is about the picture, so it applies to the flattened `composite/`
-export and not to the per-layer sequences: **a layer's folder is as long as its
-own track.** A background drawn once exports one frame, and downstream you import
-the still rather than a sequence. It does mean layer folders can differ in
-length.
+Tracks need not be the same length. What a track shows once the playhead is past
+its last drawing is set under Track ▸ Past the last drawing: show nothing (the
+default), keep showing its last drawing, or cycle. That is about the picture, so
+it applies to the flattened `composite/` export and not to the per-layer
+sequences: **a layer's folder is as long as its own track.** A background drawn
+once exports one frame, and downstream you import the still rather than a
+sequence. It does mean layer folders can differ in length.
+
+**How long the shot is** is set under Edit ▸ Scene settings, in frames, with the
+duration in seconds beside it. Left at its default it is as long as the longest
+track, and it cannot be set shorter than that -- shortening a shot means
+shortening its tracks.
 
 **Overwrite drawings**, in the Track menu, is per track and on by default. On,
 the shot is a fixed length and a new drawing lands on the playhead and takes over

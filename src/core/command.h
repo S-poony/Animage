@@ -126,6 +126,16 @@ private:
     int framerate_;
 };
 
+// How long the shot is. Zero means "as long as the longest track".
+class SceneLengthOp final : public Op {
+public:
+    explicit SceneLengthOp(int length) : length_(length) {}
+    void applySwap(Document& doc) override;
+
+private:
+    int length_;
+};
+
 // The canvas size. Undoable like everything else: resizing the picture is an
 // edit to the scene, and finding out you preferred the old one is normal.
 class SceneCanvasOp final : public Op {

@@ -1154,7 +1154,7 @@ void MainWindow::syncStatus() {
     // because a track that holds or cycles goes on contributing to the picture.
     // Said out loud, because a brush that does nothing is otherwise a bug.
     const QString past = (image == kNoId && slot >= track->frameCount())
-                             ? QStringLiteral("   past the end of this track")
+                             ? QStringLiteral("   you cannot draw past the end of a track")
                              : QString();
 
     // The frame count is the scene's and the rest is the current track's, which
@@ -1500,8 +1500,14 @@ void MainWindow::chooseSceneSettings() {
     const int was_framerate = doc_.scene().framerate;
     const int was_width = doc_.scene().width;
     const int was_height = doc_.scene().height;
+    const int was_length = doc_.scene().length;
 
-    SceneSettingsDialog dialog(was_framerate, was_width, was_height, this);
+    // What the tracks already make the shot, which the length cannot go below.
+    std::size_t shortest = 0;
+    for (const Track& t : doc_.scene().tracks) shortest = std::max(shortest, t.frameCount());
+
+    SceneSettingsDialog dialog(was_framerate, was_width, was_height, was_length,
+                               static_cast<int>(shortest), this);
 
     // The preview writes to the scene directly, around the history. Choosing a
     // resolution means looking at it, and it is not worth an undo entry per
@@ -1528,9 +1534,12 @@ void MainWindow::chooseSceneSettings() {
     doc_.beginCommand("Scene settings");
     doc_.setCanvasSize(dialog.canvasWidth(), dialog.canvasHeight());
     doc_.setFramerate(dialog.framerate());
+    doc_.setSceneLength(dialog.sceneLength());
     doc_.endCommand();
 
-    // The canvas bounds the colour fills, so they have to be solved again.
+    // The canvas bounds the colour fills, so they have to be solved again, and
+    // the shot's length changes how far the timeline runs.
+    timeline_widget_->refresh();
     canvas_->refreshAll();
     syncStatus();
 }

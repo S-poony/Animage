@@ -40,12 +40,24 @@ struct Scene {
 
     std::vector<Track> tracks;
 
-    // How long the shot is: the longest track, because the timeline is the
-    // scene's and every track shares it. Tracks are not obliged to be the same
-    // length, so a shorter one simply shows nothing over the frames it does not
-    // reach -- see Track::imageAtSlot, which is where that is decided.
+    // How long the shot is, said outright rather than left to whichever track
+    // happens to be longest.
+    //
+    // Zero means "as long as the longest track", which is what it was before the
+    // setting existed and is still the right default: a shot being made up as it
+    // goes has no length yet. Set it and the shot is that long, which is what
+    // makes a cycle worth having -- a four-drawing walk cycles over sixty frames
+    // because the scene says sixty, and with nothing to say it the walk would be
+    // the longest track and cycle over nothing at all.
+    int length = 0;
+
+    // The length in frames. Never shorter than the longest track: a scene that
+    // could be set shorter than its own contents would put drawings past the end
+    // of the timeline, where nothing can reach them and only the file would know
+    // they were there. So this is a floor the shot is held to, not a limit
+    // imposed on it, and shortening a shot means shortening its tracks.
     std::size_t frameCount() const {
-        std::size_t frames = 0;
+        std::size_t frames = (length > 0) ? static_cast<std::size_t>(length) : 0;
         for (const Track& track : tracks) frames = std::max(frames, track.frameCount());
         return frames;
     }

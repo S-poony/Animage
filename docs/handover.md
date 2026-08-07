@@ -696,9 +696,31 @@ underlying drawing, on the grounds that a repeat is the same image showing again
 exactly as a hold is. But the end behaviour had already been scoped to the
 picture, and editing follows the contents; extending it to the brush contradicted
 the distinction the whole feature is built on. Past the end there is no slot and
-no cel, so there is nothing to edit. The status bar says "past the end of this
-track" and the timeline draws those frames dotted and faint, because a brush that
+no cel, so there is nothing to edit, and the status bar says so — a brush that
 silently does nothing is otherwise a bug.
+
+**The timeline row stops at the last drawing, and that was the second attempt.**
+The first drew the extended frames as faint dotted cells, so that the row would
+not stop at four while the canvas kept drawing out to forty. It reads worse than
+an empty row: a cell is a frame you can put a drawing on, so cells you cannot
+click are a harder thing to explain than the absence of any. What a track does
+out there wants saying once, at the end of the row, rather than repeated along
+it — a clickable state icon, as TVPaint has, which is
+[issue #22](https://github.com/S-poony/Animage/issues/22). Not a widget on the
+row: see "a widget on a list row disables that row's own tick".
+
+**A shot can now be told how long it is.** `Scene::length` in frames, under Edit
+▸ Scene settings with the duration in seconds beside it, because frames are what
+an exposure sheet counts in and seconds are what a brief is written in. Zero
+means "as long as the longest track", which is the default and what happened
+before it could be said.
+
+It is a floor and not a limit: `Scene::frameCount` is the larger of the length
+and the longest track, so a shot cannot be set shorter than its own contents.
+That would leave drawings past the end of the timeline where nothing can reach
+them and only the file would know they were there; shortening a shot means
+shortening its tracks. It is also what makes a cycle worth having — without it a
+four-drawing walk is the longest track and cycles over nothing at all.
 
 The solve counter in the export had to change with it. It used to skip repeats of
 the drawing before, which is exact when each drawing is visited once and
@@ -1306,15 +1328,11 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    what `CtgSolver`'s second priority is still there for.
 5. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-6. **An explicit scene length.** A shot is currently as long as its longest
-   track, which is what stops a cycle running away — and it is also why a
-   cycling track that is the longest cycles over nothing. "This shot is sixty
-   frames" cannot be said, so cycling only does something when some other track
-   already reaches that far. See "What a track does past its last drawing".
-7. **The rest of the open issues**: deleting every layer of a drawing (#2), an
-   eraser cursor (#4), brush-resize feedback (#5), and a non-modal colour panel
-   (the parked half of #8). Several tracks (#1), "overwrite drawings" (#9) and
-   what a track does past its end (#20) are built — see the two sections above.
+6. **The rest of the open issues**: showing a track's end behaviour on the track
+   itself (#22), deleting every layer of a drawing (#2), an eraser cursor (#4),
+   brush-resize feedback (#5), and a non-modal colour panel (the parked half of
+   #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
+   its end (#20) are built — see the two sections above.
 
 ## Two things to be careful of
 
