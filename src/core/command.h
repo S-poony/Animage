@@ -92,9 +92,7 @@ private:
 
 // Swaps a track's group-level properties: its name, its opacity, its blend, its
 // time offset and whether it overwrites drawings. Not its layers, its slots or
-// its images, each of which has an operation of its own -- and deliberately not
-// `next_drawing_number`, which counts up and is never reused, so undoing the
-// change that advanced it must not hand the number out twice.
+// its images, each of which has an operation of its own.
 class TrackPropsOp final : public Op {
 public:
     TrackPropsOp(TrackId track, TrackProperties state)

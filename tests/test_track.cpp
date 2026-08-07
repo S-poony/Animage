@@ -349,10 +349,61 @@ void drawingNumbersSurviveReordering() {
     const ImageId copy = f.doc.duplicateImage(f.track, 0);
     CHECK_EQ(f.tl().findImage(copy)->number, 4);
 
-    // And a number is never reused, even after the drawing is gone.
+    // A number *is* reused once the drawing carrying it has gone: 4 is free
+    // again, so the next drawing is 4 and not 5. See Track::nextDrawingNumber.
     f.doc.removeDrawing(f.track, copy);
     const ImageId fresh = f.doc.insertImage(f.track, 0);
-    CHECK_EQ(f.tl().findImage(fresh)->number, 5);
+    CHECK_EQ(f.tl().findImage(fresh)->number, 4);
+}
+
+// Reported as a timeline bug and it was one: delete drawing 2 and the next
+// drawing you made came back as 3, with no 2 in the track at all.
+void anewDrawingTakesTheLowestFreeNumber() {
+    TEST("a new drawing fills the lowest gap in the numbering");
+    Fixture f;
+    const ImageId a = f.doc.insertImage(f.track, 0);
+    const ImageId b = f.doc.insertImage(f.track, 1);
+    const ImageId c = f.doc.insertImage(f.track, 2);
+    CHECK_EQ(f.tl().findImage(b)->number, 2);
+
+    // The reported case: take the middle one out and make another.
+    f.doc.removeDrawing(f.track, b);
+    const ImageId filled = f.doc.insertImage(f.track, 1);
+    CHECK_EQ(f.tl().findImage(filled)->number, 2);
+
+    // With nothing free, it carries on counting.
+    const ImageId next = f.doc.insertImage(f.track, 3);
+    CHECK_EQ(f.tl().findImage(next)->number, 4);
+
+    // A gap at the front is a gap like any other.
+    f.doc.removeDrawing(f.track, a);
+    const ImageId first = f.doc.insertImage(f.track, 0);
+    CHECK_EQ(f.tl().findImage(first)->number, 1);
+
+    // And two drawings never share a number, which is the property the card
+    // depends on to identify anything at all.
+    std::vector<int> numbers;
+    for (const auto& [id, image] : f.tl().images) numbers.push_back(image.number);
+    std::sort(numbers.begin(), numbers.end());
+    CHECK(std::adjacent_find(numbers.begin(), numbers.end()) == numbers.end());
+    CHECK_EQ(f.tl().findImage(c)->number, 3);  // untouched throughout
+}
+
+// Undo puts the drawing back, so it also puts its number back in use -- and the
+// next drawing has to see that rather than handing the same one out twice.
+void undoingADeletionPutsItsNumberBackInUse() {
+    TEST("a number freed by a deletion is taken again only while it is free");
+    Fixture f;
+    f.doc.insertImage(f.track, 0);
+    const ImageId b = f.doc.insertImage(f.track, 1);
+    CHECK_EQ(f.tl().findImage(b)->number, 2);
+
+    f.doc.removeDrawing(f.track, b);
+    CHECK(f.doc.undo());  // 2 is back
+    CHECK_EQ(f.tl().findImage(b)->number, 2);
+
+    const ImageId made = f.doc.insertImage(f.track, 2);
+    CHECK_EQ(f.tl().findImage(made)->number, 3);
 }
 
 // --- overwriting drawings ------------------------------------------------
@@ -562,11 +613,10 @@ void overwritingNeverLosesADrawing() {
     CHECK_NEAR(kept->pixel(50, 50).a, 1.0, 1e-2);
 }
 
-void trackPropertiesUndoWithoutReusingADrawingNumber() {
+void trackPropertiesAreOneUndoStep() {
     TEST("changing a track's settings is one undo step");
     Fixture f;
     f.doc.insertImage(f.track, 0);
-    const int next = f.tl().next_drawing_number;
 
     TrackProperties props = f.tl().properties();
     props.overwrite_drawings = false;
@@ -578,8 +628,6 @@ void trackPropertiesUndoWithoutReusingADrawingNumber() {
     CHECK(f.doc.undo());
     CHECK(f.tl().overwrite_drawings);
     CHECK_EQ(f.tl().name, std::string("main"));
-    // The counter is not a property and does not travel with them.
-    CHECK_EQ(f.tl().next_drawing_number, next);
 }
 
 void layerNamesStayUnique() {
@@ -621,6 +669,8 @@ int main() {
     framesLeftAtTheStartGoToTheDrawingAfterThem();
     movingOverToWhereItAlreadyIsDoesNothing();
     overwritingNeverLosesADrawing();
-    trackPropertiesUndoWithoutReusingADrawingNumber();
+    trackPropertiesAreOneUndoStep();
+    anewDrawingTakesTheLowestFreeNumber();
+    undoingADeletionPutsItsNumberBackInUse();
     return testing::summarise("track");
 }

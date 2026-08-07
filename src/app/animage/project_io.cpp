@@ -312,7 +312,9 @@ QJsonObject writeTrack(const Track& track) {
     out.insert("blend", QString::fromLatin1(blendName(track.blend)));
     out.insert("time_offset", jsonNumber(track.time_offset));
     out.insert("overwrite_drawings", track.overwrite_drawings);
-    out.insert("next_drawing_number", jsonNumber(track.next_drawing_number));
+    // No `next_drawing_number`: what a new drawing is called is the lowest
+    // number the track is not using, worked out from the drawings themselves.
+    // A file from before this carries the key and it is simply ignored.
 
     QJsonArray layers;
     for (const Layer& layer : track.layers) layers.append(writeLayer(layer));
@@ -355,7 +357,6 @@ Track readTrack(const QJsonObject& json) {
     // key, so it only touches projects saved before the setting existed.
     // No version bump: an older build reading a newer file ignores the key.
     track.overwrite_drawings = asBool(json.value("overwrite_drawings"), true);
-    track.next_drawing_number = asInt(json.value("next_drawing_number"), 1);
 
     const QJsonArray layers = json.value("layers").toArray();
     for (const QJsonValue& value : layers) track.layers.push_back(readLayer(value.toObject()));

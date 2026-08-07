@@ -79,7 +79,9 @@ void checkSameScene(const Document& a, const Document& b) {
         CHECK_EQ(static_cast<int>(ta.blend), static_cast<int>(tb.blend));
         CHECK_EQ(ta.time_offset, tb.time_offset);
         CHECK_EQ(ta.overwrite_drawings, tb.overwrite_drawings);
-        CHECK_EQ(ta.next_drawing_number, tb.next_drawing_number);
+        // What a new drawing is called is derived from the drawings, so it has
+        // to come back right without the file storing it.
+        CHECK_EQ(ta.nextDrawingNumber(), tb.nextDrawingNumber());
         CHECK_EQ(ta.slots.size(), tb.slots.size());
         for (std::size_t i = 0; i < ta.slots.size(); ++i) CHECK_EQ(ta.slots[i], tb.slots[i]);
 

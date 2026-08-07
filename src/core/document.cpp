@@ -217,7 +217,7 @@ ImageId Document::insertImage(TrackId track_id, std::size_t slot) {
 
     Image image;
     image.id = image_ids_.next();
-    image.number = track->next_drawing_number++;
+    image.number = track->nextDrawingNumber();
     const ImageId id = image.id;
     recordOp(std::make_unique<ImageOp>(track_id, id, std::nullopt));
 
@@ -313,7 +313,7 @@ std::optional<Image> Document::copyOfImage(Track& track, ImageId source_id) {
 
     Image copy;
     copy.id = image_ids_.next();
-    copy.number = track.next_drawing_number++;  // a copy is a new drawing
+    copy.number = track.nextDrawingNumber();  // a copy is a new drawing
     copy.marker = source->marker;
     for (const auto& [layer_id, cel_id] : source->cels) {
         const Cel* original = cel(cel_id);
@@ -362,7 +362,7 @@ ImageId Document::addDrawing(TrackId track_id, std::size_t slot) {
 
     Image image;
     image.id = image_ids_.next();
-    image.number = track->next_drawing_number++;
+    image.number = track->nextDrawingNumber();
     const ImageId id = image.id;
     recordOp(std::make_unique<ImageOp>(track_id, id, std::nullopt));
     track->images.emplace(id, std::move(image));

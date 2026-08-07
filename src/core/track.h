@@ -78,9 +78,35 @@ struct Track {
         overwrite_drawings = p.overwrite_drawings;
     }
 
-    // Counts up and is never reused, for the same reason CelIds are not: a
-    // number that comes back means two drawings in one scene answer to it.
-    int next_drawing_number = 1;
+    // The number a new drawing on this track should carry: the lowest one no
+    // drawing here is using.
+    //
+    // Derived, and it used to be a stored counter that only ever went up. That
+    // never reused a number, which sounds like the safe property and is not the
+    // one that matters -- the number is a label on a card and in a tooltip, and
+    // nothing is keyed on it. What it cost was gaps: delete drawing 2, add
+    // another, and it came back as 3 with no 2 in the track at all, and a
+    // reworked scene climbed into numbers that meant nothing.
+    //
+    // Two drawings still never share a number at one time, which is the part
+    // that has to hold for the card to identify anything. What is given up is
+    // that a number names the same drawing for ever -- delete 2 and the next
+    // drawing is 2 -- so a note written a week ago about "drawing 2" may now
+    // point elsewhere. That was the trade, made deliberately.
+    int nextDrawingNumber() const {
+        std::vector<int> used;
+        used.reserve(images.size());
+        for (const auto& [id, image] : images) used.push_back(image.number);
+        std::sort(used.begin(), used.end());
+
+        int candidate = 1;
+        for (const int taken : used) {
+            if (taken < candidate) continue;  // duplicates, and anything a file got wrong
+            if (taken > candidate) break;     // the gap starts here
+            ++candidate;
+        }
+        return candidate;
+    }
 
     const Layer* findLayer(LayerId id) const {
         auto it = std::find_if(layers.begin(), layers.end(),

@@ -441,6 +441,32 @@ None of it was caught by a test. A harness prints the dock height as tracks are
 added, deleted and dragged, and it is the only reason the second version — which
 had passed a screenshot — was found to have stopped growing at all.
 
+**A drawing number is now the lowest one free, and that reverses a decision this
+file used to defend.** `Track::next_drawing_number` was a stored counter that
+only went up, on the grounds that "a number that comes back means two drawings in
+one scene answer to it". Reported as a bug and it is one: delete drawing 2, make
+another, and it arrives as 3 with no 2 in the track at all, and a reworked scene
+climbs into numbers that mean nothing.
+
+The old grounds were about the wrong property. Nothing is keyed on the number —
+it is a label on a timeline card and in one tooltip, and the identity is the
+`ImageId`, which still is never reused. What has to hold is that two drawings do
+not share a number *at one time*, and the lowest-free rule keeps that. What is
+given up is that a number names the same drawing for ever, so a note written last
+week about "drawing 2" may now point at a different one. That was the trade and
+it was made deliberately.
+
+Being derived is the other half of it: the counter is gone from the struct *and*
+from `scene.json`, because a stored counter that no longer decides anything is
+exactly the thing somebody re-wires by accident later. Undo gets it for free —
+putting a drawing back puts its number back in use, and there is a test — where
+the counter version would have had to record and restore it.
+
+What did **not** change is that a drawing keeps the number it was born with.
+Deriving the label from position instead renumbers a drawing the moment you drag
+it, which is precisely when you need to know which one you are holding; that
+decision stands.
+
 And **`Timeline` is now `Track`** throughout, including the French
 specification. A `Track` is one stack of layers with its own time; the timeline
 is the scene's shared time axis and the panel that shows it. A scene has several
