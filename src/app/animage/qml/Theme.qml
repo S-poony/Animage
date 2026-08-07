@@ -8,48 +8,102 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    // --- surfaces ----------------------------------------------------------
-    // Kept exactly as the original black theme — user asked to keep the
-    // black background and only desaturate the orange.
-    readonly property color background:   "#0e0f13"  // behind everything
-    readonly property color surface:     "#17181e"  // panels
-    readonly property color surfaceHigh: "#20222b"  // raised: toolbars, cards
-    readonly property color surfaceHover:"#272a35"
-    readonly property color canvasWell:  "#101014"  // the well the canvas sits in
-    readonly property color overlay:     "#0e0f13"
+    // --- the scheme ----------------------------------------------------------
+    // The whole palette follows the OS. Theme.qml binds to `animageDark`
+    // -- a boolean top-level property that main() seeds from a synchronous
+    // resolveColorScheme() and brings up to date on every colorSchemeChanged
+    // (see main.cpp). Binding here, rather than to Qt.styleHints.colorScheme
+    // directly, is the startup fix: Qt reports that value as Unknown (or a
+    // stale Light) before the async theme portal answers, and the palette-
+    // luminance fallback gets the first frame right. Every token below binds
+    // to `dark`, so the whole interface re-tints in place on an OS flip.
+    //
+    // `dark` is not readonly on purpose: the offscreen platform cannot be
+    // told a color scheme, so the screenshot harness overrides it to render
+    // the light theme for inspection. The application never touches it.
+    property bool dark: typeof animageDark !== "undefined"
+                        ? animageDark
+                        : Qt.styleHints.colorScheme !== Qt.ColorScheme.Light
+
+    // --- the light palette ---------------------------------------------------
+    // The mirror image of the dark tokens below, picked whenever the OS asks
+    // for light. Separate named properties keep the active palette below one
+    // dark-or-light ternary per token instead of two palettes of ternaries.
+    readonly property color backgroundLight:   "#eef0f4"  // behind everything
+    readonly property color surfaceLight:     "#f7f8fa"  // panels
+    readonly property color surfaceHighLight: "#ffffff"  // raised: toolbars, cards
+    readonly property color surfaceHoverLight:"#e3e6ec"
+    readonly property color canvasWellLight:  "#e9ebf0"  // the well the canvas sits in
+    readonly property color overlayLight:     "#eef0f4"
+
+    readonly property color borderLight:       "#d8dce4"
+    readonly property color borderStrongLight: "#b9c0cc"
+    readonly property color borderFocusLight:  "#8a5a44"
+
+    readonly property color textLight:        "#1c2028"
+    readonly property color textSecondaryLight: "#525a68"
+    readonly property color textTertiaryLight:  "#7d8494"
+    readonly property color textDisabledLight:  "#a8aebd"
+    readonly property color textOnAccentLight:  "#f7efea"
+
+    // The same orange family as the dark accent, stepped down a few shades so
+    // it keeps its contrast on white.
+    readonly property color accentLight:      "#a06a52"
+    readonly property color accentHoverLight: "#8f5c46"
+    readonly property color accentDownLight:  "#b57f68"
+    readonly property color accentSoftLight:  "#1aa06a52"
+    readonly property color accentBorderLight:"#3da06a52"
+    readonly property color accentFocusLight: "#c99a83"
+
+    readonly property color carriedLight:     "#3f7fc4"
+    readonly property color flagLight:        "#a06a2e"
+    readonly property color okLight:          "#2f9e5e"
+    readonly property color dangerLight:      "#d64545"
+
+    readonly property color checkerDarkLight:  "#d3d7df"
+    readonly property color checkerLightLight: "#e6e9ee"
+    readonly property color scrimLight:        "#66000000"
+
+    // --- the active palette ---------------------------------------------------
+    // Dark tokens keep their original names and values -- the black design the
+    // app shipped with. The OS scheme flips them to the light twins above.
+    readonly property color background:   dark ? "#0e0f13" : backgroundLight
+    readonly property color surface:      dark ? "#17181e" : surfaceLight
+    readonly property color surfaceHigh:  dark ? "#20222b" : surfaceHighLight
+    readonly property color surfaceHover: dark ? "#272a35" : surfaceHoverLight
+    readonly property color canvasWell:   dark ? "#101014" : canvasWellLight
+    readonly property color overlay:      dark ? "#0e0f13" : overlayLight
 
     // --- lines -------------------------------------------------------------
-    readonly property color border:       "#2b2e38"
-    readonly property color borderStrong: "#3d4250"
-    readonly property color borderFocus:  "#d87854"
+    readonly property color border:       dark ? "#2b2e38" : borderLight
+    readonly property color borderStrong: dark ? "#3d4250" : borderStrongLight
+    readonly property color borderFocus:  dark ? "#b07a62" : borderFocusLight
 
     // --- text --------------------------------------------------------------
-    readonly property color text:        "#e8eaf0"
-    readonly property color textSecondary: "#9aa1b0"
-    readonly property color textTertiary:  "#676e80"
-    readonly property color textDisabled:  "#4a4f5c"
-    readonly property color textOnAccent:  "#1c120c"
+    readonly property color text:           dark ? "#e8eaf0" : textLight
+    readonly property color textSecondary:  dark ? "#9aa1b0" : textSecondaryLight
+    readonly property color textTertiary:   dark ? "#676e80" : textTertiaryLight
+    readonly property color textDisabled:   dark ? "#4a4f5c" : textDisabledLight
+    readonly property color textOnAccent:   dark ? "#1c120c" : textOnAccentLight
 
     // --- accent ------------------------------------------------------------
-    // Desaturated clay orange — same family as #ff7847 but lower chroma so
-    // Export, selections and slider thumbs don't shout against the black.
-    readonly property color accent:      "#d87854"
-    readonly property color accentHover: "#e1835e"
-    readonly property color accentDown:  "#c56545"
-    readonly property color accentSoft:  "#d878541a"
-    readonly property color accentBorder:"#d8785452"
-    readonly property color accentFocus: "#a85e45"
+    readonly property color accent:      dark ? "#b07a62" : accentLight
+    readonly property color accentHover: dark ? "#bd8a73" : accentHoverLight
+    readonly property color accentDown:  dark ? "#9c6b56" : accentDownLight
+    readonly property color accentSoft:  dark ? "#b07a6214" : accentSoftLight
+    readonly property color accentBorder:dark ? "#b07a623d" : accentBorderLight
+    readonly property color accentFocus: dark ? "#7a5745" : accentFocusLight
 
     // --- semantic ----------------------------------------------------------
-    readonly property color carried:     "#5b9cd6"  // marks carried to a drawing
-    readonly property color flag:        "#b98248"  // desaturated — was #e07a1e
-    readonly property color ok:          "#45d483"
-    readonly property color danger:      "#ff5d5d"
+    readonly property color carried:     dark ? "#5b9cd6" : carriedLight
+    readonly property color flag:        dark ? "#b98248" : flagLight
+    readonly property color ok:          dark ? "#45d483" : okLight
+    readonly property color danger:      dark ? "#ff5d5d" : dangerLight
 
-    // --- checker / scrim (was hardcoded in LayerPanel/ColorSwatch/Main) ---
-    readonly property color checkerDark:  "#2a2d36"
-    readonly property color checkerLight: "#33363f"
-    readonly property color scrim:        "#99000000"
+    // --- checker / scrim ---------------------------------------------------
+    readonly property color checkerDark:  dark ? "#2a2d36" : checkerDarkLight
+    readonly property color checkerLight: dark ? "#33363f" : checkerLightLight
+    readonly property color scrim:        dark ? "#99000000" : scrimLight
 
     // --- shape -------------------------------------------------------------
     readonly property int radiusSmall: 4
@@ -91,7 +145,7 @@ QtObject {
 
     // A shadow used to lift floating things (dialogs, the shortcut palette)
     // off the surface. The scene graph cannot spread shadows, so these are
-    // painted with a translucent black that reads as depth on dark surfaces.
+    // painted with a translucent black that reads as depth on either scheme.
     readonly property var elevation: [
         "0 1 2 0 rgba(0,0,0,0.3)",
         "0 2 6 0 rgba(0,0,0,0.4)"

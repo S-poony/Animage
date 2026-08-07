@@ -12,12 +12,14 @@
 //     scene graph, and the png lands where asked.
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlContext>
 #include <QQmlError>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
+#include <QStringList>
 #include <cstdio>
 
 #include "qml_registry.h"
@@ -25,17 +27,37 @@
 int main(int argc, char** argv) {
     // Same style contract as main.cpp: the QML paints itself from Theme.qml,
     // the few raw Qt Quick Controls underneath are Basic, and the palette is
-    // the dark mirror of Theme.qml so nothing renders as a light OS widget.
+    // the mirror of Theme.qml so nothing renders as a default OS widget.
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
     QGuiApplication app(argc, argv);
-    app.setPalette(animageDarkPalette());
+    // A trailing "light" argument forces the light theme to render, so it can
+    // be screenshotted on a platform that does not report one (offscreen
+    // colorScheme is Unknown, which Theme.qml treats as dark). Scan the whole
+    // tail so it combines with the capture mode ("harness shot.png min light").
+    const QStringList tail = [&] {
+        QStringList t;
+        for (int i = 2; i < argc; ++i) t << QString::fromLocal8Bit(argv[i]);
+        return t;
+    }();
+    const bool force_light = tail.contains(QLatin1String("light"));
+    // The offscreen platform has no color scheme. Theme.qml reads animageDark
+    // (seeded here) rather than Qt.styleHints.colorScheme, so this harness
+    // picks the look itself: dark by default -- the design's primary look, so
+    // the workflow screenshots are stable -- and light on request. main.cpp,
+    // the real app, resolves the OS scheme via resolveColorScheme().
+    const Qt::ColorScheme scheme = force_light ? Qt::ColorScheme::Light
+                                               : Qt::ColorScheme::Dark;
+    app.setPalette(animagePalette(scheme));
     QCoreApplication::setApplicationName(QStringLiteral("Animage"));
 
     registerAnimageQmlTypes();
 
     QQmlApplicationEngine engine;
     engine.addImportPath(QStringLiteral("qrc:/"));
+    // Same context property as main.cpp: Theme.qml reads animageDark.
+    engine.rootContext()->setContextProperty(QStringLiteral("animageDark"),
+                                             scheme != Qt::ColorScheme::Light);
 
     bool has_warnings = false;
     QObject::connect(&engine, &QQmlEngine::warnings,

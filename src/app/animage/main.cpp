@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlContext>
 #include <QQmlError>
 #include <QQuickStyle>
+#include <QStyleHints>
 #include <QUrl>
 #include <cstdio>
 
@@ -22,7 +24,7 @@ int main(int argc, char** argv) {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
     QGuiApplication app(argc, argv);
-    app.setPalette(animageDarkPalette());
+
     QCoreApplication::setApplicationName(QStringLiteral("Animage"));
     QCoreApplication::setOrganizationName(QStringLiteral("Animage"));
 
@@ -30,6 +32,27 @@ int main(int argc, char** argv) {
 
     QQmlApplicationEngine engine;
     engine.addImportPath(QStringLiteral("qrc:/"));
+
+    // Theme.qml reads a top-level boolean `animageDark` (see Theme.qml); the
+    // scheme for the underlying controls' palette is the same decision. It is
+    // resolved synchronously here -- resolveColorScheme() guesses from the OS
+    // palette luminance while Qt.styleHints.colorScheme is still Unknown, so
+    // the first frame matches the user's theme instead of flashing light --
+    // and brought up to date below every time the OS reports a real scheme.
+    const auto reapply = [&](Qt::ColorScheme s) {
+        const bool dark = s != Qt::ColorScheme::Light;  // Unknown, Dark -> dark
+        app.setPalette(animagePalette(dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light));
+        engine.rootContext()->setContextProperty(QStringLiteral("animageDark"), dark);
+    };
+    QObject::connect(app.styleHints(), &QStyleHints::colorSchemeChanged, &app,
+                     [&reapply](Qt::ColorScheme s) { reapply(s); });
+
+    // Seed the scheme now, before any QML is evaluated, from the synchronous
+    // resolver so the first frame already matches the user's theme.
+    const Qt::ColorScheme initial = resolveColorScheme();
+    app.setPalette(animagePalette(initial));
+    engine.rootContext()->setContextProperty(QStringLiteral("animageDark"),
+                                             initial != Qt::ColorScheme::Light);
 
     QObject::connect(&engine, &QQmlEngine::warnings,
                      [](const QList<QQmlError>& warnings) {
