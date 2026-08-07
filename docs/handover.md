@@ -286,7 +286,10 @@ three different answers:
 user's call and it is a better design than the plan sketches. A CTG layer is
 the mode: draw on it with the ordinary brush and what you draw is a scribble.
 
-**Cels are not saved as PNG.** The plan says a PNG per cel; a 16-bit PNG cannot
+**Cels are not saved as PNG.** Argued out at length, with the measurements and
+the rejected alternatives, in
+[why-our-own-formats.md](why-our-own-formats.md) — it is the first thing anyone
+asks about this repository. In brief: the plan says a PNG per cel; a 16-bit PNG cannot
 hold a half-float. Half spends its precision relatively — finely near zero,
 coarsely near one — while integers are evenly spaced, so of the 15362 half values
 in [0,1] a 16-bit image keeps 7169, and some non-zero values quantise to zero.
