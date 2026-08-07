@@ -20,8 +20,26 @@ did not before — and now survives not thinking about it at all.
 | M2 | Canvas, pressure brush, eraser, layers. Compositing is on the CPU, not the GPU. |
 | M3 | Timeline, holds, onion skin, playback, drawing during playback. |
 | M4 | LazyBrush solver and the CTG layer, in the app and usable. Solved on a worker thread. |
-| M5 | Save, open, Save As, autosave, New, and export as 16-bit PNG or half EXR. |
+<| M5 | Save, open, Save As, autosave, New, and export as 16-bit PNG or half EXR. |
 | — | Several tracks in the interface, and an "overwrite drawings" setting per track. |
+| UI | Modern QML + Qt Quick Controls 2 application interface (`Main.qml`, `Theme.qml`, `AppController`). |
+
+## QML + Qt Quick Controls 2 Interface Architecture
+
+The user interface has been rewritten with QML + Qt Quick Controls 2 using a modern dark design system while preserving the Qt-free core model (`animage::core`):
+
+- **`CanvasView` (`canvas_view.h/.cpp`)**: A `QQuickPaintedItem` port of the drawing surface. Preserves all compositing, onion skinning, cache margin management (`kMinCacheMargin`), and async CTG colour solving logic. Handles pen/stylus input via `touchEvent()` and tablet fallback.
+- **`AppController` (`app_controller.h/.cpp`)**: The QObject facade that replaces `MainWindow`. Owns the `Document`, manages undo/redo history, playback timers, autosave, save/open/export workflows, and exposes properties and slots to QML.
+- **Models (`LayersModel`, `TimelineModel`, `CtgSourcesModel`, `SceneSettingsModel`)**: Clean `QAbstractListModel` adapters that bridge core data structures to QML views.
+- **QML Views (`src/app/animage/qml/`)**:
+  - `Theme.qml`: Singleton design tokens (surfaces, coral accent `#ff7847`, spacing, typography).
+  - `Icons.qml`/`Icon.qml`: Vector Material icons.
+  - `Main.qml`: Application window, toolbar, left tool rail, central canvas well, right layer dock, bottom timeline panel, and status bar.
+  - `LayerPanel.qml`: Layer stack management, opacity control, and CTG colour layer options.
+  - `TimelinePanel.qml` / `TimelineCell.qml`: Loop playback transport, drawing insertion/duplication/deletion, hold extension (+/-), ruler scrub, and drag-to-reorder / edge-stretch gesture handles.
+  - `SceneSettingsDialog.qml`, `ExportDialog.qml`, `PaletteDialog.qml`, `ShortcutPalette.qml`: Dialogs for scene configuration, sequence export with progress overlay, color picker, and shortcut cheatsheet.
+- **Binary Location**: The executable lands at `build/bin/animage`.
+- **Offscreen Harness**: `animage_qml_harness` allows headless UI verification and screenshot generation without opening OS desktop windows.
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
 All of it lives in the application now, in one place — `ProjectIO`, which is
@@ -55,12 +73,13 @@ promise about the disk, and a sync client is entitled to move the disk.
 
 Autosave then fires every two minutes, writing over the project, deferred while
 the pen is down or the animation is playing and silent when nothing has moved.
-Closing the window writes too. That was the deliberate choice the plan describes
-and it has the consequence it always had: the disk is always current, so
-"quit without saving to throw away a ruined drawing" is gone, and undo within
-the session is the only way back. The `*` in the title stayed, now meaning
-"not yet autosaved" — it clears itself within two minutes and is the only sign
-that the last few strokes are still only in memory.
+An autosave is a recovery snapshot: it writes the current document but never
+touches the clean marker, so the `*` in the title survives it and only an
+explicit save establishes clean. Undoing back to the saved state clears it,
+because "saved" is tracked as the identity of the edit that was on top of the
+history when the save landed (a command id on the `Document`), not a stack
+depth — a depth compares equal after undo-and-branch to the same depth while
+the contents differ, and the command identity does not lie.
 
 One cost is worth writing down because it was raised and accepted rather than
 missed. The swap replaces every directory entry in the project on every save,
@@ -72,14 +91,18 @@ and sync far better, at the cost of the guarantee that an interrupted save
 leaves the last good project alone. That trade is open, and the numbers to
 re-argue it are in `bench_save`.
 
-**New, Open and Close all go through one door.** `leaveCurrentDocument` is what
-they call first, and it says the thing autosave implies: a project with a folder
-is simply written, because leaving is not a way to discard. The single case
-autosave cannot cover is a document that has never been saved anywhere — there
-is no folder to write it to — so that is the only case that asks, and it is the
-only place in the program where work can be lost by answering a question wrong.
-New then rebuilds the same document the application starts with, including the
-`clearHistory` that stops a fresh document arriving with three undoable setup
+**New, Open and Close all go through one door.** `requestLeave(PendingAction)`
+is what they call first, and it records the requested action — New, Open or
+Close — *before* asking anything. A document that is clean just performs the
+action. A dirty document raises the unsaved-changes question, and each of the
+three answers does exactly one thing: Discard performs the recorded action,
+Cancel drops it, and Save writes first (Save As when the document has no
+folder) and only then performs it. A failed save drops the leave; it can never
+invent an action of its own — the old code assigned `Close` after any failed
+save, so asking for New and losing the save would have closed the window. The
+workflow is covered offscreen in `tests/test_controller.cpp`. New then rebuilds
+the same document the application starts with, including the `clearHistory`
+that stops a fresh document arriving with three undoable setup
 steps on the stack, and opens Scene settings.
 
 **Export writes 16-bit PNG and EXR**, a folder per layer with
@@ -1265,7 +1288,7 @@ is where interface bugs get caught. A crash writes `animage-crash.txt` beside
 the executable, with a stack that `addr2line` decodes:
 
 ```bash
-addr2line -e build/src/app/animage.exe -f -C 0x14000a130
+addr2line -e build/bin/animage.exe -f -C 0x14000a130
 ```
 
 Add the PE image base (`0x140000000`) to the offsets in the report.

@@ -1,31 +1,44 @@
-﻿set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOMOC ON)
 
 # M0: the latency harness. Deliberately standalone -- it links nothing of ours,
-# so it measures Qt and the driver rather than our code.
-add_executable(animage_m0_latency
-  latency/main.cpp
-  latency/latency_canvas.cpp
-  latency/latency_canvas.h
-)
-target_link_libraries(animage_m0_latency PRIVATE Qt6::Widgets)
-target_include_directories(animage_m0_latency PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/latency)
+# so it measures Qt and the driver rather than our code. It is the one piece of
+# the interface that still runs on Qt Widgets: it exists to measure input
+# latency, and Quick's own event plumbing is a different measurement.
+find_package(Qt6 6.5 COMPONENTS Widgets QUIET)
+if(Qt6Widgets_FOUND)
+  add_executable(animage_m0_latency
+    latency/main.cpp
+    latency/latency_canvas.cpp
+    latency/latency_canvas.h
+  )
+  target_link_libraries(animage_m0_latency PRIVATE Qt6::Widgets)
+  target_include_directories(animage_m0_latency PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/latency)
 
-# A console window on Windows: the device listing and the report on exit are
-# part of what the tool is for.
-set_target_properties(animage_m0_latency PROPERTIES WIN32_EXECUTABLE OFF)
+  # A console window on Windows: the device listing and the report on exit are
+  # part of what the tool is for.
+  set_target_properties(animage_m0_latency PROPERTIES WIN32_EXECUTABLE OFF)
+else()
+  message(STATUS "Qt 6 Widgets not found: skipping the M0 latency harness")
+endif()
 
-# M2/M3: the interface, as a library so that tests can drive it offscreen. A
-# widget that can only be exercised by a human clicking on it is a widget whose
-# crashes are found by the human.
+# The interface: the canvas, the controllers and the models, as a library so
+# that tests can drive them offscreen. An item that can only be exercised by a
+# human clicking on it is an item whose crashes are found by the human.
 add_library(animage_ui STATIC
-  animage/main_window.cpp
-  animage/main_window.h
-  animage/canvas_widget.cpp
-  animage/canvas_widget.h
-  animage/timeline_widget.cpp
-  animage/timeline_widget.h
-  animage/scene_settings_dialog.cpp
-  animage/scene_settings_dialog.h
+  animage/app_controller.cpp
+  animage/app_controller.h
+  animage/qml_registry.cpp
+  animage/qml_registry.h
+  animage/canvas_view.cpp
+  animage/canvas_view.h
+  animage/layers_model.cpp
+  animage/layers_model.h
+  animage/tracks_model.cpp
+  animage/tracks_model.h
+  animage/timeline_model.cpp
+  animage/timeline_model.h
+  animage/scene_settings_model.cpp
+  animage/scene_settings_model.h
   animage/project_io.cpp
   animage/project_io.h
   animage/export_sequence.cpp
@@ -35,7 +48,16 @@ add_library(animage_ui STATIC
   animage/crash_report.cpp
   animage/crash_report.h
 )
-target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
+target_link_libraries(animage_ui PUBLIC Qt6::Quick Qt6::QuickControls2 animage::core)
+# DBus is needed for synchronous dark-mode detection (portal Settings Read).
+# It is optional: Windows/macOS and some headless environments have no DBus,
+# and the resolver falls back to palette luminance. When present, it gives a
+# correct answer before Qt's async styleHintscolorScheme round-trip.
+find_package(Qt6 6.5 COMPONENTS DBus QUIET)
+if(Qt6DBus_FOUND)
+  target_link_libraries(animage_ui PUBLIC Qt6::DBus)
+  target_compile_definitions(animage_ui PUBLIC ANIMAGE_HAVE_DBUS=1)
+endif()
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
 
 # OpenEXR, via tinyexr: one vendored BSD-3 header, compiled in exr_writer.cpp
@@ -79,14 +101,130 @@ endif()
 # macros, so the interface uses Q_SIGNALS / Q_SLOTS / Q_EMIT instead.
 target_compile_definitions(animage_ui PUBLIC QT_NO_KEYWORDS)
 
+# The whole interface in one QML module: the window, the panels, the dialogs
+# and the design tokens, compiled in so the binary has no filesystem dependency.
+qt_add_qml_module(animage_ui
+  URI Animage
+  VERSION 1.0
+  QML_FILES
+    animage/qml/Main.qml
+    animage/qml/Theme.qml
+    animage/qml/AppToolButton.qml
+    animage/qml/AppCheckBox.qml
+    animage/qml/AppDialog.qml
+    animage/qml/AppSpinBox.qml
+    animage/qml/AppComboBox.qml
+    animage/qml/AppSlider.qml
+    animage/qml/AppTextField.qml
+    animage/qml/AppRadioButton.qml
+    animage/qml/AppMenu.qml
+    animage/qml/AppMenuItem.qml
+    animage/qml/ColorSwatch.qml
+    animage/qml/LayerPanel.qml
+    animage/qml/TimelinePanel.qml
+    animage/qml/TimelineCell.qml
+    animage/qml/TracksPanel.qml
+    animage/qml/TemporalStrip.qml
+    animage/qml/GhostMark.qml
+    animage/qml/ToolOptionsBar.qml
+    animage/qml/SceneSettingsDialog.qml
+    animage/qml/ExportDialog.qml
+    animage/qml/ShortcutPalette.qml
+    animage/qml/PaletteDialog.qml
+)
+
+# Fallback icons for platforms where Freedesktop theme not available (Windows/macOS
+# and headless offscreen). Bundled Adwaita symbolic icons used when icon.name not found.
+# Flat copies for direct icon.source fallback (qrc:/Animage/...)
+qt_add_resources(animage_ui "fallback_icons"
+  PREFIX "/Animage"
+  BASE "animage"
+  FILES
+    animage/icons/input-tablet.svg
+    animage/icons/edit-delete.svg
+    animage/icons/user-trash-symbolic.svg
+    animage/icons/edit-clear-symbolic.svg
+    animage/icons/edit-clear-all-symbolic.svg
+    animage/icons/edit-cut-symbolic.svg
+    animage/icons/document-edit-symbolic.svg
+    animage/icons/view-reveal-symbolic.svg
+    animage/icons/view-conceal-symbolic.svg
+    animage/icons/system-lock-screen-symbolic.svg
+    animage/icons/changes-allow-symbolic.svg
+    animage/icons/list-add.svg
+    animage/icons/edit-copy.svg
+    animage/icons/media-playback-start.svg
+    animage/icons/media-playback-stop.svg
+    animage/icons/document-new.svg
+    animage/icons/document-open.svg
+    animage/icons/document-save.svg
+    animage/icons/document-save-as.svg
+    animage/icons/document-send.svg
+    animage/icons/edit-undo.svg
+    animage/icons/edit-redo.svg
+    animage/icons/preferences-system.svg
+    animage/icons/zoom-original.svg
+    animage/icons/zoom-fit-best.svg
+    animage/icons/help-contents.svg
+    animage/icons/applications-graphics.svg
+    animage/icons/go-up.svg
+    animage/icons/go-down.svg
+    animage/icons/view-refresh-symbolic.svg
+    animage/icons/color-select-symbolic.svg
+)
+
+# Hicolor fallback theme for QIcon::fromTheme on Windows/macOS/headless.
+# Provides the same Adwaita icons under the standard theme path
+# so hasThemeIcon resolves via fallback theme.
+qt_add_resources(animage_ui "hicolor_fallback"
+  PREFIX "/icons"
+  BASE "animage/icons"
+  FILES
+    animage/icons/hicolor/index.theme
+    animage/icons/hicolor/scalable/actions/document-edit-symbolic.svg
+    animage/icons/hicolor/scalable/actions/document-new.svg
+    animage/icons/hicolor/scalable/actions/document-open.svg
+    animage/icons/hicolor/scalable/actions/document-save.svg
+    animage/icons/hicolor/scalable/actions/document-save-as.svg
+    animage/icons/hicolor/scalable/actions/document-send.svg
+    animage/icons/hicolor/scalable/actions/edit-clear-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-clear-all-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-copy.svg
+    animage/icons/hicolor/scalable/actions/edit-cut-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-delete.svg
+    animage/icons/hicolor/scalable/actions/user-trash-symbolic.svg
+    animage/icons/hicolor/scalable/actions/edit-redo.svg
+    animage/icons/hicolor/scalable/actions/edit-undo.svg
+    animage/icons/hicolor/scalable/actions/go-down.svg
+    animage/icons/hicolor/scalable/actions/go-up.svg
+    animage/icons/hicolor/scalable/actions/help-contents.svg
+    animage/icons/hicolor/scalable/actions/list-add.svg
+    animage/icons/hicolor/scalable/actions/media-playback-start.svg
+    animage/icons/hicolor/scalable/actions/media-playback-stop.svg
+    animage/icons/hicolor/scalable/actions/preferences-system.svg
+    animage/icons/hicolor/scalable/actions/view-conceal-symbolic.svg
+    animage/icons/hicolor/scalable/actions/view-refresh-symbolic.svg
+    animage/icons/hicolor/scalable/actions/color-select-symbolic.svg
+    animage/icons/hicolor/scalable/actions/view-reveal-symbolic.svg
+    animage/icons/hicolor/scalable/actions/zoom-fit-best.svg
+    animage/icons/hicolor/scalable/actions/zoom-original.svg
+    animage/icons/hicolor/scalable/categories/applications-graphics.svg
+    animage/icons/hicolor/scalable/devices/input-tablet.svg
+    animage/icons/hicolor/scalable/status/changes-allow-symbolic.svg
+    animage/icons/hicolor/scalable/status/system-lock-screen-symbolic.svg
+)
+
 add_executable(animage animage/main.cpp)
 target_link_libraries(animage PRIVATE animage_ui)
+if(TARGET animage_uiplugin)
+  target_link_libraries(animage PRIVATE animage_uiplugin)
+endif()
+
+# Output binary to build/bin/animage because build/src/app/animage is a directory
+# generated by Qt's QML module compiler.
+set_target_properties(animage PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set_target_properties(animage PROPERTIES
-  # A console window on Windows, for the same reason as the latency harness:
-  # a prototype that crashes should be able to say so.
   WIN32_EXECUTABLE OFF
-  # macOS will not run a loose executable that opens windows, and macdeployqt
-  # has nowhere to put Qt without a bundle to put it in.
   MACOSX_BUNDLE TRUE
   MACOSX_BUNDLE_BUNDLE_NAME "Animage"
   MACOSX_BUNDLE_GUI_IDENTIFIER "org.animage.Animage"
@@ -99,4 +237,18 @@ include(GNUInstallDirs)
 install(TARGETS animage
   BUNDLE DESTINATION .
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# A harness that assembles the real interface offscreen and saves a picture of
+# it: the "does the whole window load" test, and how a screenshot is made
+# without a human at the screen.
+add_executable(animage_qml_harness
+  animage/harness.cpp
+)
+target_link_libraries(animage_qml_harness PRIVATE animage_ui)
+if(TARGET animage_uiplugin)
+  target_link_libraries(animage_qml_harness PRIVATE animage_uiplugin)
+endif()
+set_target_properties(animage_qml_harness PROPERTIES
+  WIN32_EXECUTABLE OFF
 )

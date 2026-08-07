@@ -13,7 +13,9 @@
 // true, so a change that quietly gives one back is a red build rather than a
 // complaint about jagged strokes six months later.
 
-#include <QApplication>
+#include <QGuiApplication>
+#include "canvas_view.h"
+using CanvasWidget = CanvasView;
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QPointF>
@@ -23,7 +25,7 @@
 #include <vector>
 
 #include "brush.h"
-#include "canvas_widget.h"
+
 #include "compositor.h"
 #include "document.h"
 #include "testing.h"
@@ -73,12 +75,13 @@ struct Fixture {
     ImageId image;
     CanvasWidget canvas;
 
-    Fixture(int width, int height, int curves = 6) : canvas(doc) {
+    Fixture(int width, int height, int curves = 6)  {
         track = doc.addTrack("main");
         image = doc.insertImage(track, 0);
         layer = doc.addLayer(track, "layer 1");
         doc.setCanvasSize(1920, 1080);
         drawCurves(doc, track, image, layer, curves, 1920, 1080);
+        canvas.setDocument(&doc);
         canvas.resize(width, height);
         canvas.setTrack(track);
         canvas.setFrame(0);
@@ -147,7 +150,7 @@ void panningDoesNotRecompositeOnEveryMove() {
 
         QMouseEvent press(QEvent::MouseButtonPress, start, start, Qt::MiddleButton,
                           Qt::MiddleButton, Qt::NoModifier);
-        QApplication::sendEvent(&fixture.canvas, &press);
+        QGuiApplication::sendEvent(&fixture.canvas, &press);
 
         PixelRect previous = fixture.canvas.cachedRegion();
         int rebuilds = 0;
@@ -155,7 +158,7 @@ void panningDoesNotRecompositeOnEveryMove() {
             const QPointF at = start + QPointF(i * kPixelsPerMove, i * kPixelsPerMove * 0.5);
             QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::MiddleButton,
                              Qt::NoModifier);
-            QApplication::sendEvent(&fixture.canvas, &move);
+            QGuiApplication::sendEvent(&fixture.canvas, &move);
             fixture.canvas.grab();
 
             const PixelRect now = fixture.canvas.cachedRegion();
@@ -168,7 +171,7 @@ void panningDoesNotRecompositeOnEveryMove() {
 
         QMouseEvent release(QEvent::MouseButtonRelease, start, start, Qt::MiddleButton,
                             Qt::NoButton, Qt::NoModifier);
-        QApplication::sendEvent(&fixture.canvas, &release);
+        QGuiApplication::sendEvent(&fixture.canvas, &release);
 
         // 720 screen pixels of travel against a margin of at least 32 either
         // side is at most about 23 rebuilds; 30 leaves room for the rounding
@@ -305,19 +308,19 @@ void theViewSitsOnWholeScreenPixels() {
         const QPointF start(fixture.canvas.width() / 2.0, fixture.canvas.height() / 2.0);
         QMouseEvent press(QEvent::MouseButtonPress, start, start, Qt::MiddleButton,
                           Qt::MiddleButton, Qt::NoModifier);
-        QApplication::sendEvent(&fixture.canvas, &press);
+        QGuiApplication::sendEvent(&fixture.canvas, &press);
         for (int i = 1; i <= 8; ++i) {
             // Deliberately fractional: a whole-pixel drag would pass this
             // without the snapping doing anything.
             const QPointF at = start + QPointF(i * 7.3, i * 3.9);
             QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::MiddleButton,
                              Qt::NoModifier);
-            QApplication::sendEvent(&fixture.canvas, &move);
+            QGuiApplication::sendEvent(&fixture.canvas, &move);
             aligned("panning", zoom);
         }
         QMouseEvent release(QEvent::MouseButtonRelease, start, start, Qt::MiddleButton,
                             Qt::NoButton, Qt::NoModifier);
-        QApplication::sendEvent(&fixture.canvas, &release);
+        QGuiApplication::sendEvent(&fixture.canvas, &release);
     }
 
     // Fitting sets the view directly rather than moving it, and is the third
@@ -422,7 +425,7 @@ void theWritebackIsNotTheSlowHalfOfARefresh() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    QApplication app(argc, argv);
+    QGuiApplication app(argc, argv);
     std::printf("render:\n");
     everyZoomKeepsAMarginToPanInto();
     panningDoesNotRecompositeOnEveryMove();

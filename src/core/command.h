@@ -153,6 +153,12 @@ struct Command {
     std::vector<std::unique_ptr<Op>> ops;
     std::vector<TileSnapshot> tiles;
 
+    // A unique token handed out when the command lands on the undo stack.
+    // Undo and redo move the command around without changing it, so the token
+    // identifies a particular edit wherever the history has got to. The UI
+    // uses it for dirty tracking: "saved" is a command, not a stack depth.
+    std::size_t id = 0;
+
     bool empty() const { return ops.empty() && tiles.empty(); }
 };
 

@@ -4,6 +4,7 @@
 // A test harness small enough to read in one sitting. The core library has no
 // external dependencies and its tests should not add one.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,26 @@ namespace testing {
 inline int g_failures = 0;
 inline int g_checks = 0;
 inline const char* g_current = "";
+inline std::chrono::steady_clock::time_point g_tick = std::chrono::steady_clock::now();
+
+// Each TEST() prints its own duration, so a slow test is found by reading the
+// output and not by staring at the wall clock. The first TEST in a suite has
+// nothing to time yet, so startTest only prints from the second one on.
+inline void finishTest() {
+    if (*g_current) {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - g_tick)
+                              .count();
+        std::printf("    %7.1f ms\n", ms);
+    }
+}
+
+inline void startTest(const char* name) {
+    finishTest();
+    g_current = name;
+    g_tick = std::chrono::steady_clock::now();
+    std::printf("  - %s", name);
+}
 
 inline void fail(const char* file, int line, const std::string& what) {
     ++g_failures;
@@ -64,6 +85,7 @@ inline bool onSharedHardware() {
 inline void skip(const char* why) { std::printf("    skipped: %s\n", why); }
 
 inline int summarise(const char* suite) {
+    finishTest();
     if (g_failures == 0) {
         std::printf("%s: %d checks passed\n", suite, g_checks);
         return 0;
@@ -74,9 +96,7 @@ inline int summarise(const char* suite) {
 
 }  // namespace testing
 
-#define TEST(name)                     \
-    testing::g_current = name;         \
-    std::printf("  - %s\n", name);
+#define TEST(name) testing::startTest(name)
 
 #define CHECK(expr) testing::check(static_cast<bool>(expr), __FILE__, __LINE__, #expr)
 #define CHECK_EQ(a, b) testing::checkEqual((a), (b), __FILE__, __LINE__, #a " == " #b)

@@ -652,6 +652,7 @@ void Document::endCommand() {
 
     pending_.tiles = journal_.take();
     if (!pending_.empty()) {
+        pending_.id = next_command_id_++;
         undo_stack_.push_back(std::move(pending_));
         redo_stack_.clear();
     }

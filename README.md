@@ -113,8 +113,9 @@ Then run the CMake commands above from a UCRT64 shell.
 | Path | Contents |
 |---|---|
 | `src/core/` | Data model, tiles, brush, compositor, undo, colour. Pure C++20, no Qt. |
-| `src/app/animage/` | The application. |
-| `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
+| `src/app/animage/` | Application C++ facade (`AppController`, `CanvasView`, models). |
+| `src/app/animage/qml/` | QML user interface (`Main.qml`, `Theme.qml`, `LayerPanel.qml`, `TimelinePanel.qml`, etc.). |
+| `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and zlib included. |
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests, for the core and for the application's save and load. |
 | `third_party/` | tinyexr (BSD-3) and miniz (MIT), vendored and compiled only into `exr_writer.cpp`. |
@@ -125,7 +126,7 @@ Then run the CMake commands above from a UCRT64 shell.
 Double-click `run-animage.bat`, or:
 
 ```bash
-cmake --build build --target animage && ./build/src/app/animage
+cmake --build build --target animage && ./build/bin/animage
 ```
 
 | | |
