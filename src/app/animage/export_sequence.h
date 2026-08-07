@@ -47,12 +47,20 @@
 //     writes integers exactly as lossy as the PNG above.
 //   - **EXR, for losslessness.** Its default pixel type is half, premultiplied,
 //     linear, which is bit for bit what the tiles hold. `tinyexr` is a single
-//     BSD header. It could also put every layer in one file per frame, which is
-//     a change to the *layout* and so wants deciding before more is built on
-//     the folder-per-layer one.
+//     BSD header. It stays a file per layer like PNG -- putting every layer in
+//     one file was considered and declined; see the handover.
 //
-// The full comparison, and the correction to the claim that TIFF could not hold
-// our pixels at all, is in docs/handover.md and docs/why-our-own-formats.md.
+// Two things about writing either, both of which cost somebody time to find
+// out. A non-Qt writer should read the `Framebuffer` directly and never build a
+// QImage: `Rgba` is float32 and interleaved, EXR wants planar half, and Qt
+// cannot write EXR or TIFF at all in this build. And an EXR is linear and
+// premultiplied, so it makes *neither* of the conversions toSrgb16 makes --
+// which means the same frame as PNG and as EXR holds different numbers, on
+// purpose.
+//
+// The full comparison, the decisions and their reasons, and the correction to
+// the claim that TIFF could not hold our pixels at all, are in
+// docs/handover.md and docs/why-our-own-formats.md.
 namespace exporting {
 
 struct Options {
