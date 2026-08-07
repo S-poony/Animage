@@ -85,6 +85,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The build denies compiler warnings and runs the tests under ASan and UBSan by
+default, so a warning or a memory error fails the build or the tests rather
+than being noticed later. `-DANIMAGE_WERROR=OFF` and `-DANIMAGE_SANITIZE=OFF`
+turn either off (the packaged CI builds use the latter, so released binaries
+do not carry a sanitizer runtime).
+
 The core library `animage_core` has no Qt dependency and no external
 dependencies at all. If Qt 6 is not found, the GUI targets are skipped and the
 core library and its tests still build.
@@ -103,8 +109,9 @@ Then run the CMake commands above from a UCRT64 shell.
 |---|---|
 | `src/core/` | Data model, tiles, brush, compositor, undo, colour. Pure C++20, no Qt. |
 | `src/app/animage/` | The application. |
+| `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and zlib included. |
 | `src/app/latency/` | M0: the pen latency harness. |
-| `tests/` | Unit tests for the core. |
+| `tests/` | Unit tests, for the core and for the application's save and load. |
 | `docs/fr/` | Original design documents. |
 
 ## Running it

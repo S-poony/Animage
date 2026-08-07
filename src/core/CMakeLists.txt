@@ -1,7 +1,6 @@
 ﻿add_library(animage_core
   brush.cpp
   cel.cpp
-  celfile.cpp
   color.cpp
   command.cpp
   compositor.cpp
@@ -11,9 +10,7 @@
   ctg_solver.cpp
   document.cpp
   gridflow.cpp
-  json.cpp
   lazybrush.cpp
-  serialise.cpp
   track.cpp
 )
 

@@ -8,10 +8,78 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(ANIMAGE_BUILD_TESTS "Build the unit tests" ON)
 
+# A warning is a bug the compiler saw first, and a tree that builds despite
+# them ships bugs it has been told about. Denied here rather than policed: the
+# build does not finish. Off for a compiler that invents new warnings on code
+# that used to be clean, not as the default.
+option(ANIMAGE_WERROR "Treat compiler warnings as errors" ON)
+
+# The tests are the memory-safety story, and they can only tell it while the
+# sanitizers are listening. On by default so that a plain build and test run
+# catches out-of-bounds access, use-after-free and undefined behaviour; the
+# packaging build in CI turns it off so the binaries it ships do not carry a
+# sanitizer runtime.
+option(ANIMAGE_SANITIZE "Build with ASan and UBSan" ON)
+
 if(MSVC)
   add_compile_options(/W4 /permissive-)
+  if(ANIMAGE_WERROR)
+    add_compile_options(/WX)
+  endif()
 else()
   add_compile_options(-Wall -Wextra -Wpedantic)
+  if(ANIMAGE_WERROR)
+    add_compile_options(-Werror)
+  endif()
+endif()
+
+if(ANIMAGE_SANITIZE)
+  include(CheckCXXSourceCompiles)
+  if(MSVC)
+    # MSVC has AddressSanitizer and no UndefinedBehaviorSanitizer; the runtime
+    # is not always present, so probe for it.
+    set(CMAKE_REQUIRED_FLAGS "/fsanitize=address")
+    check_cxx_source_compiles("int main() { return 0; }" ANIMAGE_ASAN_OK)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(ANIMAGE_ASAN_OK)
+      add_compile_options(/fsanitize=address)
+      add_link_options(/fsanitize=address)
+      message(STATUS "Sanitizers: AddressSanitizer")
+    else()
+      message(WARNING "ANIMAGE_SANITIZE is ON but this MSVC cannot link ASan")
+    endif()
+  else()
+    # -fno-sanitize-recover is what turns a sanitizer report into a test
+    # failure: without it UBSan prints and carries on, and the test passes.
+    set(CMAKE_REQUIRED_FLAGS
+        "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer")
+    check_cxx_source_compiles("int main() { return 0; }" ANIMAGE_ASAN_UBSAN_OK)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(ANIMAGE_ASAN_UBSAN_OK)
+      add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined
+                          -fno-omit-frame-pointer)
+      add_link_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined
+                       -fno-omit-frame-pointer)
+      message(STATUS "Sanitizers: AddressSanitizer + UndefinedBehaviorSanitizer")
+    else()
+      # Some distributions ship a compiler without the ASan runtime (Fedora's
+      # gcc is one). UBSan alone still catches the undefined behaviour, so
+      # fall back to it rather than silently building without any.
+      set(CMAKE_REQUIRED_FLAGS
+          "-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer")
+      check_cxx_source_compiles("int main() { return 0; }" ANIMAGE_UBSAN_OK)
+      unset(CMAKE_REQUIRED_FLAGS)
+      if(ANIMAGE_UBSAN_OK)
+        add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined
+                            -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=undefined)
+        message(STATUS "Sanitizers: UndefinedBehaviorSanitizer only (no ASan runtime here)")
+      else()
+        message(WARNING "ANIMAGE_SANITIZE is ON but no sanitizer runtime links; "
+                        "tests will not detect memory or UB errors")
+      endif()
+    endif()
+  endif()
 endif()
 
 add_subdirectory(src/core)

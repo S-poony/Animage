@@ -10,7 +10,6 @@ animage_test(test_ctg)
 animage_test(test_ctg_solver)
 animage_test(test_lazybrush)
 animage_test(test_model)
-animage_test(test_serialise)
 animage_test(test_track)
 animage_test(test_undo)
 animage_test(test_color)
@@ -26,6 +25,8 @@ target_link_libraries(bench_carry PRIVATE animage::core)
 
 # Interface tests need Qt, and run offscreen so they work on a build machine
 # with no display.
+# Saving and loading is the application's half -- ProjectIO, Qt's JSON and all
+# -- so its tests live with the other interface tests.
 if(TARGET animage_ui)
   add_executable(test_canvas test_canvas.cpp)
   target_link_libraries(test_canvas PRIVATE animage_ui)
@@ -36,6 +37,16 @@ if(TARGET animage_ui)
   target_link_libraries(test_render PRIVATE animage_ui)
   target_include_directories(test_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_render COMMAND test_render -platform offscreen)
+
+  add_executable(test_serialise test_serialise.cpp)
+  target_link_libraries(test_serialise PRIVATE animage_ui)
+  target_include_directories(test_serialise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_serialise COMMAND test_serialise)
+
+  add_executable(test_hostile test_hostile.cpp)
+  target_link_libraries(test_hostile PRIVATE animage_ui)
+  target_include_directories(test_hostile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_hostile COMMAND test_hostile)
 
   # Stopwatches, like bench_composite: built, never run by ctest.
   add_executable(bench_save bench_save.cpp)

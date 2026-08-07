@@ -1,90 +1,21 @@
 ﻿// SPDX-License-Identifier: GPL-3.0-or-later
 //
-// scene.json: the structure of a document, without its pixels. The pixels are
-// the application's half of saving and are tested elsewhere.
+// Saving and loading: scene.json (the structure of a document, without its
+// pixels) and the cel bytes. The format lives in the application now --
+// ProjectIO -- with the JSON read and written by Qt's QJsonDocument, so the
+// parsing itself is not ours to test; what is ours is everything this file
+// tests: the scene that comes back from its own file, the cel bits that come
+// back exactly, and the refusal of files that are not what they claim.
 
 #include <cstdio>
 #include <string>
 
-#include "celfile.h"
-#include "json.h"
-#include "serialise.h"
+#include "project_io.h"
 #include "testing.h"
 
 using namespace animage;
 
 namespace {
-
-// --- the JSON underneath ---------------------------------------------------
-
-void jsonWritesWhatItReads() {
-    TEST("JSON round-trips the shapes a scene file is made of");
-
-    Json root = Json::object();
-    root.set("text", Json::text("layer 1"));
-    root.set("number", Json::number(24));
-    root.set("fraction", Json::number(0.95));
-    root.set("yes", Json::boolean(true));
-    root.set("nothing", Json());
-
-    Json list = Json::array();
-    list.push(Json::number(1));
-    list.push(Json::number(2));
-    root.set("list", std::move(list));
-
-    Json parsed;
-    std::string error;
-    CHECK(Json::parse(root.dump(), parsed, &error));
-    CHECK_EQ(error, std::string());
-
-    CHECK_EQ(parsed["text"].asText(), std::string("layer 1"));
-    CHECK_EQ(parsed["number"].asInt(), 24);
-    // Shortest-round-trip output, so a float survives exactly rather than
-    // arriving as 0.94999999999999996.
-    CHECK_EQ(parsed["fraction"].asNumber(), 0.95);
-    CHECK_EQ(parsed["yes"].asBool(), true);
-    CHECK(parsed["nothing"].isNull());
-    CHECK_EQ(parsed["list"].size(), std::size_t{2});
-    CHECK_EQ(parsed["list"].at(1).asInt(), 2);
-
-    // A missing key reads as the fallback rather than throwing, which is what
-    // lets an older file load with defaults.
-    CHECK_EQ(parsed["absent"].asInt(7), 7);
-    CHECK_EQ(parsed.has("absent"), false);
-    CHECK_EQ(parsed.has("nothing"), true);
-}
-
-void jsonKeepsKeysInOrder() {
-    TEST("JSON keeps object keys in the order they were set");
-    Json root = Json::object();
-    root.set("zebra", Json::number(1));
-    root.set("apple", Json::number(2));
-    // A hash would sort or shuffle these, and every save would rewrite the file
-    // into a different order -- which is the whole reason for choosing a text
-    // format.
-    const std::string dumped = root.dump(0);
-    CHECK(dumped.find("zebra") < dumped.find("apple"));
-}
-
-void jsonRefusesRubbish() {
-    TEST("JSON refuses malformed input rather than guessing");
-    const char* bad[] = {
-        "",  "{",  "[1,2",  "{\"a\" 1}",  "{\"a\":}",  "tru",
-        "{\"a\":1} trailing",  "\"unterminated",  "[1,]",
-    };
-    for (const char* text : bad) {
-        Json parsed;
-        std::string error;
-        CHECK_EQ(Json::parse(text, parsed, &error), false);
-        CHECK(!error.empty());
-    }
-
-    // And a string with the characters that have to be escaped survives.
-    Json quoted = Json::text("a \"quoted\"\n\\path\\");
-    Json parsed;
-    CHECK(Json::parse(quoted.dump(), parsed));
-    CHECK_EQ(parsed.asText(), std::string("a \"quoted\"\n\\path\\"));
-}
 
 // --- the scene -------------------------------------------------------------
 
@@ -169,7 +100,7 @@ void checkSameScene(const Document& a, const Document& b) {
 void aSceneSurvivesTheRoundTrip() {
     TEST("a scene comes back from its own file unchanged");
     const Document original = buildScene();
-    const std::string text = writeSceneJson(original);
+    const std::string text = ProjectIO::writeSceneJson(original);
 
     // Printed because being readable is the reason the format is text at all.
     // If this ever stops looking like something you could fix in an editor, the
@@ -178,13 +109,13 @@ void aSceneSurvivesTheRoundTrip() {
 
     Document loaded;
     std::string error;
-    CHECK(readSceneJson(text, loaded, &error));
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
     CHECK_EQ(error, std::string());
     checkSameScene(original, loaded);
 
     // And writing the loaded document again produces the same bytes, which is
     // the property that keeps a project diffable across saves.
-    CHECK_EQ(writeSceneJson(loaded), text);
+    CHECK_EQ(ProjectIO::writeSceneJson(loaded), text);
 }
 
 // The invariant the undo model rests on. A counter that restarted at one would
@@ -193,13 +124,13 @@ void aSceneSurvivesTheRoundTrip() {
 void idsResumePastTheFile() {
     TEST("ids resume past everything in the file, never reusing one");
     Document original = buildScene();
-    const std::string text = writeSceneJson(original);
+    const std::string text = ProjectIO::writeSceneJson(original);
 
     Document loaded;
-    CHECK(readSceneJson(text, loaded));
+    CHECK(ProjectIO::readSceneJson(text, loaded));
 
     // Collect every id the file mentions, then make more of each kind.
-    std::vector<CelId> before = celsReferencedBy(loaded);
+    std::vector<CelId> before = ProjectIO::celsReferencedBy(loaded);
     CHECK(!before.empty());
 
     const TrackId track = loaded.scene().tracks.front().id;
@@ -217,7 +148,7 @@ void idsResumePastTheFile() {
         if (id != image) CHECK(id != image);
     }
 
-    const std::vector<CelId> after = celsReferencedBy(loaded);
+    const std::vector<CelId> after = ProjectIO::celsReferencedBy(loaded);
     CHECK(after.size() > before.size());
     for (CelId fresh : after) {
         if (std::find(before.begin(), before.end(), fresh) != before.end()) continue;
@@ -231,8 +162,8 @@ void loadingForgetsTheHistory() {
     Document doc = buildScene();
     CHECK(doc.undoDepth() > 0);
 
-    const std::string text = writeSceneJson(doc);
-    CHECK(readSceneJson(text, doc));
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    CHECK(ProjectIO::readSceneJson(text, doc));
     CHECK_EQ(doc.undoDepth(), std::size_t{0});
     CHECK_EQ(doc.canUndo(), false);
     CHECK_EQ(doc.canRedo(), false);
@@ -241,7 +172,7 @@ void loadingForgetsTheHistory() {
 void abadFileLeavesTheDocumentAlone() {
     TEST("a file that will not load leaves the open document untouched");
     Document doc = buildScene();
-    const std::string good = writeSceneJson(doc);
+    const std::string good = ProjectIO::writeSceneJson(doc);
 
     const std::pair<const char*, const char*> bad[] = {
         {"not json at all", "not JSON"},
@@ -252,10 +183,10 @@ void abadFileLeavesTheDocumentAlone() {
     };
     for (const auto& [text, expected] : bad) {
         std::string error;
-        CHECK_EQ(readSceneJson(text, doc, &error), false);
+        CHECK_EQ(ProjectIO::readSceneJson(text, doc, &error), false);
         CHECK(error.find(expected) != std::string::npos);
         // Still the document we started with.
-        CHECK_EQ(writeSceneJson(doc), good);
+        CHECK_EQ(ProjectIO::writeSceneJson(doc), good);
     }
 }
 
@@ -280,7 +211,7 @@ void asharedCelStaysShared() {
     }
 
     Document loaded;
-    CHECK(readSceneJson(writeSceneJson(doc), loaded));
+    CHECK(ProjectIO::readSceneJson(ProjectIO::writeSceneJson(doc), loaded));
 
     const Track* after = loaded.scene().findTrack(track);
     CHECK(after != nullptr);
@@ -291,7 +222,7 @@ void asharedCelStaysShared() {
     CHECK_EQ(a, b);
 
     // And it is one cel in the manifest, not two.
-    const std::vector<CelId> cels = celsReferencedBy(loaded);
+    const std::vector<CelId> cels = ProjectIO::celsReferencedBy(loaded);
     CHECK_EQ(cels.size(), std::size_t{1});
 }
 
@@ -325,10 +256,10 @@ void celPixelsSurviveExactly() {
     grid.set({-7, 3}, makeTile({{0, 0.25f}, {3, 1.0f}}));
     grid.set({12, -40}, makeTile({{1, 0.75f}, {3, 0.5f}}));
 
-    const std::vector<std::uint8_t> bytes = encodeCel(grid);
+    const std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(grid);
     TileGrid back;
     std::string error;
-    CHECK(decodeCel(bytes, back, &error));
+    CHECK(ProjectIO::decodeCel(bytes, back, &error));
     CHECK_EQ(error, std::string());
 
     CHECK_EQ(back.tileCount(), grid.tileCount());
@@ -351,15 +282,15 @@ void celPixelsSurviveExactly() {
 void anEmptyCelIsAnEmptyFile() {
     TEST("an empty cel writes a header and nothing else");
     TileGrid empty;
-    const std::vector<std::uint8_t> bytes = encodeCel(empty);
+    const std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(empty);
     CHECK_EQ(bytes.size(), std::size_t{24});
 
-    CelFileInfo info;
-    CHECK(readCelFileInfo(bytes, info));
+    ProjectIO::CelFileInfo info;
+    CHECK(ProjectIO::readCelFileInfo(bytes, info));
     CHECK_EQ(info.tile_count, std::size_t{0});
 
     TileGrid back;
-    CHECK(decodeCel(bytes, back));
+    CHECK(ProjectIO::decodeCel(bytes, back));
     CHECK(back.empty());
 }
 
@@ -374,13 +305,13 @@ void transparentTilesAreNotWritten() {
     grid.set({1, 0}, std::make_shared<Tile>());    // cleared by an eraser
     CHECK_EQ(grid.tileCount(), std::size_t{2});
 
-    const std::vector<std::uint8_t> bytes = encodeCel(grid);
-    CelFileInfo info;
-    CHECK(readCelFileInfo(bytes, info));
+    const std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(grid);
+    ProjectIO::CelFileInfo info;
+    CHECK(ProjectIO::readCelFileInfo(bytes, info));
     CHECK_EQ(info.tile_count, std::size_t{1});
 
     TileGrid back;
-    CHECK(decodeCel(bytes, back));
+    CHECK(ProjectIO::decodeCel(bytes, back));
     CHECK_EQ(back.tileCount(), std::size_t{1});
     CHECK(back.find({1, 0}) == nullptr);
 }
@@ -402,19 +333,19 @@ void celBytesAreStable() {
 
     // Same tiles, different insertion order, identical file. Without this a save
     // rewrites every cel whether or not anything changed.
-    CHECK(encodeCel(grid) == encodeCel(other));
+    CHECK(ProjectIO::encodeCel(grid) == ProjectIO::encodeCel(other));
 }
 
 void acorruptCelIsRefused() {
     TEST("a corrupt cel file is refused rather than half-read");
     TileGrid grid;
     grid.set({0, 0}, makeTile({{3, 1.0f}}));
-    const std::vector<std::uint8_t> good = encodeCel(grid);
+    const std::vector<std::uint8_t> good = ProjectIO::encodeCel(grid);
 
     const auto refused = [](std::vector<std::uint8_t> bytes, const char* because) {
         TileGrid out;
         std::string error;
-        CHECK_EQ(decodeCel(bytes, out, &error), false);
+        CHECK_EQ(ProjectIO::decodeCel(bytes, out, &error), false);
         CHECK(error.find(because) != std::string::npos);
         CHECK(out.empty());  // untouched
     };
@@ -424,10 +355,18 @@ void acorruptCelIsRefused() {
 
     // A tile count that says there is far more here than there is. This is the
     // one that matters: taken on trust it is a request to allocate a terabyte.
+    // It is now caught by the per-cel tile budget, which refuses even earlier
+    // than the size floor that used to catch it.
     std::vector<std::uint8_t> lying = good;
-    lying[20] = 0xff;
-    lying[21] = 0xff;
-    refused(lying, "truncated");
+    lying.at(20) = 0xff;  // in-bounds: the header is always at least 24 bytes
+    lying.at(21) = 0xff;
+    refused(lying, "too many");
+
+    // A count that is under the budget but still far larger than the file: the
+    // size floor, not the budget, is what catches this one.
+    std::vector<std::uint8_t> lying_plausible = good;
+    lying_plausible.at(20) = 100;  // 100 tiles need 52,824 bytes; there are 552
+    refused(lying_plausible, "truncated");
 
     // Truncated in the middle of the pixels.
     std::vector<std::uint8_t> cut = good;
@@ -439,9 +378,6 @@ void acorruptCelIsRefused() {
 
 int main() {
     std::printf("serialise:\n");
-    jsonWritesWhatItReads();
-    jsonKeepsKeysInOrder();
-    jsonRefusesRubbish();
     aSceneSurvivesTheRoundTrip();
     idsResumePastTheFile();
     loadingForgetsTheHistory();

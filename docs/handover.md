@@ -23,16 +23,23 @@ did not before — and now survives not thinking about it at all.
 | M5 | Save, open, Save As, autosave, New, and PNG export. EXR is not written. |
 
 A project is a folder: `scene.json` in text, and one file per cel beside it.
-`serialise.h` decides the structure and `celfile.h` the pixels — both in `core`,
-both testable without a window — while `project_files.h` in the application adds
-the compressor and the folder around them. Saving builds alongside and swaps at
-the end, so an interrupted save leaves the last good project where it was;
-opening builds a whole document before adopting it, so a project that will not
-open cannot take the open one down with it.
+All of it lives in the application now, in one place — `ProjectIO`, which is
+the single class that turns a folder on disk into a document in memory and
+back. `core` is the model and knows nothing of bytes on disk. Saving builds
+alongside and swaps at the end, so an interrupted save leaves the last good
+project where it was; opening builds a whole document before adopting it, so a
+project that will not open cannot take the open one down with it.
+
+`scene.json` is read and written with Qt's QJsonDocument — the hand-rolled
+JSON reader is gone — and the readers are pinned by hostile-file tests
+(`tests/test_hostile.cpp`) that replay the crashes and undefined behaviour
+the old reader had, so they cannot come back. The tests themselves run under
+ASan and UBSan by default and the build denies warnings, so a memory error or
+an out-of-range conversion fails the tests instead of shipping.
 
 **Saving is incremental, and autosave rests on that.** A cel's revision is
-bumped by every write to it, undo included, so a `project::SaveState` — a folder
-and the revisions written to it — is enough to know which files in that folder
+bumped by every write to it, undo included, so a `ProjectIO::SaveState` — a
+folder and the revisions written to it — is enough to know which files in that folder
 are still current. The ones that are get carried into the folder being built as
 a hard link rather than as new bytes, which keeps the build-alongside-and-swap
 exactly as it was while paying nothing for the drawings that did not move. On a
@@ -295,7 +302,7 @@ coarsely near one — while integers are evenly spaced, so of the 15362 half val
 in [0,1] a 16-bit image keeps 7169, and some non-zero values quantise to zero.
 sRGB-encoding first keeps 10871, which is better and still lossy. A save that
 loses pixels is not a save. The format is ours instead, storing the same bits the
-tiles hold — see `celfile.h`, which documents the layout so a drawing is
+tiles hold — the layout is documented in `project_io.h` so a drawing is
 recoverable with nothing but zlib. PNG remains the right thing for *export*,
 where a conversion is expected and the destination is another program.
 

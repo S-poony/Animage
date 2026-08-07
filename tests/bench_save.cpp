@@ -11,10 +11,8 @@
 #include <cstdio>
 
 #include "brush.h"
-#include "celfile.h"
 #include "document.h"
-#include "project_files.h"
-#include "serialise.h"
+#include "project_io.h"
 
 using namespace animage;
 
@@ -90,7 +88,7 @@ long long folderBytes(const QString& path) {
 
 void time(int drawings) {
     Document doc = buildShot(drawings);
-    const std::size_t cels = celsReferencedBy(doc).size();
+    const std::size_t cels = ProjectIO::celsReferencedBy(doc).size();
     const std::size_t tiles = doc.totalTileCount();
 
     QTemporaryDir scratch;
@@ -99,7 +97,7 @@ void time(int drawings) {
 
     QElapsedTimer clock;
     clock.start();
-    const bool ok = project::save(doc, folder, nullptr);
+    const bool ok = ProjectIO::save(doc, folder, nullptr);
     const qint64 first = clock.elapsed();
     if (!ok) {
         std::printf("  %3d drawings: save failed\n", drawings);
@@ -109,27 +107,27 @@ void time(int drawings) {
     // Again, with nothing changed and nothing remembered: the whole project
     // re-encoded, which is what a save cost before it learned which cels moved.
     clock.restart();
-    project::save(doc, folder, nullptr);
+    ProjectIO::save(doc, folder, nullptr);
     const qint64 again = clock.elapsed();
 
     // And again knowing what is already there. The first of these is what an
     // autosave costs when the animator has paused, the second what it costs
     // mid-drawing -- one cel touched out of all of them, which is the shape of
     // nearly every autosave there will ever be.
-    project::SaveState state;
-    project::save(doc, folder, state, nullptr);
+    ProjectIO::SaveState state;
+    ProjectIO::save(doc, folder, state, nullptr);
     clock.restart();
-    project::save(doc, folder, state, nullptr);
+    ProjectIO::save(doc, folder, state, nullptr);
     const qint64 untouched = clock.elapsed();
 
     touchOneCel(doc);
     clock.restart();
-    project::save(doc, folder, state, nullptr);
+    ProjectIO::save(doc, folder, state, nullptr);
     const qint64 one_moved = clock.elapsed();
 
     clock.restart();
     Document back;
-    project::load(back, folder, nullptr);
+    ProjectIO::load(back, folder, nullptr);
     const qint64 opened = clock.elapsed();
 
     const double megabytes = static_cast<double>(folderBytes(folder)) / (1024.0 * 1024.0);
@@ -145,7 +143,7 @@ void time(int drawings) {
 void breakdown() {
     Document doc = buildShot(24);
     std::vector<const Cel*> cels;
-    for (CelId id : celsReferencedBy(doc)) {
+    for (CelId id : ProjectIO::celsReferencedBy(doc)) {
         if (const Cel* cel = doc.cel(id)) cels.push_back(cel);
     }
 
@@ -155,7 +153,7 @@ void breakdown() {
     encoded.reserve(cels.size());
     long long raw_bytes = 0;
     for (const Cel* cel : cels) {
-        const std::vector<std::uint8_t> bytes = encodeCel(cel->tiles());
+        const std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(cel->tiles());
         raw_bytes += static_cast<long long>(bytes.size());
         encoded.emplace_back(reinterpret_cast<const char*>(bytes.data()),
                              static_cast<qsizetype>(bytes.size()));
