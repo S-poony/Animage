@@ -17,11 +17,14 @@ that only defends things is not worth reading.
 Every off-the-shelf image format would have forced us to choose one of two
 things we are not willing to lose:
 
-1. **Pixels.** PNG, TIFF and every other integer format cannot store what a
-   drawing actually contains without throwing some of it away.
-2. **The infinite canvas.** PNG, OpenEXR and every other format stores a
+1. **Pixels.** PNG and every other *integer* format cannot store what a drawing
+   actually contains without throwing some of it away.
+2. **The infinite canvas.** PNG, OpenEXR, TIFF and every other format stores a
    rectangle. Our drawings are not rectangles; they are scattered patches on an
    endless sheet.
+
+TIFF used to be listed under the first of those and it did not belong there —
+see below. It loses on shape, like everything else, and not on precision.
 
 Our format keeps both. It is 200 lines, it is documented byte for byte, and it
 was written *after* the obvious approach was tried and measured.
@@ -124,6 +127,33 @@ There is also a practical cost. A rectangular format stores the whole bounding
 box and relies on its compressor to squeeze the emptiness back out. That is
 precisely the approach we tried first, and it is what the measurements below
 rejected.
+
+### TIFF, and a correction
+
+This document used to call TIFF an integer format, in a subordinate clause, and
+that is false. TIFF has carried `SampleFormat = 3` — IEEE floating point — since
+TIFF 6.0, and `BitsPerSample = 16` alongside it is half: exactly the type our
+tiles hold. `ExtraSamples = 1` says associated alpha, which is exactly our
+premultiplied convention. A TIFF can store our pixels without losing one.
+
+So the sentence was wrong, and the conclusion it was supporting was right for
+the other reason. **TIFF loses to our cel format on shape, not on precision.**
+It is a rectangle like OpenEXR and PNG are rectangles, it cannot express a
+sparse set of tiles at signed coordinates, and everything in the section above
+applies to it unchanged.
+
+The correction is worth making rather than quietly deleting, because the error
+has a shape worth recognising: TIFF is *usually* an integer format, in the sense
+that almost every TIFF anybody has ever opened is one, and a generalisation
+about what a format is normally used for was written down as a fact about what
+it can do. The second argument was doing all the work and the first was never
+examined.
+
+It also mattered somewhere else. Because TIFF had been filed under "cannot store
+our pixels", it never appeared as a candidate for *export* either — where the
+shape objection does not apply at all, because export writes the canvas
+rectangle on purpose. See the handover on what the export format list should
+hold.
 
 ## What our format actually does
 

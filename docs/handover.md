@@ -83,12 +83,44 @@ steps on the stack, and opens Scene settings.
 
 **Export writes 16-bit PNG**, a folder per layer with
 `{track}_{layer}_{frame:04}.png` inside, plus an optional `composite/` of the
-flattened picture, all over the canvas rectangle. Hidden layers are not written
-at all, so the per-layer sequences and the flattened one agree about what the
-shot contains. It is lossy and knowingly so — the arithmetic is in
+flattened picture, all over the canvas rectangle, and all inside a folder the
+export dialog asks you to name — defaulting to the project's. Hidden layers are
+not written at all, so the per-layer sequences and the flattened one agree about
+what the shot contains. It is lossy and knowingly so — the arithmetic is in
 `export_sequence.h` — and **EXR is the named next step** rather than a decision
 still open: PNG is right where the destination expects PNG, and the format list
 is easier to add to than the layout is to change.
+
+**An export replaces what was in the folder, and "overwrite" had to be made
+true before it could be said.** The word was going to go on a confirmation
+dialog over the merge that was already happening, and it would have been a lie —
+`write` creates folders and writes files into them, and nothing clears what was
+there. Same-named files are replaced and everything else stays, so re-exporting
+a shot you have since cut short leaves the old export's later frames after the
+new ones, which downstream is a well-formed sequence of the wrong length, and
+cancelling halfway splices two shots at the seam. Both are silent and both look
+right. The dialog would have been reassuring in exactly the cases that were
+wrong.
+
+So the folder is emptied first, and the price of that is a recursive delete
+needing a guard. `exporting::occupantOf` answers Nothing, AnExport or
+SomethingElse, and it is strict on purpose: an export is folders of frames named
+after their folder and *nothing else whatever*, bar the junk a file browser
+leaves (`.DS_Store` and friends), which is ignored and deleted with the rest.
+SomethingElse is refused rather than weighed up — the project folder is the
+obvious way to point `rm -r` at every drawing in the shot, and it is tested that
+one is not mistaken for an export. Save's build-alongside-and-swap is still not
+what export does; this only decides what the folder holds before it starts.
+
+**The underscore in an exported name means one thing.** It separates the track
+from the layer from the frame number, so every other character that is not a
+letter or a digit — spaces, punctuation, and an underscore somebody typed —
+becomes a hyphen, runs of them collapse to one, and the ends are trimmed. That
+is what makes `track-1_layer-1_0007` readable: three fields, and the last number
+is always the frame. It also decided the default track's name, which was `main`
+and is now `track 1`: the model and the timeline both take several tracks
+already and only the interface does not, so the first one may as well say which
+number it is rather than being the one that never does.
 
 One thing about export is worth reading before touching it. **A CTG layer's
 fill is a cache, and the canvas only builds it for the frame on screen**,
@@ -97,9 +129,37 @@ off disk has no fills at all, and an export that composited only what was
 cached wrote blank colour sequences and said nothing about it — which is why
 `exporting::write` takes the document by mutable reference and solves what is
 missing. The price is that exporting a coloured shot for the first time pays one
-max-flow per CTG layer per distinct drawing. It still solves where it stands and
-at the interactive budget, which is now the *only* place that budget still binds
-a final answer — see "what I would do next".
+max-flow per CTG layer per distinct drawing.
+
+**Those max-flows are on a worker now, and getting them there moved the loop
+they were in.** `exporting::Solve` is a callback: `write` hands over a `CtgJob`
+and installs the `CtgFill` that comes back, and `MainWindow` implements it with
+a `CtgSolver` and a nested event loop, so the interface thread waits somewhere
+it can still paint the progress dialog and answer Cancel. Off the interface
+thread it can also ask for `kFullSolveBudget`, which fixes a quality bug nobody
+had reported: an exported fill used to be capped where the one on screen was
+not. Passing no `Solve` solves where the caller stands, capped — what the tests
+do, and what the behaviour was.
+
+Two things about that are worth knowing before changing it.
+
+- **The solver is the export's own and not the canvas's**, which is not what
+  this file used to suggest. Results are collected rather than delivered, so a
+  `CtgSolver` has exactly one owner: everything it finishes goes to whoever
+  calls `collect()`, and `CanvasWidget::collectColour` drops what the canvas did
+  not ask for. Sharing one would mean a repaint during the export — which the
+  progress dialog causes — quietly swallowing the answer the export was waiting
+  for, and the wait would never end. One worker, so one max-flow at a time,
+  which is also the memory bound.
+- **Frames are written in slot order, every sequence at once**, rather than one
+  whole sequence after another. That is what makes each drawing solve exactly
+  once. Sequence by sequence, a colour layer's pass solves every drawing in the
+  shot and the flattened pass asks for them all over again — by which time the
+  bounded fill cache has evicted the early ones, so the same max-flows run
+  twice. It is also what lets the solves be counted in advance, which is what
+  the progress bar needs: a max-flow is a second and a half and a PNG is
+  milliseconds, so a bar counting only files sits still through the whole of the
+  slow half and then runs to the end.
 
 Since the first build, the model also grew a **canvas**: `Scene::canvas()`, the
 rectangle that will be exported, set under Edit ▸ Scene settings. Before it
@@ -288,6 +348,11 @@ three different answers:
   the interface thread on a 16 ms poll. A worker never touches a widget, and the
   solver's own wake-up callback is deliberately unused by the canvas for that
   reason.
+- An export does the same, through its own `CtgSolver` and a nested event loop
+  rather than a poll — it is a thing the user is waiting for, so it waits, and
+  the loop is what keeps the progress dialog painting while it does. Every write
+  to the document is still the interface thread's, made where the answer is
+  collected. See "export writes 16-bit PNG".
 
 **There is no scribble tool**, and there should not be one — this was the
 user's call and it is a better design than the plan sketches. A CTG layer is
@@ -792,21 +857,55 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **Export solves on the interface thread, and it is now the only thing that
-   does.** `exporting::write` calls `ctgFill` directly, so a coloured shot's
-   first export pays a capped max-flow per drawing with the window frozen behind
-   a progress dialog. Everything it needs is built: hand the jobs to
-   `canvas_->colourSolver()` at `kFullSolveBudget`, collect them as they land,
-   and the progress dialog becomes honest as well as unfrozen. It also fixes a
-   quality bug nobody has reported yet — an exported fill is capped where the
-   one on screen is not.
-2. **EXR export**, the one piece of M5 deliberately left out. 16-bit PNG throws
-   pixels away, so a lossless deliverable needs it; `tinyexr` is a single BSD
-   header and the format list in `export_sequence.h` is where it goes.
-   Everything around it — the layout, the naming, the canvas rectangle, the fill
-   solving, the progress and cancellation — already exists and is tested, so this
-   is a writer and a radio button.
-3. **Rung three of scribbles that move**: one transform per *region* rather than
+1. **More export formats**, the one piece of M5 deliberately left out. 16-bit
+   PNG throws pixels away. Everything around a second writer — the layout, the
+   naming, the canvas rectangle, the fill solving, the progress and cancellation
+   — already exists and is tested, so each one is a writer and a radio button.
+
+   This used to read "EXR export" and name no alternative, which was an
+   assertion rather than a decision. It was raised that TIFF is the more common
+   deliverable in 2D animation, and that is true — TVPaint and Harmony both
+   write it and scanned-drawing pipelines have used it for decades. The
+   comparison is recorded here so the next person inherits an argument instead
+   of a preference.
+
+   **They answer different questions, and the list should hold both.**
+
+   - **TIFF is the compatibility deliverable.** If the destination is a 2D
+     pipeline that asks for TIFF, this is a radio button over the same integer
+     conversion PNG already does, and it should be offered. What it is *not* is
+     the lossless one — see below.
+   - **EXR is the lossless one.** Its default pixel type is half, premultiplied,
+     linear: bit for bit what our tiles hold, with no conversion at all. It can
+     also put every layer in one file per frame, which would replace "a folder
+     per layer" with something a compositor likes better — and the layout is the
+     part this file says is harder to change than the format list, so that is
+     worth knowing before the layout hardens further.
+
+   Three things about TIFF that are easy to get wrong, all of them measured
+   against what it *can* do rather than what it usually does:
+
+   - A TIFF **can** hold our pixels losslessly — `SampleFormat = 3` and
+     `BitsPerSample = 16` is half. `why-our-own-formats.md` used to say
+     otherwise and has been corrected.
+   - But half-float TIFF is a thinly supported corner. Writing it produces files
+     a lot of applications will not open, and writing 32-bit float instead to be
+     safely readable doubles the bytes for data that is natively 16-bit and buys
+     no precision whatever. EXR's half is the ordinary path rather than the
+     unusual one, which is most of the argument.
+   - And it is not the cheap option it sounds like. `tinyexr` is a single BSD
+     header; TIFF needs libtiff or Qt's `qtimageformats` add-on, which **this
+     build does not have** — the installed plugins are `qgif`, `qico`, `qjpeg`
+     and nothing else. The nearly-free version is Qt writing *integer* TIFF,
+     which is exactly as lossy as the PNG already written. The free TIFF is the
+     lossy TIFF.
+
+   One thing to check before building either, rather than assume: Qt 6.2 added
+   `QImage::Format_RGBA16FPx4_Premultiplied`, which is our exact pixel layout.
+   `toSrgb16` currently converts to `Format_RGBA64`, an integer format, because
+   PNG is where it is going — a writer that does not need that round trip may be
+   able to skip it.
+2. **Rung three of scribbles that move**: one transform per *region* rather than
    one per drawing, from the previous fill's regions. Read
    [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and
    two are built and measured, and the note now records both what they buy and
@@ -814,24 +913,24 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    the ink repeats. Rung four is the paper written for this exact problem
    (Sýkora, Dingliana & Collins, NPAR 2009) and is what to read before designing
    anything past three.
-4. **Free the tiles that erasing has emptied.** A tile whose pixels are all
+3. **Free the tiles that erasing has emptied.** A tile whose pixels are all
    cleared stays in the grid forever — it is written to saved projects and
    counted in memory. `Tile::isFullyTransparent` already exists and `celBounds`
    already ignores such tiles, so the correctness problem is gone and only the
    waste is left. The traps are the undo journal, which records tile snapshots
    by (cel, coord), and the tiles copy-on-write shares between cels.
-5. **A flag that means something.** There was one, built on `spread`, and it came
+4. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the
    drawing a mark came from, so it needs a correspondence between regions on two
-   drawings, which is what item 3 would produce. Every proxy tried on paper —
+   drawings, which is what item 2 would produce. Every proxy tried on paper —
    area ratio, region overlap — misfires on fast movement, which is exactly when
    carrying is most likely to be wrong *and* most likely to be right. And it has
    to be computed for drawings nobody has opened, which is what the audit did and
    what `CtgSolver`'s second priority is still there for.
-6. **GPU compositing**, if `bench_composite` says it is worth it at real
+5. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-7. **The rest of the open issues**: several tracks (#1, which the timeline and
+6. **The rest of the open issues**: several tracks (#1, which the timeline and
    the model are both ready for and no interface exposes), deleting every layer
    of a drawing (#2), an eraser cursor (#4), brush-resize feedback (#5), a
    non-modal colour panel (the parked half of #8), and an "overwrite drawings"

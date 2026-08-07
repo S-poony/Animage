@@ -54,10 +54,18 @@ public:
     // situation the interface can only reach with a tablet in somebody's hand.
     animage::Document& documentForTesting() { return doc_; }
 
-    // Writes the sequences to `folder` with a progress dialog over them. What
-    // exportSequences does once it knows where; also how a test drives it.
+    // Writes the sequences to `folder` with a progress dialog over them, and
+    // `folder` is the whole destination: the export dialog asks for a name and
+    // joins it to the directory that was chosen, so a shot's sequences land in
+    // a folder of their own. What exportSequences does once it knows where;
+    // also how a test drives it.
     bool exportSequencesTo(const QString& folder, bool layers, bool flattened,
                            QString* error = nullptr);
+
+    // What that name is before the user changes it: the project's own, without
+    // the suffix that makes a folder a project. "untitled" for a document that
+    // has never been saved anywhere.
+    QString defaultExportName() const;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -148,10 +156,14 @@ private:
     // The document the application starts with, which is also what New makes.
     void resetToNewDocument();
     void openProject();
-    // Asks where and what, then writes the sequences with a progress dialog.
-    // Exposed the same way openProjectAt is, for the same reason: a test cannot
-    // answer a file dialog.
+    // Asks what, where and under what name, then writes the sequences with a
+    // progress dialog. Exposed the same way openProjectAt is, for the same
+    // reason: a test cannot answer a file dialog.
     void exportSequences();
+    // Asks about, and then empties, an export folder that already has an export
+    // in it; refuses outright if what is in it is not one. False means do not
+    // export. See the comment on it: an export replaces rather than merges.
+    bool clearTheWayFor(const QString& folder, const QString& called);
     void saveProject();
     void saveProjectAs();
     bool saveTo(const QString& folder);
