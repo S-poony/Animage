@@ -1013,6 +1013,13 @@ void AppController::setCtgSource(int source_index, bool used) {
     // notice on its own.
     doc_.ctgCache().clear();
     if (canvas_) canvas_->refreshAll();
+    // Keep the sources model in step so the tick and the
+    // "nothing ticked" warning update without waiting for a layer
+    // selection change.
+    if (const Layer* cur = currentLayerConst();
+        cur && cur->kind == LayerKind::Ctg) {
+        ctg_sources_model_->refresh(cur);
+    }
     refreshLayerFlags();
     syncStatus();
 }

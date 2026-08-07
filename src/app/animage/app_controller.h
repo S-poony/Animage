@@ -172,7 +172,7 @@ public:
     int framerate() const { return doc_.scene().framerate; }
     int sceneWidth() const { return doc_.scene().width; }
     int sceneHeight() const { return doc_.scene().height; }
-    int currentSlot() const { return current_slot_; }
+    int currentSlot() const { return static_cast<int>(current_slot_); }
     // How many frames the drawing in front of you is held for. The frame
     // duration control in the timeline reads and changes this.
     int currentHold() const;

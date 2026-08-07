@@ -25,7 +25,7 @@ Item {
             spacing: Theme.spaceS
             Icon { size: Theme.iconSize; name: "palette"; color: Theme.flag }
             Text {
-                text: "Colourize — scribble colour hints; they fill the regions bounded by the line layers in the Inspector."
+                text: "Colourize — scribble hints fill inside ticked line layers (see Inspector)."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontM
                 verticalAlignment: Text.AlignVCenter
