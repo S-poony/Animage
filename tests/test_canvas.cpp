@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QPainter>
 #include <QThread>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -38,6 +39,7 @@
 #include "brush.h"
 #include "canvas_widget.h"
 #include "export_sequence.h"
+#include "color.h"
 #include "half.h"
 
 // Declarations only; animage_ui compiles the implementation.
@@ -2231,6 +2233,115 @@ void anExportIsRecognisedBeforeAnythingIsDeleted() {
     CHECK(QFileInfo::exists(path("shot") + QStringLiteral("/main_ink/main_ink_0001.png")));
 }
 
+// The two formats have to be the same picture, differing only in the two
+// conversions PNG makes on purpose. Reported as line art appearing to sit both
+// under and over the colour when the EXR was opened in Blender, which is what a
+// premultiply applied twice looks like -- so this pins that the file leaves here
+// premultiplied exactly once, and that the flattened picture stacks its layers
+// the way the compositor does.
+void exrAndPngAreTheSamePicture() {
+    TEST("the EXR and the PNG differ only by the conversions the PNG makes");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+
+    Document doc = buildDrawnScene();
+
+    // Half-opacity on the colour layer, and it is the whole reason this test
+    // can fail. Without it every partly-covered pixel in the fixture belongs to
+    // the black line art -- and black is the one colour where premultiplied and
+    // straight are identical, because both are zero. The first version of this
+    // test passed with the unpremultiply deleted, which was checked rather than
+    // assumed. A translucent *orange* region is what tells the two apart:
+    // premultiplied it is (0.45, 0.15, 0.02), straight it is (0.9, 0.3, 0.05).
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId colour = doc.scene().tracks.front().layers.back().id;
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.opacity = 0.5f;
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto exportAs = [&](exporting::Format format, const QString& into) {
+        exporting::Options options;
+        options.folder = scratch.filePath(into);
+        options.format = format;
+        options.layers = false;
+        options.flattened = true;
+        CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    };
+    exportAs(exporting::Format::Png, QStringLiteral("png"));
+    exportAs(exporting::Format::Exr, QStringLiteral("exr"));
+
+    const QImage png(scratch.filePath(QStringLiteral("png")) +
+                     QStringLiteral("/composite/composite_0001.png"));
+    CHECK(!png.isNull());
+    if (png.isNull()) return;
+
+    float* exr = nullptr;
+    int width = 0, height = 0;
+    const char* why = nullptr;
+    CHECK_EQ(LoadEXR(&exr, &width, &height,
+                     (scratch.filePath(QStringLiteral("exr")) +
+                      QStringLiteral("/composite/composite_0001.exr"))
+                         .toUtf8()
+                         .constData(),
+                     &why),
+             TINYEXR_SUCCESS);
+    if (!exr) return;
+    CHECK_EQ(width, png.width());
+    CHECK_EQ(height, png.height());
+
+    // Put the EXR through exactly what the PNG writer does -- unpremultiply,
+    // then the sRGB curve on the colours but not on alpha -- and the two should
+    // land on the same 16-bit numbers. A premultiply too many or too few shows
+    // up here as edges that disagree while solid interiors match, which is
+    // precisely the "dark outline under the colour" symptom.
+    // How far apart the two are allowed to be, and it is not zero for a reason
+    // worth knowing. The PNG's numbers are computed from the float32 the
+    // compositor works in; the EXR's have been through half first, because half
+    // is what it stores. So the EXR path quantises *before* the sRGB curve, and
+    // the curve then magnifies that step: half's absolute step near 0.9 is
+    // about 4.9e-4 and the curve's slope there is about 0.47, which is 15 parts
+    // in 65535. Measured worst on this fixture is 10. Twenty-four leaves
+    // headroom and is still 0.04%, far below anything that could hide a missing
+    // premultiply, a swapped channel or a curve applied twice.
+    constexpr int kSlack = 24;
+
+    long long differing = 0, edges = 0;
+    int worst_gap = 0;
+    for (int y = 0; y < height; ++y) {
+        const auto* row = reinterpret_cast<const quint16*>(png.constScanLine(y));
+        for (int x = 0; x < width; ++x) {
+            const float* got = exr + 4 * (static_cast<std::size_t>(y) * width + x);
+            Rgba premultiplied{got[0], got[1], got[2], got[3]};
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+            unpremultiply(premultiplied, r, g, b, a);
+            const auto toShort = [](float v) {
+                return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 65535.0f));
+            };
+            const int want[4] = {toShort(linearToSrgb(r)), toShort(linearToSrgb(g)),
+                                 toShort(linearToSrgb(b)), toShort(a)};
+            // Partly covered *and* not grey, which is the combination that can
+            // tell a premultiply from its absence.
+            const bool coloured = std::abs(got[0] - got[2]) > 0.02f;
+            if (got[3] > 0.01f && got[3] < 0.99f && coloured) ++edges;
+            for (int c = 0; c < 4; ++c) {
+                const int gap = std::abs(static_cast<int>(row[4 * x + c]) - want[c]);
+                if (gap > kSlack) ++differing;
+                worst_gap = std::max(worst_gap, gap);
+            }
+        }
+    }
+    // Reported, not just asserted: if half's step through the curve ever grows,
+    // this is the number that says so before the slack above starts hiding it.
+    CHECK(worst_gap < kSlack);
+    CHECK_EQ(differing, 0LL);
+    // The comparison is only worth anything if there were partly-covered pixels
+    // in it, since those are the only ones a wrong premultiply moves.
+    CHECK(edges > 100);
+    free(exr);
+}
+
 // EXR is the lossless half of the export, so what it has to prove is that
 // nothing was converted: the bits that went in are the bits that came out.
 //
@@ -2840,6 +2951,7 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     exrExportsThePixelsUnconverted();
+    exrAndPngAreTheSamePicture();
     theFileMenuExports();
     theWindowExportsAtFullResolution();
     anExportIsRecognisedBeforeAnythingIsDeleted();
