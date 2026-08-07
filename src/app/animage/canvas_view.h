@@ -4,7 +4,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPointF>
-#include <QWidget>
+#include <QQuickPaintedItem>
 
 #include <map>
 #include <utility>
@@ -18,8 +18,9 @@ class QTimer;
 #include "ctg_solver.h"
 #include "document.h"
 
-// The drawing surface. Shows the whole scene at one frame -- every track,
-// stacked, index 0 on top -- and turns tablet events into brush strokes on the
+// The drawing surface, as a QQuickItem so that the interface around it can be
+// QML. Shows the whole scene at one frame -- every track, stacked, index 0 on
+// top -- and turns tablet, touch and mouse events into brush strokes on the
 // one track that is current.
 //
 // Looking at everything and editing one thing is the whole of the difference a
@@ -29,10 +30,26 @@ class QTimer;
 // they are about the drawing in your hand and not about the shot.
 //
 // Compositing is deferred: edits mark a region dirty and the flattening happens
-// once in paintEvent. Doing it eagerly meant a slider that emits fifty changes
-// a second asked for fifty full-viewport composites, and the interface stopped
+// once in paint(). Doing it eagerly meant a slider that emits fifty changes a
+// second asked for fifty full-viewport composites, and the interface stopped
 // responding long before the drawing did.
-class CanvasWidget : public QWidget {
+//
+// Input reaches this item by three routes, and the item keeps them apart the
+// way the widget it replaced did:
+//
+//   - a stylus or a finger arrives as a QTouchEvent in touchEvent(), with the
+//     pressure of each point. This is the route Qt Quick uses for the pen,
+//     which is why the old tabletEvent handling lives behind it now;
+//   - a mouse arrives through the mouse handlers. Mouse events promoted from a
+//     pen by Windows Ink are recognised by how recently the pen was heard from
+//     and ignored, exactly as before;
+//   - tests (and any other code that sends events straight at the item rather
+//     than through the delivery agent) send QTabletEvent, which event() catches
+//     and routes through the same stroke code.
+//
+// Everything else -- the view, the cache, the onion skin, the colour solves --
+// is a direct port of the widget, line for line where the API allowed it.
+class CanvasView : public QQuickPaintedItem {
     Q_OBJECT
 
 public:
@@ -47,13 +64,27 @@ public:
         float opacity = 0.45f;
     };
 
-    explicit CanvasWidget(animage::Document& document, QWidget* parent = nullptr);
-    ~CanvasWidget() override;
+    // Constructible from QML, where there is no document to hand over: the
+    // controller attaches one with setDocument when it wires the canvas up.
+    explicit CanvasView(QQuickItem* parent = nullptr);
+    ~CanvasView() override;
+
+    void resize(int w, int h) { setSize(QSizeF(w, h)); }
+
+    void setDocument(animage::Document* document);
+    animage::Document* document() const { return doc_; }
 
     void setTrack(animage::TrackId track);
     void setFrame(std::size_t slot);
     std::size_t frame() const { return slot_; }
     animage::ImageId currentImage() const { return image_; }
+
+    // Space and Z are held modifiers for panning and zooming, not shortcuts, so
+    // they cannot be QML Shortcut items. The canvas grabs them app-wide (see
+    // eventFilter) the way the widget it replaced did; this is what a test
+    // sends directly instead.
+    void setSpaceHeld(bool held);
+    void setZoomHeld(bool held);
 
     void setActiveLayer(animage::LayerId layer);
     animage::LayerId activeLayer() const { return active_layer_; }
@@ -92,74 +123,44 @@ public:
     bool isStroking() const { return stroking_; }
 
     double zoom() const { return zoom_; }
-    // The image coordinate at the widget's top-left corner. Always on a whole
-    // screen pixel -- see onWholeScreenPixels -- which is what lets the cache
-    // blit one entry to one pixel instead of being resampled against itself.
     QPointF pan() const { return pan_; }
     void setZoom(double zoom, const QPointF& widget_anchor);
-    void resetView();
-    void fitToDrawing();
-    void fitToCanvas();
+    // Called from QML (toolbar, shortcuts); Q_INVOKABLE so the interface can
+    // reach them. A plain public method is invisible to QML and the harness
+    // never presses the buttons, which made these silent failures.
+    Q_INVOKABLE void resetView();
+    Q_INVOKABLE void fitToDrawing();
+    Q_INVOKABLE void fitToCanvas();
 
     // Everything drawn changed underneath us: undo, layer visibility, opacity.
     void refreshAll();
 
-    // Where the colour of a CTG layer is worked out: a worker thread, so that a
-    // max-flow taking a second happens beside the interface rather than inside
-    // it. Lives here because the canvas is what knows which drawing is on
-    // screen, when a stroke has ended and what has to be repainted -- and it is
-    // lent out to anything else that needs one solved.
     animage::CtgSolver& colourSolver() { return ctg_solver_; }
-
-    // Installs anything the solver has finished. Called on a timer while
-    // solves are outstanding; public so a test can drive it directly.
     void collectColour();
-
-    // Waits for every outstanding solve and installs it.
-    //
-    // For tests, and for anything that must not run ahead of the colour. Never
-    // during ordinary drawing: waiting for a max-flow on the interface thread
-    // is the thing all of this exists to stop.
     bool settleColour(int timeout_ms = 30000);
-
-    // Whether any colour is being worked out. The interface has no business
-    // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
 
-    // Entries in the composite cache. Exposed so a test can assert this tracks
-    // the size of the window rather than the size of the visible image area.
     long long cacheEntryCount() const;
-
-    // The other two numbers ensureCacheCoversView settles on. Exposed for the
-    // same reason: how coarsely the cache samples the drawing, and over what
-    // area, is what decides both how much of a stroke survives to the screen
-    // and how much a pan costs. Neither could be read from outside, so both
-    // were argued about instead of measured. See bench_zoom.
-    //
-    // Image pixels per cache entry, and fractional on purpose -- an integer
-    // could not follow a continuous zoom, so there was always a zoom at which
-    // it doubled.
     animage::SampleStep cacheStep() const { return cache_step_; }
     animage::PixelRect cachedRegion() const { return cached_region_; }
 
-    // The margin the cache will not go below, in screen pixels. A pan costs a
-    // full recomposite the moment it runs past the cached region, so when the
-    // margin was allowed to reach zero every mouse move paid for one. Nothing
-    // spends it now that the cache no longer grows as the view zooms out, but
-    // it is what the invariant is asserted against.
     static constexpr int kMinCacheMargin = 32;
 
     // Magnification at which the blit stops interpolating and starts showing
-    // pixels as squares. Above this an animator is looking *at* the pixels and
-    // a guess between them is a lie; below it, nearest-neighbour is just a
-    // staircase along every curve.
-    //
-    // A rule rather than a rendered result on purpose: testing it through the
-    // pixels Qt produces would be testing Qt's resampler, not this decision.
+    // pixels as squares.
     static constexpr double kNearestNeighbourAbove = 3.0;
     static bool blitInterpolatesAt(double blit_scale) {
         return blit_scale < kNearestNeighbourAbove;
     }
+
+    // Renders the view into an image the size of the item. What paint() shows,
+    // produced on demand; it is how tests look at an offscreen canvas, since
+    // there is no scene graph to grab from.
+    QImage grab() const;
+
+    // Whether the canvas should take keyboard focus when the pointer lands on
+    // it. Set by the interface; QML cannot know what a stroke is.
+    void setCaptureFocus(bool capture) { capture_focus_ = capture; }
 
 Q_SIGNALS:
     void viewChanged();
@@ -168,23 +169,22 @@ Q_SIGNALS:
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
 
-    // A fill landed, so anything reporting on the colour is out of date. Emitted when a solve
-    // is installed, which happens on a timer and no longer inside a paint; the
-    // queued connection it is on can stay either way, and a fill arriving while
-    // the canvas is painting itself would be a way to delete a widget from
-    // inside its own paint.
+    // A fill landed, so anything reporting on the colour is out of date.
     void colourChanged();
 
 protected:
-    void tabletEvent(QTabletEvent* event) override;
+    void paint(QPainter* painter) override;
+
+    void touchEvent(QTouchEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
-    void paintEvent(QPaintEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
+    void hoverMoveEvent(QHoverEvent* event) override;
+    bool event(QEvent* event) override;
+    void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
     QPointF imageFromWidget(const QPointF& widget_point) const;
@@ -197,7 +197,7 @@ private:
     void repaintImageRect(const animage::PixelRect& region);
     void rebuildOnion();
     void fitTo(const animage::PixelRect& bounds);
-    void drawCanvasFrame(QPainter& painter);
+    void drawCanvasFrame(QPainter& painter) const;
     void requestCtgFills();
     void dropStaleColourRequests(bool only_this_frame);
     // Whether any track shows this drawing at the frame the playhead is on.
@@ -217,25 +217,22 @@ private:
     bool continueNavigation(const QPointF& widget_point);
     void endNavigation();
 
-    animage::Document& doc_;
+    // The tablet fallback: a QTabletEvent sent straight at the item (which is
+    // how tests drive it) is turned into a stroke. Returns true when it has
+    // consumed the event.
+    bool handleTabletEvent(QTabletEvent* event);
+
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
+    animage::Document* doc_ = nullptr;
     animage::Compositor compositor_;
     animage::Brush brush_;
     animage::Framebuffer scratch_;
 
-    // The solves asked for and not yet installed, and what each one was asked
-    // about. Without this a paint would ask again for a solve already running,
-    // and the rule that the newest question wins would call off the answer it
-    // was waiting for -- for ever, at the rate a widget repaints.
-    //
-    // The generation is the other half of "is this answer still about the
-    // question I asked". A fill depends on things it is not keyed on -- which
-    // way marks are carried, and a document being replaced by another whose
-    // drawings answer to the same ids -- and the way those say so is by
-    // emptying the fill cache. See CtgFillCache::generation.
     struct ColourAsked {
         animage::ImageId image = animage::kNoId;
         animage::LayerId layer = animage::kNoId;
-        bool tiles = true;  // a picture, rather than a judgement about one
+        bool tiles = true;
 
         friend auto operator<=>(const ColourAsked&, const ColourAsked&) = default;
     };
@@ -246,14 +243,6 @@ private:
     animage::CtgSolver ctg_solver_;
     std::map<ColourAsked, ColourWanted> ctg_asked_;
 
-    // Runs only while something is outstanding.
-    //
-    // A poll rather than the solver's own wake-up, deliberately: that callback
-    // arrives on a worker thread, and a worker thread that touches a widget --
-    // or outlives one by a few microseconds -- is a crash that happens to
-    // somebody else on a machine with a different number of cores. Sixteen
-    // milliseconds is nothing beside a solve, and the timer stops when there is
-    // nothing to wait for.
     QTimer* ctg_poll_ = nullptr;
     bool colour_was_pending_ = false;
 
@@ -264,39 +253,27 @@ private:
     animage::BrushSettings brush_settings_;
     animage::BrushSettings eraser_settings_;
     bool erasing_ = false;
-    bool stylus_eraser_ = false;  // the pen was turned over for this stroke
+    bool stylus_eraser_ = false;
 
-    // The cached composite, in sRGB, covering `cached_region_` in image
-    // coordinates. `cached_region_` is snapped to the sampling grid, so the
-    // image size is exactly the entries the region spans.
     QImage display_;
     animage::PixelRect cached_region_;
-    // Image pixels per cached entry: one per *screen* pixel, so 1 while zoomed
-    // in and 1/zoom when zoomed out. That makes the cache the size of the
-    // window whatever the zoom, rather than the size of the visible image area.
     animage::SampleStep cache_step_;
 
-    // Accumulated between paints. Empty width means nothing is pending.
     animage::PixelRect pending_dirty_;
     bool dirty_everything_ = false;
 
-    // The onion skin flattened once, covering the same region. It only changes
-    // when the frame, the view or the settings do, so a stroke does not pay to
-    // recomposite the neighbouring drawings on every dab.
     animage::Framebuffer onion_;
     bool onion_dirty_ = false;
     OnionSettings onion_settings_;
     std::size_t slot_ = 0;
     bool playing_ = false;
 
-    QPointF pan_;  // image coordinate shown at the widget's top-left corner
+    QPointF pan_;
     double zoom_ = 1.0;
 
     bool stroking_ = false;
-    // An eyedropper gesture is in progress. The colour is taken when the button
-    // or the pen comes up, so the pointer can be slid onto the right pixel.
     bool picking_ = false;
-    bool scribbling_ = false;  // the stroke is on a CTG layer
+    bool scribbling_ = false;
     animage::LayerId scribble_preview_layer_ = animage::kNoId;
     bool scribble_preview_was_showing_ = false;
     QPointF last_image_point_;
@@ -318,11 +295,8 @@ private:
 
     Background background_ = Background::White;
     bool passe_partout_ = true;
+    bool capture_focus_ = true;
 
-    // When the pen was last heard from, used to recognise the mouse events
-    // Windows Ink promotes from it. A count of tablet events was used for this
-    // and could only ever go up, so the first time the pen came near the tablet
-    // the mouse stopped working for the rest of the session.
     QElapsedTimer clock_;
     qint64 last_tablet_ms_ = -1;
 };

@@ -21,7 +21,9 @@
 //
 // Run it by hand:  ./build/tests/bench_zoom -platform offscreen
 
-#include <QApplication>
+#include <QGuiApplication>
+#include "canvas_view.h"
+using CanvasWidget = CanvasView;
 #include <QElapsedTimer>
 #include <QImage>
 #include <QMouseEvent>
@@ -34,7 +36,7 @@
 #include <vector>
 
 #include "brush.h"
-#include "canvas_widget.h"
+
 #include "compositor.h"
 #include "document.h"
 
@@ -102,7 +104,7 @@ struct Fixture {
     CanvasWidget canvas;
 
     explicit Fixture(int layers, int curves_per_layer, int spread)
-        : canvas(doc) {
+         {
         track = doc.addTrack("main");
         image = doc.insertImage(track, 0);
         doc.setCanvasSize(1920, 1080);
@@ -145,7 +147,7 @@ DragCost timePan(CanvasWidget& canvas, int moves = 60, double pixels_per_move = 
     const QPointF start(kCanvasWidth / 2.0, kCanvasHeight / 2.0);
     QMouseEvent press(QEvent::MouseButtonPress, start, start, Qt::MiddleButton, Qt::MiddleButton,
                       Qt::NoModifier);
-    QApplication::sendEvent(&canvas, &press);
+    QGuiApplication::sendEvent(&canvas, &press);
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(moves));
@@ -155,14 +157,14 @@ DragCost timePan(CanvasWidget& canvas, int moves = 60, double pixels_per_move = 
         QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::MiddleButton,
                          Qt::NoModifier);
         clock.start();
-        QApplication::sendEvent(&canvas, &move);
+        QGuiApplication::sendEvent(&canvas, &move);
         canvas.grab();  // the repaint the move asked for
         samples.push_back(clock.nsecsElapsed() / 1e6);
     }
 
     QMouseEvent release(QEvent::MouseButtonRelease, start, start, Qt::MiddleButton, Qt::NoButton,
                         Qt::NoModifier);
-    QApplication::sendEvent(&canvas, &release);
+    QGuiApplication::sendEvent(&canvas, &release);
     return summarise(std::move(samples));
 }
 
@@ -273,7 +275,8 @@ void samplingVersusWindowSize() {
         const LayerId layer = doc.addLayer(track, "layer 1");
         drawCurves(doc, track, image, layer, 3, 1920, 1080, 0x9e37u);
 
-        CanvasWidget canvas(doc);
+        CanvasWidget canvas;
+    canvas.setDocument(&doc);
         canvas.resize(size.first, size.second);
         canvas.setTrack(track);
         canvas.setFrame(0);
@@ -598,7 +601,8 @@ void filterExperiment(const char* dump_dir) {
             brush.end();
         }
 
-        CanvasWidget canvas(doc);
+        CanvasWidget canvas;
+    canvas.setDocument(&doc);
         canvas.resize(kCanvasWidth, kCanvasHeight);
         canvas.setTrack(track);
         canvas.setFrame(0);
@@ -608,7 +612,7 @@ void filterExperiment(const char* dump_dir) {
         for (double zoom : {0.50, 0.68, 1.00, 1.09}) {
             canvas.resetView();
             canvas.setZoom(zoom, QPointF(kCanvasWidth / 2.0, kCanvasHeight / 2.0));
-            const QImage shot = canvas.grab().toImage();
+            const QImage shot = canvas.grab();
 
             // The upper-right of the ellipse, where it runs at about 45 degrees
             // and a resampler has the most to get wrong. Found through the view
@@ -638,7 +642,7 @@ void filterExperiment(const char* dump_dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    QApplication app(argc, argv);
+    QGuiApplication app(argc, argv);
 
     sweep("a sparse drawing, like the screenshots on the issue", 1, 6, 1920);
     sweep("a full shot: four layers drawn over a wide field", 4, 90, 5000);

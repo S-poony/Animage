@@ -36,6 +36,11 @@ if(TARGET animage_ui)
   target_include_directories(test_canvas SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
   add_test(NAME test_canvas COMMAND test_canvas -platform offscreen)
 
+  add_executable(test_controller test_controller.cpp)
+  target_link_libraries(test_controller PRIVATE animage_ui)
+  target_include_directories(test_controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_controller COMMAND test_controller -platform offscreen)
+
   add_executable(test_render test_render.cpp)
   target_link_libraries(test_render PRIVATE animage_ui)
   target_include_directories(test_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -183,6 +183,15 @@ public:
     std::size_t undoDepth() const { return undo_stack_.size(); }
     std::string undoLabel() const;
 
+    // The identity of the edit on top of the undo stack, or 0 when the history
+    // is empty. Two calls agree exactly when the top edit is the same command.
+    // Unlike undoDepth(), it stays distinct after undo-and-edit branches the
+    // history back to the same depth, so "is the document back where I saved
+    // it" can be answered by comparing tokens instead of depths.
+    std::size_t historyToken() const {
+        return undo_stack_.empty() ? 0 : undo_stack_.back().id;
+    }
+
     // Drops cels that no image references and no history entry mentions. The
     // history counts as a reference: a cel must survive the deletion of the
     // last image showing it for as long as undo can bring that image back.
@@ -232,6 +241,7 @@ private:
     Command pending_;
     int command_depth_ = 0;
     TileJournal journal_;
+    std::size_t next_command_id_ = 1;
 
     std::vector<Command> undo_stack_;
     std::vector<Command> redo_stack_;

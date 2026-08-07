@@ -101,11 +101,11 @@ add_subdirectory(src/core)
 
 # The core library and its tests never need Qt. Only the application does, so a
 # missing Qt is a skipped target rather than a failed configure.
-find_package(Qt6 6.5 COMPONENTS Widgets QUIET)
+find_package(Qt6 6.5 COMPONENTS Quick QuickControls2 QUIET)
 if(Qt6_FOUND)
   add_subdirectory(src/app)
 else()
-  message(STATUS "Qt 6 not found: building the core library and tests only")
+  message(STATUS "Qt 6 Quick not found: building the core library and tests only")
 endif()
 
 if(ANIMAGE_BUILD_TESTS)

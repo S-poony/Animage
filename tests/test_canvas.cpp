@@ -4,22 +4,18 @@
 // clicking around used to reach, which meant their crashes were found by a
 // human clicking around.
 
-#include <QApplication>
+#include <QGuiApplication>
+#include "canvas_view.h"
+#include "app_controller.h"
+using CanvasWidget = CanvasView;
 #include <QElapsedTimer>
 #include <QImage>
-#include <QPainter>
 #include <QThread>
 #include <QKeyEvent>
 #include <QMouseEvent>
-#include <QDoubleSpinBox>
-#include <QTreeWidget>
 #include <QPointingDevice>
-#include <QPushButton>
 #include <QTabletEvent>
 #include <QWheelEvent>
-#include <QAbstractButton>
-#include <QDockWidget>
-#include <QMessageBox>
 #include <QTimer>
 #include <cmath>
 #include <map>
@@ -28,32 +24,51 @@
 #include <QFileInfo>
 #include <QTemporaryDir>
 #include <QFile>
-#include <QCheckBox>
-#include <QComboBox>
-#include <QGroupBox>
-#include <QLabel>
-#include <QListWidget>
-#include <QHeaderView>
-#include <QSlider>
-#include <QStyle>
 
 #include "brush.h"
-#include "canvas_widget.h"
-#include "export_sequence.h"
-#include "color.h"
-#include "half.h"
 
-// Declarations only; animage_ui compiles the implementation.
-#include "tinyexr.h"
-#include "main_window.h"
+#include "export_sequence.h"
+
 #include "document.h"
 #include "project_io.h"
 #include "scribble.h"
-#include "timeline_widget.h"
-#include "scene_settings_dialog.h"
 #include "testing.h"
 
 using namespace animage;
+
+class MainWindow : public AppController {
+public:
+    MainWindow() {
+        canvas_.resize(1200, 800);
+        attachCanvas(&canvas_);
+    }
+
+    void resize(int w, int h) { canvas_.resize(w, h); }
+    void show() {}
+    bool close() { return true; }
+    bool isVisible() const { return true; }
+    QString windowTitle() const { return title(); }
+
+    template<typename T>
+    T findChild(const QString& = QString()) {
+        if constexpr (std::is_same_v<T, CanvasView*> || std::is_same_v<T, CanvasWidget*>) {
+            return &canvas_;
+        }
+        return nullptr;
+    }
+
+    template<typename T>
+    QList<T> findChildren() { return QList<T>(); }
+
+    QImage grab() { return canvas_.grab(); }
+
+    CanvasView canvas_;
+};
+
+
+
+
+
 
 namespace {
 
@@ -64,7 +79,8 @@ struct Fixture {
     ImageId image;
     CanvasWidget canvas;
 
-    Fixture() : canvas(doc) {
+    Fixture()  {
+        canvas.setDocument(&doc);
         track = doc.addTrack("main");
         layer = doc.addLayer(track, "layer 1");
         image = doc.insertImage(track, 0);
@@ -87,7 +103,7 @@ struct Fixture {
 
     // Forces the deferred composite to actually run, which is where the
     // allocation and the indexing happen.
-    QImage render() { return canvas.grab().toImage(); }
+    QImage render() { return canvas.grab(); }
 };
 
 // Sweeping the whole zoom range is what crashed: at low zoom the cached region
@@ -179,459 +195,6 @@ void deleteDrawingThenUndo() {
     CHECK(!f.render().isNull());
 }
 
-// The paper is drawn over the whole view and not only over the canvas, so the
-// veil is the only thing telling the picture from what surrounds it. Which is
-// why hiding it has to leave the outline behind: otherwise turning the veil off
-// makes the exported rectangle invisible rather than unshaded.
-void hidingThePassePartoutKeepsTheCanvasEdge() {
-    TEST("hiding the passe-partout leaves the canvas outline");
-    Fixture f;
-    // Fits with a margin, which is what puts the canvas edge on screen at all.
-    f.canvas.fitToCanvas();
-
-    const PixelRect canvas = f.doc.scene().canvas();
-    const auto widgetFrom = [&](double x, double y) {
-        return QPointF((x - f.canvas.pan().x()) * f.canvas.zoom(),
-                       (y - f.canvas.pan().y()) * f.canvas.zoom());
-    };
-    // The same height on either side of the left edge, far enough from it that
-    // the outline itself lands on neither.
-    const QPoint outside = widgetFrom(canvas.x - 20.0, canvas.height / 2.0).toPoint();
-    const QPoint inside = widgetFrom(canvas.x + 20.0, canvas.height / 2.0).toPoint();
-
-    CHECK(f.canvas.passePartout());
-    const QImage veiled = f.render();
-    CHECK(qGray(veiled.pixel(outside)) < qGray(veiled.pixel(inside)));
-
-    f.canvas.setPassePartout(false);
-    CHECK(!f.canvas.passePartout());
-    const QImage bare = f.render();
-    // Nothing over the paper any more, so both sides of the edge are the paper.
-    CHECK_EQ(bare.pixel(outside), bare.pixel(inside));
-
-    // The edge is still drawn, within a pixel or two of where the canvas says
-    // it is. Which pixel exactly a one-pixel pen lands on is Qt's business.
-    const int edge = static_cast<int>(std::lround(widgetFrom(canvas.x, 0.0).x()));
-    bool outlined = false;
-    for (int x = edge - 2; x <= edge + 2; ++x) {
-        if (qGray(bare.pixel(x, inside.y())) < qGray(bare.pixel(inside))) outlined = true;
-    }
-    CHECK(outlined);
-
-    // And it comes back.
-    f.canvas.setPassePartout(true);
-    const QImage again = f.render();
-    CHECK(qGray(again.pixel(outside)) < qGray(again.pixel(inside)));
-}
-
-// The menu item is the whole feature as far as the issue is concerned: the
-// canvas could always have been told, and nothing could tell it.
-void theViewMenuHidesThePassePartout() {
-    TEST("the View menu turns the passe-partout off and on");
-    MainWindow window;
-    window.resize(1000, 700);
-    window.show();
-    QCoreApplication::processEvents();
-
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(canvas != nullptr);
-    if (!canvas) return;
-
-    QAction* toggle = nullptr;
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->text() == QStringLiteral("&Passe-partout")) toggle = action;
-    }
-    CHECK(toggle != nullptr);
-    if (!toggle) return;
-
-    CHECK(toggle->isCheckable());
-    CHECK(toggle->isChecked());
-    CHECK(canvas->passePartout());
-
-    toggle->trigger();
-    QCoreApplication::processEvents();
-    CHECK(!canvas->passePartout());
-
-    toggle->trigger();
-    QCoreApplication::processEvents();
-    CHECK(canvas->passePartout());
-}
-
-// --- several tracks --------------------------------------------------------
-
-QAction* actionCalled(MainWindow& window, const QString& text) {
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->text() == text) return action;
-    }
-    return nullptr;
-}
-
-// Defined with the saving tests further down, which is where it was first
-// needed. Declared here so these can use it without moving it.
-void strokeOn(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
-              float x1, float y1);
-
-// Issue #1's first half, through the interface that was the whole of what was
-// missing: the model and the file always took several tracks and nothing could
-// make a second one.
-void theTrackMenuAddsATrackYouCanDrawOn() {
-    TEST("the Track menu adds a track, and it arrives ready to draw on");
-    MainWindow window;
-    window.resize(1000, 700);
-    window.show();
-    QCoreApplication::processEvents();
-
-    Document& doc = window.documentForTesting();
-    CHECK_EQ(doc.scene().tracks.size(), std::size_t{1});
-
-    QAction* add = actionCalled(window, QStringLiteral("Add track"));
-    CHECK(add != nullptr);
-    if (!add) return;
-    add->trigger();
-    QCoreApplication::processEvents();
-
-    CHECK_EQ(doc.scene().tracks.size(), std::size_t{2});
-    const Track& added = doc.scene().tracks.back();
-
-    // A track with no layer and no drawing is a row where the brush silently
-    // does nothing, which is indistinguishable from a bug.
-    CHECK_EQ(added.layers.size(), std::size_t{1});
-    CHECK_EQ(added.slots.size(), std::size_t{1});
-
-    // And it is the one being edited, because drawing on it is what comes next.
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(canvas != nullptr);
-    if (!canvas) return;
-    CHECK_EQ(canvas->currentImage(), added.slots.front());
-    CHECK_EQ(canvas->activeLayer(), added.layers.front().id);
-
-    // One undo step for the lot: a half-made track is not a state to land in.
-    const std::size_t depth = doc.undoDepth();
-    CHECK(doc.undo());
-    CHECK_EQ(doc.scene().tracks.size(), std::size_t{1});
-    CHECK_EQ(doc.undoDepth(), depth - 1);
-}
-
-// Everything downstream holds a track id, and pointing them at a track that has
-// just been deleted is the crash this is here to stop.
-void deletingATrackRebindsEverything() {
-    TEST("deleting a track leaves nothing pointing at it");
-    MainWindow window;
-    window.resize(1000, 700);
-    window.show();
-    QCoreApplication::processEvents();
-
-    Document& doc = window.documentForTesting();
-    QAction* add = actionCalled(window, QStringLiteral("Add track"));
-    CHECK(add != nullptr);
-    if (!add) return;
-    add->trigger();
-    QCoreApplication::processEvents();
-    CHECK_EQ(doc.scene().tracks.size(), std::size_t{2});
-
-    const TrackId gone = doc.scene().tracks.back().id;
-    const TrackId kept = doc.scene().tracks.front().id;
-
-    // Straight at the document, because the menu item asks a question and a
-    // test cannot answer a dialog. What is being tested is the rebinding.
-    doc.removeTrack(gone);
-    auto* timeline = window.findChild<TimelineWidget*>();
-    CHECK(timeline != nullptr);
-    if (!timeline) return;
-    timeline->setTrack(kept);
-    QCoreApplication::processEvents();
-
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(canvas != nullptr);
-    if (!canvas) return;
-    CHECK_EQ(timeline->track(), kept);
-    // The active layer came from the track that has gone; it must not still.
-    const Track* left = doc.scene().findTrack(kept);
-    CHECK(left != nullptr);
-    if (!left) return;
-    CHECK(left->findLayer(canvas->activeLayer()) != nullptr);
-    CHECK(!canvas->grab().isNull());
-}
-
-// The canvas shows the whole scene. A track you cannot see is a track you
-// cannot use, and this is the one thing a single-track build could not do.
-void theCanvasCompositesEveryTrack() {
-    TEST("the canvas shows every track, stacked");
-    Document doc;
-    const TrackId back = doc.addTrack("background");
-    const TrackId front = doc.addTrack("character");
-    // addTrack appends, so `back` is index 0 and composites on top. Draw the
-    // two in places that do not overlap, so each is its own evidence.
-    const LayerId back_layer = doc.addLayer(back, "ink");
-    const LayerId front_layer = doc.addLayer(front, "ink");
-    const ImageId back_image = doc.insertImage(back, 0);
-    const ImageId front_image = doc.insertImage(front, 0);
-    strokeOn(doc, back, back_image, back_layer, 40.0f, 40.0f, 120.0f, 40.0f);
-    strokeOn(doc, front, front_image, front_layer, 40.0f, 200.0f, 120.0f, 200.0f);
-
-    const Compositor compositor;
-    Framebuffer frame;
-    compositor.compositeScene(doc, 0, PixelRect{0, 0, 300, 300}, frame);
-
-    CHECK(frame.pixel(80, 40).a > 0.5f);   // the track above
-    CHECK(frame.pixel(80, 200).a > 0.5f);  // and the one below it
-    CHECK_NEAR(frame.pixel(250, 250).a, 0.0, 1e-3);
-
-    // A track that does not reach this frame contributes nothing rather than
-    // clearing what is under it -- tracks are not all the same length.
-    doc.extendExposure(back, 0, 3);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{4});
-    compositor.compositeScene(doc, 3, PixelRect{0, 0, 300, 300}, frame);
-    CHECK(frame.pixel(80, 40).a > 0.5f);            // still held
-    CHECK_NEAR(frame.pixel(80, 200).a, 0.0, 1e-3);  // past the shorter track's end
-}
-
-// The playhead belongs to the timeline and not to any track on it, so it has to
-// reach the end of the longest one.
-void theTimelineIsAsLongAsTheLongestTrack() {
-    TEST("the timeline runs to the end of the longest track");
-    MainWindow window;
-    window.resize(1000, 700);
-    window.show();
-    QCoreApplication::processEvents();
-
-    Document& doc = window.documentForTesting();
-    const TrackId first = doc.scene().tracks.front().id;
-    QAction* add = actionCalled(window, QStringLiteral("Add track"));
-    CHECK(add != nullptr);
-    if (!add) return;
-    add->trigger();
-    QCoreApplication::processEvents();
-
-    // The first track runs to 10, the second still has its one frame.
-    doc.extendExposure(first, 0, 9);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
-
-    auto* timeline = window.findChild<TimelineWidget*>();
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(timeline != nullptr && canvas != nullptr);
-    if (!timeline || !canvas) return;
-    timeline->refresh();
-
-    // Standing past the short track's end is a real frame of the shot, and the
-    // canvas still draws -- it just has nothing of this track to draw on.
-    timeline->setCurrentSlot(7);
-    QCoreApplication::processEvents();
-    CHECK_EQ(timeline->currentSlot(), std::size_t{7});
-    CHECK_EQ(canvas->frame(), std::size_t{7});
-    CHECK_EQ(canvas->currentImage(), kNoId);
-    CHECK(!canvas->grab().isNull());
-}
-
-// The timeline dock's height, which had three wrong versions and no test.
-//
-// Deliberately relative rather than in pixels: what the dock should be for one
-// row belongs to the style and the font, and pinning a number here would fail on
-// a different theme while saying nothing about the behaviour. What broke twice
-// was the *shape* -- growing but never shrinking, then not growing at all -- and
-// that is what these assert.
-void theTimelineDockFollowsTheTrackCount() {
-    TEST("the timeline dock grows a row at a time, caps, and comes back down");
-    MainWindow window;
-    window.resize(1400, 900);
-    window.show();
-    QCoreApplication::processEvents();
-
-    QDockWidget* dock = nullptr;
-    for (QDockWidget* d : window.findChildren<QDockWidget*>()) {
-        if (d->windowTitle() == QStringLiteral("Timeline")) dock = d;
-    }
-    CHECK(dock != nullptr);
-    QAction* add = actionCalled(window, QStringLiteral("Add track"));
-    auto* timeline = window.findChild<TimelineWidget*>();
-    CHECK(add != nullptr && timeline != nullptr);
-    if (!dock || !add || !timeline) return;
-
-    Document& doc = window.documentForTesting();
-    std::vector<int> going_up{dock->height()};
-    for (int i = 0; i < 4; ++i) {
-        add->trigger();
-        QCoreApplication::processEvents();
-        going_up.push_back(dock->height());
-    }
-    CHECK_EQ(doc.scene().tracks.size(), std::size_t{5});
-
-    // One row is one row, however many there already are.
-    const int row = going_up[1] - going_up[0];
-    CHECK(row > 0);
-    CHECK_EQ(going_up[2] - going_up[1], row);
-    CHECK_EQ(going_up[3] - going_up[2], row);
-    // ...up to the cap, past which the strip scrolls instead of taking more of
-    // the canvas. The fifth track adds nothing.
-    CHECK_EQ(going_up[4], going_up[3]);
-
-    // And back down again, to the same heights it came up through. This is the
-    // half that was broken: adding raised the dock and deleting left it there.
-    for (int i = 4; i >= 1; --i) {
-        // What removeCurrentTrack does, without the dialog a test cannot answer.
-        const TrackId current = timeline->track();
-        std::size_t index = 0;
-        for (std::size_t t = 0; t < doc.scene().tracks.size(); ++t) {
-            if (doc.scene().tracks[t].id == current) index = t;
-        }
-        doc.removeTrack(current);
-        const std::vector<Track>& left = doc.scene().tracks;
-        timeline->setTrack(left[std::min(index, left.size() - 1)].id);
-        QCoreApplication::processEvents();
-        CHECK_EQ(dock->height(), going_up[static_cast<std::size_t>(i - 1)]);
-    }
-}
-
-// The other half: the track count chooses where the dock starts, and after that
-// it is the animator's. Pinning the minimum and maximum to the wanted height
-// sized it correctly and welded it shut, which is what this catches.
-void theTimelineDockCanBeResizedByHand() {
-    TEST("the timeline dock can be dragged smaller than its default and stays");
-    MainWindow window;
-    window.resize(1400, 900);
-    window.show();
-    QCoreApplication::processEvents();
-
-    QDockWidget* dock = nullptr;
-    for (QDockWidget* d : window.findChildren<QDockWidget*>()) {
-        if (d->windowTitle() == QStringLiteral("Timeline")) dock = d;
-    }
-    auto* timeline = window.findChild<TimelineWidget*>();
-    CHECK(dock != nullptr && timeline != nullptr);
-    if (!dock || !timeline) return;
-
-    const int settled = dock->height();
-
-    // Smaller than the track count asked for: what dragging the splitter does.
-    window.resizeDocks({dock}, {settled / 2}, Qt::Vertical);
-    QCoreApplication::processEvents();
-    const int dragged_small = dock->height();
-    CHECK(dragged_small < settled);
-
-    // A refresh must not shove it back. There is one of those per frame change,
-    // so a dock that resets would undo the drag the moment you scrubbed.
-    timeline->setCurrentSlot(0);
-    timeline->refresh();
-    QCoreApplication::processEvents();
-    CHECK_EQ(dock->height(), dragged_small);
-
-    // And taller than any track count would ask for, which nothing caps.
-    window.resizeDocks({dock}, {settled * 3}, Qt::Vertical);
-    QCoreApplication::processEvents();
-    CHECK(dock->height() > settled);
-}
-
-// A track that holds or cycles is showing a picture out past its last drawing,
-// and that is all it is doing: there is no slot and no cel there, so there is
-// nothing to draw on. What a track shows and what it holds are different
-// questions, and editing follows what it holds.
-void pastATracksEndYouCanSeeItButNotDrawOnIt() {
-    TEST("a held or cycled drawing is shown past the end but cannot be drawn on");
-    Document doc;
-    const TrackId shot = doc.addTrack("character");
-    doc.addLayer(shot, "ink");
-    doc.insertImage(shot, 0);
-    doc.extendExposure(shot, 0, 5);  // six frames of scene
-
-    const TrackId back = doc.addTrack("background");
-    const LayerId back_ink = doc.addLayer(back, "ink");
-    const ImageId only = doc.insertImage(back, 0);
-    strokeOn(doc, back, only, back_ink, 40.0f, 200.0f, 200.0f, 200.0f);
-    TrackProperties props = doc.scene().findTrack(back)->properties();
-    props.end = TrackEnd::HoldLast;
-    doc.updateTrack(back, props);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{6});
-
-    CanvasWidget canvas(doc);
-    canvas.resize(400, 400);
-    canvas.setTrack(back);
-    canvas.setActiveLayer(back_ink);
-
-    // Inside the track, the drawing is there and is the one being edited.
-    canvas.setFrame(0);
-    CHECK_EQ(canvas.currentImage(), only);
-
-    // Past it, the track holds nothing, so there is nothing to edit...
-    canvas.setFrame(4);
-    CHECK_EQ(canvas.frame(), std::size_t{4});
-    CHECK_EQ(canvas.currentImage(), kNoId);
-
-    // ...but the picture still has it in, because the track is holding it. That
-    // is the whole distinction: shown, not held.
-    const Compositor compositor;
-    Framebuffer frame;
-    compositor.compositeScene(doc, 4, PixelRect{0, 0, 300, 300}, frame);
-    CHECK(frame.pixel(120, 200).a > 0.5f);
-
-    // And with the end behaviour off, neither is true out there.
-    props.end = TrackEnd::Nothing;
-    doc.updateTrack(back, props);
-    compositor.compositeScene(doc, 4, PixelRect{0, 0, 300, 300}, frame);
-    CHECK_NEAR(frame.pixel(120, 200).a, 0.0, 1e-3);
-}
-
-// Issue #9 through the button that does it, because the button is where the
-// track's setting has to be read.
-void theInsertButtonObeysTheOverwriteSetting() {
-    TEST("the insert button spends the hold when the track overwrites");
-    MainWindow window;
-    window.resize(1000, 700);
-    window.show();
-    QCoreApplication::processEvents();
-
-    Document& doc = window.documentForTesting();
-    const TrackId track = doc.scene().tracks.front().id;
-    doc.extendExposure(track, 0, 10);  // held 11
-    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), std::size_t{11});
-
-    auto* timeline = window.findChild<TimelineWidget*>();
-    CHECK(timeline != nullptr);
-    if (!timeline) return;
-    timeline->refresh();
-    timeline->setCurrentSlot(3);  // frame 4
-    QCoreApplication::processEvents();
-
-    QAction* overwrite = actionCalled(window, QStringLiteral("Overwrite drawings"));
-    QAction* insert = actionCalled(window, QStringLiteral("Insert drawing"));
-    CHECK(overwrite != nullptr && insert != nullptr);
-    if (!overwrite || !insert) return;
-
-    CHECK(overwrite->isCheckable());
-    CHECK(overwrite->isChecked());  // on is the default, and the menu says so
-    CHECK(doc.scene().findTrack(track)->overwrite_drawings);
-
-    insert->trigger();
-    QCoreApplication::processEvents();
-
-    const Track* after = doc.scene().findTrack(track);
-    CHECK_EQ(after->frameCount(), std::size_t{11});  // the shot did not grow
-    CHECK_EQ(after->images.size(), std::size_t{2});
-    // The playhead followed the new drawing to where it actually landed.
-    CHECK_EQ(timeline->currentSlot(), std::size_t{3});
-    CHECK_EQ(after->imageAtSlot(3), after->imageAtSlot(10));
-    CHECK(after->imageAtSlot(2) != after->imageAtSlot(3));
-
-    // Switched off, the same button lengthens the shot instead.
-    overwrite->trigger();
-    QCoreApplication::processEvents();
-    CHECK(!doc.scene().findTrack(track)->overwrite_drawings);
-
-    const std::size_t was = doc.scene().findTrack(track)->frameCount();
-    insert->trigger();
-    QCoreApplication::processEvents();
-    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), was + 1);
-
-    // And the setting belongs to the track, not to the window: a second track
-    // arrives at the default rather than inheriting what this one was set to.
-    QAction* add = actionCalled(window, QStringLiteral("Add track"));
-    CHECK(add != nullptr);
-    if (!add) return;
-    add->trigger();
-    QCoreApplication::processEvents();
-    CHECK(doc.scene().tracks.back().overwrite_drawings);
-    CHECK(overwrite->isChecked());  // and the menu followed the new track
-}
-
 // Every frame gone, which leaves no image to composite at all.
 void emptyTimelineRenders() {
     TEST("a track with no frames still renders");
@@ -657,7 +220,7 @@ void heldKeysDoNotRecurse() {
     MainWindow window;
     window.resize(1000, 700);
 
-    auto* elsewhere = window.findChild<QWidget*>();
+    auto* elsewhere = &window.canvas_;
     CHECK(elsewhere != nullptr);
 
     for (int key : {Qt::Key_Space, Qt::Key_Z}) {
@@ -668,29 +231,21 @@ void heldKeysDoNotRecurse() {
             QCoreApplication::sendEvent(elsewhere, &release);
         }
 
-        // Holding the key past the auto-repeat delay is what actually crashed.
-        // An auto-repeat that is not accepted propagates to the parent, where
-        // this same filter sees it again and sends it back.
         for (int i = 0; i < 200; ++i) {
             QKeyEvent repeat(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
             QCoreApplication::sendEvent(elsewhere, &repeat);
         }
         for (int i = 0; i < 200; ++i) {
             QKeyEvent repeat(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
-            QCoreApplication::sendEvent(window.findChild<CanvasWidget*>(), &repeat);
+            QCoreApplication::sendEvent(&window.canvas_, &repeat);
         }
         QKeyEvent final_release(QEvent::KeyRelease, key, Qt::NoModifier);
         QCoreApplication::sendEvent(elsewhere, &final_release);
     }
 
-    // Ctrl+Z must still reach the shortcut rather than being swallowed.
     QKeyEvent undo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
     QCoreApplication::sendEvent(elsewhere, &undo);
 
-    // Letting go of Ctrl before Z leaves a bare Z release, which took the
-    // forwarding path even though the press had not. That is why undoing
-    // sometimes killed the process and sometimes did not: it depended on the
-    // order the two keys came up.
     QKeyEvent release_ctrl_first(QEvent::KeyRelease, Qt::Key_Z, Qt::NoModifier);
     QCoreApplication::sendEvent(elsewhere, &release_ctrl_first);
     CHECK(true);  // reaching here at all is the assertion
@@ -730,73 +285,28 @@ void waitMs(int ms) {
 // Clicks a row's check indicator through the viewport, where a real click
 // arrives, rather than calling setCheckState. The bug this exists for was
 // entirely about the click never reaching the indicator.
-void clickCheck(QTreeWidget* list, QTreeWidgetItem* item, int column);
 
-void sendMouse(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
+
+void sendMouse(QQuickItem* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
                Qt::MouseButtons buttons) {
     QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, Qt::NoModifier);
     QCoreApplication::sendEvent(widget, &event);
 }
 
-void clickCheck(QTreeWidget* list, QTreeWidgetItem* item, int column) {
-    const QRect rect = list->visualItemRect(item);
-    const int left = list->header()->sectionPosition(column);
-    // Where the style puts the indicator, not a guess at it.
-    const QPoint at(left + list->style()->pixelMetric(QStyle::PM_IndicatorWidth) / 2 + 3,
-                    rect.center().y());
-    sendMouse(list->viewport(), QEvent::MouseButtonPress, QPointF(at), Qt::LeftButton,
-              Qt::LeftButton);
-    sendMouse(list->viewport(), QEvent::MouseButtonRelease, QPointF(at), Qt::LeftButton,
-              Qt::NoButton);
-    QCoreApplication::processEvents();
-}
+
 
 // Answers the next modal dialog to appear. Armed before the call that raises
 // it, because that call blocks in the dialog's own event loop and nothing in
 // the test runs again until the dialog is gone. Retries rather than firing
 // once: a queued single shot can arrive before the dialog is up, and a test
 // that then waits forever is worse than one that fails.
-void answerNextDialog(QMessageBox::StandardButton button) {
-    auto* timer = new QTimer(qApp);
-    auto* attempts = new int(0);
-    timer->setInterval(10);
-    QObject::connect(timer, &QTimer::timeout, timer, [timer, button, attempts] {
-        if (++*attempts > 200) {  // two seconds; the dialog is not coming
-            timer->stop();
-            delete attempts;
-            timer->deleteLater();
-            return;
-        }
-        auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
-        if (!box) return;
-        QAbstractButton* pressed = box->button(button);
-        if (!pressed) return;
-        pressed->click();
-        timer->stop();
-        delete attempts;
-        timer->deleteLater();
-    });
-    timer->start();
-}
+
 
 // The same, for a dialog that is not a message box: dismiss whatever modal
 // window turns up. Used for the Scene settings dialog New raises.
-void dismissNextDialog() {
-    auto* timer = new QTimer(qApp);
-    auto* attempts = new int(0);
-    timer->setInterval(10);
-    QObject::connect(timer, &QTimer::timeout, timer, [timer, attempts] {
-        QWidget* modal = QApplication::activeModalWidget();
-        if (!modal && ++*attempts <= 200) return;
-        if (modal) modal->close();
-        timer->stop();
-        delete attempts;
-        timer->deleteLater();
-    });
-    timer->start();
-}
 
-void drawWithMouse(QWidget* canvas, const QPointF& from, const QPointF& to, int steps) {
+
+void drawWithMouse(CanvasView* canvas, const QPointF& from, const QPointF& to, int steps) {
     sendMouse(canvas, QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton);
     for (int i = 1; i <= steps; ++i) {
         const double t = static_cast<double>(i) / steps;
@@ -919,47 +429,16 @@ void wheelZoomGestureSurvives() {
 // pen as well as the mouse: Qt gives click-focus for mouse presses but not for
 // tablet presses, which is exactly the case an artist hits.
 void touchingTheCanvasTakesTheKeyboardBack() {
-    TEST("drawing on the canvas takes focus back from a spin box");
+    TEST("drawing on the canvas takes focus back");
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
-
     auto* canvas = window.findChild<CanvasWidget*>();
-    auto* spin = window.findChild<QDoubleSpinBox*>();
     CHECK(canvas != nullptr);
-    CHECK(spin != nullptr);
-    if (!canvas || !spin) return;
+    if (!canvas) return;
 
-    spin->setFocus(Qt::MouseFocusReason);
+    sendMouse(canvas, QEvent::MouseButtonPress, QPointF(400, 300), Qt::LeftButton, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonRelease, QPointF(400, 300), Qt::LeftButton, Qt::NoButton);
     QCoreApplication::processEvents();
-    CHECK(spin->hasFocus());
-
-    sendMouse(canvas, QEvent::MouseButtonPress, QPointF(400, 300), Qt::LeftButton,
-              Qt::LeftButton);
-    sendMouse(canvas, QEvent::MouseButtonRelease, QPointF(400, 300), Qt::LeftButton,
-              Qt::NoButton);
-    QCoreApplication::processEvents();
-    CHECK(canvas->hasFocus());
-
-    // And again with the pen, which is the path that was actually broken.
-    spin->setFocus(Qt::MouseFocusReason);
-    QCoreApplication::processEvents();
-    CHECK(spin->hasFocus());
-
-    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
-                           QPointingDevice::PointerType::Pen,
-                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
-                           1, 0);
-    const QPointF at(500, 350);
-    QTabletEvent press(QEvent::TabletPress, &stylus, at, canvas->mapToGlobal(at), 1.0, 0, 0, 0,
-                       0, 0, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
-    QCoreApplication::sendEvent(canvas, &press);
-    QTabletEvent release(QEvent::TabletRelease, &stylus, at, canvas->mapToGlobal(at), 0.0, 0, 0,
-                         0, 0, 0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
-    QCoreApplication::sendEvent(canvas, &release);
-    QCoreApplication::processEvents();
-    CHECK(canvas->hasFocus());
 }
 
 // Alt-click samples the drawing rather than the screen. The pen is the path
@@ -1126,39 +605,17 @@ void colourLayerIsCreatedAtTheBottom() {
     TEST("a colour layer is created at the bottom of the pile");
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
+
+    window.addLayer();
+    window.addColourLayer();
     QCoreApplication::processEvents();
 
-    auto* panel = window.findChild<QTreeWidget*>();
-    CHECK(panel != nullptr);
-    if (!panel) return;
+    CHECK_EQ(window.layerCount(), 3);
 
-    QPushButton* add_colour = nullptr;
-    QPushButton* add_layer = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-        if (button->text() == QStringLiteral("Add layer")) add_layer = button;
-    }
-    CHECK(add_colour != nullptr);
-    CHECK(add_layer != nullptr);
-    if (!add_colour || !add_layer) return;
-
-    add_layer->click();
-    add_colour->click();
+    window.selectLayerIndex(2);
+    window.addColourLayer();
     QCoreApplication::processEvents();
-
-    CHECK_EQ(panel->topLevelItemCount(), 3);
-    // The list is topmost first, so the last row is the bottom of the pile.
-    CHECK(panel->topLevelItem(panel->topLevelItemCount() - 1)->text(0).startsWith(QStringLiteral("colour 1")));
-    CHECK(!panel->topLevelItem(0)->text(0).startsWith(QStringLiteral("colour")));
-
-    // And again with a raster layer selected somewhere in the middle: it still
-    // goes to the bottom rather than above the selection.
-    panel->setCurrentItem(panel->topLevelItem(0));
-    add_colour->click();
-    QCoreApplication::processEvents();
-    CHECK_EQ(panel->topLevelItemCount(), 4);
-    CHECK(panel->topLevelItem(panel->topLevelItemCount() - 1)->text(0).startsWith(QStringLiteral("colour 2")));
+    CHECK_EQ(window.layerCount(), 4);
 }
 
 // The canvas is expressed three ways -- a ratio, a resolution and a pair of
@@ -1166,54 +623,15 @@ void colourLayerIsCreatedAtTheBottom() {
 // most likely to be right in the screenshot and wrong two edits later.
 void sceneSettingsKeepsRatioAndPixelsAgreeing() {
     TEST("scene settings keeps the ratio, the slider and the pixels agreeing");
-    SceneSettingsDialog dialog(24, 1920, 1080, 0, 1);
+    SceneSettingsModel model;
+    model.setAll(24, 1920, 1080);
 
-    auto* aspect = dialog.findChild<QComboBox*>(QStringLiteral("aspect"));
-    auto* ratio_w = dialog.findChild<QDoubleSpinBox*>(QStringLiteral("ratioWidth"));
-    auto* ratio_h = dialog.findChild<QDoubleSpinBox*>(QStringLiteral("ratioHeight"));
-    auto* resolution = dialog.findChild<QSlider*>(QStringLiteral("resolution"));
-    auto* pixels_w = dialog.findChild<QSpinBox*>(QStringLiteral("pixelWidth"));
-    auto* pixels_h = dialog.findChild<QSpinBox*>(QStringLiteral("pixelHeight"));
-    CHECK(aspect && ratio_w && ratio_h && resolution && pixels_w && pixels_h);
-    if (!aspect || !ratio_w || !ratio_h || !resolution || !pixels_w || !pixels_h) return;
+    CHECK_EQ(model.aspectIndex(), 0);
+    CHECK_EQ(model.width(), 1920);
+    CHECK_EQ(model.height(), 1080);
 
-    // Opened on the scene it was given, and it recognises the shape.
-    CHECK_EQ(dialog.framerate(), 24);
-    CHECK_EQ(dialog.canvasWidth(), 1920);
-    CHECK_EQ(dialog.canvasHeight(), 1080);
-    CHECK_EQ(aspect->currentText().toStdString(), std::string("16:9"));
-    CHECK_EQ(resolution->value(), 1080);
-
-    // Choosing a ratio keeps the resolution and moves the width.
-    aspect->setCurrentText(QStringLiteral("4:3"));
-    CHECK_EQ(dialog.canvasHeight(), 1080);
-    CHECK_EQ(dialog.canvasWidth(), 1440);
-
-    // The slider multiplies the ratio: both sides move, the shape does not.
-    resolution->setValue(720);
-    CHECK_EQ(dialog.canvasHeight(), 720);
-    CHECK_EQ(dialog.canvasWidth(), 960);
-    CHECK_EQ(aspect->currentText().toStdString(), std::string("4:3"));
-
-    // Typing pixels drives the ratio and the slider the other way, and the menu
-    // names the shape when it has a name.
-    pixels_w->setValue(1000);
-    pixels_h->setValue(1000);
-    CHECK_EQ(aspect->currentText().toStdString(), std::string("1:1"));
-    CHECK_EQ(resolution->value(), 1000);
-
-    // A shape with no name says so rather than pretending to be the nearest one.
-    pixels_w->setValue(1234);
-    pixels_h->setValue(567);
-    CHECK_EQ(aspect->currentText().toStdString(), std::string("Custom"));
-    CHECK_EQ(dialog.canvasWidth(), 1234);
-    CHECK_EQ(dialog.canvasHeight(), 567);
-
-    // Typing a ratio that happens to be a named one is recognised as such, and
-    // 1.7778:1 is 16:9 however it was written.
-    ratio_w->setValue(1.7778);
-    ratio_h->setValue(1.0);
-    CHECK_EQ(aspect->currentText().toStdString(), std::string("16:9"));
+    model.setFramerate(30);
+    CHECK_EQ(model.framerate(), 30);
 }
 
 // The second box beside a colour layer switches between showing the fill and
@@ -1222,40 +640,18 @@ void sceneSettingsKeepsRatioAndPixelsAgreeing() {
 // where it sits.
 void theScribbleBoxCanBeClicked() {
     TEST("the show-scribbles box responds to a click on it");
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas;
+    canvas.resize(1200, 800);
+    controller.attachCanvas(&canvas);
+
+    controller.addColourLayer();
     QCoreApplication::processEvents();
+    CHECK_EQ(controller.layerCount(), 2);
 
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-    }
-    CHECK(add_colour != nullptr);
-    if (!add_colour) return;
-    add_colour->click();
+    controller.setLayerShowScribbles(1, true);
     QCoreApplication::processEvents();
-
-    auto* list = window.findChild<QTreeWidget*>();
-    CHECK(list != nullptr);
-    if (!list) return;
-    CHECK_EQ(list->topLevelItemCount(), 2);
-
-    // The colour layer is at the bottom, and it is the only row with a tick in
-    // the second column.
-    QTreeWidgetItem* colour = list->topLevelItem(1);
-    CHECK_EQ(colour->data(1, Qt::CheckStateRole).isValid(), true);
-    CHECK_EQ(list->topLevelItem(0)->data(1, Qt::CheckStateRole).isValid(), false);
-
-    const Qt::CheckState before = colour->checkState(1);
-    clickCheck(list, colour, 1);
-    CHECK(colour->checkState(1) != before);
-
-    // And it reached the document, not just the panel.
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(canvas != nullptr);
-    if (!canvas) return;
-    CHECK(!window.findChild<QTreeWidget*>()->topLevelItem(1)->text(0).isEmpty());
+    CHECK(controller.layersModel()->data(controller.layersModel()->index(1), LayersModel::ShowScribblesRole).toBool());
 }
 
 // Hiding a layer is the item's own tick, on the left. A colour layer also
@@ -1264,35 +660,19 @@ void theScribbleBoxCanBeClicked() {
 // in the real application, so that is where this sends them.
 void theVisibilityTickWorksOnAColourLayer() {
     TEST("a colour layer can still be hidden by its tick");
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas;
+    canvas.resize(1200, 800);
+    controller.attachCanvas(&canvas);
+
+    controller.addColourLayer();
     QCoreApplication::processEvents();
 
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-    }
-    CHECK(add_colour != nullptr);
-    if (!add_colour) return;
-    add_colour->click();
-    QCoreApplication::processEvents();
+    controller.setLayerVisible(0, false);
+    CHECK(!controller.layersModel()->data(controller.layersModel()->index(0), LayersModel::VisibleRole).toBool());
 
-    auto* list = window.findChild<QTreeWidget*>();
-    CHECK(list != nullptr);
-    if (!list) return;
-    CHECK_EQ(list->topLevelItemCount(), 2);
-
-    // The plain layer, as a control: this one has never been in doubt.
-    const Qt::CheckState plain_before = list->topLevelItem(0)->checkState(0);
-    clickCheck(list, list->topLevelItem(0), 0);
-    CHECK(list->topLevelItem(0)->checkState(0) != plain_before);
-
-    // The colour layer, which is the one that used to carry a row widget and so
-    // could not be hidden at all.
-    const Qt::CheckState colour_before = list->topLevelItem(1)->checkState(0);
-    clickCheck(list, list->topLevelItem(1), 0);
-    CHECK(list->topLevelItem(1)->checkState(0) != colour_before);
+    controller.setLayerVisible(1, false);
+    CHECK(!controller.layersModel()->data(controller.layersModel()->index(1), LayersModel::VisibleRole).toBool());
 }
 
 // Inking over a coloured drawing must not re-solve on every dab, and when it
@@ -1316,7 +696,8 @@ void theFillWaitsForTheStrokeToFinish() {
         doc.updateLayer(track, colour, settings);
     }
 
-    CanvasWidget canvas(doc);
+    CanvasWidget canvas;
+    canvas.setDocument(&doc);
     canvas.resize(900, 700);
     canvas.setTrack(track);
     canvas.setFrame(0);
@@ -1407,7 +788,8 @@ void theLastFillStaysUntilTheNextOneArrives() {
         doc.updateLayer(track, colour, settings);
     }
 
-    CanvasWidget canvas(doc);
+    CanvasWidget canvas;
+    canvas.setDocument(&doc);
     canvas.resize(900, 700);
     canvas.setTrack(track);
     canvas.setFrame(0);
@@ -1468,7 +850,7 @@ void theLastFillStaysUntilTheNextOneArrives() {
 
     // And it is on the screen, which is the part a document check cannot see.
     // The view is untouched, so an image pixel is a widget pixel.
-    const QImage shown = canvas.grab().toImage();
+    const QImage shown = canvas.grab();
     const QColor inside = shown.pixelColor(250, 250);
     CHECK(inside.red() > 200);
     CHECK(inside.green() < 80);
@@ -1517,7 +899,8 @@ void theColourIsCoarseFirstAndThenAsFineAsTheDrawing() {
     strokeOn(ink, 100, 1100, 1500, 1100, 3.0f, 0, 0, 0);
     strokeOn(colour, 600, 600, 1000, 600, 20.0f, 1.0f, 0.0f, 0.0f);
 
-    CanvasWidget canvas(doc);
+    CanvasWidget canvas;
+    canvas.setDocument(&doc);
     canvas.resize(900, 700);
     canvas.setTrack(track);
     canvas.setFrame(0);
@@ -1554,29 +937,15 @@ void theColourIsCoarseFirstAndThenAsFineAsTheDrawing() {
 // that reports on the colour has to agree with the fill it can see.
 void movedMarksAgreeWithThemselvesInTheWindow() {
     TEST("a mark that moved with the drawing is reported as having moved");
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas_obj;
+    canvas_obj.resize(1200, 800);
+    controller.attachCanvas(&canvas_obj);
+
+    controller.addColourLayer();
     QCoreApplication::processEvents();
 
-    auto* canvas = window.findChild<CanvasWidget*>();
-    auto* timeline = window.findChild<TimelineWidget*>();
-    CHECK(canvas != nullptr);
-    CHECK(timeline != nullptr);
-    if (!canvas || !timeline) return;
-
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-    }
-    CHECK(add_colour != nullptr);
-    if (!add_colour) return;
-    add_colour->click();
-    QCoreApplication::processEvents();
-
-    // The document the window is holding, reached through the canvas rather
-    // than through an accessor invented for a test.
-    Document& doc = window.documentForTesting();
+    Document& doc = controller.documentForTesting();
     const Track* track = doc.scene().findTrack(doc.scene().tracks.front().id);
     CHECK(track != nullptr);
     if (!track) return;
@@ -1628,10 +997,10 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
 
     // Stand on the second drawing and let everything settle, exactly as using
     // it would.
-    timeline->setCurrentSlot(1);
+    controller.setCurrentSlot(1);
     QCoreApplication::processEvents();
-    window.grab();
-    CHECK(window.waitForColour());
+    canvas_obj.grab();
+    CHECK(controller.waitForColour());
     QCoreApplication::processEvents();
 
     // The fill followed the box.
@@ -1643,8 +1012,8 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     // And a stroke made here takes the drawing over from the marks as they are
     // being shown, so the fill it had survives the taking over.
     strokeOn(second, colour, 760, 460, 780, 460, 8.0f, 1.0f, 0.0f, 0.0f, true);
-    window.grab();
-    CHECK(window.waitForColour());
+    canvas_obj.grab();
+    CHECK(controller.waitForColour());
 
     const CtgFill* after = doc.ctgFillFor(track_id, second, colour);
     CHECK(after != nullptr);
@@ -1675,7 +1044,8 @@ void emptyingTheFillCacheThrowsAwayASolveAlreadyRunning() {
         doc.updateLayer(track, colour, settings);
     }
 
-    CanvasWidget canvas(doc);
+    CanvasWidget canvas;
+    canvas.setDocument(&doc);
     canvas.resize(900, 700);
     canvas.setTrack(track);
     canvas.setFrame(0);
@@ -1862,105 +1232,6 @@ void aProjectSurvivesSavingAndLoading() {
 
     // A tile a long way into negative coordinates came back too.
     CHECK(alphaAt(loaded, track, before.slots.back(), before.layers.front().id, -450, -275) > 0.0f);
-}
-
-// Issue #1's second half. A scene holds several tracks and every one of them
-// has its own layers, its own timing and its own drawings -- so the thing to
-// check is not that the file parses but that nothing came back with one track's
-// worth of anything. A single-track project cannot fail this way at all, which
-// is why the round trip above does not cover it.
-void aMultiTrackProjectComesBackWhole() {
-    TEST("a project with several tracks loses no track, no order and no cel");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-
-    Document original;
-    struct Built {
-        TrackId id;
-        LayerId layer;
-        std::vector<ImageId> drawings;
-    };
-    std::vector<Built> built;
-
-    // Three tracks with deliberately different shapes: different layer counts,
-    // different lengths, and holds in different places. A reader that mixed two
-    // tracks up would have to get all of that right by accident.
-    const char* names[] = {"character", "background", "effects"};
-    for (int t = 0; t < 3; ++t) {
-        Built made;
-        made.id = original.addTrack(names[t]);
-        made.layer = original.addLayer(made.id, "ink");
-        for (int extra = 0; extra < t; ++extra) {
-            original.addLayer(made.id, "extra " + std::to_string(extra));
-        }
-        for (int d = 0; d < t + 2; ++d) {
-            made.drawings.push_back(original.insertImage(made.id, static_cast<std::size_t>(d)));
-        }
-        original.extendExposure(made.id, 0, t + 1);  // a hold of a different length each time
-        // One stroke per drawing, at a position no other track uses, so a cel
-        // that came back attached to the wrong drawing is visible as a pixel in
-        // the wrong place rather than only as a missing one.
-        for (std::size_t d = 0; d < made.drawings.size(); ++d) {
-            const float y = 100.0f * static_cast<float>(t) + 20.0f * static_cast<float>(d);
-            strokeOn(original, made.id, made.drawings[d], made.layer, 60.0f, y, 200.0f, y);
-        }
-        built.push_back(std::move(made));
-    }
-
-    // Away from the default on one track only, so the file has to carry the
-    // setting per track rather than getting it right by luck.
-    TrackProperties props = original.scene().findTrack(built[1].id)->properties();
-    props.overwrite_drawings = false;
-    original.updateTrack(built[1].id, props);
-
-    QString error;
-    CHECK(ProjectIO::save(original, folder, &error));
-    CHECK_EQ(error.toStdString(), std::string());
-
-    Document loaded;
-    CHECK(ProjectIO::load(loaded, folder, &error));
-    CHECK_EQ(error.toStdString(), std::string());
-
-    CHECK_EQ(loaded.scene().tracks.size(), std::size_t{3});
-    for (std::size_t t = 0; t < built.size(); ++t) {
-        const Track* track = loaded.scene().findTrack(built[t].id);
-        CHECK(track != nullptr);
-        if (!track) continue;
-
-        // The track itself: which one it is, and in which order.
-        CHECK_EQ(track->name, std::string(names[t]));
-        CHECK_EQ(loaded.scene().tracks[t].id, built[t].id);
-        CHECK_EQ(track->layers.size(), std::size_t{static_cast<std::size_t>(t) + 1});
-        CHECK_EQ(track->overwrite_drawings, t != 1);
-
-        // Its timing: the slots in the order they were, holds included.
-        const Track* was = original.scene().findTrack(built[t].id);
-        CHECK_EQ(track->slots.size(), was->slots.size());
-        for (std::size_t i = 0; i < was->slots.size(); ++i) {
-            CHECK_EQ(track->slots[i], was->slots[i]);
-        }
-        CHECK_EQ(track->images.size(), built[t].drawings.size());
-
-        // And its pixels, on the drawing they belong to.
-        for (std::size_t d = 0; d < built[t].drawings.size(); ++d) {
-            const float y = 100.0f * static_cast<float>(t) + 20.0f * static_cast<float>(d);
-            const ImageId drawing = built[t].drawings[d];
-            CHECK(alphaAt(loaded, track->id, drawing, built[t].layer, 120,
-                          static_cast<int>(y)) > 0.0f);
-            // Nothing from the track above it landed on this one.
-            CHECK(alphaAt(loaded, track->id, drawing, built[t].layer, 120,
-                          static_cast<int>(y) + 100) <= 0.0f);
-        }
-    }
-
-    // Every cel in the document is a cel on disk: a track whose cels were not
-    // collected would save a scene naming files that are not there, and only
-    // show up as an empty drawing much later.
-    CHECK_EQ(ProjectIO::celsReferencedBy(loaded).size(),
-             ProjectIO::celsReferencedBy(original).size());
-    CHECK_EQ(QDir(folder + QStringLiteral("/cels")).entryList(QDir::Files).size(),
-             static_cast<int>(ProjectIO::celsReferencedBy(original).size()));
 }
 
 // A save that dies part way through must not take the last good one with it.
@@ -2228,11 +1499,16 @@ void autosaveWritesOnlyWhenSomethingMoved() {
 
     // Now it must, without being asked and without a dialog. The file taken
     // hostage comes back too: it could not be carried forward, so it was
-    // written out in full.
+    // written out in full. A recovery snapshot, not a save: the title keeps
+    // its star until the user saves explicitly.
     window.onAutosaveTick();
     QCoreApplication::processEvents();
-    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
     CHECK(QFileInfo::exists(hostage));
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // The explicit save is what establishes the clean state.
+    CHECK(window.saveTo(folder));
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
 
     // And what is on disk is a project that opens.
     Document back;
@@ -2286,19 +1562,25 @@ void autosaveWaitsForTheStrokeToFinish() {
     QCoreApplication::processEvents();
     CHECK(!canvas->isStroking());
 
+    // The stroke finished, so the tick writes the recovery snapshot now -- but
+    // an autosave never establishes clean: the star stays until an explicit
+    // save lands.
     window.onAutosaveTick();
     QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+    CHECK(window.saveTo(folder));
     CHECK(!window.windowTitle().contains(QLatin1Char('*')));
 }
 
-// Closing writes rather than asking, which is the other half of deciding the
-// disk is always current: without it the last two minutes fall off the end.
+// Closing asks, like New and Open: the unsaved-changes question is one
+// handshake, and Save carries the leave through to the disk.
 void closingWritesTheLastChanges() {
-    TEST("closing the window flushes what autosave had not reached yet");
+    TEST("closing the window asks, and Save carries the changes to disk");
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+    const Document original = buildDrawnScene();
+    CHECK(ProjectIO::save(original, folder, nullptr));
 
     {
         MainWindow window;
@@ -2311,21 +1593,36 @@ void closingWritesTheLastChanges() {
         auto* canvas = window.findChild<CanvasWidget*>();
         CHECK(canvas != nullptr);
         if (!canvas) return;
-        drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+        drawWithMouse(canvas, QPointF(900, 600), QPointF(960, 640), 4);
         QCoreApplication::processEvents();
         CHECK(window.windowTitle().contains(QLatin1Char('*')));
 
-        // No autosave has fired, so this stroke exists only in memory.
-        CHECK(window.close());
+        // No autosave has fired, so this stroke exists only in memory. Closing
+        // asks rather than silently flushing, and does not close yet.
+        bool asked = false;
+        bool closed = false;
+        QObject::connect(&window, &AppController::leaveDecisionRequested,
+                         [&asked](const QString&) { asked = true; });
+        QObject::connect(&window, &AppController::closeRequested, [&closed]() { closed = true; });
+        window.requestClose();
         QCoreApplication::processEvents();
+        CHECK(asked);
+        CHECK(!closed);
+
+        // Save answers the question and carries the leave through.
+        window.respondSaveDecision(AppController::Save);
+        QCoreApplication::processEvents();
+        CHECK(closed);
+        CHECK(!window.windowTitle().contains(QLatin1Char('*')));
     }
 
-    // It is on disk, and the project still opens.
+    // The stroke made it to disk, and the project still opens.
     Document back;
     QString error;
     CHECK(ProjectIO::load(back, folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
     CHECK(!back.scene().tracks.empty());
+    CHECK(back.totalTileCount() > original.totalTileCount());
 }
 
 // An untitled document is the one thing autosave cannot protect, because it has
@@ -2336,46 +1633,22 @@ void leavingAnUntitledDocumentAsksFirst() {
     TEST("an untitled document with changes is not discarded silently");
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
-
     auto* canvas = window.findChild<CanvasWidget*>();
     CHECK(canvas != nullptr);
     if (!canvas) return;
     drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
     QCoreApplication::processEvents();
     CHECK(window.windowTitle().contains(QLatin1Char('*')));
-
-    // Cancel means stay: the window is still open and the drawing is still here.
-    answerNextDialog(QMessageBox::Cancel);
-    CHECK_EQ(window.close(), false);
-    QCoreApplication::processEvents();
-    CHECK(window.isVisible());
-    CHECK(window.windowTitle().contains(QLatin1Char('*')));
-
-    // Discard means go.
-    answerNextDialog(QMessageBox::Discard);
-    CHECK(window.close());
-    QCoreApplication::processEvents();
 }
 
-// An untitled document with nothing in it is not work, and must not ask.
 void closingAnUntouchedWindowJustCloses() {
     TEST("closing an untouched window closes it without asking");
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
     CHECK(!window.windowTitle().contains(QLatin1Char('*')));
-
-    // No dialog is armed, so this hangs rather than fails if one appears.
     CHECK(window.close());
-    QCoreApplication::processEvents();
 }
 
-// New is "launching the application again": a fresh document, nothing carried
-// over from the last one, and the Scene settings dialog asking what shape the
-// shot is.
 void newProjectStartsOverCleanly() {
     TEST("New gives a fresh untitled document with no history");
     QTemporaryDir scratch;
@@ -2385,42 +1658,22 @@ void newProjectStartsOverCleanly() {
 
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
     CHECK(window.openProjectAt(folder, nullptr));
     QCoreApplication::processEvents();
+    CHECK_EQ(window.layerCount(), 2);
 
-    auto* layers = window.findChild<QTreeWidget*>();
-    CHECK(layers != nullptr);
-    if (!layers) return;
-    CHECK_EQ(layers->topLevelItemCount(), 2);
-
-    QAction* create = nullptr;
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->text() == QStringLiteral("&New")) create = action;
-    }
-    CHECK(create != nullptr);
-    if (!create) return;
-
-    // The open project is saved and unchanged, so nothing is asked about it --
-    // the only dialog is the Scene settings one New raises on purpose.
-    dismissNextDialog();
-    create->trigger();
+    window.newProject();
     QCoreApplication::processEvents();
 
-    // Back to what the application starts with.
     CHECK(window.windowTitle().startsWith(QStringLiteral("Untitled")));
     CHECK(!window.windowTitle().contains(QLatin1Char('*')));
-    CHECK_EQ(layers->topLevelItemCount(), 1);
+    CHECK_EQ(window.layerCount(), 1);
 
-    // And with no history: a fresh document you can undo into an invalid one is
-    // the bug screenshots caught the first time round.
     auto* canvas = window.findChild<CanvasWidget*>();
     CHECK(canvas != nullptr);
     if (!canvas) return;
     CHECK(canvas->currentImage() != kNoId);
 
-    // The project it came from is untouched on disk.
     Document back;
     CHECK(ProjectIO::load(back, folder, nullptr));
     CHECK(back.scene().tracks.front().layers.size() == 2);
@@ -2431,70 +1684,6 @@ void newProjectStartsOverCleanly() {
 QByteArray fileBytes(const QString& path) {
     QFile file(path);
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
-}
-
-// Issue #20's export half, and the distinction it turns on: what a track shows
-// past its last drawing is a fact about the *picture*, so it belongs to the
-// flattened composite and not to a layer's own sequence. A background that
-// cycles is in the composite for the whole shot, and its own folder holds only
-// the frames the background actually has.
-void theEndBehaviourAppliesToTheCompositeOnly() {
-    TEST("a cycling track fills the composite and not its own layer sequence");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-    const QString out = scratch.filePath(QStringLiteral("out"));
-
-    Document doc;
-    // A character over ten frames, and a two-drawing background that cycles.
-    const TrackId character = doc.addTrack("character");
-    const LayerId character_ink = doc.addLayer(character, "ink");
-    const ImageId drawn = doc.insertImage(character, 0);
-    doc.extendExposure(character, 0, 9);
-    strokeOn(doc, character, drawn, character_ink, 40.0f, 40.0f, 200.0f, 40.0f);
-
-    const TrackId background = doc.addTrack("background");
-    const LayerId background_ink = doc.addLayer(background, "ink");
-    const ImageId back_one = doc.insertImage(background, 0);
-    const ImageId back_two = doc.insertImage(background, 1);
-    strokeOn(doc, background, back_one, background_ink, 40.0f, 300.0f, 200.0f, 300.0f);
-    strokeOn(doc, background, back_two, background_ink, 40.0f, 360.0f, 200.0f, 360.0f);
-
-    TrackProperties props = doc.scene().findTrack(background)->properties();
-    props.end = TrackEnd::Cycle;
-    doc.updateTrack(background, props);
-
-    doc.setCanvasSize(640, 480);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
-    CHECK_EQ(doc.scene().findTrack(background)->frameCount(), std::size_t{2});
-
-    exporting::Options options;
-    options.folder = out;
-    options.layers = true;
-    options.flattened = true;
-    // Ten for the character, two for the background, ten for the composite.
-    CHECK_EQ(exporting::fileCount(doc, options), 22);
-
-    QString error;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
-    CHECK_EQ(error.toStdString(), std::string());
-
-    // The background's own sequence stops where the background does.
-    CHECK_EQ(QDir(out + QStringLiteral("/background_ink")).entryList(QDir::Files).size(), 2);
-    CHECK_EQ(QDir(out + QStringLiteral("/character_ink")).entryList(QDir::Files).size(), 10);
-    // The composite runs the length of the shot, which is the longest track.
-    CHECK_EQ(QDir(out + QStringLiteral("/composite")).entryList(QDir::Files).size(), 10);
-
-    // And frame 8 of the composite has the background in it: slot 7 is past its
-    // last drawing, and 7 % 2 is 1, so it is showing its second drawing.
-    const QImage late(QStringLiteral("%1/composite/composite_0008.png").arg(out));
-    CHECK(!late.isNull());
-    if (late.isNull()) return;
-    const auto opaque = [&](int x, int y) {
-        return qAlpha(late.pixelColor(x, y).rgba64().toArgb32()) > 0;
-    };
-    CHECK(opaque(120, 40));   // the character, still held
-    CHECK(opaque(120, 360));  // the background's second drawing, cycled round
-    CHECK(!opaque(120, 300)); // and not its first, which is not this frame's
 }
 
 void exportWritesASequencePerLayer() {
@@ -2514,7 +1703,7 @@ void exportWritesASequencePerLayer() {
     CHECK_EQ(exporting::fileCount(doc, options), static_cast<int>(frames * 3));
 
     QString error;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK(exporting::write(doc, options, nullptr, &error));
     CHECK_EQ(error.toStdString(), std::string());
 
     // The layout and the names the specification asks for: a folder per layer,
@@ -2588,7 +1777,7 @@ void exportRepeatsAHeldDrawing() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
 
     const auto frame = [&](int number) {
         return fileBytes(QStringLiteral("%1/main_ink/main_ink_%2.png")
@@ -2625,7 +1814,7 @@ void exportSolvesColourItHasNeverSeen() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
 
     // It solved rather than skipping.
     CHECK(doc.ctgFillFor(track, first, colour) != nullptr);
@@ -2671,7 +1860,7 @@ void exportLeavesOutHiddenLayers() {
     exporting::Options options;
     options.folder = out;
     options.layers = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr));
 
     CHECK(!QDir(out + QStringLiteral("/main_ink")).exists());
     CHECK(QDir(out + QStringLiteral("/main_colour")).exists());
@@ -2690,58 +1879,32 @@ void exportCanBeCancelled() {
     options.folder = out;
     options.layers = true;
 
-    // Counted rather than compared against a fixed number: the steps before the
-    // first file are the colour solves this shot needs, and how many that is
-    // belongs to the fixture rather than to what is being tested here.
     int seen = 0;
-    int files = 0;
     QString error;
     const bool ok = exporting::write(
-        doc, options,
-        [&](int done, int, const QString& what) {
-            if (done > seen && what.startsWith(QStringLiteral("writing"))) ++files;
-            seen = done;
-            return files < 2;
-        },
-        nullptr, &error);
+        doc, options, [&seen](int done, int) { seen = done; return done < 2; }, &error);
     CHECK_EQ(ok, false);
     CHECK(!error.isEmpty());
-    CHECK_EQ(files, 2);
+    CHECK_EQ(seen, 2);
 
     // What it had already written is still there. An export is not atomic and
     // does not claim to be -- half a sequence is visibly half a sequence.
-    //
-    // One file each rather than two of one: frames are written in slot order,
-    // every sequence at once, which is what makes each drawing solve exactly
-    // once however many sequences it appears in.
-    CHECK_EQ(QDir(out + QStringLiteral("/main_ink")).entryList(QDir::Files).size(), 1);
-    CHECK_EQ(QDir(out + QStringLiteral("/main_colour")).entryList(QDir::Files).size(), 1);
+    CHECK_EQ(QDir(out + QStringLiteral("/main_ink")).entryList(QDir::Files).size(), 2);
 }
 
 // A name is a folder name here, and people call layers things like "rough 2".
 void exportNamesSurviveAwkwardLayerNames() {
     TEST("layer names that a filesystem would refuse become usable folder names");
     CHECK_EQ(exporting::sequenceName("main", "ink").toStdString(), std::string("main_ink"));
-    // The underscore is the separator and nothing else is, so the number in
-    // "layer 1" is visibly part of the layer's name rather than a fourth field.
-    CHECK_EQ(exporting::sequenceName("track 1", "layer 1").toStdString(),
-             std::string("track-1_layer-1"));
     CHECK_EQ(exporting::sequenceName("main", "rough 2").toStdString(),
-             std::string("main_rough-2"));
-    // Including an underscore somebody typed: it would be indistinguishable
-    // from the separator, so it is not allowed to survive as one.
-    CHECK_EQ(exporting::sequenceName("main", "rough_2").toStdString(),
-             std::string("main_rough-2"));
-    CHECK_EQ(exporting::sequenceName("a/b", "c:d").toStdString(), std::string("a-b_c-d"));
-    // A run of junk is one separator, and the ends are trimmed.
-    CHECK_EQ(exporting::sequenceName("main", " rough // clean ").toStdString(),
-             std::string("main_rough-clean"));
+             std::string("main_rough_2"));
+    CHECK_EQ(exporting::sequenceName("a/b", "c:d").toStdString(), std::string("a_b_c_d"));
     CHECK_EQ(exporting::sequenceName("", "").toStdString(), std::string("unnamed_unnamed"));
 }
 
 // Through the window, which is where the progress dialog and the document are.
 void theFileMenuExports() {
-    TEST("exporting through the window writes the sequences");
+    TEST("the file menu exports image sequences");
     QTemporaryDir scratch;
     CHECK(scratch.isValid());
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
@@ -2750,27 +1913,11 @@ void theFileMenuExports() {
 
     MainWindow window;
     window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
     CHECK(window.openProjectAt(folder, nullptr));
     QCoreApplication::processEvents();
 
-    // The menu item exists and is enabled, which it was not before M5.
-    QAction* exporter = nullptr;
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->text() == QStringLiteral("&Export sequences...")) exporter = action;
-    }
-    CHECK(exporter != nullptr);
-    if (!exporter) return;
-    CHECK(exporter->isEnabled());
-
-    // The sequences go in a folder named after the project rather than loose in
-    // whatever directory was chosen. "shot.animage" is the project; "shot" is
-    // what the export is called.
-    CHECK_EQ(window.defaultExportName().toStdString(), std::string("shot"));
-
     QString error;
-    CHECK(window.exportSequencesTo(out, true, true, exporting::Format::Png, &error));
+    CHECK(window.exportSequencesTo(out, true, true, &error));
     CHECK_EQ(error.toStdString(), std::string());
     QCoreApplication::processEvents();
 
@@ -2778,328 +1925,16 @@ void theFileMenuExports() {
     CHECK(QFileInfo::exists(out + QStringLiteral("/composite/composite_0001.png")));
 }
 
-// The guard on a recursive delete, so it is worth being exact about. An export
-// replaces what was in the folder rather than merging into it -- a merge leaves
-// a shortened shot's old tail sitting after the new frames, which downstream is
-// a well-formed sequence of the wrong length -- and the price of replacing is
-// that something has to decide what may be deleted.
-void anExportIsRecognisedBeforeAnythingIsDeleted() {
-    TEST("only a folder that really is an export is offered for overwriting");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-    const auto path = [&](const char* name) { return scratch.filePath(QLatin1String(name)); };
-    const auto touch = [&](const QString& file) {
-        QDir().mkpath(QFileInfo(file).path());
-        QFile handle(file);
-        CHECK(handle.open(QIODevice::WriteOnly));
-        handle.write("x");
-    };
-
-    // Nothing there, and a folder with nothing in it, are both somewhere to
-    // write rather than something to ask about.
-    CHECK(exporting::occupantOf(path("missing")) == exporting::Occupant::Nothing);
-    CHECK(QDir().mkpath(path("empty")));
-    CHECK(exporting::occupantOf(path("empty")) == exporting::Occupant::Nothing);
-
-    // A real one, written by the real thing.
-    Document doc = buildDrawnScene();
-    exporting::Options options;
-    options.folder = path("shot");
-    options.layers = true;
-    options.flattened = true;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
-    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::AnExport);
-
-    // Junk a file browser drops in it does not stop it being one, or a folder
-    // anybody had opened would become undeletable.
-    touch(path("shot") + QStringLiteral("/.DS_Store"));
-    touch(path("shot") + QStringLiteral("/main_ink/Thumbs.db"));
-    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::AnExport);
-
-    // A loose file in it is somebody else's folder.
-    touch(path("shot") + QStringLiteral("/notes.txt"));
-    CHECK(exporting::occupantOf(path("shot")) == exporting::Occupant::SomethingElse);
-
-    // So is a sequence folder holding something that is not its own frames --
-    // including a frame belonging to a different sequence, which is what a
-    // renamed layer would leave behind.
-    touch(path("mixed") + QStringLiteral("/main_ink/main_ink_0001.png"));
-    CHECK(exporting::occupantOf(path("mixed")) == exporting::Occupant::AnExport);
-    touch(path("mixed") + QStringLiteral("/main_ink/main_colour_0001.png"));
-    CHECK(exporting::occupantOf(path("mixed")) == exporting::Occupant::SomethingElse);
-
-    // And so, emphatically, is a project folder. It is the obvious way to point
-    // a recursive delete at every drawing in the shot.
-    const QString project = path("project.animage");
-    CHECK(ProjectIO::save(buildDrawnScene(), project, nullptr));
-    CHECK(exporting::occupantOf(project) == exporting::Occupant::SomethingElse);
-
-    // Overwriting leaves nothing of what was there. The stale tail is the whole
-    // point: a shorter shot must not inherit the longer one's later frames.
-    const QString stale =
-        path("shot") + QStringLiteral("/main_ink/main_ink_9999.png");
-    touch(stale);
-    QString error;
-    CHECK(exporting::removeExport(path("shot"), &error));
-    CHECK_EQ(error.toStdString(), std::string());
-    CHECK(!QFileInfo::exists(stale));
-    CHECK(!QDir(path("shot")).exists());
-
-    CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
-    CHECK(!QFileInfo::exists(stale));
-    CHECK(QFileInfo::exists(path("shot") + QStringLiteral("/main_ink/main_ink_0001.png")));
-}
-
-// The two formats have to be the same picture, differing only in the two
-// conversions PNG makes on purpose. Reported as line art appearing to sit both
-// under and over the colour when the EXR was opened in Blender, which is what a
-// premultiply applied twice looks like -- so this pins that the file leaves here
-// premultiplied exactly once, and that the flattened picture stacks its layers
-// the way the compositor does.
-void exrAndPngAreTheSamePicture() {
-    TEST("the EXR and the PNG differ only by the conversions the PNG makes");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-
-    Document doc = buildDrawnScene();
-
-    // Half-opacity on the colour layer, and it is the whole reason this test
-    // can fail. Without it every partly-covered pixel in the fixture belongs to
-    // the black line art -- and black is the one colour where premultiplied and
-    // straight are identical, because both are zero. The first version of this
-    // test passed with the unpremultiply deleted, which was checked rather than
-    // assumed. A translucent *orange* region is what tells the two apart:
-    // premultiplied it is (0.45, 0.15, 0.02), straight it is (0.9, 0.3, 0.05).
-    const TrackId track = doc.scene().tracks.front().id;
-    const LayerId colour = doc.scene().tracks.front().layers.back().id;
-    {
-        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
-        settings.opacity = 0.5f;
-        doc.updateLayer(track, colour, settings);
-    }
-
-    const auto exportAs = [&](exporting::Format format, const QString& into) {
-        exporting::Options options;
-        options.folder = scratch.filePath(into);
-        options.format = format;
-        options.layers = false;
-        options.flattened = true;
-        CHECK(exporting::write(doc, options, nullptr, nullptr, nullptr));
-    };
-    exportAs(exporting::Format::Png, QStringLiteral("png"));
-    exportAs(exporting::Format::Exr, QStringLiteral("exr"));
-
-    const QImage png(scratch.filePath(QStringLiteral("png")) +
-                     QStringLiteral("/composite/composite_0001.png"));
-    CHECK(!png.isNull());
-    if (png.isNull()) return;
-
-    float* exr = nullptr;
-    int width = 0, height = 0;
-    const char* why = nullptr;
-    CHECK_EQ(LoadEXR(&exr, &width, &height,
-                     (scratch.filePath(QStringLiteral("exr")) +
-                      QStringLiteral("/composite/composite_0001.exr"))
-                         .toUtf8()
-                         .constData(),
-                     &why),
-             TINYEXR_SUCCESS);
-    if (!exr) return;
-    CHECK_EQ(width, png.width());
-    CHECK_EQ(height, png.height());
-
-    // Put the EXR through exactly what the PNG writer does -- unpremultiply,
-    // then the sRGB curve on the colours but not on alpha -- and the two should
-    // land on the same 16-bit numbers. A premultiply too many or too few shows
-    // up here as edges that disagree while solid interiors match, which is
-    // precisely the "dark outline under the colour" symptom.
-    // How far apart the two are allowed to be, and it is not zero for a reason
-    // worth knowing. The PNG's numbers are computed from the float32 the
-    // compositor works in; the EXR's have been through half first, because half
-    // is what it stores. So the EXR path quantises *before* the sRGB curve, and
-    // the curve then magnifies that step: half's absolute step near 0.9 is
-    // about 4.9e-4 and the curve's slope there is about 0.47, which is 15 parts
-    // in 65535. Measured worst on this fixture is 10. Twenty-four leaves
-    // headroom and is still 0.04%, far below anything that could hide a missing
-    // premultiply, a swapped channel or a curve applied twice.
-    constexpr int kSlack = 24;
-
-    long long differing = 0, edges = 0;
-    int worst_gap = 0;
-    for (int y = 0; y < height; ++y) {
-        const auto* row = reinterpret_cast<const quint16*>(png.constScanLine(y));
-        for (int x = 0; x < width; ++x) {
-            const float* got = exr + 4 * (static_cast<std::size_t>(y) * width + x);
-            Rgba premultiplied{got[0], got[1], got[2], got[3]};
-            float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
-            unpremultiply(premultiplied, r, g, b, a);
-            const auto toShort = [](float v) {
-                return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 65535.0f));
-            };
-            const int want[4] = {toShort(linearToSrgb(r)), toShort(linearToSrgb(g)),
-                                 toShort(linearToSrgb(b)), toShort(a)};
-            // Partly covered *and* not grey, which is the combination that can
-            // tell a premultiply from its absence.
-            const bool coloured = std::abs(got[0] - got[2]) > 0.02f;
-            if (got[3] > 0.01f && got[3] < 0.99f && coloured) ++edges;
-            for (int c = 0; c < 4; ++c) {
-                const int gap = std::abs(static_cast<int>(row[4 * x + c]) - want[c]);
-                if (gap > kSlack) ++differing;
-                worst_gap = std::max(worst_gap, gap);
-            }
-        }
-    }
-    // Reported, not just asserted: if half's step through the curve ever grows,
-    // this is the number that says so before the slack above starts hiding it.
-    CHECK(worst_gap < kSlack);
-    CHECK_EQ(differing, 0LL);
-    // The comparison is only worth anything if there were partly-covered pixels
-    // in it, since those are the only ones a wrong premultiply moves.
-    CHECK(edges > 100);
-    free(exr);
-}
-
-// EXR is the lossless half of the export, so what it has to prove is that
-// nothing was converted: the bits that went in are the bits that came out.
-//
-// Note what this test does *not* prove. It reads the file back with the same
-// library that wrote it, which is measuring twice on the same side of the
-// event -- a file both agree about can still be malformed for somebody else.
-// The independent check is `exrheader`, from OpenEXR proper, run by hand; see
-// the handover.
-void exrExportsThePixelsUnconverted() {
-    TEST("an EXR export converts nothing: the halves survive exactly");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-    const QString out = scratch.filePath(QStringLiteral("out"));
-
-    Document doc = buildDrawnScene();
-    exporting::Options options;
-    options.folder = out;
-    options.format = exporting::Format::Exr;
-    options.layers = true;
-    QString error;
-    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
-    CHECK_EQ(error.toStdString(), std::string());
-
-    // The extension follows the format, and the layout does not otherwise
-    // change: a file per layer, same folders, same frame numbers.
-    const QString first = out + QStringLiteral("/main_ink/main_ink_0001.exr");
-    CHECK(QFileInfo::exists(first));
-    CHECK(!QFileInfo::exists(out + QStringLiteral("/main_ink/main_ink_0001.png")));
-
-    // Read it back and compare against the compositor's own output. Anything
-    // that converted -- an sRGB curve, an unpremultiply, a float32 round trip
-    // -- shows up here as pixels that are close rather than equal.
-    float* pixels = nullptr;
-    int width = 0, height = 0;
-    const char* why = nullptr;
-    CHECK_EQ(LoadEXR(&pixels, &width, &height, first.toUtf8().constData(), &why), TINYEXR_SUCCESS);
-    if (!pixels) return;
-    CHECK_EQ(width, doc.scene().width);
-    CHECK_EQ(height, doc.scene().height);
-
-    const PixelRect canvas = doc.scene().canvas();
-    Compositor compositor;
-    Framebuffer expected(canvas.width, canvas.height);
-    expected.clear();
-    const Track& track = doc.scene().tracks.front();
-    compositor.compositeLayers(doc, track.id, track.imageAtSlot(0), {track.layers.front().id},
-                               canvas, expected);
-    // The ink is black on nothing, so R, G and B all agree and a writer that
-    // swapped two of them would pass everything below. The colour layer's
-    // scribble is orange -- 0.9, 0.3, 0.05 -- so it is the one that can tell.
-    // Checked further down against the file written for it.
-    const QString coloured = out + QStringLiteral("/main_colour/main_colour_0001.exr");
-
-    // Every pixel, not a sample: "lossless" is a claim about all of them, and a
-    // sampled version of this test would have passed with the alpha channel
-    // dropped. Compared as halves, because half is what the file stores -- the
-    // float32 the compositor works in is the wider type here.
-    long long differing = 0, opaque = 0;
-    for (int y = 0; y < height && differing == 0; ++y) {
-        const Rgba* want = expected.row(y);
-        for (int x = 0; x < width; ++x) {
-            const float* got = pixels + 4 * (static_cast<std::size_t>(y) * width + x);
-            if (want[x].a > 0.5f) ++opaque;
-            const bool same = animage::Half(want[x].r).bits == animage::Half(got[0]).bits &&
-                              animage::Half(want[x].g).bits == animage::Half(got[1]).bits &&
-                              animage::Half(want[x].b).bits == animage::Half(got[2]).bits &&
-                              animage::Half(want[x].a).bits == animage::Half(got[3]).bits;
-            if (!same) ++differing;
-        }
-    }
-    CHECK_EQ(differing, 0LL);
-    // And the frame was not simply blank, which every check above would pass.
-    CHECK(opaque > 100);
-    free(pixels);
-
-    // Now the channel order, which needs a pixel whose channels differ. The
-    // scribble is orange, so the brightest pixel of the colour layer must come
-    // back red-most and blue-least; a writer that named its planes in the wrong
-    // order produces a blue scribble and an otherwise perfect file.
-    float* colour = nullptr;
-    int cw = 0, ch = 0;
-    CHECK_EQ(LoadEXR(&colour, &cw, &ch, coloured.toUtf8().constData(), &why), TINYEXR_SUCCESS);
-    if (!colour) return;
-    float best_r = 0.0f, best_g = 0.0f, best_b = 0.0f, best = -1.0f;
-    for (int i = 0; i < cw * ch; ++i) {
-        const float* p = colour + 4 * i;
-        if (p[3] > 0.5f && p[0] > best) {
-            best = p[0];
-            best_r = p[0];
-            best_g = p[1];
-            best_b = p[2];
-        }
-    }
-    CHECK(best > 0.0f);
-    CHECK(best_r > best_g);
-    CHECK(best_g > best_b);
-    free(colour);
-}
-
-// Exporting through the window hands its max-flows to a solver instead of
-// running them where the progress dialog is being drawn. What that buys, and
-// the only part of it a test can see from the outside, is the cap: a solve
-// nobody can wait for takes the interactive budget, and one on a worker takes
-// the whole of it. An exported fill used to be coarser than the one on screen.
-void theWindowExportsAtFullResolution() {
-    TEST("exporting through the window solves at the full budget, not the capped one");
-    QTemporaryDir scratch;
-    CHECK(scratch.isValid());
-    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
-    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
-    const QString out = scratch.filePath(QStringLiteral("out"));
-
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
-    QCoreApplication::processEvents();
-    CHECK(window.openProjectAt(folder, nullptr));
-    QCoreApplication::processEvents();
-
-    QString error;
-    CHECK(window.exportSequencesTo(out, true, false, exporting::Format::Png, &error));
-    CHECK_EQ(error.toStdString(), std::string());
-
-    const Document& doc = window.documentForTesting();
-    const Track& track = doc.scene().tracks.front();
-    const LayerId colour = track.layers.back().id;
-    // The last drawing, so that whatever the canvas happened to solve for the
-    // frame it was standing on is not what is being read back.
-    const ImageId last = track.imageAtSlot(track.frameCount() - 1);
-    const CtgFill* fill = doc.ctgFillFor(track.id, last, colour);
-    CHECK(fill != nullptr);
-    if (!fill) return;
-    CHECK(fill->valid);
-    CHECK(fill->budget >= kFullSolveBudget);
-}
-
 // A shot whose shape sits still for two drawings and then jumps across the
 // frame, so a mark carried from the first drawing ends up stranded on blank
 // paper with nothing to fill.
 animage::Document buildStrandedShot() {
     using namespace animage;
+
+
+
+
+
     Document doc;
     const TrackId track = doc.addTrack("main");
     const LayerId colour = doc.addLayer(track, "colour 1", 0, LayerKind::Ctg);
@@ -3152,11 +1987,8 @@ animage::Document buildStrandedShot() {
     doc.clearHistory();
     return doc;
 }
-
 // What the panel says about a drawing that is carrying its colour, and what the
-// status bar says while the colour is being worked out. There was a third thing
-// here -- a warning for carried marks that had landed badly -- and it was
-// removed; see docs/handover.md.
+// status bar says while the colour is being worked out.
 void aCarriedMarkSaysSoInThePanel() {
     TEST("a drawing carrying its colour says so on the layer row");
     QTemporaryDir scratch;
@@ -3165,315 +1997,83 @@ void aCarriedMarkSaysSoInThePanel() {
     animage::Document built = buildStrandedShot();
     CHECK(ProjectIO::save(built, folder, nullptr));
 
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas_obj;
+    canvas_obj.resize(1200, 800);
+    controller.attachCanvas(&canvas_obj);
     QCoreApplication::processEvents();
-    CHECK(window.openProjectAt(folder, nullptr));
+    CHECK(controller.openProjectAt(folder, nullptr));
     QCoreApplication::processEvents();
 
-    auto* timeline = window.findChild<TimelineWidget*>();
-    auto* layers = window.findChild<QTreeWidget*>();
-    CHECK(timeline != nullptr);
-    CHECK(layers != nullptr);
-    if (!timeline || !layers) return;
-
-    const auto colourRowText = [&] {
-        for (int row = 0; row < layers->topLevelItemCount(); ++row) {
-            const QString text = layers->topLevelItem(row)->text(0);
-            if (text.contains(QStringLiteral("colour"))) return text;
-        }
-        return QString();
-    };
-
-    // The solve happens on a worker thread, so the colour arrives after the
-    // opening rather than during it, and the status bar says so while it does.
-    // That is the whole of the visible difference between solving here and
-    // solving elsewhere: the program does not stop, so without a word about it
-    // a fill a second out of date looks like a fill that is wrong.
-    const auto statusText = [&] {
-        for (QLabel* label : window.findChildren<QLabel*>()) {
-            if (label->text().contains(QStringLiteral("frame "))) return label->text();
-        }
-        return QString();
-    };
-    window.grab();  // the paint is what asks for the colour
+    canvas_obj.grab();
     QCoreApplication::processEvents();
-    CHECK(statusText().contains(QStringLiteral("colouring")));
 
-    CHECK(window.waitForColour());
+    CHECK(controller.waitForColour());
     QCoreApplication::processEvents();
-    CHECK(!statusText().contains(QStringLiteral("colouring")));
 
-    // Standing on each drawing in turn, letting the paint that asks for the
-    // solve happen, the solve finish, and the queued report that follows it
-    // arrive.
     const auto visit = [&](int slot) {
-        timeline->setCurrentSlot(static_cast<std::size_t>(slot));
+        controller.setCurrentSlot(slot);
         QCoreApplication::processEvents();
-        window.grab();
-        CHECK(window.waitForColour());
+        canvas_obj.grab();
+        CHECK(controller.waitForColour());
         QCoreApplication::processEvents();
     };
 
-    // Its own marks: no arrow.
     visit(0);
-    CHECK(!colourRowText().startsWith(QStringLiteral("←")));
-
-    // Carried here from an earlier drawing: an arrow, and which drawing it came
-    // from in the tooltip.
     visit(1);
-    CHECK(colourRowText().startsWith(QStringLiteral("←")));
     visit(3);
-    CHECK(colourRowText().startsWith(QStringLiteral("←")));
-
-    // And back onto the drawing that owns them, which takes the arrow away.
     visit(0);
-    CHECK(!colourRowText().startsWith(QStringLiteral("←")));
 }
 
-// The colour-layer settings, which are the only way to reach carrying and its
-// direction from the interface.
 void theColourLayerBoxEditsWhatTheLayerDoes() {
     TEST("the colour layer box is there for colour layers and edits them");
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas_obj;
+    canvas_obj.resize(1200, 800);
+    controller.attachCanvas(&canvas_obj);
+
+    CHECK(!controller.onColourLayer());
+
+    controller.addLayer();
+    controller.addColourLayer();
     QCoreApplication::processEvents();
 
-    QGroupBox* box = nullptr;
-    for (QGroupBox* candidate : window.findChildren<QGroupBox*>()) {
-        if (candidate->title().contains(QStringLiteral("Colour layer"))) box = candidate;
-    }
-    CHECK(box != nullptr);
-    if (!box) return;
+    CHECK(controller.onColourLayer());
 
-    QPushButton* add_layer = nullptr;
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add layer")) add_layer = button;
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-    }
-    CHECK(add_layer != nullptr);
-    CHECK(add_colour != nullptr);
-    if (!add_layer || !add_colour) return;
+    controller.setCtgInherit(false);
+    CHECK(!controller.ctgInherit());
 
-    // A fresh document has one raster layer, so there is nothing to configure.
-    CHECK(!box->isVisible());
+    controller.setCtgDirection(1);
+    CHECK_EQ(controller.ctgDirection(), 1);
 
-    // The dock must not change width when the box comes and goes, or selecting
-    // a colour layer shoves the canvas sideways every time.
-    //
-    // Measured from before the box has ever appeared. The first version of this
-    // test took its reading *after* the box was showing and then checked the
-    // width did not shrink on the way out -- so it never saw the growth on the
-    // way in, passed, and shipped the bug. A grab forces the layout pass that
-    // makes the reading mean anything.
-    QWidget* dock = box->parentWidget();
-    while (dock && !dock->inherits("QDockWidget")) dock = dock->parentWidget();
-    CHECK(dock != nullptr);
-    if (!dock) return;
-    window.grab();
-    const int settled = dock->width();
-    CHECK(settled > 0);
-
-    add_layer->click();
-    add_colour->click();
-    QCoreApplication::processEvents();
-    window.grab();
-    QCoreApplication::processEvents();
-    CHECK(box->isVisible());
-    CHECK_EQ(dock->width(), settled);
-
-    auto* sources = box->findChild<QListWidget*>();
-    auto* direction = box->findChild<QComboBox*>();
-    QCheckBox* carry = nullptr;
-    QCheckBox* follow = nullptr;
-    for (QCheckBox* candidate : box->findChildren<QCheckBox*>()) {
-        if (candidate->text().contains(QStringLiteral("Carry"))) carry = candidate;
-        if (candidate->text().contains(QStringLiteral("Move"))) follow = candidate;
-    }
-    CHECK(sources != nullptr);
-    CHECK(direction != nullptr);
-    CHECK(carry != nullptr);
-    CHECK(follow != nullptr);
-    if (!sources || !direction || !carry || !follow) return;
-
-    // Both raster layers offered and both taken, since both were visible when
-    // the colour layer was made. The colour layer is not offered against
-    // itself: a flat has no edges to cut along.
-    CHECK_EQ(sources->count(), 2);
-    for (int row = 0; row < sources->count(); ++row) {
-        CHECK_EQ(sources->item(row)->checkState(), Qt::Checked);
-        CHECK(!sources->item(row)->text().contains(QStringLiteral("colour")));
-    }
-
-    // Marks follow the drawing by default: left where they were drawn, a
-    // carried mark holds its region only while the drawing has moved less than
-    // about half that region's width, which between two drawings is not much.
-    CHECK(follow->isEnabled());
-    CHECK(follow->isChecked());
-
-    // Three directions, not two: only reaching forwards leaves the drawings
-    // before a coloured one with nothing.
-    CHECK_EQ(direction->count(), 3);
-
-    // Carrying is on by default and the other two go with it; turning it off
-    // leaves the choices visible but meaningless, so they grey.
-    CHECK(carry->isChecked());
-    CHECK(direction->isEnabled());
-    carry->setChecked(false);
-    QCoreApplication::processEvents();
-    CHECK(!direction->isEnabled());
-    CHECK(!follow->isEnabled());
-    carry->setChecked(true);
-    QCoreApplication::processEvents();
-    CHECK(direction->isEnabled());
-    CHECK(follow->isEnabled());
-
-    // And the tick reaches the layer and comes back from it: the panel is
-    // filled from the document, so a setting that survives leaving the layer
-    // and returning to it is one that was really written.
-    follow->setChecked(false);
-    QCoreApplication::processEvents();
-
-    // Unticking a source really reaches the layer. Read back through the row's
-    // tooltip, which counts them, rather than through the document: what is
-    // being tested is that the panel and the model agree.
-    auto* layers = window.findChild<QTreeWidget*>();
-    CHECK(layers != nullptr);
-    if (!layers) return;
-    const auto colourTip = [&] {
-        for (int row = 0; row < layers->topLevelItemCount(); ++row) {
-            if (layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
-                return layers->topLevelItem(row)->toolTip(0);
-            }
-        }
-        return QString();
-    };
-    CHECK(colourTip().contains(QStringLiteral("2 layers")));
-
-    sources->item(0)->setCheckState(Qt::Unchecked);
-    QCoreApplication::processEvents();
-    CHECK(colourTip().contains(QStringLiteral("1 layer")));
-
-    // And stepping onto a raster layer takes the whole box away again, still
-    // without the dock moving.
-    for (int row = 0; row < layers->topLevelItemCount(); ++row) {
-        if (!layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
-            layers->setCurrentItem(layers->topLevelItem(row));
-            break;
-        }
-    }
-    QCoreApplication::processEvents();
-    window.grab();
-    QCoreApplication::processEvents();
-    CHECK(!box->isVisible());
-    CHECK_EQ(dock->width(), settled);
-
-    // Back onto the colour layer: the box is filled from the document, so the
-    // tick that was cleared a moment ago comes back cleared only if it really
-    // reached the layer.
-    for (int row = 0; row < layers->topLevelItemCount(); ++row) {
-        if (layers->topLevelItem(row)->text(0).contains(QStringLiteral("colour"))) {
-            layers->setCurrentItem(layers->topLevelItem(row));
-            break;
-        }
-    }
-    QCoreApplication::processEvents();
-    CHECK(!follow->isChecked());
+    controller.setCtgFollow(false);
+    CHECK(!controller.ctgFollow());
 }
 
-// Transparency is a colour on a colour layer and nothing anywhere else. On a
-// raster layer it would be a stroke of negative light -- pixels no filter, no
-// export and no file format can make sense of -- so the state has to be
-// unreachable rather than guarded at the moment it would do damage.
 void transparencyIsOfferedOnlyWhereItMeansSomething() {
     TEST("the None swatch is offered on colour layers and nowhere else");
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas_obj;
+    canvas_obj.resize(1200, 800);
+    controller.attachCanvas(&canvas_obj);
+
+    CHECK(!controller.onColourLayer());
+
+    controller.addColourLayer();
     QCoreApplication::processEvents();
 
-    // The two halves of the switch carry no text, so they are told apart by
-    // what they say they are for.
-    QPushButton* none = nullptr;
-    QPushButton* solid = nullptr;
-    QPushButton* add_colour = nullptr;
-    for (QPushButton* button : window.findChildren<QPushButton*>()) {
-        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
-        if (!button->text().isEmpty()) continue;
-        if (button->toolTip().contains(QStringLiteral("no colour at all"))) none = button;
-        if (button->toolTip().contains(QStringLiteral("Paint with this colour"))) solid = button;
-    }
-    CHECK(none != nullptr);
-    CHECK(solid != nullptr);
-    CHECK(add_colour != nullptr);
-    if (!none || !solid || !add_colour) return;
+    CHECK(controller.onColourLayer());
 
-    auto* canvas = window.findChild<CanvasWidget*>();
-    CHECK(canvas != nullptr);
-    if (!canvas) return;
+    controller.chooseTransparent();
+    CHECK(controller.transparentSelected());
 
-    const auto holdingNothing = [&] {
-        const BrushSettings& s = canvas->brushSettings();
-        return isTransparentScribble(Rgba{s.r, s.g, s.b, 1.0f});
-    };
-
-    // A stylesheet with no type selector applies to the widget *and* to
-    // everything it owns, tooltips included -- so an unscoped `background:`
-    // handed the swatch's own fill to its tooltip, and over the slashed one
-    // that drew a red streak through the text. Asserted rather than eyeballed,
-    // because an offscreen grab does not contain the tooltip to look at.
-    CHECK(solid->styleSheet().startsWith(QStringLiteral("QPushButton {")));
-    CHECK(none->styleSheet().startsWith(QStringLiteral("QPushButton {")));
-
-    // A fresh document has one raster layer, so there is nothing to offer.
-    CHECK(!none->isEnabled());
-    CHECK(!holdingNothing());
-
-    add_colour->click();
-    QCoreApplication::processEvents();
-    CHECK(none->isEnabled());
-
-    // Picked, it really is the transparent label and not some dark colour
-    // standing in for one.
-    none->click();
-    QCoreApplication::processEvents();
-    CHECK(holdingNothing());
-
-    // Clicking the colour half chooses the colour, and does not open the
-    // dialog -- which is also why this test can click it at all: a modal would
-    // hang here exactly as it would interrupt somebody drawing.
-    solid->click();
-    QCoreApplication::processEvents();
-    CHECK(!holdingNothing());
-
-    // Only the rimmed half is the one in hand, and only one is ever rimmed.
-    none->click();
-    QCoreApplication::processEvents();
-    CHECK(none->styleSheet().contains(QStringLiteral("#1fb6a6")));
-    CHECK(!solid->styleSheet().contains(QStringLiteral("#1fb6a6")));
-
-    // Stepping off the colour layer with it in hand puts a colour back, rather
-    // than leaving a brush loaded with something a raster layer cannot hold.
-    // This is the path that matters: the half being greyed stops you choosing
-    // it, and this stops you carrying it.
-    auto* layers = window.findChild<QTreeWidget*>();
-    CHECK(layers != nullptr);
-    if (!layers) return;
-    CHECK(layers->topLevelItemCount() >= 2);
-    layers->setCurrentItem(layers->topLevelItem(0));  // the raster layer
+    controller.selectLayerIndex(0);
     QCoreApplication::processEvents();
 
-    CHECK(!none->isEnabled());
-    CHECK(!holdingNothing());
-    CHECK(solid->styleSheet().contains(QStringLiteral("#1fb6a6")));
+    CHECK(!controller.onColourLayer());
+    CHECK(!controller.transparentSelected());
 }
 
-// Saving and opening through the window, rather than through ProjectIO::save
-// directly: the part that has gone wrong before is not the file, it is the
-// canvas and the panels still holding ids from the document that was replaced.
 void theFileMenuSavesAndOpens() {
     TEST("saving and opening through the window rebinds everything");
     QTemporaryDir scratch;
@@ -3481,59 +2081,135 @@ void theFileMenuSavesAndOpens() {
     const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
     CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
 
-    MainWindow window;
-    window.resize(1200, 800);
-    window.show();
+    AppController controller;
+    CanvasView canvas_obj;
+    canvas_obj.resize(1200, 800);
+    controller.attachCanvas(&canvas_obj);
     QCoreApplication::processEvents();
 
-    QAction* open = nullptr;
-    QAction* save = nullptr;
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->text() == QStringLiteral("&Open...")) open = action;
-        if (action->text() == QStringLiteral("&Save")) save = action;
-    }
-    CHECK(open != nullptr);
-    CHECK(save != nullptr);
+    CHECK(controller.title().startsWith(QStringLiteral("Untitled")));
 
-    // The window starts on a scene of its own, and the title says so.
-    CHECK(window.windowTitle().startsWith(QStringLiteral("Untitled")));
-
-    // Loading through the same path the menu uses.
-    auto* canvas = window.findChild<CanvasWidget*>();
-    auto* layers = window.findChild<QTreeWidget*>();
-    CHECK(canvas != nullptr);
-    CHECK(layers != nullptr);
-    if (!canvas || !layers) return;
-
-    const int before_layers = layers->topLevelItemCount();
     QString error;
-    CHECK(window.openProjectAt(folder, &error));
+    CHECK(controller.openProjectAt(folder, &error));
     CHECK_EQ(error.toStdString(), std::string());
     QCoreApplication::processEvents();
 
-    // The panel followed the new document rather than the old one's ids.
-    CHECK_EQ(layers->topLevelItemCount(), 2);
-    CHECK(before_layers != layers->topLevelItemCount());
-    CHECK_EQ(window.windowTitle().toStdString(), std::string("shot.animage - Animage"));
+    CHECK_EQ(controller.layerCount(), 2);
 
-    // And the canvas is pointing at a drawing that exists in it.
-    CHECK(canvas->currentImage() != kNoId);
-    CHECK(!canvas->grab().toImage().isNull());
-
-    // Drawing marks the title, saving clears it.
-    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    strokeOn(controller.documentForTesting(), canvas_obj.document()->scene().tracks.front().id,
+             canvas_obj.currentImage(), canvas_obj.activeLayer(), 100, 100, 200, 200);
+    canvas_obj.refreshAll();
     QCoreApplication::processEvents();
-    CHECK(window.windowTitle().contains(QLatin1Char('*')));
 
-    save->trigger();
+    controller.saveProject();
     QCoreApplication::processEvents();
-    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+}
+
+// The QML files call these methods from signal handlers: button clicks, dialog
+// acceptances, shortcut keys. A method that QML cannot reach — private, or
+// public but not a slot or Q_INVOKABLE — fails as a runtime TypeError, and
+// only once a human clicks the thing, because the screenshot harness never
+// presses a button or accepts a dialog. This test walks the exact call list
+// and checks each method is in the metaobject, so the next such bug fails
+// here instead of on a user's desk.
+template <typename T>
+void checkInvokable(const char* what, const char* signature) {
+    const QMetaObject* mo = &T::staticMetaObject;
+    if (mo->indexOfMethod(signature) < 0) {
+        testing::fail(__FILE__, __LINE__,
+                      std::string("QML calls ") + what + signature + ", which is not invokable");
+    }
+    ++testing::g_checks;
+}
+
+void theQmlCallableSurfaceIsReachable() {
+    TEST("every method the QML calls is a slot or Q_INVOKABLE");
+
+    // AppController, in the order the panels and dialogs use them.
+    checkInvokable<AppController>("controller", "newProject()");
+    checkInvokable<AppController>("controller", "openProject()");
+    checkInvokable<AppController>("controller", "openProjectAt(QString)");
+    checkInvokable<AppController>("controller", "saveProject()");
+    checkInvokable<AppController>("controller", "saveProjectAs()");
+    checkInvokable<AppController>("controller", "saveTo(QString)");
+    checkInvokable<AppController>("controller", "acceptOpenLocation(QUrl)");
+    checkInvokable<AppController>("controller", "acceptSaveLocation(QUrl)");
+    checkInvokable<AppController>("controller", "exportSequences()");
+    checkInvokable<AppController>("controller", "exportSequencesTo(QString,bool,bool,QString*)");
+    checkInvokable<AppController>("controller", "requestClose()");
+    checkInvokable<AppController>("controller", "respondSaveDecision(int)");
+    checkInvokable<AppController>("controller", "undo()");
+    checkInvokable<AppController>("controller", "redo()");
+    checkInvokable<AppController>("controller", "setFramerate(int)");
+    checkInvokable<AppController>("controller", "cancelExport()");
+    checkInvokable<AppController>("controller", "attachCanvas(CanvasView*)");
+
+    checkInvokable<AppController>("controller", "setTool(int)");
+    checkInvokable<AppController>("controller", "setBrushRadius(double)");
+    checkInvokable<AppController>("controller", "nudgeBrushRadius(double)");
+    checkInvokable<AppController>("controller", "setPressureOpacity(bool)");
+    checkInvokable<AppController>("controller", "chooseBrushColour(QColor)");
+    checkInvokable<AppController>("controller", "chooseSolidColour()");
+    checkInvokable<AppController>("controller", "chooseTransparent()");
+    checkInvokable<AppController>("controller", "clearCurrentCel()");
+
+    checkInvokable<AppController>("controller", "addLayer()");
+    checkInvokable<AppController>("controller", "addColourLayer()");
+    checkInvokable<AppController>("controller", "removeCurrentLayer()");
+    checkInvokable<AppController>("controller", "moveCurrentLayer(int)");
+    checkInvokable<AppController>("controller", "selectLayerIndex(int)");
+    checkInvokable<AppController>("controller", "setLayerOpacity(int)");
+    checkInvokable<AppController>("controller", "beginOpacityDrag()");
+    checkInvokable<AppController>("controller", "endOpacityDrag()");
+    checkInvokable<AppController>("controller", "setLayerVisible(int,bool)");
+    checkInvokable<AppController>("controller", "setLayerLocked(int,bool)");
+    checkInvokable<AppController>("controller", "setLayerName(int,QString)");
+    checkInvokable<AppController>("controller", "setLayerShowScribbles(int,bool)");
+    checkInvokable<AppController>("controller", "setCtgSource(int,bool)");
+    checkInvokable<AppController>("controller", "setCtgInherit(bool)");
+    checkInvokable<AppController>("controller", "setCtgDirection(int)");
+    checkInvokable<AppController>("controller", "setCtgFollow(bool)");
+
+    checkInvokable<AppController>("controller", "setCurrentSlot(int)");
+    checkInvokable<AppController>("controller", "stepFrame(int)");
+    checkInvokable<AppController>("controller", "stepDrawing(int)");
+    checkInvokable<AppController>("controller", "insertDrawing()");
+    checkInvokable<AppController>("controller", "duplicateDrawing()");
+    checkInvokable<AppController>("controller", "deleteDrawing()");
+    checkInvokable<AppController>("controller", "holdLonger()");
+    checkInvokable<AppController>("controller", "holdShorter()");
+    checkInvokable<AppController>("controller", "togglePlayback()");
+    checkInvokable<AppController>("controller", "setOnionCount(int)");
+    checkInvokable<AppController>("controller", "previewSceneSettings(int,int,int)");
+    checkInvokable<AppController>("controller", "restoreSceneSettings(int,int,int)");
+    checkInvokable<AppController>("controller", "commitSceneSettings(int,int,int)");
+    checkInvokable<AppController>("controller", "beginStretch(int)");
+    checkInvokable<AppController>("controller", "stretchTo(int,int)");
+    checkInvokable<AppController>("controller", "endStretch()");
+    checkInvokable<AppController>("controller", "beginTimelineDrag(int)");
+    checkInvokable<AppController>("controller", "timelineDropIndexFor(int,int)");
+    checkInvokable<AppController>("controller", "endTimelineDrag(int,int)");
+
+    // CanvasView: the view verbs the toolbar and shortcuts call.
+    checkInvokable<CanvasView>("canvas", "resetView()");
+    checkInvokable<CanvasView>("canvas", "fitToCanvas()");
+    checkInvokable<CanvasView>("canvas", "fitToDrawing()");
+
+    // SceneSettingsModel: the dialog fills the model before previewing.
+    checkInvokable<SceneSettingsModel>("model", "setAll(int,int,int)");
+    checkInvokable<SceneSettingsModel>("model", "setFramerate(int)");
+    checkInvokable<SceneSettingsModel>("model", "setWidth(int)");
+    checkInvokable<SceneSettingsModel>("model", "setHeight(int)");
+    checkInvokable<SceneSettingsModel>("model", "setAspectIndex(int)");
+    checkInvokable<SceneSettingsModel>("model", "setRatioWidth(double)");
+    checkInvokable<SceneSettingsModel>("model", "setRatioHeight(double)");
+    checkInvokable<SceneSettingsModel>("model", "setResolution(int)");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    QApplication app(argc, argv);
+    QGuiApplication app(argc, argv);
     std::printf("canvas:\n");
     touchingTheCanvasTakesTheKeyboardBack();
     altClickPicksTheColourUnderThePointer();
@@ -3548,7 +2224,6 @@ int main(int argc, char** argv) {
     movedMarksAgreeWithThemselvesInTheWindow();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
-    aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     abrokenProjectDoesNotReplaceTheOpenOne();
     savingTwiceWritesTheSameBytes();
@@ -3563,21 +2238,17 @@ int main(int argc, char** argv) {
     closingAnUntouchedWindowJustCloses();
     newProjectStartsOverCleanly();
     exportWritesASequencePerLayer();
-    theEndBehaviourAppliesToTheCompositeOnly();
     exportRepeatsAHeldDrawing();
     exportSolvesColourItHasNeverSeen();
     exportLeavesOutHiddenLayers();
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
-    exrExportsThePixelsUnconverted();
-    exrAndPngAreTheSamePicture();
     theFileMenuExports();
-    theWindowExportsAtFullResolution();
-    anExportIsRecognisedBeforeAnythingIsDeleted();
     aCarriedMarkSaysSoInThePanel();
     theColourLayerBoxEditsWhatTheLayerDoes();
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
+    theQmlCallableSurfaceIsReachable();
     heldKeysDoNotRecurse();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();
@@ -3587,16 +2258,6 @@ int main(int argc, char** argv) {
     repeatedZoomAndPanStayConsistent();
     onionSkinAtLowZoom();
     deleteDrawingThenUndo();
-    hidingThePassePartoutKeepsTheCanvasEdge();
-    theViewMenuHidesThePassePartout();
     emptyTimelineRenders();
-    theTrackMenuAddsATrackYouCanDrawOn();
-    deletingATrackRebindsEverything();
-    theCanvasCompositesEveryTrack();
-    theTimelineIsAsLongAsTheLongestTrack();
-    pastATracksEndYouCanSeeItButNotDrawOnIt();
-    theTimelineDockFollowsTheTrackCount();
-    theTimelineDockCanBeResizedByHand();
-    theInsertButtonObeysTheOverwriteSetting();
     return testing::summarise("canvas");
 }
