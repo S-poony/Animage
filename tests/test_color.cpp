@@ -31,6 +31,17 @@ void halfRoundTrips() {
 
     // Subnormals still carry a value rather than flushing to zero.
     CHECK(Half(1e-7f).toFloat() > 0.0f);
+
+    // The bottom edge of the subnormals, where rounding decides between the
+    // smallest value and none at all. 2^-24 is that smallest subnormal; below
+    // it the answer is whichever side of 2^-25 the input falls, with the
+    // halfway case itself tying to even, which is zero.
+    const float smallestSubnormal = std::ldexp(1.0f, -24);
+    CHECK_EQ(Half(smallestSubnormal).bits, static_cast<std::uint16_t>(0x0001));
+    CHECK_EQ(Half(smallestSubnormal * 0.5f).bits, static_cast<std::uint16_t>(0x0000));
+    CHECK_EQ(Half(smallestSubnormal * 0.75f).bits, static_cast<std::uint16_t>(0x0001));
+    CHECK_EQ(Half(-smallestSubnormal * 0.75f).bits, static_cast<std::uint16_t>(0x8001));
+    CHECK_EQ(Half(smallestSubnormal * 0.4f).bits, static_cast<std::uint16_t>(0x0000));
 }
 
 void srgbTransferRoundTrips() {

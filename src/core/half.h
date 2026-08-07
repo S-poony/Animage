@@ -32,7 +32,11 @@ inline std::uint16_t floatToHalfBits(float f) {
         if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) ++h;
         return static_cast<std::uint16_t>(h);
     }
-    if (exp >= -24) {  // subnormal
+    // Subnormal. exp == -25 is below the smallest subnormal (2^-24) but still
+    // rounds into it: the same round-to-nearest-even lands on 0x0001 above the
+    // halfway point and on zero at or below it. Anything smaller cannot reach
+    // halfway, so it is left to the flush below rather than shifted by 26 bits.
+    if (exp >= -25) {
         mant |= 0x00800000u;
         const int shift = -exp - 1;  // -exp - 14 + 13
         std::uint32_t h = mant >> shift;
