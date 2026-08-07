@@ -876,11 +876,9 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
      conversion PNG already does, and it should be offered. What it is *not* is
      the lossless one — see below.
    - **EXR is the lossless one.** Its default pixel type is half, premultiplied,
-     linear: bit for bit what our tiles hold, with no conversion at all. It can
-     also put every layer in one file per frame, which would replace "a folder
-     per layer" with something a compositor likes better — and the layout is the
-     part this file says is harder to change than the format list, so that is
-     worth knowing before the layout hardens further.
+     linear: bit for bit what the *tiles* hold, with no conversion at all. It
+     could also put every layer in one file per frame instead of a folder per
+     layer — that one is decided below, and the answer is not to.
 
    Three things about TIFF that are easy to get wrong, all of them measured
    against what it *can* do rather than what it usually does:
@@ -900,11 +898,101 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
      which is exactly as lossy as the PNG already written. The free TIFF is the
      lossy TIFF.
 
-   One thing to check before building either, rather than assume: Qt 6.2 added
-   `QImage::Format_RGBA16FPx4_Premultiplied`, which is our exact pixel layout.
-   `toSrgb16` currently converts to `Format_RGBA64`, an integer format, because
-   PNG is where it is going — a writer that does not need that round trip may be
-   able to skip it.
+   **`QImage::Format_RGBA16FPx4_Premultiplied` is not the shortcut it looks
+   like, and this was measured rather than reasoned about.** It exists in Qt
+   6.11, it is 8 bytes a pixel, and its halves are bit-identical to ours. It
+   still does not help, for three reasons, the first of which was an error in an
+   earlier draft of this file:
+
+   - **The framebuffer is not half.** `Rgba` is four `float32`. The *tiles* are
+     half; what the compositor hands the exporter is not. So there is no
+     already-half data to pass along and the conversion happens either way.
+   - **EXR wants planar and a QImage is interleaved.** Going framebuffer to
+     half-interleaved QImage to planes is strictly more work than framebuffer to
+     planes.
+   - **Qt cannot write either format here anyway.** `QImageWriter::canWrite` is
+     false for `exr` and for `tif`; the list is bmp cur ico jfif jpeg jpg pbm
+     pgm png ppm xbm xpm.
+
+   So the rule is: **a non-Qt writer reads the `Framebuffer` directly and never
+   builds a QImage.** The one in `toSrgb16` exists solely to reach Qt's PNG
+   writer.
+
+   That probe also turned up a real if invisible bug in `floatToHalfBits`, which
+   flushes to zero where IEEE rounds up — see the note on it in `half.h` if it
+   has been fixed by the time you read this, or measure `1.5 * 2^-25` against
+   `qfloat16` if it has not.
+
+   ### The EXR decisions, taken
+
+   Argued out before any of it was written, because the expensive half of this
+   is not the writer. Each says what would change it.
+
+   **Layout: a file per layer, as now — not every layer as channels in one file
+   per frame.** The specification asks for `un dossier par calque` and the
+   French documents are authoritative, so channels-in-one-file is a deviation
+   and needs an argument rather than a preference. It is also purely additive
+   later: multi-channel would be a third entry in the format list, not a
+   replacement, so nothing is foreclosed. Blender reads plain EXR sequences
+   perfectly well — what multilayer buys there is convenience in the Image node,
+   not capability — and After Effects is *specifically* awkward with
+   multi-channel (it needs the EXtractoR effect) and poor with multi-part, while
+   being perfectly happy with plain RGBA. **What would change it:** somebody
+   actually working in Blender and finding the folders annoying. Before building
+   it, check that Blender groups `layer.R`/`layer.G`/… into selectable layers by
+   testing a hand-made file; that is believed rather than known.
+
+   **Colour: linear, premultiplied, with neither conversion the PNG path makes.**
+   No sRGB transfer function and no unpremultiply. This is not really a choice —
+   it is what EXR's convention is, and it is the whole of why EXR is the lossless
+   option. **The consequence to plan for is that the same frame written as PNG
+   and as EXR will not contain the same numbers**, and whoever compares them will
+   conclude one is broken. That belongs in the dialog and not only in here.
+
+   **Colour, part two: do not write the `chromaticities` attribute.** It is a
+   wash in effect — absent means sRGB primaries by convention, so the file makes
+   that claim either way — and it comes down to whether we assert something the
+   codebase has not decided. The working space today is "linear light" and
+   nothing narrower; `fr/tablettes-couleur-licence.md` contemplates Rec.2020 or
+   ACEScg later. Leave the claim implicit rather than writing down a value
+   somebody has to remember to change. The same ambiguity is already in the
+   shipped PNG path, which applies the sRGB transfer function and assumes its
+   primaries too, so EXR does not introduce it. **What would change it:** pinning
+   the working space, at which point write it.
+
+   **Compression: ZIP.** Lossless, universally read, and line art is mostly
+   transparent so it crushes. Not DWAA, DWAB or B44, which are lossy and would
+   defeat the point of choosing EXR at all. A constant rather than a setting
+   until somebody asks for one.
+
+   **`dataWindow` equal to `displayWindow`, both the canvas.** EXR can store
+   less than the frame it declares, which would let an export keep only the drawn
+   bounding box while every frame stays logically identical — the sparse property
+   the cel format exists for, applied to export, and a real saving on typical
+   line art. It is not the default because a mismatch is handled badly by some
+   readers, After Effects historically among them, and because every frame being
+   the canvas rectangle is a deliberate promise the export tests pin. Worth
+   knowing it is there. A more radical version keeps what runs off the canvas,
+   which is a question about what an export *is* rather than about a format.
+
+   **Half channels, not float.** Exact match to storage, half the bytes, no
+   downside.
+
+   **`tinyexr` lives in the app layer, never in `animage_core`**, which has no
+   external dependencies deliberately. It is BSD-3, so GPL-compatible; it wants
+   the zlib `project_io` already links; include it as a SYSTEM header or
+   `-Werror` will fire on it, and budget an afternoon for what UBSan says about
+   it, since the tests run sanitised by default.
+
+   **Measure before threading the encode.** Now that solving is off the interface
+   thread, encoding is the largest thing left on it — but there is no
+   `bench_export`, and this file's own lesson is that a benchmark decides where
+   you will look next. Write that first and optimise second.
+
+   One behavioural difference to know: `toShort` clamps to [0,1] and EXR would
+   not. Nothing in a composited frame is out of range today — the transparent
+   label's negative light lives in scribble cels and the compositor resolves it —
+   but if one ever leaked, PNG would hide it and EXR would preserve it.
 2. **Rung three of scribbles that move**: one transform per *region* rather than
    one per drawing, from the previous fill's regions. Read
    [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and
