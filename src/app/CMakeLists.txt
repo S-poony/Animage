@@ -43,20 +43,34 @@ target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage
 # code, which is the whole reason the writer is a file of its own.
 target_include_directories(animage_ui SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
 
-# tinyexr wants a zlib-compatible compressor. The project did not link zlib
-# before -- the cel format goes through Qt's qCompress -- but zlib is a
-# transitive dependency of Qt itself, so it is present wherever Qt is and
-# find_package cannot fail on a machine that got this far.
-find_package(ZLIB REQUIRED)
-target_link_libraries(animage_ui PRIVATE ZLIB::ZLIB)
+# And miniz (MIT) for the deflate that ZIP compression needs, vendored rather
+# than linked.
+#
+# The first version used find_package(ZLIB REQUIRED), on the stated grounds that
+# zlib is a transitive dependency of Qt and so must be present. That is wrong.
+# Qt bundles zlib internally and ships neither the headers nor a CMake target,
+# so Windows CI failed at configure with "Could NOT find ZLIB" while Linux and
+# macOS -- which carry zlib for their own reasons -- passed. Vendoring settles
+# it on every platform without a per-platform install step, and makes the
+# compressed bytes identical everywhere, which three different system zlibs
+# would not.
+target_sources(animage_ui PRIVATE ${PROJECT_SOURCE_DIR}/third_party/miniz.c)
+
+# tinyexr only calls miniz's mz_-prefixed entry points, so its zlib-named
+# aliases are switched off. They would otherwise define compress2, uncompress
+# and friends into a process that may already have them from the zlib Qt links
+# -- a collision that resolves silently, and differently per platform.
+target_compile_definitions(animage_ui PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 
 # SYSTEM headers still warn when the *implementation* is compiled, because at
-# that point it is our translation unit. Silence this one file rather than
-# lowering the bar for the tree: a warning in our code is still a build failure.
+# that point it is our translation unit. Silence these two rather than lowering
+# the bar for the tree: a warning in our code is still a build failure.
 if(MSVC)
-  set_source_files_properties(animage/exr_writer.cpp PROPERTIES COMPILE_OPTIONS "/w")
+  set_source_files_properties(animage/exr_writer.cpp ${PROJECT_SOURCE_DIR}/third_party/miniz.c
+                              PROPERTIES COMPILE_OPTIONS "/w")
 else()
-  set_source_files_properties(animage/exr_writer.cpp PROPERTIES COMPILE_OPTIONS "-w")
+  set_source_files_properties(animage/exr_writer.cpp ${PROJECT_SOURCE_DIR}/third_party/miniz.c
+                              PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 
 # Qt defines `signals`, `slots` and `emit` as macros, and Track has a member

@@ -80,8 +80,8 @@ when there is something worth shipping.
 ## Building
 
 Requires a C++20 compiler, CMake 3.21+, and (for the application, not the core
-library) Qt 6.5+ and zlib. zlib is a transitive dependency of Qt, so anywhere
-Qt is found it is too; the EXR writer is the only thing that links it directly.
+library) Qt 6.5+. Nothing else: the EXR writer's compressor is vendored rather
+than linked, so there is no zlib to install on any platform.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -116,7 +116,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests, for the core and for the application's save and load. |
-| `third_party/` | tinyexr, vendored: one BSD-3 header, compiled only in `exr_writer.cpp`. |
+| `third_party/` | tinyexr (BSD-3) and miniz (MIT), vendored and compiled only into `exr_writer.cpp`. |
 | `docs/fr/` | Original design documents. |
 
 ## Running it

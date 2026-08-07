@@ -99,11 +99,36 @@ conclude one is broken. That is why the dialog says so and not only this file.
 The EXR writer is `exr_writer.cpp`, which is the only place tinyexr is compiled —
 one vendored BSD-3 header in `third_party/`, included SYSTEM, and that one
 translation unit built with warnings off so the rest of the tree keeps `-Werror`
-meaning something. It is also the first thing here to link zlib directly: the cel
-format goes through Qt's `qCompress`, so the project never needed it before, and
-tinyexr wants a zlib-compatible compressor for ZIP. zlib is a transitive
-dependency of Qt, so `find_package(ZLIB)` cannot fail on a machine that has got
-this far.
+meaning something.
+
+**Where the compressor comes from is the part that bit.** tinyexr wants a
+zlib-compatible API for ZIP, and the project had never linked zlib — the cel
+format goes through Qt's `qCompress`. The first version used
+`find_package(ZLIB REQUIRED)` on the stated grounds that "zlib is a transitive
+dependency of Qt, so it cannot fail on a machine that has got this far". **That
+was wrong, and CI said so within four minutes.** Qt bundles zlib internally and
+ships neither the headers nor an importable target, so Linux passed (apt has it),
+macOS passed (the SDK has it) and **Windows failed at configure** with
+`Could NOT find ZLIB`, because the Windows job installs no dependencies at all
+and never needed to.
+
+The lesson is not about zlib. It is that "X is a dependency of Y, so X is
+present" confuses *being linked into* with *being available to link against*, and
+a bundled library is exactly the case where those come apart. The three platforms
+disagreeing is what made it visible; a claim like that, verified only on the
+machine it was written on, will hold there and nowhere else.
+
+**miniz is vendored beside tinyexr instead** — MIT, from tinyexr's own `deps/`,
+and `TINYEXR_USE_MINIZ` is what tinyexr expects by default anyway. That removes
+the question on all three platforms with no per-platform install step, and it
+makes the compressed bytes identical everywhere, which linking three different
+system zlibs would not. It costs a second vendored library and a second licence
+in the tree, and nothing measurable in time: the suite is 40 s either way.
+`MINIZ_NO_ZLIB_COMPATIBLE_NAMES` is set, because tinyexr only calls the
+`mz_`-prefixed entry points and the zlib-named aliases would otherwise define
+`compress2` and `uncompress` into a process that may already have them from the
+zlib Qt links — a collision that resolves silently and differently per platform.
+Both files are compiled with warnings off, like the writer itself.
 
 Three things about the writer that a round trip will not catch, which is why they
 are written down. It reads the `Framebuffer` directly and builds no QImage —
@@ -122,6 +147,85 @@ which are a different implementation: the header reports four 16-bit
 floating-point channels, ZIP in blocks of 16 scan lines, and `dataWindow` equal
 to `displayWindow`, and re-tiling forces every pixel through OpenEXR's decoder.
 If you change the writer, run those again rather than trusting the test.
+
+There is a second test pinning that the EXR and the PNG are **the same
+picture**, differing only by the conversions the PNG makes. Two things about it
+are worth reading before changing it, because both were wrong first.
+
+Its tolerance is 24 parts in 65535 and deliberately not zero. The PNG's numbers
+come from the float32 the compositor works in; the EXR's have been through half,
+because half is what it stores — so the EXR path quantises *before* the sRGB
+curve and the curve then magnifies the step, about 15 parts near 0.9 against a
+measured worst of 10. Demanding equality failed on 420 fully opaque pixels and
+looked like a bug; it was arithmetic.
+
+And the fixture sets the colour layer to **half opacity**, which is the whole
+reason the test can fail at all. Without it every partly-covered pixel in the
+scene belongs to the black line art — and black is the one colour where
+premultiplied and straight agree, both being zero. The first version passed with
+the unpremultiply deleted from it. If you write another test about premultiplied
+alpha, the thing it needs is a translucent *coloured* region, and the way to know
+you have one is to break the code and watch it go red.
+
+### The EXR decisions, and what would change them
+
+Argued out before the writer was written, and it was the right order: the
+expensive half of a format is not the writing.
+
+**A file per layer, not every layer as channels in one file per frame.** The
+specification asks for `un dossier par calque` and the French documents are
+authoritative, so channels-in-one-file is a deviation needing an argument rather
+than a preference. It is also purely additive later — multi-channel would be a
+third entry in `exporting::Format`, not a replacement — so nothing is
+foreclosed. Blender reads plain EXR sequences perfectly well; what multilayer
+buys there is convenience in the Image node, not capability. After Effects is
+*specifically* awkward with multi-channel, needing the EXtractoR effect, and poor
+with multi-part, while being perfectly happy with plain RGBA. **What would change
+it:** somebody working in Blender and finding the folders annoying. Before
+building it, check that Blender groups `layer.R`/`layer.G`/… into selectable
+layers by testing a hand-made file; that is believed here rather than known.
+
+**Linear and premultiplied, making neither conversion the PNG path makes.** Not
+really a choice — it is what EXR's convention is, and the whole of why EXR is the
+lossless option.
+
+**No `chromaticities` attribute.** A wash in effect, since an absent one means
+sRGB primaries by convention and the file makes that claim either way; it comes
+down to whether we assert something the codebase has not decided. The working
+space today is "linear light" and nothing narrower, and
+`fr/tablettes-couleur-licence.md` contemplates Rec.2020 or ACEScg later. The same
+ambiguity is already in the PNG path, which applies the sRGB transfer function
+and assumes its primaries, so EXR does not introduce it. **What would change it:**
+pinning the working space, at which point write it.
+
+**ZIP compression.** Lossless, universally read, and line art is mostly
+transparent so it crushes. Not DWAA, DWAB or B44, which are lossy and would
+defeat the point of choosing EXR at all. A constant rather than a setting until
+somebody asks.
+
+**`dataWindow` equal to `displayWindow`, both the canvas.** EXR can store less
+than the frame it declares, which would let an export keep only the drawn
+bounding box while every frame stays logically identical — the sparse property
+the cel format exists for, applied to export, and a real saving on typical line
+art. It is not the default because a mismatch is handled badly by some readers,
+After Effects historically among them, and because every frame being the canvas
+rectangle is a promise the export tests pin. **What would change it:** wanting the
+file sizes more than the compatibility. A more radical version keeps what runs
+off the canvas, which is a question about what an export *is* rather than about a
+format.
+
+**Half channels, not float.** Exact match to storage, half the bytes, no
+downside.
+
+**Measure before threading the encode.** Solving is off the interface thread now,
+so encoding is the largest thing left on it — but there is no `bench_export`, and
+this file's own lesson is that a benchmark decides where you will look next.
+Write that first and optimise second.
+
+One behavioural difference to know: `toShort` clamps to [0,1] and EXR does not.
+Nothing in a composited frame is out of range today — the transparent label's
+negative light lives in scribble cels and the compositor resolves it — but if one
+ever leaked, PNG would hide it and EXR would preserve it.
 
 **An export replaces what was in the folder, and "overwrite" had to be made
 true before it could be said.** The word was going to go on a confirmation

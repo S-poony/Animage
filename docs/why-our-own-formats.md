@@ -290,7 +290,10 @@ Not dogma. Any of these would reopen it:
 - **If cels needed to be readable by other software** more than they need to fit
   the sparse model — for instance if people started exchanging individual
   drawings rather than exported sequences — OpenEXR becomes the right answer and
-  the conversion is mechanical.
+  the conversion is mechanical. This got cheaper since it was written: the export
+  now writes EXR, so an OpenEXR writer is in the tree and the work would be
+  teaching it about sparse tiles rather than acquiring it. The shape objection is
+  unchanged and is still the whole argument.
 - **If the drawing surface became bounded**, the shape objection disappears and
   a standard format is straightforwardly better.
 - **If pixels moved to 16-bit integer *and* the surface became bounded**, PNG

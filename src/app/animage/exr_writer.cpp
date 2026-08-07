@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "exr_writer.h"
 
-// tinyexr is compiled here and nowhere else. It wants a zlib-compatible API
-// declared before it, which is why zlib.h comes first and TINYEXR_USE_MINIZ is
-// off -- the alternative is vendoring miniz as well for a compressor the
-// platform already has. See the build file for why this one translation unit
-// is compiled with the warnings turned off.
-#include <zlib.h>
-
-#define TINYEXR_USE_MINIZ 0
+// tinyexr is compiled here and nowhere else, with miniz as its compressor --
+// both vendored in third_party rather than linked, because Qt bundling zlib
+// does not make zlib available to link against and Windows has none of its own.
+// See the build file. It is also why this one translation unit is compiled with
+// the warnings turned off.
+#define TINYEXR_USE_MINIZ 1
 #define TINYEXR_USE_STB_ZLIB 0
 #define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"

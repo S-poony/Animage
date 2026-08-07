@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
-project(Animage VERSION 0.1.0 LANGUAGES CXX)
+# C is here only for miniz, the deflate implementation the EXR writer uses. See
+# src/app/CMakeLists.txt: it is vendored rather than linked because Qt bundling
+# zlib does not make zlib available to link against, which cost a red Windows
+# build to establish.
+project(Animage VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
