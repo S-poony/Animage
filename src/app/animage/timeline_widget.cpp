@@ -145,6 +145,10 @@ int TimelineWidget::sceneEndX() const {
 }
 
 bool TimelineWidget::isOnSceneEnd(int x) const {
+    // Only when the scene is the one saying where the shot ends. With the
+    // setting off there is no boundary drawn, and a grab zone you cannot see is
+    // worse than no handle at all.
+    if (!doc_.scene().fixed_length) return false;
     return std::abs(x - sceneEndX()) <= kEdgeGrab;
 }
 
@@ -343,12 +347,19 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     // whole panel with a grip in the ruler: the line is the fact, the grip is
     // the control, and the ruler is where a scene-level control belongs -- the
     // rows below are a track's own time.
-    const int end_x = sceneEndX();
-    painter.setPen(QPen(colours.boundary, 2));
-    painter.drawLine(end_x, 0, end_x, height());
-    painter.setBrush(colours.boundary);
-    painter.setPen(Qt::NoPen);
-    painter.drawRect(QRect(end_x - 3, 0, 6, kRulerHeight));
+    //
+    // Only when the scene fixes the length. Left to the tracks, the shot ends
+    // where the longest one does and the rows already show that by stopping, so
+    // the line would say nothing twice -- in a colour that means a constraint,
+    // while none is being applied.
+    if (doc_.scene().fixed_length) {
+        const int end_x = sceneEndX();
+        painter.setPen(QPen(colours.boundary, 2));
+        painter.drawLine(end_x, 0, end_x, height());
+        painter.setBrush(colours.boundary);
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(QRect(end_x - 3, 0, 6, kRulerHeight));
+    }
 }
 
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
