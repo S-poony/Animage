@@ -15,6 +15,7 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPointF>
 
@@ -332,6 +333,81 @@ void theViewSitsOnWholeScreenPixels() {
 // over. It asked about the zoom when the factor being applied is
 // cache_step_ * zoom_, and it switched to nearest-neighbour at 101%, where
 // there is nothing to see and a curve gains a staircase.
+// The fault: `setZoom` measured its anchor through `imageFromWidget`, which
+// reports the view *after* it has been rounded to a whole screen pixel, and
+// then stored the rounded result. So each event began from the last event's
+// rounding error and added its own. A gesture is delivered as many events, so
+// they compounded into a random walk -- and worst in the vertical, which a
+// sideways drag never meant to touch at all.
+//
+// It scaled with the event rate rather than with the zoom, which is what made
+// it read as "zooming slowly wanders": the same 300 px drag drifted 3 px
+// vertically when delivered as 6 events and 153 px as 600.
+//
+// The gesture is driven here through the real key and mouse events, because
+// the arithmetic was not obviously wrong when read -- it was wrong in what it
+// measured against, and only the whole path shows that.
+void aScrubbyZoomHoldsItsAnchorAtEveryEventRate() {
+    TEST("a scrubby zoom holds its anchor however slowly it is dragged");
+    Fixture fixture(1645, 765);
+
+    // The same gesture every time -- the pointer travels 300 px to the right.
+    // Only the number of events carrying it changes, which is exactly what
+    // dragging slowly means: a slow hand sends many small moves, a flick a few.
+    for (int events : {6, 30, 150, 600, 1200}) {
+        fixture.canvas.resetView();
+        fixture.canvas.grab();
+
+        const QPointF anchor(700.0, 300.0);
+        // Where the anchor is pointing, in the image, as shown. Through pan()
+        // rather than the exact pan on purpose: what must hold still is what
+        // the artist can see, including the alignment.
+        const auto imageUnderAnchor = [&] {
+            const QPointF at = fixture.canvas.pan();
+            const double zoom = fixture.canvas.zoom();
+            return QPointF(at.x() + anchor.x() / zoom, at.y() + anchor.y() / zoom);
+        };
+
+        QKeyEvent zoom_down(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &zoom_down);
+        QMouseEvent press(QEvent::MouseButtonPress, anchor, anchor, Qt::LeftButton,
+                          Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &press);
+
+        const QPointF held = imageUnderAnchor();
+        double worst = 0.0;
+        for (int i = 1; i <= events; ++i) {
+            const QPointF at = anchor + QPointF(300.0 * i / events, 0.0);
+            QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::LeftButton,
+                             Qt::NoModifier);
+            QApplication::sendEvent(&fixture.canvas, &move);
+
+            const QPointF now = imageUnderAnchor();
+            const double zoom = fixture.canvas.zoom();
+            worst = std::max(worst, std::hypot((now.x() - held.x()) * zoom,
+                                               (now.y() - held.y()) * zoom));
+        }
+
+        QMouseEvent release(QEvent::MouseButtonRelease, anchor, anchor, Qt::LeftButton,
+                            Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &release);
+        QKeyEvent zoom_up(QEvent::KeyRelease, Qt::Key_Z, Qt::NoModifier);
+        QApplication::sendEvent(&fixture.canvas, &zoom_up);
+
+        // Aligning to a whole screen pixel is allowed to move it half a pixel
+        // in each axis, so about 0.71 diagonally. 1.5 covers that and the
+        // rounding at both ends without leaving room for the fault, whose
+        // *smallest* measured drift was 3 px and whose largest was 153.
+        if (worst > 1.5) {
+            testing::fail(__FILE__, __LINE__,
+                          "the anchor wandered " + std::to_string(worst) +
+                              " screen px during a 300 px scrubby zoom delivered as " +
+                              std::to_string(events) + " events");
+        }
+        CHECK(worst <= 1.5);
+    }
+}
+
 void theBlitInterpolatesUntilThePixelsAreWorthSeeing() {
     TEST("the blit interpolates until the pixels are worth seeing");
 
@@ -429,6 +505,7 @@ int main(int argc, char** argv) {
     samplingDensityTracksZoomWithNoStep();
     theCacheDoesNotGrowAsTheViewZoomsOut();
     theViewSitsOnWholeScreenPixels();
+    aScrubbyZoomHoldsItsAnchorAtEveryEventRate();
     theBlitInterpolatesUntilThePixelsAreWorthSeeing();
     theWritebackIsNotTheSlowHalfOfARefresh();
     return testing::summarise("render");

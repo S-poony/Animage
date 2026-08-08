@@ -519,12 +519,20 @@ void CanvasWidget::rebuildOnion() {
     }
 }
 
+QPointF CanvasWidget::pan() const { return onWholeScreenPixels(pan_, zoom_); }
+
+// Both transforms go through pan() rather than pan_, so what the pen is told it
+// is touching is what the blit actually put there. The half-pixel of alignment
+// is applied identically to input and output, which is the only way the two can
+// agree.
 QPointF CanvasWidget::imageFromWidget(const QPointF& widget_point) const {
-    return {pan_.x() + widget_point.x() / zoom_, pan_.y() + widget_point.y() / zoom_};
+    const QPointF at = pan();
+    return {at.x() + widget_point.x() / zoom_, at.y() + widget_point.y() / zoom_};
 }
 
 QPointF CanvasWidget::widgetFromImage(const QPointF& image_point) const {
-    return {(image_point.x() - pan_.x()) * zoom_, (image_point.y() - pan_.y()) * zoom_};
+    const QPointF at = pan();
+    return {(image_point.x() - at.x()) * zoom_, (image_point.y() - at.y()) * zoom_};
 }
 
 PixelRect CanvasWidget::visibleImageRect() const {
@@ -1052,10 +1060,13 @@ bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
         return true;
     }
     if (panning_) {
+        // Absolute from where the drag began, so this one never accumulated --
+        // but it stores an exact pan now like everything else, and lets pan()
+        // do the aligning. One rule about where rounding happens is easier to
+        // keep than three call sites that each remember to.
         const QPointF moved = widget_point - pan_anchor_widget_;
-        pan_ = onWholeScreenPixels({pan_anchor_image_.x() - moved.x() / zoom_,
-                                    pan_anchor_image_.y() - moved.y() / zoom_},
-                                   zoom_);
+        pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
+                pan_anchor_image_.y() - moved.y() / zoom_};
         ensureCacheCoversView();
         update();
         Q_EMIT viewChanged();
@@ -1223,11 +1234,26 @@ void CanvasWidget::setZoom(double zoom, const QPointF& widget_anchor) {
     const double clamped = std::clamp(zoom, kMinZoom, kMaxZoom);
     if (std::abs(clamped - zoom_) < 1e-9) return;
 
-    // Keep the image point under the anchor where it is.
-    const QPointF before = imageFromWidget(widget_anchor);
+    // Keep the image point under the anchor where it is. Written out in full
+    // rather than measured as the difference of two imageFromWidget calls, and
+    // applied to the exact pan rather than the aligned one. Both matter.
+    //
+    // Measuring it through imageFromWidget reads the view *after* rounding to a
+    // screen pixel, so the half-pixel of alignment lands in the difference; and
+    // storing the rounded result put that half-pixel into the state the next
+    // event would measure from. A scrubby zoom is one gesture delivered as many
+    // events, so the errors did not cancel, they compounded -- a random walk in
+    // both axes, and worst in the one the gesture never meant to touch.
+    //
+    // It scaled with the *event rate*, not with the zoom, which is why it read
+    // as "slow zooming wanders". The same 300 px drag: 3 px of vertical drift
+    // delivered as 6 events, 21 px as 300, 153 px as 600. Held exact it is
+    // 0.00 px at every rate, and what reaches the screen is bounded by the half
+    // pixel the alignment is allowed to move it. See tests/test_render.cpp.
+    const double was = 1.0 / zoom_;
+    const double now = 1.0 / clamped;
+    pan_ += QPointF(widget_anchor.x() * (was - now), widget_anchor.y() * (was - now));
     zoom_ = clamped;
-    const QPointF after = imageFromWidget(widget_anchor);
-    pan_ = onWholeScreenPixels(pan_ + (before - after), zoom_);
 
     ensureCacheCoversView();
     update();
@@ -1262,9 +1288,8 @@ void CanvasWidget::fitTo(const PixelRect& bounds) {
     const double scale_x = static_cast<double>(width()) / bounds.width;
     const double scale_y = static_cast<double>(height()) / bounds.height;
     zoom_ = std::clamp(std::min(scale_x, scale_y) * 0.9, kMinZoom, kMaxZoom);
-    pan_ = onWholeScreenPixels({bounds.x + bounds.width / 2.0 - width() / (2.0 * zoom_),
-                                bounds.y + bounds.height / 2.0 - height() / (2.0 * zoom_)},
-                               zoom_);
+    pan_ = {bounds.x + bounds.width / 2.0 - width() / (2.0 * zoom_),
+            bounds.y + bounds.height / 2.0 - height() / (2.0 * zoom_)};
 
     ensureCacheCoversView();
     update();

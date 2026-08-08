@@ -95,7 +95,13 @@ public:
     // The image coordinate at the widget's top-left corner. Always on a whole
     // screen pixel -- see onWholeScreenPixels -- which is what lets the cache
     // blit one entry to one pixel instead of being resampled against itself.
-    QPointF pan() const { return pan_; }
+    //
+    // The alignment is applied here, on the way out, rather than being stored.
+    // `pan_` behind it is exact and is never snapped. That distinction is the
+    // whole of the fix for the wandering scrubby zoom: rounding to a screen
+    // pixel is a property of *showing* the view, and writing it back into the
+    // view made every gesture start from the last rounding error and add to it.
+    QPointF pan() const;
     void setZoom(double zoom, const QPointF& widget_anchor);
     void resetView();
     void fitToDrawing();
@@ -289,7 +295,10 @@ private:
     std::size_t slot_ = 0;
     bool playing_ = false;
 
-    QPointF pan_;  // image coordinate shown at the widget's top-left corner
+    // Image coordinate shown at the widget's top-left corner, exact. Read it
+    // through pan(), which is where it gets aligned to a screen pixel; nothing
+    // should ever store that aligned value back here.
+    QPointF pan_;
     double zoom_ = 1.0;
 
     bool stroking_ = false;
