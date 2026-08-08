@@ -31,11 +31,15 @@ public:
     void updateTrack(TrackId track, const TrackProperties& properties);
     void setFramerate(int framerate);
 
-    // How long the shot is, in frames. Zero means "as long as the longest
-    // track", which is the default and what happened before it could be said.
-    // Clamped rather than validated, like the canvas: a negative length has
-    // nothing to mean.
-    void setSceneLength(int frames);
+    // How long the shot is. `fixed` off takes it from the tracks, which is the
+    // default; on makes `frames` the shot whatever the tracks do, and a track is
+    // then allowed to run past it. Clamped rather than validated, like the
+    // canvas: a negative length has nothing to mean.
+    //
+    // Nothing a track does may call this. The scene sits above the tracks, so
+    // adding a drawing lengthens the track and never the shot -- a setting that
+    // edits itself when you draw is not a setting.
+    void setSceneLength(bool fixed, int frames);
 
     // The exported rectangle. Clamped to something sane rather than validated:
     // a scene with a zero-width canvas has nothing to show and nothing to

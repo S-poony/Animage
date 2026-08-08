@@ -64,6 +64,12 @@ private:
     int rowTop(std::size_t row) const;
 
     std::size_t slotAt(int x) const;
+    // Where the shot ends, in x. The boundary is grabbed in the ruler and
+    // nowhere else: the ruler is the scene's own time, which is what the shot's
+    // length belongs to, and it keeps the handle clear of the run edges in the
+    // rows below, which are a track's business and sometimes at the same x.
+    int sceneEndX() const;
+    bool isOnSceneEnd(int x) const;
     // First and last slot of the run of identical ImageIds containing `slot`,
     // in the given row's track.
     std::pair<std::size_t, std::size_t> runAt(std::size_t row, std::size_t slot) const;
@@ -91,6 +97,10 @@ private:
     // Dragging in the ruler band scrubs. Keeping it in its own strip is what
     // stops a scrub from turning into an exposure change by accident.
     bool scrubbing_ = false;
+    // Dragging the end-of-shot boundary in the ruler. Doing so fixes the scene
+    // length: you are saying where the shot ends, which is the whole of what the
+    // setting means.
+    bool dragging_end_ = false;
 
     // Dragging the body of a numbered card reorders the drawing. Only the
     // numbered card can start one: a held frame is not a thing in its own

@@ -27,7 +27,7 @@ constexpr int kGutterWidth = 104;
 // theme too, if the system asks for one.
 struct Palette {
     QColor background, ruler, cell, cell_held, outline, tick, text, current, current_text;
-    QColor carried, gutter, gutter_current;
+    QColor carried, gutter, gutter_current, outside, boundary;
 };
 
 Palette paletteFor(const QWidget& widget) {
@@ -51,6 +51,12 @@ Palette paletteFor(const QWidget& widget) {
     // Not from the palette: this has to mean the same thing in every theme, and
     // "carried" is not a role a system palette has.
     p.carried = QColor(0x5b, 0x9c, 0xd6);
+    // A wash over cells outside the shot rather than a different cell colour, so
+    // whatever the cell was still reads through it -- held, carried, numbered.
+    p.outside = QColor(window.red(), window.green(), window.blue(), 150);
+    // "The shot ends here" has to mean the same in every theme, and it is not a
+    // role a system palette has.
+    p.boundary = QColor(0xd0, 0x45, 0x3c);
     return p;
 }
 
@@ -99,7 +105,7 @@ void TimelineWidget::setTrack(TrackId track) {
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
     // Against the scene and not against one track: the playhead is the
     // timeline's, so it can stand on a frame that this track does not reach.
-    const std::size_t frames = doc_.scene().frameCount();
+    const std::size_t frames = doc_.scene().timelineFrames();
     if (frames == 0) return;
     const std::size_t clamped = std::min(slot, frames - 1);
     if (clamped == current_slot_) return;
@@ -109,7 +115,7 @@ void TimelineWidget::setCurrentSlot(std::size_t slot) {
 }
 
 void TimelineWidget::refresh() {
-    const std::size_t frames = doc_.scene().frameCount();
+    const std::size_t frames = doc_.scene().timelineFrames();
     if (frames > 0 && current_slot_ >= frames) {
         current_slot_ = frames - 1;
         Q_EMIT currentSlotChanged(current_slot_);
@@ -122,16 +128,24 @@ void TimelineWidget::refresh() {
 }
 
 QSize TimelineWidget::sizeHint() const {
-    const int frames = static_cast<int>(doc_.scene().frameCount());
+    const int frames = static_cast<int>(doc_.scene().timelineFrames());
     const int rows = static_cast<int>(std::max<std::size_t>(rowCount(), 1));
     return {kGutterWidth + (frames + 2) * kCellWidth, kRulerHeight + rows * kRowHeight};
 }
 
 std::size_t TimelineWidget::slotAt(int x) const {
-    const std::size_t frames = doc_.scene().frameCount();
+    const std::size_t frames = doc_.scene().timelineFrames();
     if (frames == 0) return 0;
     const int index = std::clamp((x - kGutterWidth) / kCellWidth, 0, static_cast<int>(frames) - 1);
     return static_cast<std::size_t>(index);
+}
+
+int TimelineWidget::sceneEndX() const {
+    return kGutterWidth + static_cast<int>(doc_.scene().shotFrames()) * kCellWidth;
+}
+
+bool TimelineWidget::isOnSceneEnd(int x) const {
+    return std::abs(x - sceneEndX()) <= kEdgeGrab;
 }
 
 std::pair<std::size_t, std::size_t> TimelineWidget::runAt(std::size_t row,
@@ -200,7 +214,8 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     font.setPointSizeF(8.5);
     painter.setFont(font);
 
-    const std::size_t frames = doc_.scene().frameCount();
+    const std::size_t frames = doc_.scene().timelineFrames();
+    const std::size_t shot = doc_.scene().shotFrames();
 
     // The ruler, once, across the whole width: it is the scene's time and not
     // any one track's.
@@ -244,6 +259,11 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             const QRect cell(x, top + 2, kCellWidth - 1, kRowHeight - 8);
 
             painter.fillRect(cell, held ? colours.cell_held : colours.cell);
+            // Outside the shot: there is a drawing here and you may work on it,
+            // but it will not play and will not be exported until the boundary
+            // is dragged past it. Said on the cell, because an export that
+            // quietly leaves work out is the expensive kind of surprise.
+            if (i >= shot) painter.fillRect(cell, colours.outside);
 
             if (held) {
                 // A held drawing is one block with a tail, not a repeated cell.
@@ -318,6 +338,17 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
                          QString::number(current_slot_ + 1));
     }
+
+    // Where the shot ends, drawn last so nothing paints over it. A line down the
+    // whole panel with a grip in the ruler: the line is the fact, the grip is
+    // the control, and the ruler is where a scene-level control belongs -- the
+    // rows below are a track's own time.
+    const int end_x = sceneEndX();
+    painter.setPen(QPen(colours.boundary, 2));
+    painter.drawLine(end_x, 0, end_x, height());
+    painter.setBrush(colours.boundary);
+    painter.setPen(Qt::NoPen);
+    painter.drawRect(QRect(end_x - 3, 0, 6, kRulerHeight));
 }
 
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
@@ -325,9 +356,17 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
 
-    // The ruler is a scrub band and nothing else. Exposure edges live below it,
-    // so dragging along time can never resize a hold by accident.
+    // The ruler is a scrub band, apart from the end-of-shot grip in it. Exposure
+    // edges live below it, so dragging along time can never resize a hold by
+    // accident, and the grip is the one thing up here that is not scrubbing.
     if (y < kRulerHeight) {
+        if (isOnSceneEnd(x)) {
+            dragging_end_ = true;
+            // One command for the whole drag, as the exposure stretch does, so
+            // dragging the boundary about undoes in a single step.
+            doc_.beginCommand("Scene length");
+            return;
+        }
         scrubbing_ = true;
         setCurrentSlot(slotAt(x));
         return;
@@ -388,6 +427,18 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
 
+    if (dragging_end_) {
+        // Dragging it says where the shot ends, which is exactly what fixing the
+        // length means -- so the drag turns the setting on rather than needing it
+        // on first.
+        const int frames = static_cast<int>(
+            std::lround(static_cast<double>(x - kGutterWidth) / kCellWidth));
+        doc_.setSceneLength(true, std::max(1, frames));
+        refresh();
+        Q_EMIT documentChanged();
+        return;
+    }
+
     if (scrubbing_) {
         setCurrentSlot(slotAt(x));
         return;
@@ -438,7 +489,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 
     if (!stretching_ && y < kRulerHeight) {
         hovering_edge_ = false;
-        setCursor(Qt::PointingHandCursor);
+        setCursor(isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::PointingHandCursor);
         return;
     }
 
@@ -504,6 +555,13 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
         return;
     }
     may_drag_ = false;
+
+    if (dragging_end_) {
+        dragging_end_ = false;
+        doc_.endCommand();
+        Q_EMIT documentChanged();
+        return;
+    }
 
     if (scrubbing_) {
         scrubbing_ = false;

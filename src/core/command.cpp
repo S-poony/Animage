@@ -123,6 +123,7 @@ void SceneFramerateOp::applySwap(Document& doc) {
 }
 
 void SceneLengthOp::applySwap(Document& doc) {
+    std::swap(doc.mutableScene().fixed_length, fixed_);
     std::swap(doc.mutableScene().length, length_);
 }
 

@@ -40,27 +40,49 @@ struct Scene {
 
     std::vector<Track> tracks;
 
-    // How long the shot is, said outright rather than left to whichever track
-    // happens to be longest.
+    // Whether the shot's length is the scene's to say, or is taken from whatever
+    // the tracks add up to.
     //
-    // Zero means "as long as the longest track", which is what it was before the
-    // setting existed and is still the right default: a shot being made up as it
-    // goes has no length yet. Set it and the shot is that long, which is what
-    // makes a cycle worth having -- a four-drawing walk cycles over sixty frames
-    // because the scene says sixty, and with nothing to say it the walk would be
-    // the longest track and cycle over nothing at all.
-    int length = 0;
+    // Off by default, which is what happened before it could be said: a shot
+    // being made up as it goes has no length yet, and deriving one is the honest
+    // answer. Switch it on and the number below is the shot, whatever the tracks
+    // do -- which is the state you want when the length is decided first,
+    // animating to a soundtrack or filling an exposure sheet, and it is what
+    // makes a cycle worth having. A four-drawing walk cycles over sixty frames
+    // because the scene says sixty; with nothing to say it, the walk is the
+    // longest track and cycles over nothing at all.
+    //
+    // Two fields rather than a sentinel value, because "derived" and "sixty" are
+    // different kinds of answer and a zero pretending to mean the first is the
+    // sort of thing that gets typed into by accident.
+    bool fixed_length = false;
+    int length = 100;
 
-    // The length in frames. Never shorter than the longest track: a scene that
-    // could be set shorter than its own contents would put drawings past the end
-    // of the timeline, where nothing can reach them and only the file would know
-    // they were there. So this is a floor the shot is held to, not a limit
-    // imposed on it, and shortening a shot means shortening its tracks.
-    std::size_t frameCount() const {
-        std::size_t frames = (length > 0) ? static_cast<std::size_t>(length) : 0;
+    // What the tracks alone make it.
+    std::size_t longestTrack() const {
+        std::size_t frames = 0;
         for (const Track& track : tracks) frames = std::max(frames, track.frameCount());
         return frames;
     }
+
+    // The shot: what plays, and what is exported. Nothing else.
+    //
+    // With a fixed length this is a cap, and a track is allowed to run past it.
+    // Drawings out there are not lost and not hidden -- the timeline still shows
+    // them and you can still work on them -- they are simply not in the shot
+    // until the boundary is moved past them. Cutting a shot short must not mean
+    // destroying what is beyond the cut.
+    std::size_t shotFrames() const {
+        return fixed_length ? static_cast<std::size_t>(std::max(0, length)) : longestTrack();
+    }
+
+    // Everything the timeline can reach: the shot, or a track that runs past it.
+    //
+    // Separate from shotFrames on purpose, and the split is the whole of how a
+    // cap works. Everything that draws or scrubs wants this one; everything that
+    // plays or writes files wants the other. A max() hidden inside one function
+    // could not tell them apart.
+    std::size_t timelineFrames() const { return std::max(shotFrames(), longestTrack()); }
 
     const Track* findTrack(TrackId id) const {
         for (const Track& t : tracks) {

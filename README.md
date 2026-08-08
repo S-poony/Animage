@@ -175,10 +175,17 @@ sequences: **a layer's folder is as long as its own track.** A background drawn
 once exports one frame, and downstream you import the still rather than a
 sequence. It does mean layer folders can differ in length.
 
-**How long the shot is** is set under Edit ▸ Scene settings, in frames, with the
-duration in seconds beside it. Left at its default it is as long as the longest
-track, and it cannot be set shorter than that -- shortening a shot means
-shortening its tracks.
+**How long the shot is.** By default, as long as the longest track. Tick *Fixed
+scene length* under Edit ▸ Scene settings and the number beside it is the shot
+instead, in frames, with the duration in seconds shown under it.
+
+Fixed, the boundary is a red line down the timeline with a grip in the ruler, and
+you can drag it. A track is allowed to run past it: those frames are washed out
+in the timeline, the status bar says *outside the shot*, and they are not played
+and not exported until you move the boundary. Nothing is thrown away -- you can
+still scrub to them and draw on them -- so cutting a shot short is not the same
+as deleting the end of it. Adding a drawing never moves the boundary; the scene
+says how long the shot is, not the tracks.
 
 **Overwrite drawings**, in the Track menu, is per track and on by default. On,
 the shot is a fixed length and a new drawing lands on the playhead and takes over

@@ -709,17 +709,47 @@ it — a clickable state icon, as TVPaint has, which is
 [issue #22](https://github.com/S-poony/Animage/issues/22). Not a widget on the
 row: see "a widget on a list row disables that row's own tick".
 
-**A shot can now be told how long it is.** `Scene::length` in frames, under Edit
-▸ Scene settings with the duration in seconds beside it, because frames are what
-an exposure sheet counts in and seconds are what a brief is written in. Zero
-means "as long as the longest track", which is the default and what happened
-before it could be said.
+**A shot can now be told how long it is, and the length is a cap rather than a
+floor.** That is the second design; the first one is worth recording because the
+difference is instructive.
 
-It is a floor and not a limit: `Scene::frameCount` is the larger of the length
-and the longest track, so a shot cannot be set shorter than its own contents.
-That would leave drawings past the end of the timeline where nothing can reach
-them and only the file would know they were there; shortening a shot means
-shortening its tracks. It is also what makes a cycle worth having — without it a
+`Scene::fixed_length` and `Scene::length`, under Edit ▸ Scene settings as a
+checkbox and a number, with the duration in seconds under it — frames are what an
+exposure sheet counts in and seconds are what a brief is written in, and the
+framerate is the only thing connecting them. Off by default, which is what
+happened before it could be said. Two fields rather than a zero sentinel, because
+"derived" and "sixty" are different kinds of answer.
+
+**The first version made it a floor** — the shot was the larger of the length and
+the longest track — on the grounds that a shot shorter than its own contents
+would strand drawings past the end of the timeline where nothing could reach
+them. That reasoning was sound and the conclusion was wrong: it made the setting
+unable to do the one thing it is for, which is to say a shot is sixty frames when
+a track runs to eighty. The answer is not to forbid the case but to keep the
+drawings reachable, so:
+
+| | |
+|---|---|
+| `Scene::shotFrames()` | the shot. What plays, and what is exported — the composite *and* every layer's own sequence. |
+| `Scene::timelineFrames()` | everything reachable: the shot, or a track that runs past it. What the timeline draws and what scrubbing, stepping and the canvas clamp to. |
+
+They differ only past a fixed boundary, and keeping them apart is the whole of
+how a cap works — a `max()` hidden inside one function could not tell a caller
+that plays from a caller that draws. Frames out there are washed over in the
+timeline, the status bar says "outside the shot", and they are still editable.
+Cutting a shot short must not mean destroying what is beyond the cut.
+
+The boundary is drawn as a line down the panel with a grip in the ruler, and
+dragging it fixes the length — you are saying where the shot ends, which is what
+the setting means. The grip is in the ruler and nowhere else on purpose: the
+ruler is the scene's own time, and it keeps the handle clear of the run edges in
+the rows, which belong to a track and are sometimes at the same x.
+
+**Nothing a track does may move it.** The scene sits above the tracks, so adding
+a drawing lengthens the track and never the shot. A setting that edits itself
+when you draw is not a setting.
+
+A fixed length is also what makes a cycle worth having: without one, a
 four-drawing walk is the longest track and cycles over nothing at all.
 
 The solve counter in the export had to change with it. It used to skip repeats of

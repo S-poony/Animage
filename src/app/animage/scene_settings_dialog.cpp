@@ -2,6 +2,7 @@
 #include "scene_settings_dialog.h"
 
 #include <QAbstractSpinBox>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -60,8 +61,8 @@ bool sameShape(double a_w, double a_h, double b_w, double b_h) {
 
 }  // namespace
 
-SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, int length,
-                                         int shortest, QWidget* parent)
+SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, bool fixed,
+                                         int length, int shortest, QWidget* parent)
     : QDialog(parent), shortest_(std::max(0, shortest)) {
     setWindowTitle(QStringLiteral("Scene settings"));
 
@@ -75,25 +76,35 @@ SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, i
     framerate_->setSuffix(QStringLiteral(" fps"));
     timing_form->addRow(QStringLiteral("Framerate"), framerate_);
 
-    // The shot's length, in frames, because that is what an exposure sheet
-    // counts in. It cannot go below what the tracks already make it: a shot
-    // shorter than its own contents would leave drawings past the end of the
-    // timeline, reachable by nothing but the file.
+    // Off, the shot is however long the tracks make it, which is what a shot
+    // being made up as it goes wants. On, the number is the shot and the tracks
+    // answer to it -- the state you want when the length is decided first.
+    fixed_length_ = new QCheckBox(QStringLiteral("Fixed scene length"), timing);
+    fixed_length_->setChecked(fixed);
+    fixed_length_->setToolTip(
+        QStringLiteral("Off, the shot is as long as the longest track.\n"
+                       "On, the shot is the length below whatever the tracks do: a track may\n"
+                       "run past it, and the frames out there are not played or exported\n"
+                       "until you move the boundary. A track that cycles or holds fills up to\n"
+                       "here, which is what makes a short cycling track worth having."));
+    timing_form->addRow(QString(), fixed_length_);
+
     length_ = new QSpinBox(timing);
-    length_->setRange(std::max(1, shortest_), 100000);
-    length_->setValue(std::max(length, shortest_));
+    length_->setRange(1, 100000);
+    length_->setValue(std::max(1, length));
     length_->setSuffix(QStringLiteral(" frames"));
-    length_->setToolTip(
-        QStringLiteral("How long the shot is.\n"
-                       "A track that cycles or holds fills the frames up to here, so this is\n"
-                       "what makes a short cycling track worth having. It cannot be set\n"
-                       "shorter than the longest track -- shorten the track instead."));
     timing_form->addRow(QStringLiteral("Length"), length_);
 
     length_seconds_ = new QLabel(timing);
     length_seconds_->setEnabled(false);  // a readout, not a control
     timing_form->addRow(QString(), length_seconds_);
+
+    syncLengthEnabled();
     syncLengthSeconds();
+    connect(fixed_length_, &QCheckBox::toggled, this, [this] {
+        syncLengthEnabled();
+        syncLengthSeconds();
+    });
     connect(length_, &QSpinBox::valueChanged, this, &SceneSettingsDialog::syncLengthSeconds);
     connect(framerate_, &QSpinBox::valueChanged, this, &SceneSettingsDialog::syncLengthSeconds);
 
@@ -230,14 +241,27 @@ void SceneSettingsDialog::mousePressEvent(QMouseEvent* event) {
     QDialog::mousePressEvent(event);
 }
 
+// The number is only the shot's when the box is ticked, so it is only editable
+// then. Greyed rather than hidden: a control that vanishes takes the answer to
+// "how long is this" with it, and the tracks' own length is worth reading even
+// when you are not the one setting it.
+void SceneSettingsDialog::syncLengthEnabled() {
+    if (!length_ || !fixed_length_) return;
+    const bool fixed = fixed_length_->isChecked();
+    length_->setEnabled(fixed);
+    if (!fixed) length_->setValue(std::max(1, shortest_));
+}
+
 void SceneSettingsDialog::syncLengthSeconds() {
     if (!length_seconds_ || !length_ || !framerate_) return;
     const int fps = std::max(1, framerate_->value());
     const double seconds = static_cast<double>(length_->value()) / fps;
-    length_seconds_->setText(QStringLiteral("%1 s at %2 fps")
-                                 .arg(seconds, 0, 'f', 2)
-                                 .arg(fps));
+    const QString from = fixedLength() ? QString() : QStringLiteral(", from the tracks");
+    length_seconds_->setText(
+        QStringLiteral("%1 s at %2 fps%3").arg(seconds, 0, 'f', 2).arg(fps).arg(from));
 }
+
+bool SceneSettingsDialog::fixedLength() const { return fixed_length_->isChecked(); }
 
 int SceneSettingsDialog::sceneLength() const { return length_->value(); }
 

@@ -1157,15 +1157,23 @@ void MainWindow::syncStatus() {
                              ? QStringLiteral("   you cannot draw past the end of a track")
                              : QString();
 
+    // Standing past the end of the shot is a different thing again: there may be
+    // a drawing here and you may edit it, but it will not play and will not be
+    // exported until the boundary is dragged past it. Silence about that is how
+    // work goes missing from an export.
+    const QString outside = (slot >= doc_.scene().shotFrames())
+                                ? QStringLiteral("   outside the shot")
+                                : QString();
+
     // The frame count is the scene's and the rest is the current track's, which
     // is the distinction the whole panel now rests on: one timeline, several
     // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   undo %10   %11 fps%12%13")
+                       "tiles %9   undo %10   %11 fps%12%13%14")
             .arg(slot + 1)
-            .arg(doc_.scene().frameCount())
+            .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
             .arg(track->overwrite_drawings ? QStringLiteral(" (overwrite)") : QString())
             .arg(track->exposureOf(image))
@@ -1176,7 +1184,8 @@ void MainWindow::syncStatus() {
             .arg(doc_.undoDepth())
             .arg(doc_.scene().framerate)
             .arg(colouring)
-            .arg(past));
+            .arg(past)
+            .arg(outside));
 }
 
 // The timeline dock follows the number of tracks, up to a point.
@@ -1401,7 +1410,9 @@ void MainWindow::onSlotChanged(std::size_t slot) {
 // Over the scene and not over one track: the playhead is the timeline's, so
 // stepping walks the whole shot however long the track being edited is.
 void MainWindow::stepFrame(int delta) {
-    const int count = static_cast<int>(doc_.scene().frameCount());
+    // Everything reachable rather than the shot: stepping has to get to a
+    // drawing that sits past a fixed scene length, or it could not be edited.
+    const int count = static_cast<int>(doc_.scene().timelineFrames());
     if (count <= 0) return;
 
     int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;
@@ -1501,13 +1512,10 @@ void MainWindow::chooseSceneSettings() {
     const int was_width = doc_.scene().width;
     const int was_height = doc_.scene().height;
     const int was_length = doc_.scene().length;
+    const bool was_fixed = doc_.scene().fixed_length;
 
-    // What the tracks already make the shot, which the length cannot go below.
-    std::size_t shortest = 0;
-    for (const Track& t : doc_.scene().tracks) shortest = std::max(shortest, t.frameCount());
-
-    SceneSettingsDialog dialog(was_framerate, was_width, was_height, was_length,
-                               static_cast<int>(shortest), this);
+    SceneSettingsDialog dialog(was_framerate, was_width, was_height, was_fixed, was_length,
+                               static_cast<int>(doc_.scene().longestTrack()), this);
 
     // The preview writes to the scene directly, around the history. Choosing a
     // resolution means looking at it, and it is not worth an undo entry per
@@ -1534,7 +1542,7 @@ void MainWindow::chooseSceneSettings() {
     doc_.beginCommand("Scene settings");
     doc_.setCanvasSize(dialog.canvasWidth(), dialog.canvasHeight());
     doc_.setFramerate(dialog.framerate());
-    doc_.setSceneLength(dialog.sceneLength());
+    doc_.setSceneLength(dialog.fixedLength(), dialog.sceneLength());
     doc_.endCommand();
 
     // The canvas bounds the colour fills, so they have to be solved again, and
@@ -1550,7 +1558,7 @@ void MainWindow::togglePlayback() {
         return;
     }
 
-    if (doc_.scene().frameCount() < 2) return;
+    if (doc_.scene().shotFrames() < 2) return;
 
     playback_start_slot_ = timeline_widget_->currentSlot();
     playback_clock_.start();
@@ -1579,7 +1587,10 @@ void MainWindow::onPlaybackTick() {
     // track being edited would cut the take short whenever a background ran
     // longer than the character on it. What a shorter track shows out there is
     // Track::imageAtSlot's answer -- nothing, today.
-    const std::size_t count = doc_.scene().frameCount();
+    // The shot and not the timeline: playback stops at the boundary, which is
+    // what makes a fixed length worth setting. Drawings past it are still there,
+    // they are simply not in the take.
+    const std::size_t count = doc_.scene().shotFrames();
     if (count == 0) {
         stopPlayback();
         return;

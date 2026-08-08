@@ -380,7 +380,7 @@ void theCanvasCompositesEveryTrack() {
     // A track that does not reach this frame contributes nothing rather than
     // clearing what is under it -- tracks are not all the same length.
     doc.extendExposure(back, 0, 3);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{4});
+    CHECK_EQ(doc.scene().timelineFrames(), std::size_t{4});
     compositor.compositeScene(doc, 3, PixelRect{0, 0, 300, 300}, frame);
     CHECK(frame.pixel(80, 40).a > 0.5f);            // still held
     CHECK_NEAR(frame.pixel(80, 200).a, 0.0, 1e-3);  // past the shorter track's end
@@ -405,7 +405,7 @@ void theTimelineIsAsLongAsTheLongestTrack() {
 
     // The first track runs to 10, the second still has its one frame.
     doc.extendExposure(first, 0, 9);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
+    CHECK_EQ(doc.scene().timelineFrames(), std::size_t{10});
 
     auto* timeline = window.findChild<TimelineWidget*>();
     auto* canvas = window.findChild<CanvasWidget*>();
@@ -540,7 +540,7 @@ void pastATracksEndYouCanSeeItButNotDrawOnIt() {
     TrackProperties props = doc.scene().findTrack(back)->properties();
     props.end = TrackEnd::HoldLast;
     doc.updateTrack(back, props);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{6});
+    CHECK_EQ(doc.scene().timelineFrames(), std::size_t{6});
 
     CanvasWidget canvas(doc);
     canvas.resize(400, 400);
@@ -1166,7 +1166,7 @@ void colourLayerIsCreatedAtTheBottom() {
 // most likely to be right in the screenshot and wrong two edits later.
 void sceneSettingsKeepsRatioAndPixelsAgreeing() {
     TEST("scene settings keeps the ratio, the slider and the pixels agreeing");
-    SceneSettingsDialog dialog(24, 1920, 1080, 0, 1);
+    SceneSettingsDialog dialog(24, 1920, 1080, false, 100, 1);
 
     auto* aspect = dialog.findChild<QComboBox*>(QStringLiteral("aspect"));
     auto* ratio_w = dialog.findChild<QDoubleSpinBox*>(QStringLiteral("ratioWidth"));
@@ -2464,7 +2464,7 @@ void theEndBehaviourAppliesToTheCompositeOnly() {
     doc.updateTrack(background, props);
 
     doc.setCanvasSize(640, 480);
-    CHECK_EQ(doc.scene().frameCount(), std::size_t{10});
+    CHECK_EQ(doc.scene().timelineFrames(), std::size_t{10});
     CHECK_EQ(doc.scene().findTrack(background)->frameCount(), std::size_t{2});
 
     exporting::Options options;
@@ -2495,6 +2495,57 @@ void theEndBehaviourAppliesToTheCompositeOnly() {
     CHECK(opaque(120, 40));   // the character, still held
     CHECK(opaque(120, 360));  // the background's second drawing, cycled round
     CHECK(!opaque(120, 300)); // and not its first, which is not this frame's
+}
+
+// A fixed scene length is a cap on the shot, so it is a cap on the export too --
+// both the composite and every layer's own sequence. The drawings past it are
+// not destroyed and not hidden; they are simply not in this shot.
+void aFixedSceneLengthCapsTheExport() {
+    TEST("a fixed scene length caps what is exported, without losing the drawings");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    Document doc;
+    const TrackId track = doc.addTrack("character");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId drawn = doc.insertImage(track, 0);
+    doc.extendExposure(track, 0, 11);  // twelve frames on the track
+    strokeOn(doc, track, drawn, ink, 40.0f, 40.0f, 200.0f, 40.0f);
+    doc.setCanvasSize(320, 240);
+
+    // Derived: the shot is the track.
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{12});
+
+    // Fixed at four: the shot is four, the timeline still reaches twelve.
+    doc.setSceneLength(true, 4);
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{4});
+    CHECK_EQ(doc.scene().timelineFrames(), std::size_t{12});
+    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), std::size_t{12});
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    options.flattened = true;
+    CHECK_EQ(exporting::fileCount(doc, options), 8);  // four of each
+
+    QString error;
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    CHECK_EQ(QDir(out + QStringLiteral("/character_ink")).entryList(QDir::Files).size(), 4);
+    CHECK_EQ(QDir(out + QStringLiteral("/composite")).entryList(QDir::Files).size(), 4);
+
+    // Move the boundary and the rest of the shot is there again -- nothing had
+    // been thrown away, which is the whole point of a cap over a truncation.
+    doc.setSceneLength(true, 12);
+    const QString longer = scratch.filePath(QStringLiteral("longer"));
+    options.folder = longer;
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK_EQ(QDir(longer + QStringLiteral("/character_ink")).entryList(QDir::Files).size(), 12);
+
+    // And switching it off goes back to the tracks deciding.
+    doc.setSceneLength(false, 4);
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{12});
 }
 
 void exportWritesASequencePerLayer() {
@@ -3564,6 +3615,7 @@ int main(int argc, char** argv) {
     newProjectStartsOverCleanly();
     exportWritesASequencePerLayer();
     theEndBehaviourAppliesToTheCompositeOnly();
+    aFixedSceneLengthCapsTheExport();
     exportRepeatsAHeldDrawing();
     exportSolvesColourItHasNeverSeen();
     exportLeavesOutHiddenLayers();

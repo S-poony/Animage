@@ -3,6 +3,7 @@
 
 #include <QDialog>
 
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -22,16 +23,16 @@ class SceneSettingsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    // `length` is the shot in frames, zero meaning "as long as the longest
-    // track". `shortest` is how long the tracks already make it, which the
-    // length cannot go below -- a shot shorter than its own contents would put
-    // drawings past the end of the timeline where nothing can reach them.
-    SceneSettingsDialog(int framerate, int width, int height, int length, int shortest,
-                        QWidget* parent = nullptr);
+    // `fixed` is whether the scene says how long the shot is at all; `length` is
+    // that number in frames, and matters only when it does. `shortest` is what
+    // the tracks alone make it, shown while the scene is not saying.
+    SceneSettingsDialog(int framerate, int width, int height, bool fixed, int length,
+                        int shortest, QWidget* parent = nullptr);
 
     int framerate() const;
     int canvasWidth() const;
     int canvasHeight() const;
+    bool fixedLength() const;
     int sceneLength() const;
 
 Q_SIGNALS:
@@ -67,8 +68,11 @@ private:
     // the framerate is the only thing that connects them -- so it is worth
     // showing rather than leaving to be worked out.
     void syncLengthSeconds();
+    // The number is only editable while the scene is the one saying it.
+    void syncLengthEnabled();
 
     QSpinBox* framerate_ = nullptr;
+    QCheckBox* fixed_length_ = nullptr;
     QSpinBox* length_ = nullptr;
     QLabel* length_seconds_ = nullptr;
     int shortest_ = 0;

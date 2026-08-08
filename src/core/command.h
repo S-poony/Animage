@@ -126,13 +126,14 @@ private:
     int framerate_;
 };
 
-// How long the shot is. Zero means "as long as the longest track".
+// How long the shot is, and whether the scene says so at all.
 class SceneLengthOp final : public Op {
 public:
-    explicit SceneLengthOp(int length) : length_(length) {}
+    SceneLengthOp(bool fixed, int length) : fixed_(fixed), length_(length) {}
     void applySwap(Document& doc) override;
 
 private:
+    bool fixed_;
     int length_;
 };
 

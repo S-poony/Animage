@@ -167,7 +167,9 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // stops at 12. Standing there simply means this track has no drawing, which
     // the rest of this handles -- the canvas still shows whatever the other
     // tracks have, and there is nothing here to draw on until one is added.
-    const std::size_t frames = doc_.scene().frameCount();
+    // Everything reachable, not just the shot: a track may run past a fixed
+    // scene length, and those drawings are still there to be worked on.
+    const std::size_t frames = doc_.scene().timelineFrames();
     slot_ = (frames == 0) ? 0 : std::min(slot, frames - 1);
 
     // What the track *holds* here, not what it shows. Past its last drawing

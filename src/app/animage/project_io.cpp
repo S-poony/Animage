@@ -823,8 +823,10 @@ std::string ProjectIO::writeSceneJson(const Document& doc) {
     out.insert("format", QString::fromLatin1(kFormatName));
     out.insert("version", jsonNumber(kSceneFormatVersion));
     out.insert("framerate", jsonNumber(scene.framerate));
-    // Zero means "as long as the longest track", which is what a file from
-    // before the setting gets and is what it did.
+    // Both, because "derived" and "sixty" are different answers: a file that
+    // stored only the number could not say which one it meant. A file from
+    // before the setting has neither and gets derived, which is what it did.
+    out.insert("fixed_length", scene.fixed_length);
     out.insert("length", jsonNumber(scene.length));
     out.insert("canvas", canvas);
 
@@ -863,7 +865,8 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
 
     Scene scene;
     scene.framerate = std::max(1, asInt(object.value("framerate"), 24));
-    scene.length = std::max(0, asInt(object.value("length"), 0));
+    scene.fixed_length = asBool(object.value("fixed_length"), false);
+    scene.length = std::max(0, asInt(object.value("length"), 100));
     scene.width = std::clamp(asInt(object.value("canvas").toObject().value("width"), 1920),
                              kMinCanvasSide, kMaxCanvasSide);
     scene.height = std::clamp(asInt(object.value("canvas").toObject().value("height"), 1080),

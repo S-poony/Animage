@@ -71,11 +71,10 @@ QImage toSrgb16(const Framebuffer& frame) {
     return image;
 }
 
-std::size_t frameCount(const Document& doc) {
-    std::size_t frames = 0;
-    for (const Track& track : doc.scene().tracks) frames = std::max(frames, track.frameCount());
-    return frames;
-}
+// The shot, which is what gets written. With a fixed scene length a track may
+// run past it, and those drawings are deliberately not exported: the boundary is
+// where the shot ends, and moving it is how you change your mind.
+std::size_t frameCount(const Document& doc) { return doc.scene().shotFrames(); }
 
 QString framePath(const QString& folder, const QString& sequence, std::size_t frame,
                   Format format) {
@@ -203,8 +202,10 @@ int fileCount(const Document& doc, const Options& options) {
             // end behaviour is about the picture, so it belongs to the flattened
             // pass; a background's own sequence stops when the background does
             // rather than repeating it to pad out the shot.
+            // ...and no longer than the shot either, when the scene caps it.
+            const std::size_t reach = std::min(track.frameCount(), frames);
             for (const Layer& layer : track.layers) {
-                if (layer.visible) files += track.frameCount();
+                if (layer.visible) files += reach;
             }
         }
     }

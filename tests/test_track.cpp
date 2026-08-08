@@ -721,7 +721,7 @@ void whatATrackShowsPastItsEnd() {
 
     // And it never makes the shot longer: the scene is as long as the longest
     // track, so a lone cycling track cycles over nothing at all.
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{3});
+    CHECK_EQ(f.doc.scene().timelineFrames(), std::size_t{3});
 }
 
 // A hold repeats a drawing inside the track; the end behaviour repeats it past
@@ -747,41 +747,56 @@ void anEmptyTrackShowsNothingWhateverItsEnd() {
 // four-drawing walk cycles over sixty frames because the scene says sixty, and
 // with nothing to say it the walk is the longest track and cycles over nothing.
 void theSceneCanBeToldHowLongTheShotIs() {
-    TEST("the shot is as long as it is told, or as its longest track");
+    TEST("the shot is as long as the scene says, or as its longest track");
     Fixture f;
     f.doc.insertImage(f.track, 0);
     f.doc.extendExposure(f.track, 0, 3);  // four frames of walk
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+    CHECK(!f.doc.scene().fixed_length);    // off by default
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{4});
 
     TrackProperties props = f.tl().properties();
     props.end = TrackEnd::Cycle;
     f.doc.updateTrack(f.track, props);
-    // Cycling over nothing, because this track is the whole shot.
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+    // Cycling over nothing, because with nothing saying otherwise this track is
+    // the whole shot.
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{4});
 
-    f.doc.setSceneLength(60);
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{60});
+    // Told it is sixty, the walk cycles over sixty.
+    f.doc.setSceneLength(true, 60);
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{60});
+    CHECK_EQ(f.doc.scene().timelineFrames(), std::size_t{60});
     CHECK_EQ(f.tl().imageShownAt(59), f.tl().imageAtSlot(3));  // 59 % 4 is 3
     CHECK_EQ(f.tl().frameCount(), std::size_t{4});             // the track is untouched
 
-    // Never shorter than its own contents: a shot set shorter than the tracks in
-    // it would leave drawings past the end of the timeline, where nothing but
-    // the file knows they are there.
-    f.doc.setSceneLength(2);
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+    // A cap, not a wall. Set shorter than the track and the shot really is
+    // shorter -- the drawings out past it are not destroyed and not hidden, they
+    // are simply not in the shot, and the timeline still reaches them.
+    f.doc.setSceneLength(true, 2);
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{2});
+    CHECK_EQ(f.doc.scene().timelineFrames(), std::size_t{4});
+    CHECK_EQ(f.tl().frameCount(), std::size_t{4});
+    CHECK(f.tl().imageAtSlot(3) != kNoId);
 
-    // Zero is "as long as the longest track", which is the default and what
-    // happened before it could be said.
-    f.doc.setSceneLength(0);
-    CHECK_EQ(f.doc.scene().length, 0);
-    CHECK_EQ(f.doc.scene().frameCount(), std::size_t{4});
+    // Switched off, it goes back to whatever the tracks make it, and the number
+    // it was set to is kept rather than thrown away.
+    f.doc.setSceneLength(false, 2);
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{4});
+    CHECK_EQ(f.doc.scene().length, 2);
 
-    // And it is one undo step like any other scene setting.
-    f.doc.setSceneLength(30);
+    // And nothing a track does may move it: the scene sits above the tracks.
+    f.doc.setSceneLength(true, 60);
+    f.doc.addDrawing(f.track, 0);
+    f.doc.extendExposure(f.track, 0, 20);
+    CHECK_EQ(f.doc.scene().shotFrames(), std::size_t{60});
+    CHECK(f.doc.scene().fixed_length);
+
+    // One undo step like any other scene setting, and it puts back both halves.
     const std::size_t depth = f.doc.undoDepth();
+    f.doc.setSceneLength(false, 12);
     CHECK(f.doc.undo());
-    CHECK_EQ(f.doc.scene().length, 0);
-    CHECK_EQ(f.doc.undoDepth(), depth - 1);
+    CHECK(f.doc.scene().fixed_length);
+    CHECK_EQ(f.doc.scene().length, 60);
+    CHECK_EQ(f.doc.undoDepth(), depth);
 }
 
 void layerNamesStayUnique() {
