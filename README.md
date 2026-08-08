@@ -168,10 +168,8 @@ deletes them; a new track arrives at the bottom of the stack, with a layer and a
 drawing so there is something to draw on.
 
 Tracks need not be the same length. What a track shows once the playhead is past
-its last drawing is a small button just past its last frame, showing a stop bar,
-an arrow or a loop: click it to go round the three — show nothing (the default),
-keep showing its last drawing, or cycle. The same three are under Track ▸ Past
-the last drawing, which is the keyboard-reachable way to them. That is about the picture, so
+its last drawing is set under Track ▸ Past the last drawing: show nothing (the
+default), keep showing its last drawing, or cycle. That is about the picture, so
 it applies to the flattened `composite/` export and not to the per-layer
 sequences: **a layer's folder is as long as its own track.** A background drawn
 once exports one frame, and downstream you import the still rather than a
