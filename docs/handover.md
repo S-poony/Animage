@@ -1363,6 +1363,14 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    brush-resize feedback (#5), and a non-modal colour panel (the parked half of
    #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
    its end (#20) are built — see the two sections above.
+7. **Lasso and transform**, designed and not built:
+   [lasso-and-transform.md](lasso-and-transform.md). It has a prerequisite worth
+   knowing about before starting — a shortcut table, because a live transform is
+   the first *mode* this program has, and every shortcut today is an
+   `ApplicationShortcut` that fires whatever the canvas is doing. Designing it
+   turned up three things that are not part of it and now have issues of their
+   own: the unbounded undo history (#23), flipping (#24), and transforming a
+   layer across time (#25).
 
 ## Two things to be careful of
 
