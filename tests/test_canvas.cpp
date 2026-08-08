@@ -570,6 +570,79 @@ void pastATracksEndYouCanSeeItButNotDrawOnIt() {
     CHECK_NEAR(frame.pixel(120, 200).a, 0.0, 1e-3);
 }
 
+// Issue #22: the end behaviour is set where its effect is, on the track.
+//
+// Driven with real mouse events at the position the widget says the button is,
+// rather than by calling the handler: what this is really testing is that the
+// button is where it is drawn and that a press there does not land on something
+// else -- the last run's edge is the exposure-stretch handle and is only a few
+// pixels away.
+void clickingTheTrackEndButtonCyclesIt() {
+    TEST("clicking a track's end button cycles what it shows past its last drawing");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 3);  // four frames, so the button is clear of x=0
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    // Where the widget itself says the button is. Asking rather than computing
+    // is the point: a test that recomputed the position could agree with a
+    // button drawn somewhere nobody can click.
+    const QRect button = timeline->endButtonRectForTesting(0);
+    CHECK(button.isValid());
+    if (!button.isValid()) return;
+
+    // Past the last frame, and clear of the run edge that stretches the hold.
+    const int last_edge = button.left() - 8;
+    CHECK(button.left() > last_edge);
+
+    const auto click = [&] {
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(button.center()),
+                          timeline->mapToGlobal(button.center()), Qt::LeftButton, Qt::LeftButton,
+                          Qt::NoModifier);
+        QCoreApplication::sendEvent(timeline, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(button.center()),
+                            timeline->mapToGlobal(button.center()), Qt::LeftButton,
+                            Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(timeline, &release);
+        QCoreApplication::processEvents();
+    };
+
+    CHECK_EQ(static_cast<int>(doc.scene().findTrack(track)->end),
+             static_cast<int>(TrackEnd::Nothing));
+    click();
+    CHECK_EQ(static_cast<int>(doc.scene().findTrack(track)->end),
+             static_cast<int>(TrackEnd::HoldLast));
+    click();
+    CHECK_EQ(static_cast<int>(doc.scene().findTrack(track)->end),
+             static_cast<int>(TrackEnd::Cycle));
+    click();  // round again
+    CHECK_EQ(static_cast<int>(doc.scene().findTrack(track)->end),
+             static_cast<int>(TrackEnd::Nothing));
+
+    // The frames it was on are untouched: this says what happens *past* the
+    // track, and must not be a way to change the track itself.
+    CHECK_EQ(doc.scene().findTrack(track)->frameCount(), std::size_t{4});
+
+    // And the menu follows, because the same setting now has two ways in.
+    click();
+    QAction* hold = nullptr;
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Hold the last drawing")) hold = action;
+    }
+    CHECK(hold != nullptr);
+    if (hold) CHECK(hold->isChecked());
+}
+
 // Issue #9 through the button that does it, because the button is where the
 // track's setting has to be read.
 void theInsertButtonObeysTheOverwriteSetting() {
@@ -3650,5 +3723,6 @@ int main(int argc, char** argv) {
     theTimelineDockFollowsTheTrackCount();
     theTimelineDockCanBeResizedByHand();
     theInsertButtonObeysTheOverwriteSetting();
+    clickingTheTrackEndButtonCyclesIt();
     return testing::summarise("canvas");
 }

@@ -1238,6 +1238,9 @@ void MainWindow::syncTimelineHeight() {
 
 void MainWindow::refreshEverything() {
     syncTimelineHeight();
+    // The end behaviour can now be changed from the timeline as well as from the
+    // menu, so the menu has to be told rather than only telling.
+    syncTrackMenu();
     timeline_widget_->refresh();
     canvas_->setFrame(timeline_widget_->currentSlot());
     rebuildLayerList();

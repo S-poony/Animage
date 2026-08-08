@@ -699,6 +699,24 @@ the distinction the whole feature is built on. Past the end there is no slot and
 no cel, so there is nothing to edit, and the status bar says so — a brush that
 silently does nothing is otherwise a bug.
 
+**The setting has a button at the end of the row** — issue #22, built. A stop
+bar, an arrow, or a loop, painted just past a track's last frame, cycling through
+the three on click with a tooltip naming the one it is on. Three things about it:
+
+- **The glyphs are painted, not written.** A font is not guaranteed to have an
+  arrow or a loop, and this repository has already shipped one mis-encoded
+  character that only a screenshot caught.
+- **The gap before it is not padding.** The last run's right edge is the
+  exposure-stretch handle, grabbed within `kEdgeGrab`, so a button flush against
+  the last cell would eat the drag that makes a hold longer.
+- **The press is intercepted before anything reads an x as a slot.** The button
+  is past the last frame, where `slotAt` clamps — so without that, clicking it
+  would also read as selecting the last drawing.
+
+The Track menu keeps the same three items. A button painted into a custom widget
+is not reachable from the keyboard, and the menu is what makes the setting
+reachable at all for anyone not using a mouse.
+
 **The timeline row stops at the last drawing, and that was the second attempt.**
 The first drew the extended frames as faint dotted cells, so that the row would
 not stop at four while the canvas kept drawing out to forty. It reads worse than
@@ -1358,11 +1376,11 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    what `CtgSolver`'s second priority is still there for.
 5. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-6. **The rest of the open issues**: showing a track's end behaviour on the track
-   itself (#22), deleting every layer of a drawing (#2), an eraser cursor (#4),
-   brush-resize feedback (#5), and a non-modal colour panel (the parked half of
-   #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
-   its end (#20) are built — see the two sections above.
+6. **The rest of the open issues**: deleting every layer of a drawing (#2), an
+   eraser cursor (#4), brush-resize feedback (#5), and a non-modal colour panel
+   (the parked half of #8). Several tracks (#1), "overwrite drawings" (#9), what
+   a track does past its end (#20) and the button that sets it (#22) are built —
+   see the two sections above.
 
 ## Two things to be careful of
 

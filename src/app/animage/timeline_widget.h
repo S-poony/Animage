@@ -38,6 +38,11 @@ public:
 
     void refresh();
 
+    // Where a row's end-behaviour button is. Exposed so a test can press the
+    // pixels the widget actually draws on, rather than recomputing the position
+    // and agreeing with itself about a button nobody can click.
+    QRect endButtonRectForTesting(std::size_t row) const { return endButtonRect(row); }
+
     QSize sizeHint() const override;
 
 Q_SIGNALS:
@@ -46,6 +51,9 @@ Q_SIGNALS:
     void documentChanged();
 
 protected:
+    // Tooltips are per row and per position rather than per widget, so they are
+    // answered here rather than set once.
+    bool event(QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -70,6 +78,15 @@ private:
     // rows below, which are a track's business and sometimes at the same x.
     int sceneEndX() const;
     bool isOnSceneEnd(int x) const;
+
+    // The end-behaviour button, sitting just past a track's last drawing --
+    // where its effect is. Kept a few pixels clear of the last run's edge,
+    // because that edge is the exposure-stretch handle and they would otherwise
+    // be the same pixels.
+    QRect endButtonRect(std::size_t row) const;
+    // The row whose end button is under this point, or false if none is.
+    bool endButtonAt(const QPoint& at, std::size_t* row) const;
+    void cycleTrackEnd(const animage::Track& track);
     // First and last slot of the run of identical ImageIds containing `slot`,
     // in the given row's track.
     std::pair<std::size_t, std::size_t> runAt(std::size_t row, std::size_t slot) const;

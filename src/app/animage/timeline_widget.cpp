@@ -2,9 +2,11 @@
 #include "timeline_widget.h"
 
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QPalette>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QToolTip>
 #include <algorithm>
 
 using namespace animage;
@@ -16,6 +18,13 @@ constexpr int kRulerHeight = 18;
 constexpr int kRowHeight = 46;
 constexpr int kEdgeGrab = 5;
 constexpr int kDragThreshold = 5;
+
+// The end-behaviour button past a track's last drawing. The gap is not padding:
+// the last run's right edge is the exposure-stretch handle and is grabbed within
+// kEdgeGrab of it, so the button has to start beyond that or dragging a hold
+// longer would land on the button instead.
+constexpr int kEndButtonSize = 16;
+constexpr int kEndButtonGap = kEdgeGrab + 3;
 
 // The strip of track names down the left. It is what makes a row say which
 // track it is without a control on it -- see the handover on why a widget on a
@@ -58,6 +67,61 @@ Palette paletteFor(const QWidget& widget) {
     // role a system palette has.
     p.boundary = QColor(0xd0, 0x45, 0x3c);
     return p;
+}
+
+// The three end behaviours, drawn rather than written.
+//
+// Painter primitives and not glyphs: a font is not guaranteed to have an arrow
+// or a loop, and this repository has already shipped one mis-encoded character
+// that only a screenshot caught. A stop bar, an arrow carrying on, and a loop
+// are distinguishable at sixteen pixels and mean the same in every locale.
+void drawTrackEnd(QPainter& painter, const QRect& box, TrackEnd end, const QColor& ink) {
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(ink, 1.6));
+    painter.setBrush(Qt::NoBrush);
+
+    const QPointF middle(box.center().x() + 0.5, box.center().y() + 0.5);
+    switch (end) {
+        case TrackEnd::Nothing: {
+            // A stop: the track simply ends here.
+            const double half = box.height() * 0.28;
+            painter.drawLine(QPointF(middle.x(), middle.y() - half),
+                             QPointF(middle.x(), middle.y() + half));
+            break;
+        }
+        case TrackEnd::HoldLast: {
+            // Carrying on: a line out to an arrowhead.
+            const double reach = box.width() * 0.30;
+            painter.drawLine(QPointF(middle.x() - reach, middle.y()),
+                             QPointF(middle.x() + reach, middle.y()));
+            painter.drawLine(QPointF(middle.x() + reach, middle.y()),
+                             QPointF(middle.x() + reach * 0.2, middle.y() - reach * 0.55));
+            painter.drawLine(QPointF(middle.x() + reach, middle.y()),
+                             QPointF(middle.x() + reach * 0.2, middle.y() + reach * 0.55));
+            break;
+        }
+        case TrackEnd::Cycle: {
+            // Round again: an open circle with an arrowhead on its own tail.
+            const double radius = box.height() * 0.30;
+            const QRectF circle(middle.x() - radius, middle.y() - radius, radius * 2, radius * 2);
+            painter.drawArc(circle, 60 * 16, 280 * 16);
+            const QPointF tip(middle.x() + radius * 0.5, middle.y() - radius * 0.87);
+            painter.drawLine(tip, QPointF(tip.x() - radius * 0.75, tip.y() - radius * 0.15));
+            painter.drawLine(tip, QPointF(tip.x() - radius * 0.1, tip.y() + radius * 0.75));
+            break;
+        }
+    }
+    painter.restore();
+}
+
+const char* trackEndName(TrackEnd end) {
+    switch (end) {
+        case TrackEnd::HoldLast: return "holds its last drawing";
+        case TrackEnd::Cycle: return "cycles";
+        case TrackEnd::Nothing: break;
+    }
+    return "shows nothing";
 }
 
 }  // namespace
@@ -138,6 +202,40 @@ std::size_t TimelineWidget::slotAt(int x) const {
     if (frames == 0) return 0;
     const int index = std::clamp((x - kGutterWidth) / kCellWidth, 0, static_cast<int>(frames) - 1);
     return static_cast<std::size_t>(index);
+}
+
+QRect TimelineWidget::endButtonRect(std::size_t row) const {
+    const Track* line = trackAt(row);
+    if (!line) return {};
+    const int x = kGutterWidth + static_cast<int>(line->frameCount()) * kCellWidth + kEndButtonGap;
+    const int top = rowTop(row) + (kRowHeight - kEndButtonSize) / 2 - 2;
+    return {x, top, kEndButtonSize, kEndButtonSize};
+}
+
+bool TimelineWidget::endButtonAt(const QPoint& at, std::size_t* row) const {
+    for (std::size_t i = 0; i < rowCount(); ++i) {
+        if (endButtonRect(i).contains(at)) {
+            if (row) *row = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Click cycles: nothing, hold the last drawing, cycle, and round again. Three
+// states is the most a cycling button can carry -- past that you overshoot more
+// often than you land -- and the tooltip names the one you are on, so it is
+// never a guess about which way round it goes.
+void TimelineWidget::cycleTrackEnd(const Track& track) {
+    TrackProperties props = track.properties();
+    switch (track.end) {
+        case TrackEnd::Nothing:  props.end = TrackEnd::HoldLast; break;
+        case TrackEnd::HoldLast: props.end = TrackEnd::Cycle; break;
+        case TrackEnd::Cycle:    props.end = TrackEnd::Nothing; break;
+    }
+    doc_.updateTrack(track.id, props);
+    refresh();
+    Q_EMIT documentChanged();
 }
 
 int TimelineWidget::sceneEndX() const {
@@ -297,6 +395,15 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             }
         }
 
+        // What this track does past its last drawing, at the place it does it.
+        // The Track menu says the same thing and stays, because a painted button
+        // in a custom widget is not reachable from the keyboard.
+        const QRect button = endButtonRect(row);
+        painter.setPen(QPen(colours.outline, 1));
+        painter.setBrush(is_current ? colours.cell : colours.cell_held);
+        painter.drawRoundedRect(button, 3, 3);
+        drawTrackEnd(painter, button, line.end, colours.text);
+
         if (dragging_ && drag_row_ == row) {
             if (drop_overwrites_) {
                 // The frames it would take over, outlined where they are.
@@ -380,6 +487,19 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         }
         scrubbing_ = true;
         setCurrentSlot(slotAt(x));
+        return;
+    }
+
+    // The end-behaviour button, before anything that reads an x as a slot: it
+    // sits past the last drawing, where slotAt would clamp to the last frame and
+    // a press would look like selecting it.
+    std::size_t button_row = 0;
+    if (endButtonAt(QPoint(x, y), &button_row)) {
+        const Track* on = trackAt(button_row);
+        if (on) {
+            setTrack(on->id);
+            cycleTrackEnd(*on);
+        }
         return;
     }
 
@@ -509,6 +629,12 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    if (endButtonAt(QPoint(x, y), nullptr)) {
+        hovering_edge_ = false;
+        setCursor(Qt::PointingHandCursor);
+        return;
+    }
+
     std::size_t row = 0;
     if (!rowAtY(y, &row) || x < kGutterWidth) {
         hovering_edge_ = false;
@@ -582,6 +708,32 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
     stretching_ = false;
     doc_.endCommand();
     Q_EMIT documentChanged();
+}
+
+// What the thing under the pointer is. Answered per position rather than set on
+// the widget, because the widget is one surface with several controls painted on
+// it -- the end button is the only one that needs explaining, and it needs to
+// say which of the three it is currently on, which a fixed string cannot.
+bool TimelineWidget::event(QEvent* event) {
+    if (event->type() != QEvent::ToolTip) return QWidget::event(event);
+
+    auto* help = static_cast<QHelpEvent*>(event);
+    std::size_t row = 0;
+    if (endButtonAt(help->pos(), &row)) {
+        const Track* line = trackAt(row);
+        if (line) {
+            QToolTip::showText(
+                help->globalPos(),
+                QStringLiteral("Past its last drawing, \"%1\" %2.\nClick to change.")
+                    .arg(QString::fromStdString(line->name),
+                         QString::fromLatin1(trackEndName(line->end))),
+                this);
+            return true;
+        }
+    }
+    QToolTip::hideText();
+    event->ignore();
+    return true;
 }
 
 void TimelineWidget::leaveEvent(QEvent*) {
