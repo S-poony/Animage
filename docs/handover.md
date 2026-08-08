@@ -704,10 +704,10 @@ The first drew the extended frames as faint dotted cells, so that the row would
 not stop at four while the canvas kept drawing out to forty. It reads worse than
 an empty row: a cell is a frame you can put a drawing on, so cells you cannot
 click are a harder thing to explain than the absence of any. What a track does
-out there wants saying once, at the end of the row, rather than repeated along
-it — a clickable state icon, as TVPaint has, which is
-[issue #22](https://github.com/S-poony/Animage/issues/22). Not a widget on the
-row: see "a widget on a list row disables that row's own tick".
+out there wants saying once rather than repeated along the row, and how is
+[issue #22](https://github.com/S-poony/Animage/issues/22) — still open, and the
+shape of it is not decided. Whatever it turns out to be, it must not be a widget
+placed on the row: see "a widget on a list row disables that row's own tick".
 
 **A shot can now be told how long it is, and the length is a cap rather than a
 floor.** That is the second design; the first one is worth recording because the
