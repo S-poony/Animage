@@ -216,6 +216,13 @@ public:
     void setTransformValues(const animage::Transform& values);
     void nudgeTransform(int dx, int dy);
 
+    // Where the rotation knob and the middle of the box are, in widget
+    // coordinates. For tests that press the knob rather than recomputing where
+    // it ought to be -- a test that worked the position out for itself would
+    // agree happily with a knob drawn where nobody can press it.
+    QPointF rotationHandleForTesting() const;
+    QPointF transformCentreForTesting() const;
+
     // Bakes it. One resample, one command, and nothing at all if the transform
     // is an identity -- looking at a drawing and putting it back is not an edit.
     void applyTransform();

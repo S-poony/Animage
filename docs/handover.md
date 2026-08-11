@@ -870,6 +870,26 @@ centred along the top. What that costs is that nothing lays it out: it is placed
 by hand when it appears and again from the canvas's resize, which the window's
 event filter forwards. Reported after the first build of it.
 
+**And that broke the pen on it, which is a trap worth writing down.** A
+`QSpinBox` has no `tabletEvent`, so it ignores the pen and Qt propagates the
+event to the parent — which, now that the bar is a child of the canvas, is the
+canvas, and `tabletEvent` there accepted everything. Two things went wrong at
+once: the press started a transform drag on the drawing underneath, and **Qt only
+synthesises a mouse event for a tablet event that nobody accepted**, so the
+buttons were not clickable with a pen at all. `childAt` on the event position is
+the guard. Every other panel in the window is a sibling of the canvas rather than
+a child, which is why none of them ever needed it — putting any control *on* the
+canvas needs it again.
+
+**The box has a rotation knob**, on a stem out from the middle of the top edge,
+away from the centre so it stays outside the box however far the box has turned.
+Round, where the eight that resize are square: two shapes for two operations, and
+it is the only thing on the box saying that one of them turns the drawing rather
+than stretching it. Rotation used to be available only from an invisible band
+just outside a corner — the band stays, because it is where a hand reaches
+without being told, but a gesture nobody can see is a gesture nobody uses, and
+the numeric field was the only discoverable way to turn a drawing. Reported.
+
 **Two scale fields, not one.** The note says "dx / dy / rotation / scale" and
 also that edge handles scale one axis; those cannot both be true. Two fields was
 the user's call. Letting the handle decide is what frees Shift to constrain

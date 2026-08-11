@@ -4216,11 +4216,108 @@ void pastingOntoAColourLayerIsRefused() {
     CHECK(fixture.window.statusBar()->currentMessage().contains(QStringLiteral("Cannot paste")));
 }
 
+// The bar floats over the canvas, so the canvas is its parent -- and a QSpinBox
+// has no tabletEvent, so the pen propagates from it to the canvas. Accepting it
+// there did two wrong things at once: the press started a transform drag on the
+// drawing underneath, and Qt only synthesises a mouse event for a tablet event
+// nobody accepted, so the bar was not clickable with a pen at all. Reported.
+void thePenReachesTheTransformBar() {
+    TEST("the pen reaches the transform bar rather than dragging the canvas");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+
+    QFrame* bar = fixture.window.findChild<QFrame*>(QStringLiteral("transformBar"));
+    CHECK(bar != nullptr);
+    if (!bar) return;
+
+    // The middle of the bar, in the canvas's coordinates, which is where a
+    // propagated tablet event arrives.
+    const QPointF on_the_bar = bar->geometry().center();
+    const animage::Transform before = fixture.canvas->transformValues();
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+    QTabletEvent press(QEvent::TabletPress, &stylus, on_the_bar,
+                       fixture.canvas->mapToGlobal(on_the_bar), 1.0, 0, 0, 0, 0, 0,
+                       Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(fixture.canvas, &press);
+
+    // Left for whoever it landed on, which is what makes Qt synthesise the mouse
+    // event the bar's controls actually listen for.
+    CHECK(!press.isAccepted());
+
+    QTabletEvent moved(QEvent::TabletMove, &stylus, on_the_bar + QPointF(60, 40),
+                       fixture.canvas->mapToGlobal(on_the_bar + QPointF(60, 40)), 1.0, 0, 0, 0, 0,
+                       0, Qt::NoModifier, Qt::NoButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(fixture.canvas, &moved);
+    QTabletEvent release(QEvent::TabletRelease, &stylus, on_the_bar + QPointF(60, 40),
+                         fixture.canvas->mapToGlobal(on_the_bar + QPointF(60, 40)), 0.0, 0, 0, 0,
+                         0, 0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::sendEvent(fixture.canvas, &release);
+    QCoreApplication::processEvents();
+
+    // And the drawing did not move: a press on a control is not a drag on what
+    // is behind it.
+    CHECK(fixture.canvas->transformIsLive());
+    CHECK_NEAR(fixture.canvas->transformValues().dx, before.dx, 1e-9);
+    CHECK_NEAR(fixture.canvas->transformValues().dy, before.dy, 1e-9);
+
+    fixture.canvas->cancelTransform();
+}
+
+// A gesture nobody can see is a gesture nobody uses. Rotation was only available
+// from an invisible band just outside a corner, so the numeric field was the
+// only discoverable way to turn a drawing.
+void theBoxHasSomethingToRotateBy() {
+    TEST("dragging the knob above the box rotates the drawing");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+    CHECK_NEAR(fixture.canvas->transformValues().rotation, 0.0, 1e-9);
+
+    // Where the knob is drawn: out from the middle of the top edge, away from
+    // the middle of the box, at a fixed distance on screen. Asked of the widget
+    // rather than recomputed here -- a test that worked the position out for
+    // itself would agree with a knob drawn where nobody can press it.
+    const QPointF knob = fixture.canvas->rotationHandleForTesting();
+    const QPointF centre = fixture.canvas->transformCentreForTesting();
+
+    // A quarter turn: from directly above the centre round to directly right of
+    // it, at the same distance, so the angle is the whole of what changed.
+    const double reach = QLineF(centre, knob).length();
+    CHECK(reach > 10.0);
+    const QPointF quarter(centre.x() + reach, centre.y());
+
+    sendMouse(fixture.canvas, QEvent::MouseButtonPress, knob, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(fixture.canvas, QEvent::MouseMove, quarter, Qt::NoButton, Qt::LeftButton);
+    sendMouse(fixture.canvas, QEvent::MouseButtonRelease, quarter, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+
+    // Ninety degrees, and only the rotation: a knob that moved the drawing as
+    // well would be a knob that does two things.
+    CHECK_NEAR(fixture.canvas->transformValues().rotation, 90.0, 1.0);
+    CHECK_NEAR(fixture.canvas->transformValues().scale_x, 1.0, 1e-6);
+    CHECK_NEAR(fixture.canvas->transformValues().scale_y, 1.0, 1e-6);
+
+    fixture.canvas->cancelTransform();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    thePenReachesTheTransformBar();
+    theBoxHasSomethingToRotateBy();
     aPasteLandsWhereItWasCopiedFrom();
     cutTakesThePixelsAway();
     cancellingAPasteWritesNothing();

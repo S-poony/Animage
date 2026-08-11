@@ -158,7 +158,8 @@ from another layer of the same drawing means something, and carrying it to
 another drawing is how you transform the wrong thing.
 
 **Transform** takes the selection, or the whole drawing on the layer you are on
-if there is none. Corner handles resize both ways and edge handles one way,
+if there is none. Corner handles resize both ways and edge handles one way, the
+round knob above the box turns it (so does dragging just outside a corner),
 `Shift` constrains a rotation to fifteen degrees and a move to an axis, and the
 numeric fields on the bar are the way to place something exactly, or to move a
 box whose handles have gone off screen. Nothing is written until you apply, so

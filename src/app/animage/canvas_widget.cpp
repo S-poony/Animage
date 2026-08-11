@@ -43,7 +43,13 @@ constexpr qint64 kPenMouseWindowMs = 250;
 // different targets.
 constexpr double kTransformHandleSize = 9.0;
 constexpr double kTransformHandleGrab = 8.0;
-// Just outside a corner, where every program puts rotation.
+// The rotation handle, on a stem out from the middle of the top edge. Every
+// program that has one puts it there, and a gesture nobody can see is a gesture
+// nobody uses -- which is what the band below was on its own.
+constexpr double kTransformRotateStem = 26.0;
+constexpr double kTransformRotateKnob = 5.0;
+// And just outside a corner, which stays because it is where a hand reaches
+// without being told. It is the shortcut for the gizmo, not a replacement.
 constexpr double kTransformRotateBand = 24.0;
 // Below this the box has no interior left to press: what is there is handles,
 // and moving comes from them or from the numeric fields. The mirror case is
@@ -61,6 +67,22 @@ constexpr double kRotationSnap = 15.0;
 // legitimate selection can be a single eyelash.
 constexpr double kDragThreshold = 4.0;
 constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
+
+// Where the rotation knob sits, given the eight handles: out from the middle of
+// the top edge, away from the box, at a fixed distance on screen.
+//
+// Away from the *centre* rather than along a fixed axis, so it stays outside the
+// box however far the box has been turned -- at 180 degrees "up" is into it.
+QPointF rotationGizmo(const std::array<QPointF, 8>& handles) {
+    const QPointF centre = (handles[0] + handles[4]) / 2.0;
+    QPointF away = handles[1] - centre;
+    const double reach = std::hypot(away.x(), away.y());
+    // A box with no height at all has no direction to go: straight up on screen
+    // is the only answer left, and it is better than none.
+    if (reach < 1e-6) return handles[1] - QPointF(0.0, kTransformRotateStem);
+    away /= reach;
+    return handles[1] + away * kTransformRotateStem;
+}
 
 // A corner or an edge middle of an untransformed box, clockwise from the top
 // left. Even is a corner, odd is an edge middle.
@@ -1430,6 +1452,17 @@ std::array<QPointF, 8> CanvasWidget::transformHandles() const {
     return handles;
 }
 
+QPointF CanvasWidget::rotationHandleForTesting() const {
+    if (!transform_) return {};
+    return rotationGizmo(transformHandles());
+}
+
+QPointF CanvasWidget::transformCentreForTesting() const {
+    if (!transform_) return {};
+    const std::array<QPointF, 8> handles = transformHandles();
+    return (handles[0] + handles[4]) / 2.0;
+}
+
 void CanvasWidget::drawTransformPreview(QPainter& painter) {
     const LiveTransform& live = *transform_;
     const Matrix m = matrixOf(live.values);
@@ -1460,12 +1493,20 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     QPolygonF box;
     box << handles[0] << handles[2] << handles[4] << handles[6];
 
+    // The stem out to the rotation knob, drawn with the box so that the knob
+    // reads as part of it rather than as something floating nearby.
+    const QPointF knob = rotationGizmo(handles);
+
     painter.save();
     painter.setBrush(Qt::NoBrush);
+    // Light under dark, both here and on the stem: the box crosses paper and ink
+    // by definition, and a one-colour outline disappears against one of them.
     painter.setPen(QPen(QColor(255, 255, 255, 160), 3.0));
     painter.drawPolygon(box);
+    painter.drawLine(handles[1], knob);
     painter.setPen(QPen(QColor(60, 130, 240), 1.0));
     painter.drawPolygon(box);
+    painter.drawLine(handles[1], knob);
 
     const double half = kTransformHandleSize / 2.0;
     for (const QPointF& handle : handles) {
@@ -1475,6 +1516,13 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
         painter.setPen(QPen(QColor(60, 130, 240), 1.0));
         painter.drawRect(square);
     }
+
+    // Round, where the eight that resize are square. Two shapes for two
+    // operations, which is the only thing on the box saying that this one turns
+    // the drawing rather than stretching it.
+    painter.setBrush(QColor(255, 255, 255));
+    painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+    painter.drawEllipse(knob, kTransformRotateKnob, kTransformRotateKnob);
     painter.restore();
 }
 
@@ -1487,6 +1535,16 @@ bool CanvasWidget::beginTransformDrag(const QPointF& widget_point) {
 
     const std::array<QPointF, 8> handles = transformHandles();
     grab_image_ = imageFromWidget(widget_point);
+
+    // The knob first: it is the one thing on the box that says what it does, and
+    // it is drawn outside the box where nothing else is competing for the press.
+    if (QLineF(widget_point, rotationGizmo(handles)).length() <=
+        kTransformRotateKnob + kTransformHandleGrab) {
+        centreTransformPivot();
+        grab_values_ = transform_->values;
+        grab_ = Grab::Rotate;
+        return true;
+    }
 
     for (int i = 0; i < 8; ++i) {
         if (QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length() >
@@ -1503,10 +1561,11 @@ bool CanvasWidget::beginTransformDrag(const QPointF& widget_point) {
         return true;
     }
 
-    // A ring just outside each corner rotates. Letting the handle decide what a
-    // drag means is what frees Shift to constrain the rotation to fifteen-degree
-    // steps and a move to an axis, which is worth more than a modifier that
-    // switches between scaling one axis and two.
+    // And a ring just outside each corner does the same, which is where a hand
+    // reaches without being told. Letting the handle decide what a drag means is
+    // what frees Shift to constrain the rotation to fifteen-degree steps and a
+    // move to an axis, which is worth more than a modifier that switches between
+    // scaling one axis and two.
     for (int i = 0; i < 8; i += 2) {
         const double reach = QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length();
         if (reach > kTransformRotateBand) continue;
@@ -1874,6 +1933,24 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     // open dialog, and took the keyboard focus off it on the way in. Leave the
     // event alone: whatever is modal has a better claim on the pen than we do.
     if (QApplication::activeModalWidget()) {
+        event->ignore();
+        return;
+    }
+
+    // A control sitting on the canvas gets the pen, and this is what lets it.
+    //
+    // The transform bar is a child widget, so it floats over the drawing rather
+    // than taking a row of the window. A QSpinBox has no tabletEvent, so it
+    // ignores the pen and Qt propagates the event to the parent -- here,
+    // translated into our coordinates -- and accepting it would do two wrong
+    // things at once: the press would start a transform drag on the canvas
+    // underneath, and Qt only synthesises a mouse event for a tablet event that
+    // *nobody* accepted, so the button would never be clickable with a pen at
+    // all. It was not, and it was reported.
+    //
+    // Every other panel in the window is a sibling rather than a child, which is
+    // why none of them ever needed this.
+    if (childAt(event->position().toPoint()) != nullptr) {
         event->ignore();
         return;
     }
