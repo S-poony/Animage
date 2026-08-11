@@ -135,6 +135,7 @@ cmake --build build --target animage && ./build/src/app/animage
 | `L` | lasso: loop round part of the drawing |
 | `T` | transform: move, turn or resize the selection, or the whole drawing |
 | Backspace | erase what is selected (`Delete` still deletes the drawing) |
+| `Ctrl+X` / `C` / `V` | cut, copy, paste — the selection, or the whole drawing |
 | Enter, Escape, arrows | during a transform: apply, cancel, nudge (`Shift` for ten) |
 | `[` / `]` | smaller / larger |
 | Wheel | zoom about the pointer |
@@ -164,6 +165,13 @@ box whose handles have gone off screen. Nothing is written until you apply, so
 cancelling leaves no undo step; moving by a whole number of pixels does not
 resample, so registration nudges never soften a line. Colour layers are excluded:
 a mark there is a label rather than paint, and interpolating one invents colours.
+
+**A paste is a transform that came from the clipboard.** It lands at the
+coordinates it was copied from — you paste to re-register something, not to drop
+it wherever the view happens to be — and it arrives as a float you can place
+before applying it, so nothing is written until you press Enter. The clipboard is
+the program's own and not the system one: a 16-bit-per-channel image handed to
+another program would lose precision, and it would be a different feature.
 
 Fitting the drawing is `F` and not the `Shift+0` it used to be. On a keyboard
 whose digit row is the shifted face of another row — AZERTY, for one — typing

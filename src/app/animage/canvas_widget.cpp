@@ -1093,6 +1093,92 @@ void CanvasWidget::drawSelection(QPainter& painter) const {
     painter.restore();
 }
 
+// --- clipboard -----------------------------------------------------------
+
+// Everything copy, cut and paste have to check before they touch anything: the
+// same list the brush checks, plus the layer kind.
+CanvasWidget::Refusal CanvasWidget::refuseHere() const {
+    if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    if (!layer) return Refusal::NoLayer;
+    if (layer->kind == LayerKind::Ctg) return Refusal::ColourLayer;
+    if (layer->locked) return Refusal::LockedLayer;
+    if (!layer->visible) return Refusal::HiddenLayer;
+    return Refusal::None;
+}
+
+CanvasWidget::Refusal CanvasWidget::copySelection() {
+    const Refusal refusal = refuseHere();
+    if (refusal != Refusal::None) return refusal;
+
+    Lift split = liftForTransform();
+    if (split.lifted.empty()) return Refusal::NothingDrawn;
+
+    clipboard_ = std::move(split.lifted);
+    clipboard_kind_ = LayerKind::Raster;
+    return Refusal::None;
+}
+
+CanvasWidget::Refusal CanvasWidget::cutSelection() {
+    const Refusal refusal = refuseHere();
+    if (refusal != Refusal::None) return refusal;
+
+    Lift split = liftForTransform();
+    if (split.lifted.empty()) return Refusal::NothingDrawn;
+
+    {
+        ScopedCommand command(doc_, "Cut");
+        if (Cel* cel = doc_.celForWriting(track_, image_, active_layer_)) {
+            cel->replaceTiles(split.remaining, doc_.journal());
+        }
+    }
+
+    clipboard_ = std::move(split.lifted);
+    clipboard_kind_ = LayerKind::Raster;
+    clearSelection();
+    refreshAll();
+    Q_EMIT documentChanged();
+    return Refusal::None;
+}
+
+CanvasWidget::Refusal CanvasWidget::paste() {
+    if (transform_) applyTransform();
+
+    const Refusal refusal = refuseHere();
+    if (refusal != Refusal::None) return refusal;
+    if (clipboard_.empty()) return Refusal::NothingCopied;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    if (!layer || layer->kind != clipboard_kind_) return Refusal::DifferentLayerKind;
+
+    const PixelRect bounds = paintedBounds(clipboard_);
+    if (bounds.isEmpty()) return Refusal::NothingCopied;
+
+    LiveTransform live;
+    live.track = track_;
+    live.image = image_;
+    live.layer = active_layer_;
+    live.bounds = bounds;
+    live.lifted = clipboard_;
+    // Nothing was taken out of the drawing, so what stands in the layer's place
+    // is the whole of it. That one line is the entire difference between a paste
+    // and a transform.
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    if (cel) live.remaining = cel->tiles();
+    live.pasted = true;
+    live.values.pivot_x = bounds.x + bounds.width / 2.0;
+    live.values.pivot_y = bounds.y + bounds.height / 2.0;
+    transform_ = std::move(live);
+
+    buildTransformPicture();
+    refreshAll();
+    Q_EMIT transformBegan();
+    return Refusal::None;
+}
+
 // --- transform -----------------------------------------------------------
 
 QString CanvasWidget::explain(Refusal refusal) {
@@ -1108,6 +1194,9 @@ QString CanvasWidget::explain(Refusal refusal) {
                                   "nothing here that can be resampled");
         case Refusal::NothingDrawn:
             return QStringLiteral("nothing is drawn on this layer");
+        case Refusal::NothingCopied: return QStringLiteral("nothing has been copied");
+        case Refusal::DifferentLayerKind:
+            return QStringLiteral("what was copied came off a different kind of layer");
     }
     return {};
 }
@@ -1115,22 +1204,18 @@ QString CanvasWidget::explain(Refusal refusal) {
 CanvasWidget::Refusal CanvasWidget::beginTransform() {
     if (transform_) return Refusal::None;
 
-    // Past the end of a track there is no slot and no cel, so there is nothing
-    // to edit -- the same refusal the brush makes out there, and easy to forget
-    // here precisely because this is not the brush.
-    if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
-
-    const Track* track = doc_.scene().findTrack(track_);
-    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
-    if (!layer) return Refusal::NoLayer;
-    // On the layer kind, never on a guess about the pixels. A mark on a colour
-    // layer is a label: alpha is exactly 0 or 1 and the colour is a key, so any
-    // interpolation invents a third colour that competes for regions on its own
-    // account -- and the transparent label is negative light, which blended
-    // against a real colour classifies as transparent and swallows it.
-    if (layer->kind == LayerKind::Ctg) return Refusal::ColourLayer;
-    if (layer->locked) return Refusal::LockedLayer;
-    if (!layer->visible) return Refusal::HiddenLayer;
+    // Refuse where the brush refuses, and for the same reasons: past the end of
+    // a track there is no slot and no cel and so nothing to edit, a locked or
+    // hidden layer is not being drawn on either. Easy to forget here precisely
+    // because this is not the brush.
+    //
+    // And on the layer kind, never on a guess about the pixels. A mark on a
+    // colour layer is a label: alpha is exactly 0 or 1 and the colour is a key,
+    // so any interpolation invents a third colour that competes for regions on
+    // its own account -- and the transparent label is negative light, which
+    // blended against a real colour classifies as transparent and swallows it.
+    const Refusal refusal = refuseHere();
+    if (refusal != Refusal::None) return refusal;
 
     // The selection, or the whole cel if there is none. One path and not two,
     // which is exactly what "the tool is the button" buys.
@@ -1268,8 +1353,8 @@ void CanvasWidget::applyTransform() {
     // putting it back is not an edit, and it must not cost a resample or an
     // undo step -- a commit softens line art, so one that changed nothing would
     // be a pure loss.
-    if (!live.values.isIdentity()) {
-        ScopedCommand command(doc_, "Transform");
+    if (!live.values.isIdentity() || live.pasted) {
+        ScopedCommand command(doc_, live.pasted ? "Paste" : "Transform");
         // Re-checked rather than trusted. Nothing in the interface can delete
         // the layer under a live transform today, and "cannot happen" is worth
         // being wrong about cheaply.

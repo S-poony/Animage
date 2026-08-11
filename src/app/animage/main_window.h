@@ -184,6 +184,11 @@ private:
     // What the Transform tool does, including saying why when it will not.
     void chooseTransformTool();
 
+    // Cut, copy and paste, which differ from each other by so little that three
+    // handlers would be three copies of the same refusal reporting.
+    enum class Clipboard { Cut, Copy, Paste };
+    void clipboard(Clipboard what);
+
     // Tracks. Adding one puts it at the bottom of the stack and makes it
     // current, because the thing you do next is draw on it.
     void addTrack();

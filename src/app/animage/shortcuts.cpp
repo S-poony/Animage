@@ -37,6 +37,14 @@ const std::vector<Entry>& built() {
         {Id::Redo, "&Redo", kSpelledOut,
          QKeyCombination(Qt::CTRL | Qt::SHIFT | Qt::Key_Z).toCombined(), kAlways},
 
+        // The clipboard is internal: the system one cannot carry half-float
+        // precision or the CTG label encoding, and an image handed to another
+        // program is a different feature with a different argument behind it.
+        // The keys are the usual ones anyway, because the gesture is the usual
+        // one.
+        {Id::Cut, "Cu&t", QKeySequence::Cut, 0, kNormal},
+        {Id::Copy, "&Copy", QKeySequence::Copy, 0, kNormal},
+        {Id::Paste, "&Paste", QKeySequence::Paste, 0, kNormal},
         {Id::SelectAll, "Select &all", QKeySequence::SelectAll, 0, kNormal},
         {Id::Deselect, "&Deselect", kSpelledOut,
          QKeyCombination(Qt::CTRL | Qt::SHIFT | Qt::Key_A).toCombined(), kNormal},

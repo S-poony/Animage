@@ -271,6 +271,10 @@ void MainWindow::buildActions() {
     edit->addSeparator();
     // Beside Undo and Redo, and nothing goes in the Track menu: a selection is
     // an argument to editing operations rather than a property of a track.
+    edit->addAction(makeAction(Id::Cut, [this] { clipboard(Clipboard::Cut); }));
+    edit->addAction(makeAction(Id::Copy, [this] { clipboard(Clipboard::Copy); }));
+    edit->addAction(makeAction(Id::Paste, [this] { clipboard(Clipboard::Paste); }));
+    edit->addSeparator();
     edit->addAction(makeAction(Id::SelectAll, [this] { canvas_->selectEverything(); }));
     edit->addAction(makeAction(Id::Deselect, [this] { canvas_->clearSelection(); }));
     edit->addAction(makeAction(Id::EraseSelection, [this] {
@@ -602,7 +606,45 @@ void MainWindow::chooseTransformTool() {
     syncToolSettings();
 }
 
+void MainWindow::clipboard(Clipboard what) {
+    stopPlayback();
+
+    CanvasWidget::Refusal refusal = CanvasWidget::Refusal::None;
+    const char* verb = "copy";
+    switch (what) {
+        case Clipboard::Cut:
+            verb = "cut";
+            refusal = canvas_->cutSelection();
+            break;
+        case Clipboard::Copy: refusal = canvas_->copySelection(); break;
+        case Clipboard::Paste:
+            verb = "paste";
+            refusal = canvas_->paste();
+            break;
+    }
+
+    if (refusal != CanvasWidget::Refusal::None) {
+        statusBar()->showMessage(QStringLiteral("Cannot %1: %2")
+                                     .arg(QString::fromLatin1(verb),
+                                          CanvasWidget::explain(refusal)),
+                                 6000);
+        return;
+    }
+    // Only a cut has written anything. A paste has not: it arrives as a float,
+    // and refreshEverything would put the canvas back on the timeline's frame --
+    // which is the thing that commits a float, so a paste would bake itself
+    // before it could be placed.
+    if (what == Clipboard::Cut) refreshEverything();
+    syncStatus();
+}
+
 void MainWindow::onTransformBegan() {
+    // A paste arrives here without anybody having pressed the tool, and the
+    // float it lands in is a transform like any other -- so the tool says so.
+    if (transform_action_ && !transform_action_->isChecked()) {
+        transform_action_->setChecked(true);
+        canvas_->setLassoing(false);
+    }
     if (transform_bar_) transform_bar_->setVisible(true);
     setShortcutMode(shortcuts::Mode::Transform);
     syncTransformFields();

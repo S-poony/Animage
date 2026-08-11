@@ -4084,11 +4084,132 @@ void theSelectionSurvivesALayerChangeAndNotAFrameChange() {
     CHECK(!fixture.canvas->hasSelection());
 }
 
+void aPasteLandsWhereItWasCopiedFrom() {
+    TEST("a paste is a float that lands at the coordinates it came from");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const animage::TrackId track = doc.scene().tracks.front().id;
+    doc.addDrawing(track, 0);  // an empty second drawing to paste onto
+    QCoreApplication::processEvents();
+    fixture.canvas->setFrame(0);
+    QCoreApplication::processEvents();
+
+    fixture.action(shortcuts::Id::Copy)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->canPaste());
+    // Copying is not an edit.
+    const std::size_t depth = doc.undoDepth();
+
+    // The clipboard follows you to another drawing, which is what makes a float
+    // that does not the right answer. Through the timeline, which is the path a
+    // frame change really takes -- moving the canvas alone leaves the two
+    // disagreeing, and the next refresh puts it back.
+    fixture.action(shortcuts::Id::NextFrame)->trigger();
+    QCoreApplication::processEvents();
+    CHECK_EQ(fixture.canvas->frame(), std::size_t{1});
+    CHECK(fixture.ink() == nullptr);
+
+    fixture.action(shortcuts::Id::Paste)->trigger();
+    QCoreApplication::processEvents();
+
+    // It arrives as a float: a live transform, with the bar up and the tool
+    // saying so, and nothing written yet.
+    CHECK(fixture.canvas->transformIsLive());
+    CHECK(fixture.action(shortcuts::Id::Transform)->isChecked());
+    CHECK_EQ(doc.undoDepth(), depth);
+    CHECK(fixture.ink() == nullptr);
+
+    // Applied without moving it, it lands where it was copied from -- you paste
+    // to re-register something, not to drop it wherever the view happens to be.
+    // And unlike a transform of the drawing's own pixels, an unmoved paste is
+    // still an edit.
+    fixture.press(Qt::Key_Return);
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+    CHECK(fixture.ink() != nullptr);
+    if (!fixture.ink()) return;
+    CHECK(fixture.ink()->tiles().pixel(340, 320).a > 0.5f);
+}
+
+void cutTakesThePixelsAway() {
+    TEST("cut copies and erases in one command");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const std::size_t depth = doc.undoDepth();
+    CHECK(fixture.ink()->tiles().pixel(340, 320).a > 0.5f);
+
+    fixture.action(shortcuts::Id::Cut)->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+    CHECK(fixture.canvas->canPaste());
+    CHECK(fixture.ink() == nullptr || fixture.ink()->tiles().pixel(340, 320).a < 0.5f);
+
+    // And it undoes in one step, like everything else that writes.
+    CHECK(doc.undo());
+    CHECK(fixture.ink()->tiles().pixel(340, 320).a > 0.5f);
+}
+
+void cancellingAPasteWritesNothing() {
+    TEST("cancelling a paste leaves the drawing and the history alone");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    fixture.action(shortcuts::Id::Copy)->trigger();
+    QCoreApplication::processEvents();
+
+    const std::size_t depth = doc.undoDepth();
+    fixture.action(shortcuts::Id::Paste)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+
+    fixture.press(Qt::Key_Escape);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK_EQ(doc.undoDepth(), depth);
+    // And the clipboard is still there: cancelling a paste is not a way to lose
+    // what you copied.
+    CHECK(fixture.canvas->canPaste());
+}
+
+void pastingOntoAColourLayerIsRefused() {
+    TEST("a colour layer refuses a paste and says why");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Copy)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->canPaste());
+
+    for (QPushButton* button : fixture.window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) button->click();
+    }
+    QCoreApplication::processEvents();
+
+    fixture.action(shortcuts::Id::Paste)->trigger();
+    QCoreApplication::processEvents();
+
+    // Blocked on the layer kind and not on a guess about the pixels: raster
+    // paint written onto a colour layer is a label nobody meant, and the
+    // reverse writes negative light as paint.
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK(fixture.window.statusBar()->currentMessage().contains(QStringLiteral("Cannot paste")));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    aPasteLandsWhereItWasCopiedFrom();
+    cutTakesThePixelsAway();
+    cancellingAPasteWritesNothing();
+    pastingOntoAColourLayerIsRefused();
     aLassoSelectsAndAClickClears();
     anEmptyLassoDoesNotBecomeSelectAll();
     transformingASelectionMovesOnlyWhatWasSelected();

@@ -136,6 +136,23 @@ public:
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
 
+    // Why an edit could not happen. Transform, cut, copy and paste all refuse
+    // where the brush refuses -- a locked layer, a hidden layer, past the end of
+    // a track where there is no slot and no cel -- and it is easy to forget
+    // precisely because none of them is the brush.
+    enum class Refusal {
+        None,
+        NoDrawing,     // past the end of a track: no slot, no cel, nothing to edit
+        NoLayer,
+        LockedLayer,
+        HiddenLayer,
+        ColourLayer,   // a mark there is a label; interpolating one invents colours
+        NothingDrawn,
+        NothingCopied,
+        DifferentLayerKind,
+    };
+    static QString explain(Refusal refusal);
+
     // --- selection -------------------------------------------------------
 
     // The lasso is a tool because it competes with the brush for the pen. What
@@ -162,20 +179,27 @@ public:
     // it depend on whether a selection exists is a bad surprise in the other.
     bool eraseSelection();
 
-    // --- transform -------------------------------------------------------
+    // --- clipboard -------------------------------------------------------
 
-    // Why a transform could not be started. Transform refuses where the brush
-    // refuses and for the same reasons, and it is easy to forget that precisely
-    // because it is not the brush.
-    enum class Refusal {
-        None,
-        NoDrawing,     // past the end of a track: no slot, no cel, nothing to edit
-        NoLayer,
-        LockedLayer,
-        HiddenLayer,
-        ColourLayer,   // a mark there is a label; interpolating one invents colours
-        NothingDrawn,
-    };
+    // Internal, and it has to be. The system clipboard cannot carry half-float
+    // precision or the CTG label encoding, and an image handed to another
+    // program is a different feature with a different argument behind it.
+    //
+    // Copy takes the selection, or the whole cel if there is none --
+    // symmetrical with what the Transform tool does. Cut is the same in one
+    // command with the hole written.
+    Refusal copySelection();
+    Refusal cutSelection();
+    bool canPaste() const { return !clipboard_.empty(); }
+
+    // A paste is a float that came from the clipboard instead of from the cel,
+    // which is the whole reason this comes third: the lifting, the hole, the box
+    // and the commit are all already built. It lands at the coordinates it was
+    // copied from -- you paste to re-register something, not to drop it wherever
+    // the view happens to be -- and it touches no pixel until it is validated.
+    Refusal paste();
+
+    // --- transform -------------------------------------------------------
 
     // Takes the whole cel of the active layer. Entering the tool is what starts
     // a transform -- there is no "transform selection" button, because the tool
@@ -184,7 +208,6 @@ public:
     // being a special case in it.
     Refusal beginTransform();
     bool transformIsLive() const { return transform_.has_value(); }
-    static QString explain(Refusal refusal);
 
     // The five numbers on the bar. Setting them puts the pivot back to the
     // middle of what was picked up, so that a typed rotation always means the
@@ -316,6 +339,11 @@ private:
     bool beginTransformDrag(const QPointF& widget_point);
     bool continueTransformDrag(const QPointF& widget_point);
     void endTransformDrag();
+
+    // Everything the brush checks before it draws, plus the layer kind. Shared
+    // by the transform tool and by all three clipboard operations, because
+    // "refuse where the brush refuses" is one list and not four.
+    Refusal refuseHere() const;
 
     void beginLasso(const QPointF& widget_point);
     void extendLasso(const QPointF& widget_point);
@@ -449,6 +477,13 @@ private:
         animage::TileGrid lifted;
         animage::TileGrid remaining;
 
+        // A paste writes even when it has not been moved: landing something on
+        // the drawing at the coordinates it came from is the operation, not the
+        // absence of one. A transform of the drawing's own pixels that has not
+        // moved them is the absence of one, and must cost neither a resample nor
+        // an undo step.
+        bool pasted = false;
+
         // The float: the layer alone, ready to be blitted through the matrix.
         //
         // The preview and the commit will not agree exactly, and that is
@@ -475,6 +510,13 @@ private:
     // geometry in image space, so re-lifting it from another layer of the same
     // drawing is meaningful, and carrying it to another drawing is how you
     // transform the wrong thing. It is not in the document and not saved.
+    // The clipboard, and what kind of layer it came off. The kind is what a
+    // paste is blocked on: a CTG cel pasted onto a raster layer writes negative
+    // light as paint, and that has to be refused on the layer kind rather than
+    // on a guess about the pixels.
+    animage::TileGrid clipboard_;
+    animage::LayerKind clipboard_kind_ = animage::LayerKind::Raster;
+
     animage::Selection selection_;
     bool lassoing_ = false;      // the tool is selected
     bool drawing_lasso_ = false; // and the pen is down

@@ -962,6 +962,42 @@ and exact horizontal coverage: the horizontal half costs nothing and the vertica
 half costs a factor, so the two are deliberately not symmetrical. Four sub-rows
 was visibly banded on a near-horizontal edge and sixteen bought nothing.
 
+## Copy, cut and paste
+
+Phase 3, and it is small because **a paste is a float that came from the
+clipboard instead of from the cel**. The lifting, the hole, the box and the
+commit were all already built; what a paste adds is one line — the half that
+stands in for the layer is the whole cel, because nothing was taken out of it.
+
+**The clipboard is internal.** The system clipboard cannot carry half-float
+precision or the CTG label encoding, and an image handed to another program is a
+different feature with a different argument behind it.
+
+**Copy with no selection copies the whole cel**, symmetrically with what the
+Transform tool does. Cut is copy plus the hole, in one command.
+
+**A paste lands at the coordinates it was copied from.** You paste to
+re-register something, not to drop it wherever the view happens to be.
+
+**An unmoved paste still writes, and an unmoved transform still does not.**
+`LiveTransform::pasted` is the difference: landing something on the drawing at
+the coordinates it came from is the operation, while picking the drawing's own
+pixels up and putting them back is the absence of one and must cost neither a
+resample nor an undo step.
+
+**Blocked on the layer kind, never on a guess about the pixels.** A CTG cel
+pasted onto a raster layer writes negative light as paint; raster paint onto a
+colour layer is a label nobody meant. `refuseHere` is the single list all four
+operations — transform, cut, copy, paste — check, because "refuse where the brush
+refuses" is one list and not four.
+
+**A paste must not call `refreshEverything`.** That puts the canvas back on the
+timeline's frame, and a frame change is exactly what commits a float — so a paste
+would bake itself before it could be placed. Only a cut refreshes, because only a
+cut has written anything. Found by a test that changed frame behind the
+timeline's back, which is a second thing worth remembering: the canvas and the
+timeline have to be moved together or the next refresh puts one of them back.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
