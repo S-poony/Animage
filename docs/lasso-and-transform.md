@@ -16,6 +16,12 @@ Two things are deliberately not here and have issues of their own: transforming
 a whole layer across time ([#25](https://github.com/S-poony/Animage/issues/25)),
 and flipping ([#24](https://github.com/S-poony/Animage/issues/24)).
 
+> **Correction, written while building it.** Phase 0 and phase 1 are built, so
+> "nothing here is built" is no longer true of them. What happened when they were
+> is in `handover.md` under "what the keyboard does, and when" and "moving a
+> drawing"; corrections to specific claims below are marked where they belong.
+> Phases 2, 3 and 4 are still ahead.
+
 ## What a selection is here, and what it is not
 
 **A selection does not clip the brush.** You can draw anywhere, whether or not
@@ -94,6 +100,21 @@ it follows the window's existing focus discipline — buttons `NoFocus`, numeric
 fields `ClickFocus` with `editingFinished → canvas_->setFocus()`, copying
 `radius_` and `onion_` — because that discipline is why the canvas has the
 keyboard at all.
+
+> **Correction: two scale fields, not one.** "dx / dy / rotation / scale" and
+> "edge handles scale one axis" cannot both be true, and the second is the one
+> the design leans on — letting the handle decide is what frees Shift. So the bar
+> holds dx, dy, rotation, scale X and scale Y. The alternative was a single field
+> that shows nothing meaningful whenever the two axes differ, which is a readout
+> that sometimes cannot say what is happening.
+>
+> **Addition: picking another tool commits.** The document settled that changing
+> frame commits and that looking never does, and said nothing about the tools.
+> Reaching for the brush means you have finished placing the drawing, so Brush,
+> Eraser and Lasso bake it — which makes the tools a way out as well as Apply.
+> Changing layer and changing track commit for the same reason; Clear cancels,
+> because emptying the layer throws those pixels away and baking them first would
+> be a resample spent on nothing.
 
 Cut, Copy, Paste, Select all and Deselect go in the Edit menu beside Undo and
 Redo. Nothing goes in the Track menu.

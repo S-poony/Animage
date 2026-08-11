@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -145,6 +146,98 @@ public:
 private:
     std::unordered_map<TileCoord, TileRef, TileCoordHash> tiles_;
 };
+
+// Where anything has actually been drawn, to the nearest tile, or an empty
+// rectangle if nothing has.
+//
+// Emptied tiles are skipped, and that is not tidiness. It is what the box a
+// transform draws round a drawing with no selection is made of, and it is what
+// picks a colour solve's resolution -- and erasing used to clear a tile's pixels
+// while leaving the tile in the grid, so bounds taken from tile coordinates
+// alone went on describing a mark that was no longer there. A stray scribble out
+// in a corner, made and rubbed out, left every later solve permanently coarser
+// than before it was ever drawn, invisibly, because the region is not something
+// you can see.
+//
+// The grid lets go of an emptied tile at the end of the command that emptied it
+// now, so this is the second line of defence rather than the fix -- a grid that
+// never went through a command, a CtgJob's copy or a fill's tiles, can still
+// hold one. Cheap either way: isFullyTransparent stops at the first pixel that
+// is there, so a tile holding anything costs one compare.
+inline PixelRect drawnBounds(const TileGrid& grid) {
+    bool any = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    for (const auto& [coord, tile] : grid.tiles()) {
+        if (!tile || tile->isFullyTransparent()) continue;
+        const int left = coord.x * kTileSize;
+        const int top = coord.y * kTileSize;
+        if (!any) {
+            x0 = left;
+            y0 = top;
+            x1 = left + kTileSize;
+            y1 = top + kTileSize;
+            any = true;
+            continue;
+        }
+        x0 = std::min(x0, left);
+        y0 = std::min(y0, top);
+        x1 = std::max(x1, left + kTileSize);
+        y1 = std::max(y1, top + kTileSize);
+    }
+    return any ? PixelRect{x0, y0, x1 - x0, y1 - y0} : PixelRect{};
+}
+
+// The same rectangle to the pixel rather than to the tile.
+//
+// Which of the two you want is not a matter of taste. A solve region wants
+// drawnBounds: it is choosing a resolution and a rim, both of which are about
+// how much room the work needs, and reading every pixel to save part of a tile
+// would cost more than it saves. A box drawn on screen wants this one, because
+// a rectangle 128 pixels bigger than the drawing on every side is visibly not
+// the drawing -- it is the tiles, which are an implementation detail nobody
+// asked to see.
+//
+// Reads every pixel of every occupied tile, so it is for the beginning of a
+// gesture and not for a loop. A tile whose rows are scanned from the outside in
+// stops as soon as it has bounded itself, which is most of the cost on line art.
+inline PixelRect paintedBounds(const TileGrid& grid) {
+    bool any = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+    for (const auto& [coord, tile] : grid.tiles()) {
+        if (!tile) continue;
+
+        int left = kTileSize, top = kTileSize, right = -1, bottom = -1;
+        for (int y = 0; y < kTileSize; ++y) {
+            const std::size_t row = static_cast<std::size_t>(y) * kTileSize * 4;
+            for (int x = 0; x < kTileSize; ++x) {
+                if (tile->rgba[row + static_cast<std::size_t>(x) * 4 + 3].bits == 0) continue;
+                if (x < left) left = x;
+                if (x > right) right = x;
+                if (y < top) top = y;
+                bottom = y;
+            }
+        }
+        if (right < 0) continue;  // an emptied tile the grid has not let go of
+
+        const int base_x = coord.x * kTileSize;
+        const int base_y = coord.y * kTileSize;
+        if (!any) {
+            x0 = base_x + left;
+            y0 = base_y + top;
+            x1 = base_x + right + 1;
+            y1 = base_y + bottom + 1;
+            any = true;
+            continue;
+        }
+        x0 = std::min(x0, base_x + left);
+        y0 = std::min(y0, base_y + top);
+        x1 = std::max(x1, base_x + right + 1);
+        y1 = std::max(y1, base_y + bottom + 1);
+    }
+
+    return any ? PixelRect{x0, y0, x1 - x0, y1 - y0} : PixelRect{};
+}
 
 // The same pixels, moved.
 //

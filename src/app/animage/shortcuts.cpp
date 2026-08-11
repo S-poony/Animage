@@ -84,6 +84,13 @@ const std::vector<Entry>& built() {
 
         {Id::Brush, "Brush", kSpelledOut, QKeyCombination(Qt::Key_B).toCombined(), kAlways},
         {Id::Eraser, "Eraser", kSpelledOut, QKeyCombination(Qt::Key_E).toCombined(), kAlways},
+        // A tool and not a button, because it competes with the brush for the
+        // pen -- which is exactly what the exclusive group it joins means. It is
+        // live in both modes: pressing it during a transform is how you would
+        // reach for it, and pressing another tool commits, so the tools are the
+        // way out as much as Apply is.
+        {Id::Transform, "Transform", kSpelledOut, QKeyCombination(Qt::Key_T).toCombined(),
+         kAlways},
         // [ and ] are what every drawing program uses; not having them is
         // jarring. No menu item of their own, hence no label.
         {Id::SmallerBrush, "", kSpelledOut, QKeyCombination(Qt::Key_BracketLeft).toCombined(),

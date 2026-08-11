@@ -35,7 +35,9 @@
 #include <QListWidget>
 #include <QHeaderView>
 #include <QSlider>
+#include <QStatusBar>
 #include <QStyle>
+#include <QToolBar>
 
 #include "brush.h"
 #include "canvas_widget.h"
@@ -3619,12 +3621,303 @@ void theWindowTakesItsKeysFromTheTable() {
     }
 }
 
+// --- lasso and transform -------------------------------------------------
+
+// A window with one drawing on it, ready to be picked up.
+struct WindowWithInk {
+    MainWindow window;
+    CanvasWidget* canvas = nullptr;
+
+    WindowWithInk() {
+        window.resize(1200, 800);
+        window.show();
+        QCoreApplication::processEvents();
+        canvas = window.findChild<CanvasWidget*>();
+        if (canvas) {
+            canvas->resetView();
+            drawWithMouse(canvas, QPointF(300, 300), QPointF(420, 360), 10);
+        }
+        QCoreApplication::processEvents();
+    }
+
+    animage::Document& doc() { return window.documentForTesting(); }
+
+    QAction* action(shortcuts::Id id) { return window.actionForTesting(id); }
+
+    // The one cel there is, whatever ids the window handed out.
+    const animage::Cel* ink() {
+        const animage::Track* track = doc().scene().tracks.empty()
+                                          ? nullptr
+                                          : &doc().scene().tracks.front();
+        if (!track || track->layers.empty()) return nullptr;
+        return doc().celAt(track->id, canvas->currentImage(), track->layers.front().id);
+    }
+
+    void press(int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        QKeyEvent down(QEvent::KeyPress, key, modifiers);
+        QCoreApplication::sendEvent(canvas, &down);
+        QKeyEvent up(QEvent::KeyRelease, key, modifiers);
+        QCoreApplication::sendEvent(canvas, &up);
+        QCoreApplication::processEvents();
+    }
+};
+
+void theTransformToolTakesTheWholeDrawing() {
+    TEST("the transform tool boxes the whole drawing with nothing selected");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+    CHECK(fixture.ink() != nullptr);
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK(fixture.canvas->transformIsLive());
+    // It starts as an identity: entering the tool picks the drawing up and
+    // changes nothing about it.
+    CHECK(fixture.canvas->transformValues().isIdentity());
+
+    // And the mode took the keys with it. A disabled QAction does not consume
+    // its shortcut, which is what frees Return to validate and the arrows to
+    // nudge; nothing about looking at the drawing gives up its key.
+    CHECK(!fixture.action(shortcuts::Id::Play)->isEnabled());
+    CHECK(!fixture.action(shortcuts::Id::NextFrame)->isEnabled());
+    CHECK(!fixture.action(shortcuts::Id::DeleteDrawing)->isEnabled());
+    CHECK(fixture.action(shortcuts::Id::FitCanvas)->isEnabled());
+    CHECK(fixture.action(shortcuts::Id::Undo)->isEnabled());
+
+    fixture.canvas->cancelTransform();
+    QCoreApplication::processEvents();
+    CHECK(fixture.action(shortcuts::Id::Play)->isEnabled());
+}
+
+void nudgingMovesTheDrawingExactly() {
+    TEST("a nudge moves the drawing by whole pixels and does not soften it");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const animage::Cel* cel = fixture.ink();
+    CHECK(cel != nullptr);
+    if (!cel) return;
+    const animage::TileGrid before = cel->tiles();
+    const animage::PixelRect drawn = animage::drawnBounds(before);
+    const std::size_t depth = fixture.doc().undoDepth();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    for (int i = 0; i < 3; ++i) fixture.press(Qt::Key_Right);
+    fixture.press(Qt::Key_Down, Qt::ShiftModifier);  // ten at a time
+    CHECK_NEAR(fixture.canvas->transformValues().dx, 3.0, 1e-9);
+    CHECK_NEAR(fixture.canvas->transformValues().dy, 10.0, 1e-9);
+
+    // Return validates rather than playing, which is the whole of what the mode
+    // is for.
+    fixture.press(Qt::Key_Return);
+    CHECK(!fixture.canvas->transformIsLive());
+
+    // The whole session is one command however many nudges it took: nothing
+    // about looking commits, so nothing was written until this.
+    CHECK_EQ(fixture.doc().undoDepth(), depth + 1);
+
+    const animage::Cel* after = fixture.ink();
+    CHECK(after != nullptr);
+    if (!after) return;
+
+    // Bit-exact, not merely close. A registration nudge must never soften a
+    // line, and softening is invisible in any comparison with a tolerance.
+    std::size_t differing = 0;
+    for (int y = drawn.y; y < drawn.y + drawn.height; ++y) {
+        for (int x = drawn.x; x < drawn.x + drawn.width; ++x) {
+            if (!(before.pixel(x, y) == after->tiles().pixel(x + 3, y + 10))) ++differing;
+        }
+    }
+    CHECK_EQ(differing, std::size_t{0});
+}
+
+void cancellingLeavesTheUndoDepthWhereItWas() {
+    TEST("cancelling a transform leaves no undo entry and no changed pixel");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const animage::TileGrid before = fixture.ink()->tiles();
+    const animage::PixelRect drawn = animage::drawnBounds(before);
+    const std::size_t depth = fixture.doc().undoDepth();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    for (int i = 0; i < 5; ++i) fixture.press(Qt::Key_Left);
+    fixture.press(Qt::Key_Escape);
+
+    CHECK(!fixture.canvas->transformIsLive());
+    // Nothing happened, so there is nothing to undo. The obvious implementation
+    // writes the hole immediately and puts the pixels back on cancel, which
+    // leaves an undo entry for a thing that did not happen.
+    CHECK_EQ(fixture.doc().undoDepth(), depth);
+
+    std::size_t differing = 0;
+    for (int y = drawn.y; y < drawn.y + drawn.height; ++y) {
+        for (int x = drawn.x; x < drawn.x + drawn.width; ++x) {
+            if (!(before.pixel(x, y) == fixture.ink()->tiles().pixel(x, y))) ++differing;
+        }
+    }
+    CHECK_EQ(differing, std::size_t{0});
+
+    // And an applied transform that moved nothing is not an edit either.
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    fixture.press(Qt::Key_Return);
+    CHECK_EQ(fixture.doc().undoDepth(), depth);
+}
+
+void aTransformAppliesToTheWholeHold() {
+    TEST("transforming a drawing held over five frames changes it once");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const animage::TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 4);  // one drawing, five frames
+    QCoreApplication::processEvents();
+
+    const std::size_t depth = doc.undoDepth();
+    const animage::ImageId held = fixture.canvas->currentImage();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    fixture.press(Qt::Key_Right);
+    fixture.press(Qt::Key_Return);
+
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+    // One cel, five slots. Anything walking the slots rather than the drawings
+    // would have transformed it five times.
+    const animage::Track* after = doc.scene().findTrack(track);
+    CHECK(after != nullptr);
+    if (!after) return;
+    for (std::size_t slot = 0; slot < 5; ++slot) {
+        CHECK_EQ(after->imageAtSlot(slot), held);
+    }
+    CHECK(doc.undo());
+    CHECK_EQ(doc.undoDepth(), depth);
+}
+
+void changingFrameCommitsTheTransform() {
+    TEST("changing frame commits a live transform");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const animage::TrackId track = doc.scene().tracks.front().id;
+    doc.addDrawing(track, 0);
+    QCoreApplication::processEvents();
+    const std::size_t depth = doc.undoDepth();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    fixture.press(Qt::Key_Right);
+    CHECK(fixture.canvas->transformIsLive());
+
+    // A float that follows you to another drawing is a transform of the wrong
+    // drawing waiting to happen.
+    fixture.canvas->setFrame(1);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+}
+
+void transformIsRefusedOnAColourLayer() {
+    TEST("a colour layer refuses the transform tool and says why");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    auto* add_colour = fixture.window.findChild<QPushButton*>();
+    // The button is found by its text rather than by position, because the
+    // panel's order is not what is being tested here.
+    for (QPushButton* button : fixture.window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) add_colour = button;
+    }
+    CHECK(add_colour != nullptr);
+    if (!add_colour) return;
+    add_colour->click();
+    QCoreApplication::processEvents();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK(!fixture.canvas->transformIsLive());
+    // And the tool went back rather than sitting checked over a mode that never
+    // started.
+    CHECK(fixture.action(shortcuts::Id::Brush)->isChecked());
+    CHECK(fixture.window.statusBar()->currentMessage().contains(QStringLiteral("Cannot")));
+}
+
+void undoDuringATransformCancelsIt() {
+    TEST("Ctrl+Z during a transform cancels it rather than undoing the stroke");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const std::size_t depth = fixture.doc().undoDepth();
+    CHECK(depth > 0);  // the stroke that drew the ink
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    fixture.press(Qt::Key_Right);
+
+    fixture.action(shortcuts::Id::Undo)->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK(!fixture.canvas->transformIsLive());
+    // The stroke is still there: undo answered the question that was asked.
+    CHECK_EQ(fixture.doc().undoDepth(), depth);
+}
+
+void theNumericFieldsAndTheBoxAreOneThing() {
+    TEST("the transform bar edits the same transform the handles do");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    // The bar is there while the transform is and not before it.
+    QToolBar* bar = nullptr;
+    for (QToolBar* candidate : fixture.window.findChildren<QToolBar*>()) {
+        if (candidate->windowTitle() == QStringLiteral("Transform")) bar = candidate;
+    }
+    CHECK(bar != nullptr);
+    if (!bar) return;
+    CHECK(bar->isVisible());
+
+    QSpinBox* dx = bar->findChild<QSpinBox*>();
+    CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->setValue(25);
+    QCoreApplication::processEvents();
+    CHECK_NEAR(fixture.canvas->transformValues().dx, 25.0, 1e-9);
+
+    // And the other way: a nudge reaches the field.
+    fixture.press(Qt::Key_Right);
+    CHECK_EQ(dx->value(), 26);
+
+    fixture.canvas->cancelTransform();
+    QCoreApplication::processEvents();
+    CHECK(!bar->isVisible());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
     theWindowTakesItsKeysFromTheTable();
+    theTransformToolTakesTheWholeDrawing();
+    nudgingMovesTheDrawingExactly();
+    cancellingLeavesTheUndoDepthWhereItWas();
+    aTransformAppliesToTheWholeHold();
+    changingFrameCommitsTheTransform();
+    transformIsRefusedOnAColourLayer();
+    undoDuringATransformCancelsIt();
+    theNumericFieldsAndTheBoxAreOneThing();
     touchingTheCanvasTakesTheKeyboardBack();
     altClickPicksTheColourUnderThePointer();
     theMouseStillWorksAfterThePenHasBeenUsed();

@@ -809,6 +809,98 @@ pair on a keyboard that has such a key and no chord at all on one that has not.
 AltGr, which Windows reports as Ctrl+Alt. They work and they are awkward, and
 that is a rebinding question rather than a conflict.
 
+## Moving a drawing
+
+Phase 1 of [lasso-and-transform.md](lasso-and-transform.md): the Transform tool,
+with no selection yet, so it takes the whole cel of the active layer. A live box
+with handles, five numeric fields, Apply and Cancel, and the arrows to nudge with.
+
+**Entering the tool is what starts it.** There is no "transform selection"
+button, because the tool is the button — which is what makes "press it with
+nothing selected and it boxes the whole drawing" fall out of the design instead
+of being a special case in it.
+
+**The document is not written until it is committed.** The obvious version
+writes the hole immediately and puts the pixels back if you cancel, which means
+Escape has to unwind a command and there is an undo entry for something that did
+not happen. Instead the layer is left out of the composite —
+`compositeScene` takes a `lifted` layer id — and drawn on top through a
+`QTransform`, so the source region looks empty because it is not being drawn,
+not because anything was erased. `Cel::replaceTiles` is what commits, journalling
+both sides so undo puts the drawing back exactly; an identity writes nothing at
+all, because picking a drawing up and putting it back is not an edit.
+
+**Whole-pixel translation is a branch and not a lucky case of the general
+path.** `Transform::isWholePixelTranslation` is asserted directly by a test,
+because bit equality alone would not say which path ran — bilinear at an integer
+offset lands one weight on one sample and is exact too. A drag rounds `dx` and
+`dy` to whole pixels for the same reason: half a pixel of translation cannot be
+aimed at and only resamples. This is the branch an axis mirror
+([#24](https://github.com/S-poony/Animage/issues/24)) is one sign away from, and
+the reason it must not be built as a −1 scale through the resampler.
+
+**Minification box-filters the footprint, and it is load-bearing.** Bilinear
+reads four neighbours whatever the reduction, so a one-pixel line reduced four
+times falls through the holes — measured by forcing the bilinear path and
+watching the line vanish entirely rather than merely thin. The number of samples
+per axis is bounded by `boxSampleStride` and the compositor's own constant, so
+there is one decision about this in the program and not two.
+
+**The box is the ink's bounds and not the tiles'.** `paintedBounds` reads every
+pixel of every occupied tile; `drawnBounds` stops at the tile. Which one you want
+is not a matter of taste — a solve region is choosing a resolution and wants the
+cheap one, and a rectangle drawn on screen 128 pixels bigger than the drawing on
+every side is a picture of the tile grid, which is an implementation detail
+nobody asked to see. The first screenshot of this had the tile-aligned box in it
+and nothing else would have caught it.
+
+**The pivot belongs to the gesture and is put back between gestures.** Dragging
+the top-left handle scales about the bottom-right corner, so the pivot moves
+constantly and `repivot` absorbs the difference into the translation — otherwise
+the drawing jumps the moment you touch a handle. At the end of every drag it goes
+back to the middle of what was picked up, which is what keeps "rotation 30"
+meaning thirty degrees about the middle whatever the last drag did.
+
+**Two scale fields, not one.** The note says "dx / dy / rotation / scale" and
+also that edge handles scale one axis; those cannot both be true. Two fields was
+the user's call. Letting the handle decide is what frees Shift to constrain
+rotation to fifteen-degree steps and a move to an axis, which is worth more than
+a modifier that switches between one axis and two.
+
+**Scale is clamped positive rather than allowed through zero.** Dragging a handle
+past its anchor squashes to nothing instead of flipping, because a flip has to be
+the exact path and not a bilinear resample at −1, which carries a half-pixel
+phase error and gives a blurred mirror that nothing complains about. See #24.
+
+**Leaving commits, and that was a decision.** Changing frame, changing layer,
+changing track, picking another tool and leaving the document all bake it;
+Escape and Ctrl+Z cancel it; the Clear button cancels it, because emptying the
+layer throws those pixels away and baking them first would be a resample spent on
+nothing. The note only settled the frame case — reaching for the brush meaning
+"I have finished placing it" was the user's call, and it makes the tools a way
+out as well as Apply.
+
+**The preview and the commit do not agree exactly, on purpose.** The float is
+one layer composited once into an ARGB image and blitted through a `QTransform`;
+the real resample is paid once, on commit. Re-resampling half-float tiles on
+every mouse move will not hold a frame. Two things about that image are worth
+knowing. It is bounded absolutely — 2048 on its longest side — rather than by the
+window, which is the one place in this program that is the right way round: what
+is held is one layer of one drawing, its size is known when the gesture starts,
+and rebuilding it as the view moves would recomposite on every pan of a gesture
+whose whole point is to be looked at from several places. And it unpremultiplies
+before the sRGB curve and premultiplies after, because Qt's premultiplied format
+wants sRGB bytes scaled by alpha; applying the curve to an already-premultiplied
+number leaves a rim of the wrong lightness round everything soft, which on line
+art is the whole of the line.
+
+**What is not covered.** Deleting the track or the layer under a live transform
+goes through paths that do not settle it; `applyTransform` re-checks that the cel
+is still there and silently drops the transform if it is not, rather than
+enumerating call sites — a list of those to remember would be the same bug with
+more steps. Phases 2 to 4 — the lasso, copy and paste, and `bench_transform` —
+are not built.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and

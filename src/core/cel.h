@@ -100,6 +100,19 @@ public:
     // away a CTG fill that is still perfectly correct.
     bool releaseIfEmpty(TileCoord c);
 
+    // Swaps the whole grid for another, recording every tile that changes.
+    //
+    // What a transform commits with. A transform touches every tile a cel has,
+    // and going through writableTile for each of them would copy every pixel
+    // into a tile that has already been built -- this hands over the handles the
+    // resampler produced and journals what they displaced, so undo puts the
+    // drawing back exactly.
+    //
+    // Unlike adoptTiles this is an edit. The difference is not the grid, it is
+    // whether the history is told: adoptTiles is for a cel being created, where
+    // what undoes it is the cel going away again.
+    void replaceTiles(TileGrid tiles, TileJournal& journal);
+
     // Takes a whole grid, for a cel that is being created rather than edited.
     // Not an edit and not undoable on its own: the only caller is the creation
     // of a cel that starts from marks it has moved, and what undoes that is the

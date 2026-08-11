@@ -31,6 +31,22 @@ Tile* Cel::writableTile(TileCoord c, TileJournal& journal) {
     return raw;
 }
 
+void Cel::replaceTiles(TileGrid tiles, TileJournal& journal) {
+    // Both sides: a tile the new grid does not have is a tile that is going
+    // away, and its absence has to be undoable too.
+    for (const auto& [coord, tile] : grid_.tiles()) {
+        (void)tile;
+        if (!journal.alreadyRecorded(id_, coord)) journal.record(id_, coord, grid_.find(coord));
+    }
+    for (const auto& [coord, tile] : tiles.tiles()) {
+        (void)tile;
+        if (!journal.alreadyRecorded(id_, coord)) journal.record(id_, coord, grid_.find(coord));
+    }
+
+    grid_ = std::move(tiles);
+    ++revision_;
+}
+
 bool Cel::releaseIfEmpty(TileCoord c) {
     const TileRef* slot = grid_.findSlot(c);
     if (!slot || !*slot || !(*slot)->isFullyTransparent()) return false;

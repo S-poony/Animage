@@ -35,29 +35,10 @@ bool abandoned(const std::atomic<bool>* abandon) {
 
 }  // namespace
 
-// Where anything has actually been drawn, to the nearest tile.
-//
-// Emptied tiles are skipped, and that is not tidiness. Erasing a mark clears
-// its pixels and leaves the tile in the grid, so bounds taken from tile
-// coordinates alone go on describing a mark that is no longer there -- and this
-// rectangle chooses the solve resolution and where the unseverable rim sits. A
-// stray scribble out in a corner, erased, left the solve permanently coarser
-// than it was before the scribble was ever made: draw, erase, and the drawing
-// does not come back the way it was. Nothing said so, because the region is not
-// something you can see.
-//
-// Cheap enough to do every time: isFullyTransparent stops at the first pixel
-// that is there, tiles that hold something stop immediately, and this runs once
-// per solve against a max-flow costing a hundred milliseconds.
-PixelRect drawnBounds(const TileGrid& grid) {
-    PixelRect bounds;
-    for (const auto& [coord, tile] : grid.tiles()) {
-        if (!tile || tile->isFullyTransparent()) continue;
-        bounds = uniteRects(bounds, {coord.x * kTileSize, coord.y * kTileSize, kTileSize,
-                                     kTileSize});
-    }
-    return bounds;
-}
+// drawnBounds lives in tile.h now: it is a property of a grid, and the box a
+// transform draws round a drawing with no selection is the same rectangle this
+// picks a solve resolution with. The reasoning that put it here -- what an
+// emptied tile does to a bounding box -- moved with it.
 
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step) {

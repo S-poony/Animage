@@ -38,6 +38,48 @@ constexpr int kCacheMargin = 64;
 // promoted from it by the platform rather than produced by a real mouse.
 constexpr qint64 kPenMouseWindowMs = 250;
 
+// A transform's handles, in screen pixels and not image pixels, because that is
+// where the hand is: the same box at 25% and at 400% zoom is two completely
+// different targets.
+constexpr double kTransformHandleSize = 9.0;
+constexpr double kTransformHandleGrab = 8.0;
+// Just outside a corner, where every program puts rotation.
+constexpr double kTransformRotateBand = 24.0;
+// Below this the box has no interior left to press: what is there is handles,
+// and moving comes from them or from the numeric fields. The mirror case is
+// worth remembering too -- a whole-cel transform while zoomed in puts every
+// handle off screen, and then the fields are the only grab there is.
+constexpr double kTransformSmallestInterior = 16.0;
+// Scale is clamped positive rather than allowed through zero. A negative scale
+// is a mirror, and a mirror must be an exact index permutation rather than a
+// bilinear resample at scale -1 -- which carries a half-pixel phase error and
+// gives a blurred mirror that nothing complains about. See issue #24.
+constexpr double kSmallestScale = 0.01;
+constexpr double kRotationSnap = 15.0;
+constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
+
+// A corner or an edge middle of an untransformed box, clockwise from the top
+// left. Even is a corner, odd is an edge middle.
+animage::Vec2 handleInImage(const animage::PixelRect& bounds, int index) {
+    const double left = bounds.x;
+    const double top = bounds.y;
+    const double right = bounds.x + bounds.width;
+    const double bottom = bounds.y + bounds.height;
+    const double middle_x = (left + right) / 2.0;
+    const double middle_y = (top + bottom) / 2.0;
+
+    switch (index & 7) {
+        case 0: return {left, top};
+        case 1: return {middle_x, top};
+        case 2: return {right, top};
+        case 3: return {right, middle_y};
+        case 4: return {right, bottom};
+        case 5: return {middle_x, bottom};
+        case 6: return {left, bottom};
+        default: return {left, middle_y};
+    }
+}
+
 // Linear to sRGB through a lookup table. The conversion is per pixel of the
 // viewport on every recomposite, and std::pow in that loop is measurable.
 const std::array<quint8, 4096>& srgbTable() {
@@ -157,11 +199,19 @@ CanvasWidget::~CanvasWidget() {
 }
 
 void CanvasWidget::setTrack(TrackId track) {
+    // Leaving commits, like changing frame does. A float that followed you to
+    // another track would be a transform of the wrong drawing waiting to happen.
+    if (transform_ && track != track_) applyTransform();
     track_ = track;
     setFrame(slot_);
 }
 
 void CanvasWidget::setFrame(std::size_t slot) {
+    // Changing frame commits. A float that follows you to another drawing is a
+    // paste onto the wrong drawing waiting to happen, and there is nothing
+    // useful it could mean out there.
+    if (transform_ && slot != slot_) applyTransform();
+
     // Clamped to the scene and not to the current track: the timeline is shared,
     // so frame 40 is a real frame of the shot even when the track being edited
     // stops at 12. Standing there simply means this track has no drawing, which
@@ -199,7 +249,15 @@ void CanvasWidget::setFrame(std::size_t slot) {
     refreshAll();
 }
 
-void CanvasWidget::setActiveLayer(LayerId layer) { active_layer_ = layer; }
+void CanvasWidget::setActiveLayer(LayerId layer) {
+    if (layer == active_layer_) return;
+    // A transform is of one layer -- the active one -- so choosing another says
+    // you are done with this one. Guarded on the layer actually changing,
+    // because rebuilding the layer panel reselects the same row constantly and
+    // a transform must not be committed by a repaint.
+    if (transform_) applyTransform();
+    active_layer_ = layer;
+}
 
 void CanvasWidget::setEraser(bool erasing) { erasing_ = erasing; }
 
@@ -641,7 +699,11 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     area = intersect(snapToSampleGrid(cache_step_, area), cached_region_);
     if (area.isEmpty()) return;
 
-    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_);
+    // The layer being transformed is left out: it is drawn on top, through the
+    // matrix, so where it came from has to look empty. That is the whole of why
+    // the document does not have to be written until the transform is committed.
+    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_,
+                               transform_ ? transform_->layer : kNoId);
 
     // Where this patch of entries sits in the cache.
     const long long first_column = cache_step_.entryAt(area.x);
@@ -810,6 +872,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     painter.drawImage(QRectF(origin, corner), display_);
 
     drawCanvasFrame(painter);
+    if (transform_) drawTransformPreview(painter);
 }
 
 // The canvas: the rectangle that will be exported, outlined, with everything
@@ -852,6 +915,429 @@ void CanvasWidget::drawCanvasFrame(QPainter& painter) {
     painter.restore();
 }
 
+// --- transform -----------------------------------------------------------
+
+QString CanvasWidget::explain(Refusal refusal) {
+    switch (refusal) {
+        case Refusal::None: return {};
+        case Refusal::NoDrawing:
+            return QStringLiteral("there is no drawing here to transform");
+        case Refusal::NoLayer: return QStringLiteral("no layer is selected");
+        case Refusal::LockedLayer: return QStringLiteral("that layer is locked");
+        case Refusal::HiddenLayer: return QStringLiteral("that layer is hidden");
+        case Refusal::ColourLayer:
+            return QStringLiteral("a colour layer holds labels rather than paint, so there is "
+                                  "nothing here that can be resampled");
+        case Refusal::NothingDrawn:
+            return QStringLiteral("nothing is drawn on this layer");
+    }
+    return {};
+}
+
+CanvasWidget::Refusal CanvasWidget::beginTransform() {
+    if (transform_) return Refusal::None;
+
+    // Past the end of a track there is no slot and no cel, so there is nothing
+    // to edit -- the same refusal the brush makes out there, and easy to forget
+    // here precisely because this is not the brush.
+    if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    if (!layer) return Refusal::NoLayer;
+    // On the layer kind, never on a guess about the pixels. A mark on a colour
+    // layer is a label: alpha is exactly 0 or 1 and the colour is a key, so any
+    // interpolation invents a third colour that competes for regions on its own
+    // account -- and the transparent label is negative light, which blended
+    // against a real colour classifies as transparent and swallows it.
+    if (layer->kind == LayerKind::Ctg) return Refusal::ColourLayer;
+    if (layer->locked) return Refusal::LockedLayer;
+    if (!layer->visible) return Refusal::HiddenLayer;
+
+    // The ink's bounds and not the tiles': a box 128 pixels bigger than the
+    // drawing on every side is a picture of the tile grid, which is an
+    // implementation detail nobody asked to see. This is also what freeing
+    // emptied tiles was a prerequisite for -- without it the box would still be
+    // drawn round a mark that was rubbed out.
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    const PixelRect bounds = cel ? paintedBounds(cel->tiles()) : PixelRect{};
+    if (bounds.isEmpty()) return Refusal::NothingDrawn;
+
+    LiveTransform live;
+    live.track = track_;
+    live.image = image_;
+    live.layer = active_layer_;
+    live.bounds = bounds;
+    live.values.pivot_x = bounds.x + bounds.width / 2.0;
+    live.values.pivot_y = bounds.y + bounds.height / 2.0;
+    transform_ = std::move(live);
+
+    buildTransformPicture();
+    refreshAll();
+    Q_EMIT transformBegan();
+    return Refusal::None;
+}
+
+// The float, built once.
+//
+// Bounded absolutely rather than by the window, which is the one place in this
+// program that is the right way round: what is being held is one layer of one
+// drawing, its size is known when the transform starts, and rebuilding it as the
+// view moves would mean recompositing on every pan of a gesture whose whole
+// point is to be looked at from several places. A drawing large enough to be
+// reduced here previews slightly softer than it commits, which it does anyway.
+void CanvasWidget::buildTransformPicture() {
+    if (!transform_) return;
+    LiveTransform& live = *transform_;
+
+    constexpr int kLongestSide = 2048;
+    const int longest = std::max(live.bounds.width, live.bounds.height);
+    live.step = SampleStep::fromRatio(std::max(1.0, static_cast<double>(longest) / kLongestSide));
+    live.covers = snapToSampleGrid(live.step, live.bounds);
+
+    Framebuffer pixels;
+    compositor_.compositeLayers(doc_, live.track, live.image, {live.layer}, live.covers, pixels,
+                               live.step);
+    if (pixels.isEmpty()) {
+        live.picture = QImage();
+        return;
+    }
+
+    live.picture = QImage(pixels.width(), pixels.height(), QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < pixels.height(); ++y) {
+        const Rgba* source = pixels.row(y);
+        auto* destination = reinterpret_cast<QRgb*>(live.picture.scanLine(y));
+        for (int x = 0; x < pixels.width(); ++x) {
+            const float alpha = std::clamp(source[x].a, 0.0f, 1.0f);
+            if (alpha <= 0.0f) {
+                destination[x] = 0u;
+                continue;
+            }
+            // Unpremultiply, encode, premultiply again. Qt's premultiplied
+            // format wants sRGB bytes scaled by alpha, and applying the curve to
+            // an already-premultiplied number is a different quantity: it shows
+            // as a rim of the wrong lightness round everything soft, which on
+            // line art is the whole of the line.
+            const int a = static_cast<int>(std::lround(alpha * 255.0f));
+            const auto encode = [&](float channel) {
+                return static_cast<int>(std::lround(toSrgbByte(channel / alpha) * alpha));
+            };
+            destination[x] = qRgba(encode(source[x].r), encode(source[x].g), encode(source[x].b),
+                                   a);
+        }
+    }
+}
+
+void CanvasWidget::centreTransformPivot() {
+    if (!transform_) return;
+    const PixelRect& bounds = transform_->bounds;
+    repivot(transform_->values, bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0);
+}
+
+Transform CanvasWidget::transformValues() const {
+    return transform_ ? transform_->values : Transform{};
+}
+
+void CanvasWidget::setTransformValues(const Transform& values) {
+    if (!transform_) return;
+    const PixelRect& bounds = transform_->bounds;
+    Transform wanted = values;
+    // The fields are always about the middle of what was picked up, whatever
+    // the last handle drag pivoted on. Assigned rather than repivoted: these
+    // five numbers are the whole state, so there is nothing to preserve.
+    wanted.pivot_x = bounds.x + bounds.width / 2.0;
+    wanted.pivot_y = bounds.y + bounds.height / 2.0;
+    transform_->values = wanted;
+    update();
+    Q_EMIT transformNumbersChanged();
+}
+
+void CanvasWidget::nudgeTransform(int dx, int dy) {
+    if (!transform_) return;
+    transform_->values.dx += dx;
+    transform_->values.dy += dy;
+    update();
+    Q_EMIT transformNumbersChanged();
+}
+
+void CanvasWidget::applyTransform() {
+    if (!transform_) return;
+
+    // Taken and cleared before anything below runs. Committing writes the
+    // document, which repaints, and a repaint that still saw a live transform
+    // would draw the float over the pixels it had just become.
+    const LiveTransform live = *transform_;
+    transform_.reset();
+    grab_ = Grab::None;
+
+    // An identity writes nothing at all. Picking a drawing up, looking at it and
+    // putting it back is not an edit, and it must not cost a resample or an
+    // undo step -- a commit softens line art, so one that changed nothing would
+    // be a pure loss.
+    if (!live.values.isIdentity()) {
+        ScopedCommand command(doc_, "Transform");
+        // Re-checked rather than trusted. Nothing in the interface can delete
+        // the layer under a live transform today, and "cannot happen" is worth
+        // being wrong about cheaply.
+        if (Cel* cel = doc_.celForWriting(live.track, live.image, live.layer)) {
+            cel->replaceTiles(transformTiles(cel->tiles(), live.values), doc_.journal());
+        }
+    }
+
+    refreshAll();
+    Q_EMIT documentChanged();
+    Q_EMIT transformEnded();
+}
+
+void CanvasWidget::cancelTransform() {
+    if (!transform_) return;
+    transform_.reset();
+    grab_ = Grab::None;
+    refreshAll();
+    Q_EMIT transformEnded();
+}
+
+std::array<QPointF, 8> CanvasWidget::transformHandles() const {
+    std::array<QPointF, 8> handles{};
+    if (!transform_) return handles;
+
+    const PixelRect& bounds = transform_->bounds;
+    const Matrix m = matrixOf(transform_->values);
+
+    const double left = bounds.x;
+    const double top = bounds.y;
+    const double right = bounds.x + bounds.width;
+    const double bottom = bounds.y + bounds.height;
+    const double middle_x = (left + right) / 2.0;
+    const double middle_y = (top + bottom) / 2.0;
+
+    // Clockwise from the top left, corners and edge middles alternating, so
+    // that a handle's index says what it does: even is a corner, odd is an edge.
+    const Vec2 in_image[8] = {{left, top},      {middle_x, top},    {right, top},
+                              {right, middle_y}, {right, bottom},   {middle_x, bottom},
+                              {left, bottom},   {left, middle_y}};
+
+    for (std::size_t i = 0; i < 8; ++i) {
+        const Vec2 moved = apply(m, in_image[i]);
+        handles[i] = widgetFromImage(QPointF(moved.x, moved.y));
+    }
+
+    // Below about three handles across there is nowhere on the edge left to put
+    // them, so they go outside it. Measured on screen and not in image pixels,
+    // because that is where the hand is: the same box at 25% and at 400% zoom
+    // is two completely different targets.
+    const QPointF centre = (handles[0] + handles[4]) / 2.0;
+    const double across = QLineF(handles[0], handles[2]).length();
+    const double down = QLineF(handles[0], handles[6]).length();
+    const double push_x = (across < 3 * kTransformHandleSize) ? kTransformHandleSize : 0.0;
+    const double push_y = (down < 3 * kTransformHandleSize) ? kTransformHandleSize : 0.0;
+    if (push_x > 0.0 || push_y > 0.0) {
+        for (QPointF& handle : handles) {
+            QPointF away = handle - centre;
+            const double length = std::hypot(away.x(), away.y());
+            if (length < 1e-6) continue;
+            away /= length;
+            handle += QPointF(away.x() * push_x, away.y() * push_y);
+        }
+    }
+    return handles;
+}
+
+void CanvasWidget::drawTransformPreview(QPainter& painter) {
+    const LiveTransform& live = *transform_;
+    const Matrix m = matrixOf(live.values);
+
+    if (!live.picture.isNull()) {
+        // Three transforms, applied in order: the float's own pixels to image
+        // coordinates, the transform itself, and the view. Qt composes
+        // row-vector style, so the order here reads the same way the point
+        // travels.
+        const long long first_column = live.step.entryAt(live.covers.x);
+        const long long first_row = live.step.entryAt(live.covers.y);
+        const double ratio = live.step.ratio();
+        const QTransform from_picture(ratio, 0.0, 0.0, ratio, live.step.entryEdge(first_column),
+                                      live.step.entryEdge(first_row));
+        const QTransform moving(m.a, m.c, m.b, m.d, m.tx, m.ty);
+        const QPointF at = pan();
+        const QTransform to_widget(zoom_, 0.0, 0.0, zoom_, -at.x() * zoom_, -at.y() * zoom_);
+
+        painter.save();
+        painter.setTransform(from_picture * moving * to_widget);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.drawImage(QPointF(0.0, 0.0), live.picture);
+        painter.restore();
+    }
+
+    // The box, and the handles on it.
+    const std::array<QPointF, 8> handles = transformHandles();
+    QPolygonF box;
+    box << handles[0] << handles[2] << handles[4] << handles[6];
+
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(255, 255, 255, 160), 3.0));
+    painter.drawPolygon(box);
+    painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+    painter.drawPolygon(box);
+
+    const double half = kTransformHandleSize / 2.0;
+    for (const QPointF& handle : handles) {
+        const QRectF square(handle.x() - half, handle.y() - half, kTransformHandleSize,
+                            kTransformHandleSize);
+        painter.setBrush(QColor(255, 255, 255));
+        painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+        painter.drawRect(square);
+    }
+    painter.restore();
+}
+
+// What a press on the box grabbed, and the pivot the gesture wants.
+//
+// Handles are tested before the interior because they sometimes sit outside the
+// box, and anything asking "is this inside" first would eat half of them.
+bool CanvasWidget::beginTransformDrag(const QPointF& widget_point) {
+    if (!transform_) return false;
+
+    const std::array<QPointF, 8> handles = transformHandles();
+    grab_image_ = imageFromWidget(widget_point);
+
+    for (int i = 0; i < 8; ++i) {
+        if (QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length() >
+            kTransformHandleGrab) {
+            continue;
+        }
+        // Scale about the handle opposite, which is what makes dragging one
+        // corner leave the other exactly where it was.
+        const Vec2 anchor = handleInImage(transform_->bounds, i + 4);
+        repivot(transform_->values, anchor.x, anchor.y);
+        grab_values_ = transform_->values;
+        grab_ = Grab::Handle;
+        grabbed_handle_ = i;
+        return true;
+    }
+
+    // A ring just outside each corner rotates. Letting the handle decide what a
+    // drag means is what frees Shift to constrain the rotation to fifteen-degree
+    // steps and a move to an axis, which is worth more than a modifier that
+    // switches between scaling one axis and two.
+    for (int i = 0; i < 8; i += 2) {
+        const double reach = QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length();
+        if (reach > kTransformRotateBand) continue;
+        centreTransformPivot();
+        grab_values_ = transform_->values;
+        grab_ = Grab::Rotate;
+        return true;
+    }
+
+    QPolygonF box;
+    box << handles[0] << handles[2] << handles[4] << handles[6];
+    const bool roomy = QLineF(handles[0], handles[2]).length() > kTransformSmallestInterior &&
+                       QLineF(handles[0], handles[6]).length() > kTransformSmallestInterior;
+    if (roomy && box.containsPoint(widget_point, Qt::OddEvenFill)) {
+        centreTransformPivot();
+        grab_values_ = transform_->values;
+        grab_ = Grab::Move;
+        return true;
+    }
+
+    return false;
+}
+
+bool CanvasWidget::continueTransformDrag(const QPointF& widget_point) {
+    if (!transform_ || grab_ == Grab::None) return false;
+
+    const QPointF now = imageFromWidget(widget_point);
+    const bool constrained = (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier) != 0;
+    Transform values = grab_values_;
+
+    switch (grab_) {
+        case Grab::Move: {
+            double moved_x = now.x() - grab_image_.x();
+            double moved_y = now.y() - grab_image_.y();
+            if (constrained) {
+                if (std::abs(moved_x) >= std::abs(moved_y)) {
+                    moved_y = 0.0;
+                } else {
+                    moved_x = 0.0;
+                }
+            }
+            // Whole pixels. A drag that lands half a pixel off resamples the
+            // whole drawing for a placement nobody could have aimed at, and
+            // registration is the transform this is mostly for.
+            values.dx = grab_values_.dx + std::round(moved_x);
+            values.dy = grab_values_.dy + std::round(moved_y);
+            break;
+        }
+
+        case Grab::Rotate: {
+            // About where the middle of the box is now, which is the pivot plus
+            // the translation: the pivot maps to itself under rotation and
+            // scale, so that is the one point the box turns around on screen.
+            const double centre_x = values.pivot_x + values.dx;
+            const double centre_y = values.pivot_y + values.dy;
+            const double was = std::atan2(grab_image_.y() - centre_y, grab_image_.x() - centre_x);
+            const double is = std::atan2(now.y() - centre_y, now.x() - centre_x);
+            double turned = grab_values_.rotation + (is - was) / kRadiansPerDegree;
+            if (constrained) turned = std::round(turned / kRotationSnap) * kRotationSnap;
+            values.rotation = turned;
+            break;
+        }
+
+        case Grab::Handle: {
+            const Vec2 handle = handleInImage(transform_->bounds, grabbed_handle_);
+            const Vec2 arm{handle.x - values.pivot_x, handle.y - values.pivot_y};
+
+            // Where the handle has to land, measured before the rotation is
+            // applied: what is left once the turn is taken back out is exactly
+            // the scale, because scale * arm is the only thing between them.
+            const double radians = -values.rotation * kRadiansPerDegree;
+            const double cosine = std::cos(radians);
+            const double sine = std::sin(radians);
+            const double to_x = now.x() - values.pivot_x - values.dx;
+            const double to_y = now.y() - values.pivot_y - values.dy;
+            const Vec2 wanted{cosine * to_x - sine * to_y, sine * to_x + cosine * to_y};
+
+            if ((grabbed_handle_ & 1) == 0) {
+                // A corner scales both axes by one factor, and the factor is
+                // measured against where the handle was rather than against the
+                // box -- a drawing already squashed to half height stays
+                // squashed when a corner grows it, which is what "uniform"
+                // means once the two axes can differ at all.
+                const Vec2 from{grab_values_.scale_x * arm.x, grab_values_.scale_y * arm.y};
+                const double along = from.x * from.x + from.y * from.y;
+                if (along > 1e-9) {
+                    const double factor = (wanted.x * from.x + wanted.y * from.y) / along;
+                    values.scale_x = std::max(kSmallestScale, grab_values_.scale_x * factor);
+                    values.scale_y = std::max(kSmallestScale, grab_values_.scale_y * factor);
+                }
+            } else if (std::abs(arm.x) > std::abs(arm.y)) {
+                values.scale_x = std::max(kSmallestScale, wanted.x / arm.x);
+            } else if (std::abs(arm.y) > 1e-9) {
+                values.scale_y = std::max(kSmallestScale, wanted.y / arm.y);
+            }
+            break;
+        }
+
+        case Grab::None: return false;
+    }
+
+    transform_->values = values;
+    update();
+    Q_EMIT transformNumbersChanged();
+    return true;
+}
+
+void CanvasWidget::endTransformDrag() {
+    if (grab_ == Grab::None) return;
+    grab_ = Grab::None;
+    grabbed_handle_ = -1;
+    // Back to the middle between gestures, so that what the numeric fields say
+    // means one thing however the last drag pivoted.
+    centreTransformPivot();
+    update();
+    Q_EMIT transformNumbersChanged();
+}
+
 // --- picking -------------------------------------------------------------
 
 // Samples the flattened drawing under the pointer, in the space it is stored
@@ -877,7 +1363,10 @@ bool CanvasWidget::pickColourAt(const QPointF& image_point) {
     const PixelRect one{static_cast<int>(std::floor(image_point.x())),
                         static_cast<int>(std::floor(image_point.y())), 1, 1};
     Framebuffer sample;
-    compositor_.compositeScene(doc_, slot_, one, sample);
+    // Without the layer a transform has picked up, for the same reason the
+    // display cache is composited without it: it is not there any more.
+    compositor_.compositeScene(doc_, slot_, one, sample, SampleStep{},
+                               transform_ ? transform_->layer : kNoId);
     if (sample.isEmpty()) return false;
 
     // A CTG layer contributes the fill it last generated, which is what is on
@@ -1154,6 +1643,18 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         return;  // no stroke, whatever happened to Alt in the meantime
     }
 
+    // A live transform takes the pen: the tools are exclusive, so while the
+    // transform tool holds it the brush is not competing for it.
+    if (transform_) {
+        switch (event->type()) {
+            case QEvent::TabletPress: beginTransformDrag(widget_point); break;
+            case QEvent::TabletMove: continueTransformDrag(widget_point); break;
+            case QEvent::TabletRelease: endTransformDrag(); break;
+            default: break;
+        }
+        return;
+    }
+
     const QPointingDevice* device = event->pointingDevice();
     if (event->type() == QEvent::TabletPress && device) {
         stylus_eraser_ = device->pointerType() == QPointingDevice::PointerType::Eraser;
@@ -1203,6 +1704,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
         pickColourAt(imageFromWidget(event->position()));
         return;
     }
+    if (transform_) {
+        beginTransformDrag(event->position());
+        return;
+    }
     beginStroke(imageFromWidget(event->position()), 1.0f);
 }
 
@@ -1211,6 +1716,10 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     if (eventIsSynthesisedFromPen(event)) return;
     if (picking_) {
         pickColourAt(imageFromWidget(event->position()));
+        return;
+    }
+    if (transform_) {
+        continueTransformDrag(event->position());
         return;
     }
     if (stroking_) extendStroke(imageFromWidget(event->position()), 1.0f);
@@ -1225,6 +1734,10 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (picking_) {
         picking_ = false;
         pickColourAt(imageFromWidget(event->position()));
+        return;
+    }
+    if (transform_) {
+        endTransformDrag();
         return;
     }
     endStroke();
@@ -1303,6 +1816,31 @@ void CanvasWidget::fitTo(const PixelRect& bounds) {
 // used to recurse until the stack ran out -- a crash a few seconds into every
 // pan and every zoom.
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
+    // The keys a live transform takes over. They arrive here rather than being
+    // actions of their own because the actions that own them normally have been
+    // disabled -- a disabled QAction does not consume its shortcut, so Return
+    // and the arrows fall through to whatever has the keyboard, which is this.
+    // See shortcuts.h.
+    if (transform_) {
+        const int step = (event->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+        switch (event->key()) {
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+                applyTransform();
+                event->accept();
+                return;
+            case Qt::Key_Escape:
+                cancelTransform();
+                event->accept();
+                return;
+            case Qt::Key_Left: nudgeTransform(-step, 0); event->accept(); return;
+            case Qt::Key_Right: nudgeTransform(step, 0); event->accept(); return;
+            case Qt::Key_Up: nudgeTransform(0, -step); event->accept(); return;
+            case Qt::Key_Down: nudgeTransform(0, step); event->accept(); return;
+            default: break;
+        }
+    }
+
     switch (event->key()) {
         case Qt::Key_Space:
             if (!event->isAutoRepeat()) {

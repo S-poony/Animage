@@ -12,6 +12,7 @@
   gridflow.cpp
   lazybrush.cpp
   track.cpp
+  transform.cpp
 )
 
 target_include_directories(animage_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

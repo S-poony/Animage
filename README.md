@@ -132,6 +132,8 @@ cmake --build build --target animage && ./build/src/app/animage
 |---|---|
 | Draw | pen, or left mouse |
 | `B` / `E` | brush / eraser (turning the stylus over also erases) |
+| `T` | transform: move, turn or resize this drawing on the layer you are on |
+| Enter, Escape, arrows | during a transform: apply, cancel, nudge (`Shift` for ten) |
 | `[` / `]` | smaller / larger |
 | Wheel | zoom about the pointer |
 | Space-drag, middle-drag | pan |
@@ -141,6 +143,15 @@ cmake --build build --target animage && ./build/src/app/animage
 | `Alt`+right-drag | brush size |
 | `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
+
+**Transform** takes the whole drawing on the layer you are on — there is nothing
+to select with yet. Corner handles resize both ways and edge handles one way,
+`Shift` constrains a rotation to fifteen degrees and a move to an axis, and the
+numeric fields on the bar are the way to place something exactly, or to move a
+box whose handles have gone off screen. Nothing is written until you apply, so
+cancelling leaves no undo step; moving by a whole number of pixels does not
+resample, so registration nudges never soften a line. Colour layers are excluded:
+a mark there is a label rather than paint, and interpolating one invents colours.
 
 Fitting the drawing is `F` and not the `Shift+0` it used to be. On a keyboard
 whose digit row is the shifted face of another row — AZERTY, for one — typing

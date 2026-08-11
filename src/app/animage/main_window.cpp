@@ -110,6 +110,10 @@ MainWindow::MainWindow() {
     });
     connect(canvas_, &CanvasWidget::colourPicked, this, &MainWindow::applyColour);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::syncStatus);
+    connect(canvas_, &CanvasWidget::transformBegan, this, &MainWindow::onTransformBegan);
+    connect(canvas_, &CanvasWidget::transformNumbersChanged, this,
+            &MainWindow::syncTransformFields);
+    connect(canvas_, &CanvasWidget::transformEnded, this, &MainWindow::onTransformEnded);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
         syncStatus();
@@ -356,21 +360,32 @@ void MainWindow::buildActions() {
     QToolBar* tools = addToolBar(QStringLiteral("Tools"));
     tools->setMovable(false);
 
+    // One exclusive group: these compete for the pen, which is what a tool is.
+    // Picking any of them while a transform is live commits it -- reaching for
+    // the brush means you have finished placing the drawing, and it is the same
+    // rule as changing frame.
     auto* mode = new QActionGroup(this);
     brush_action_ = makeAction(Id::Brush, [this] {
+        canvas_->applyTransform();
         canvas_->setEraser(false);
         syncToolSettings();
     });
     eraser_action_ = makeAction(Id::Eraser, [this] {
+        canvas_->applyTransform();
         canvas_->setEraser(true);
         syncToolSettings();
     });
-    for (QAction* action : {brush_action_, eraser_action_}) {
+    transform_action_ = makeAction(Id::Transform, [this] { chooseTransformTool(); });
+    for (QAction* action : {brush_action_, eraser_action_, transform_action_}) {
         action->setCheckable(true);
         mode->addAction(action);
         tools->addAction(action);
     }
     brush_action_->setChecked(true);
+    transform_action_->setToolTip(
+        QStringLiteral("Move, turn or resize this drawing on the layer you are on.\n"
+                       "With nothing selected it takes the whole drawing.\n"
+                       "Enter applies, Escape cancels, the arrows nudge."));
 
     tools->addSeparator();
     tools->addWidget(new QLabel(QStringLiteral(" Size ")));
@@ -461,11 +476,152 @@ void MainWindow::buildActions() {
     connect(clear, &QPushButton::clicked, this, &MainWindow::clearCurrentLayer);
     tools->addWidget(clear);
 
+    buildTransformBar();
+
     // Said rather than assumed. Every action is enabled by default and the
     // window opens in Normal, so this changes nothing today -- and it is the
     // only place the enabled state is ever set, which is the property worth
     // having: there is one answer to "why is this action off" and it is here.
     setShortcutMode(shortcuts::Mode::Normal);
+}
+
+// The bar exists only while a transform does.
+//
+// Not a panel and not a permanent row of controls: what is on it belongs to the
+// transform that is happening rather than to the track or to the program. A
+// permanently visible scope control that is off by default is a trap precisely
+// *because* it is off by default -- you forget it is on in the one session where
+// it is, and an ordinary drag then rewrites the whole shot.
+void MainWindow::buildTransformBar() {
+    addToolBarBreak();
+    transform_bar_ = addToolBar(QStringLiteral("Transform"));
+    transform_bar_->setMovable(false);
+    transform_bar_->setVisible(false);
+
+    const auto number = [&](const QString& label, double lowest, double highest, int decimals,
+                            const QString& suffix) {
+        transform_bar_->addWidget(new QLabel(QStringLiteral(" %1 ").arg(label), transform_bar_));
+        auto* box = new QDoubleSpinBox(transform_bar_);
+        box->setRange(lowest, highest);
+        box->setDecimals(decimals);
+        box->setSuffix(suffix);
+        // ClickFocus and not the default WheelFocus, and editingFinished hands
+        // the keyboard back: the same discipline as the brush size box, and it
+        // is why the canvas has the keyboard at all.
+        box->setFocusPolicy(Qt::ClickFocus);
+        connect(box, &QDoubleSpinBox::valueChanged, this,
+                [this](double) { onTransformFieldEdited(); });
+        connect(box, &QDoubleSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
+        transform_bar_->addWidget(box);
+        return box;
+    };
+
+    const auto whole = [&](const QString& label) {
+        transform_bar_->addWidget(new QLabel(QStringLiteral(" %1 ").arg(label), transform_bar_));
+        auto* box = new QSpinBox(transform_bar_);
+        box->setRange(-100000, 100000);
+        box->setSuffix(QStringLiteral(" px"));
+        box->setFocusPolicy(Qt::ClickFocus);
+        connect(box, &QSpinBox::valueChanged, this, [this](int) { onTransformFieldEdited(); });
+        connect(box, &QSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
+        transform_bar_->addWidget(box);
+        return box;
+    };
+
+    // Whole pixels, because a translation is the transform this is mostly for
+    // and half a pixel of it cannot be aimed at -- it only resamples.
+    transform_dx_ = whole(QStringLiteral("dx"));
+    transform_dy_ = whole(QStringLiteral("dy"));
+    transform_rotation_ =
+        number(QStringLiteral("rotation"), -3600.0, 3600.0, 1, QString::fromUtf8("°"));
+    // Two scale fields and not one. The bar could show a single number only if
+    // every handle scaled both axes, and the corner/edge distinction is what
+    // frees Shift to constrain rotation, which is worth more.
+    transform_scale_x_ = number(QStringLiteral("scale X"), 1.0, 10000.0, 1,
+                                QStringLiteral("%"));
+    transform_scale_y_ = number(QStringLiteral("scale Y"), 1.0, 10000.0, 1,
+                                QStringLiteral("%"));
+
+    transform_bar_->addSeparator();
+    const auto button = [&](const QString& text, const QString& tip, auto handler) {
+        auto* b = new QPushButton(text, transform_bar_);
+        b->setToolTip(tip);
+        b->setFocusPolicy(Qt::NoFocus);  // keep the pen and the keyboard on the canvas
+        connect(b, &QPushButton::clicked, this, handler);
+        transform_bar_->addWidget(b);
+    };
+    button(QStringLiteral("Apply"), QStringLiteral("Bake it into the drawing (Enter)"),
+           [this] { canvas_->applyTransform(); });
+    button(QStringLiteral("Cancel"),
+           QStringLiteral("Put it back where it was (Escape).\nNothing was written, so this "
+                          "leaves no undo step."),
+           [this] { canvas_->cancelTransform(); });
+}
+
+// Entering the tool is what starts a transform. There is no "transform
+// selection" button because the tool is the button, which is what makes "press
+// it with nothing selected and it boxes the whole drawing" fall out.
+void MainWindow::chooseTransformTool() {
+    stopPlayback();
+    if (canvas_->transformIsLive()) return;
+
+    const CanvasWidget::Refusal refusal = canvas_->beginTransform();
+    if (refusal == CanvasWidget::Refusal::None) return;
+
+    // Said out loud. A tool that silently does nothing is a bug as far as
+    // anybody holding the pen is concerned -- the same reason the status bar
+    // says why the brush will not draw past the end of a track.
+    statusBar()->showMessage(
+        QStringLiteral("Cannot transform: %1").arg(CanvasWidget::explain(refusal)), 6000);
+    brush_action_->setChecked(true);
+    canvas_->setEraser(false);
+    syncToolSettings();
+}
+
+void MainWindow::onTransformBegan() {
+    if (transform_bar_) transform_bar_->setVisible(true);
+    setShortcutMode(shortcuts::Mode::Transform);
+    syncTransformFields();
+    syncStatus();
+}
+
+void MainWindow::onTransformEnded() {
+    if (transform_bar_) transform_bar_->setVisible(false);
+    setShortcutMode(shortcuts::Mode::Normal);
+    // Back to the brush, which is what you were going to do next. setChecked
+    // does not emit triggered, so this cannot come back round through the
+    // handler that commits a transform.
+    if (transform_action_ && transform_action_->isChecked()) {
+        brush_action_->setChecked(true);
+        canvas_->setEraser(false);
+        syncToolSettings();
+    }
+    refreshEverything();
+}
+
+void MainWindow::syncTransformFields() {
+    if (!transform_dx_) return;
+    const Transform values = canvas_->transformValues();
+
+    updating_transform_fields_ = true;
+    transform_dx_->setValue(static_cast<int>(std::lround(values.dx)));
+    transform_dy_->setValue(static_cast<int>(std::lround(values.dy)));
+    transform_rotation_->setValue(values.rotation);
+    transform_scale_x_->setValue(values.scale_x * 100.0);
+    transform_scale_y_->setValue(values.scale_y * 100.0);
+    updating_transform_fields_ = false;
+}
+
+void MainWindow::onTransformFieldEdited() {
+    if (updating_transform_fields_ || !canvas_->transformIsLive()) return;
+
+    Transform values = canvas_->transformValues();
+    values.dx = transform_dx_->value();
+    values.dy = transform_dy_->value();
+    values.rotation = transform_rotation_->value();
+    values.scale_x = transform_scale_x_->value() / 100.0;
+    values.scale_y = transform_scale_y_->value() / 100.0;
+    canvas_->setTransformValues(values);
 }
 
 void MainWindow::buildLayerPanel() {
@@ -738,6 +894,10 @@ void MainWindow::updateTitle() {
 
 bool MainWindow::leaveCurrentDocument() {
     stopPlayback();
+    // A float is document state that is not in the document, so leaving without
+    // committing loses it -- and leaving is not a way to discard, which is the
+    // rule the rest of this function is built on.
+    canvas_->applyTransform();
     if (doc_.undoDepth() == saved_undo_depth_) return true;  // nothing to lose
 
     if (!project_folder_.isEmpty()) {
@@ -1924,6 +2084,9 @@ void MainWindow::onOpacityChanged(int percent) {
 
 void MainWindow::clearCurrentLayer() {
     stopPlayback();
+    // Cancelled rather than committed: emptying the layer throws these pixels
+    // away, so baking them first would be one resample spent on nothing.
+    canvas_->cancelTransform();
     Layer* layer = currentLayer();
     if (!layer) return;
     doc_.clearCel(track_, canvas_->currentImage(), layer->id);
@@ -2027,7 +2190,11 @@ std::string MainWindow::nextColourLayerName() const {
     }
 }
 
+// Deleting the layer a transform is holding would leave the float pointing at
+// something that is not there. Committed first, so the drawing that was picked
+// up is part of what the deletion undoes.
 void MainWindow::removeCurrentLayer() {
+    canvas_->applyTransform();
     const Track* track = doc_.scene().findTrack(track_);
     if (!track || track->layers.size() <= 1) return;  // never leave nothing to draw on
     Layer* layer = currentLayer();
@@ -2175,14 +2342,23 @@ void MainWindow::nudgeBrushRadius(double factor) {
     radius_->setValue(radius_->value() * factor);
 }
 
+// Undo and Redo are not disabled during a transform, they are redefined: Ctrl+Z
+// cancels it. Undoing the stroke before it would be answering a question nobody
+// asked, and there is no undo entry for the transform itself to reach -- nothing
+// has been written.
 void MainWindow::undo() {
     stopPlayback();
+    if (canvas_->transformIsLive()) {
+        canvas_->cancelTransform();
+        return;
+    }
     if (!doc_.undo()) return;
     refreshEverything();
 }
 
 void MainWindow::redo() {
     stopPlayback();
+    if (canvas_->transformIsLive()) return;
     if (!doc_.redo()) return;
     refreshEverything();
 }

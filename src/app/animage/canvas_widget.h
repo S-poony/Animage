@@ -6,7 +6,9 @@
 #include <QPointF>
 #include <QWidget>
 
+#include <array>
 #include <map>
+#include <optional>
 #include <utility>
 
 class QPainter;
@@ -17,6 +19,7 @@ class QTimer;
 #include "ctg.h"
 #include "ctg_solver.h"
 #include "document.h"
+#include "transform.h"
 
 // The drawing surface. Shows the whole scene at one frame -- every track,
 // stacked, index 0 on top -- and turns tablet events into brush strokes on the
@@ -132,6 +135,43 @@ public:
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
 
+    // --- transform -------------------------------------------------------
+
+    // Why a transform could not be started. Transform refuses where the brush
+    // refuses and for the same reasons, and it is easy to forget that precisely
+    // because it is not the brush.
+    enum class Refusal {
+        None,
+        NoDrawing,     // past the end of a track: no slot, no cel, nothing to edit
+        NoLayer,
+        LockedLayer,
+        HiddenLayer,
+        ColourLayer,   // a mark there is a label; interpolating one invents colours
+        NothingDrawn,
+    };
+
+    // Takes the whole cel of the active layer. Entering the tool is what starts
+    // a transform -- there is no "transform selection" button, because the tool
+    // is the button, and that single rule is what makes "press it with nothing
+    // selected and it boxes the whole drawing" fall out of the design instead of
+    // being a special case in it.
+    Refusal beginTransform();
+    bool transformIsLive() const { return transform_.has_value(); }
+    static QString explain(Refusal refusal);
+
+    // The five numbers on the bar. Setting them puts the pivot back to the
+    // middle of what was picked up, so that a typed rotation always means the
+    // same thing whatever the last handle drag did.
+    animage::Transform transformValues() const;
+    void setTransformValues(const animage::Transform& values);
+    void nudgeTransform(int dx, int dy);
+
+    // Bakes it. One resample, one command, and nothing at all if the transform
+    // is an identity -- looking at a drawing and putting it back is not an edit.
+    void applyTransform();
+    // Leaves no undo entry, because nothing was ever written.
+    void cancelTransform();
+
     // Entries in the composite cache. Exposed so a test can assert this tracks
     // the size of the window rather than the size of the visible image area.
     long long cacheEntryCount() const;
@@ -173,6 +213,14 @@ Q_SIGNALS:
     void brushSizeChanged(double radius);
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
+
+    // A transform started, its numbers moved, or it ended -- committed or not.
+    // The bar with the numeric fields on it is what listens: it exists only
+    // while a transform does, because the scope of a transform belongs to that
+    // transform and not to the program.
+    void transformBegan();
+    void transformNumbersChanged();
+    void transformEnded();
 
     // A fill landed, so anything reporting on the colour is out of date. Emitted when a solve
     // is installed, which happens on a timer and no longer inside a paint; the
@@ -222,6 +270,21 @@ private:
     bool beginNavigation(const QPointF& widget_point, Qt::MouseButton button);
     bool continueNavigation(const QPointF& widget_point);
     void endNavigation();
+
+    // The eight handles, in widget coordinates, clockwise from the top left.
+    // Drawn at a fixed screen size, so a box narrower than about three of them
+    // has them sitting outside its edge rather than on it -- there is nowhere on
+    // it left to put them.
+    std::array<QPointF, 8> transformHandles() const;
+    void drawTransformPreview(QPainter& painter);
+    void buildTransformPicture();
+    // Puts the pivot back in the middle of what was picked up, at the end of
+    // every gesture. See repivot.
+    void centreTransformPivot();
+
+    bool beginTransformDrag(const QPointF& widget_point);
+    bool continueTransformDrag(const QPointF& widget_point);
+    void endTransformDrag();
 
     animage::Document& doc_;
     animage::Compositor compositor_;
@@ -324,6 +387,39 @@ private:
     bool zoom_key_held_ = false;
     QPointF zoom_anchor_widget_;
     double zoom_at_press_ = 1.0;
+
+    // A live transform, and the whole of it. The document is not touched until
+    // it is committed: the obvious version writes the hole immediately and puts
+    // the pixels back if you cancel, which means Escape has to unwind a command
+    // and there is an undo entry for a thing that did not happen.
+    struct LiveTransform {
+        animage::TrackId track = animage::kNoId;
+        animage::ImageId image = animage::kNoId;
+        animage::LayerId layer = animage::kNoId;
+        // What was picked up, in image pixels. The box refers to this rectangle
+        // and so does the pivot.
+        animage::PixelRect bounds;
+        animage::Transform values;
+
+        // The float: the layer alone, ready to be blitted through the matrix.
+        //
+        // The preview and the commit will not agree exactly, and that is
+        // deliberate. Re-resampling half-float tiles on every mouse move will
+        // not hold a frame, so this is drawn through a QTransform and the real
+        // resample is paid once, on commit -- the same class of honesty as the
+        // PNG and the EXR not containing the same numbers.
+        QImage picture;
+        animage::PixelRect covers;
+        animage::SampleStep step;
+    };
+    std::optional<LiveTransform> transform_;
+
+    // What a press on the box grabbed.
+    enum class Grab { None, Move, Rotate, Handle };
+    Grab grab_ = Grab::None;
+    int grabbed_handle_ = -1;
+    QPointF grab_image_;
+    animage::Transform grab_values_;
 
     Background background_ = Background::White;
     bool passe_partout_ = true;

@@ -29,6 +29,7 @@ class QGroupBox;
 class QListWidget;
 class QComboBox;
 class QScrollArea;
+class QToolBar;
 
 // The application window: canvas, timeline, layers, and the File menu. One
 // track. A project saves, opens, autosaves over itself and exports.
@@ -171,6 +172,18 @@ private:
     void undo();
     void redo();
 
+    // The bar the numeric fields live on, which exists only while a transform
+    // does. The scope of a transform belongs to that transform, not to the
+    // track and not to the program: a permanently visible control that is off
+    // by default is a trap precisely because it is off by default.
+    void buildTransformBar();
+    void onTransformBegan();
+    void onTransformEnded();
+    void syncTransformFields();
+    void onTransformFieldEdited();
+    // What the Transform tool does, including saying why when it will not.
+    void chooseTransformTool();
+
     // Tracks. Adding one puts it at the bottom of the stack and makes it
     // current, because the thing you do next is draw on it.
     void addTrack();
@@ -263,6 +276,15 @@ private:
     QPushButton* play_button_ = nullptr;
     QAction* brush_action_ = nullptr;
     QAction* eraser_action_ = nullptr;
+    QAction* transform_action_ = nullptr;
+
+    QToolBar* transform_bar_ = nullptr;
+    QSpinBox* transform_dx_ = nullptr;
+    QSpinBox* transform_dy_ = nullptr;
+    QDoubleSpinBox* transform_rotation_ = nullptr;
+    QDoubleSpinBox* transform_scale_x_ = nullptr;
+    QDoubleSpinBox* transform_scale_y_ = nullptr;
+    bool updating_transform_fields_ = false;
 
     // Every action the shortcut table names, by id. See setShortcutMode.
     std::unordered_map<shortcuts::Id, QAction*> keyed_actions_;

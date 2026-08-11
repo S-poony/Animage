@@ -169,8 +169,15 @@ public:
     // and nobody else's -- tracks are not all the same length, and what a track
     // does past its end is a decision that lives there. A track showing nothing
     // contributes nothing rather than clearing what is under it.
+    //
+    // `lifted` is a layer the caller is drawing itself, and it is left out
+    // entirely. One caller: a live transform shows the layer it is moving where
+    // it is going rather than where it is stored, so the picture underneath has
+    // to have a hole in it exactly the shape of what was picked up. Not a
+    // visibility flag, because visibility is a property of the layer and is
+    // saved with the project -- this is a fact about one composite.
     void compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
-                        Framebuffer& out, SampleStep step = {}) const;
+                        Framebuffer& out, SampleStep step = {}, LayerId lifted = kNoId) const;
 
     // The same again with the layers already resolved to pixels, topmost first,
     // and every one of them drawn -- visibility, CTG fills and absent cels have

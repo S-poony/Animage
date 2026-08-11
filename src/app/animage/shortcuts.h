@@ -55,6 +55,7 @@ enum class Id {
     FitDrawing,
     Brush,
     Eraser,
+    Transform,
     SmallerBrush,
     LargerBrush,
 };

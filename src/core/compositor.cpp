@@ -385,13 +385,15 @@ void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_
 // that reads the document at all, which is what makes everything below it
 // usable from a thread that must not.
 static void collectPasses(const Document& doc, TrackId track_id, ImageId image_id,
-                          const std::vector<LayerId>& layers, std::vector<LayerPass>& passes) {
+                          const std::vector<LayerId>& layers, std::vector<LayerPass>& passes,
+                          LayerId lifted = kNoId) {
     const Track* track = doc.scene().findTrack(track_id);
     const Image* image = track ? track->findImage(image_id) : nullptr;
     if (!image) return;
 
     passes.reserve(passes.size() + layers.size());
     for (auto it = layers.begin(); it != layers.end(); ++it) {
+        if (*it == lifted) continue;  // the caller is drawing this one itself
         const Layer* layer = track->findLayer(*it);
         if (!layer || !layer->visible) continue;
 
@@ -450,7 +452,7 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
 }
 
 void Compositor::compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
-                                Framebuffer& out, SampleStep step) const {
+                                Framebuffer& out, SampleStep step, LayerId lifted) const {
     std::vector<LayerPass> passes;
 
     // Topmost first, which is the order compositeGrids wants and the order the
@@ -464,7 +466,7 @@ void Compositor::compositeScene(const Document& doc, std::size_t slot, const Pix
         std::vector<LayerId> layers;
         layers.reserve(track.layers.size());
         for (const Layer& layer : track.layers) layers.push_back(layer.id);
-        collectPasses(doc, track.id, image, layers, passes);
+        collectPasses(doc, track.id, image, layers, passes, lifted);
     }
 
     compositeGrids(passes, region, out, step);
