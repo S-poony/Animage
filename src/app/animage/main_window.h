@@ -28,8 +28,8 @@ class QTimer;
 class QGroupBox;
 class QListWidget;
 class QComboBox;
+class QFrame;
 class QScrollArea;
-class QToolBar;
 
 // The application window: canvas, timeline, layers, and the File menu. One
 // track. A project saves, opens, autosaves over itself and exports.
@@ -177,6 +177,10 @@ private:
     // track and not to the program: a permanently visible control that is off
     // by default is a trap precisely because it is off by default.
     void buildTransformBar();
+    // The bar is a child of the canvas rather than a row in the window, so
+    // nothing lays it out. Called when it appears and whenever the canvas is
+    // resized.
+    void placeTransformBar();
     void onTransformBegan();
     void onTransformEnded();
     void syncTransformFields();
@@ -284,7 +288,7 @@ private:
     QAction* lasso_action_ = nullptr;
     QAction* transform_action_ = nullptr;
 
-    QToolBar* transform_bar_ = nullptr;
+    QFrame* transform_bar_ = nullptr;
     QSpinBox* transform_dx_ = nullptr;
     QSpinBox* transform_dy_ = nullptr;
     QDoubleSpinBox* transform_rotation_ = nullptr;

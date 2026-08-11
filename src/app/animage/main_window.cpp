@@ -13,6 +13,7 @@
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QListWidget>
@@ -173,6 +174,14 @@ void MainWindow::showEvent(QShowEvent* event) {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // The transform bar is a child of the canvas and so belongs to no layout.
+    // Nothing else is going to move it when the canvas changes size, and a
+    // window dragged narrower would otherwise leave it hanging off the edge.
+    if (event->type() == QEvent::Resize && watched == canvas_ && transform_bar_ &&
+        transform_bar_->isVisible()) {
+        placeTransformBar();
+    }
+
     const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;
     if (!key_event || !canvas_) return QMainWindow::eventFilter(watched, event);
 
@@ -519,15 +528,29 @@ void MainWindow::buildActions() {
 // permanently visible scope control that is off by default is a trap precisely
 // *because* it is off by default -- you forget it is on in the one session where
 // it is, and an ordinary drag then rewrites the whole shot.
+//
+// And it floats *over* the canvas rather than taking a row above it. As a
+// QToolBar it was in the window's layout, so the canvas lost its height on the
+// way in and got it back on the way out -- which moved the drawing on screen at
+// the start and end of every transform, exactly while you were placing it. A
+// child of the canvas has no layout to belong to and costs the canvas nothing;
+// what it costs instead is being positioned by hand, in placeTransformBar.
 void MainWindow::buildTransformBar() {
-    addToolBarBreak();
-    transform_bar_ = addToolBar(QStringLiteral("Transform"));
-    transform_bar_->setMovable(false);
+    transform_bar_ = new QFrame(canvas_);
+    transform_bar_->setObjectName(QStringLiteral("transformBar"));
+    // Opaque and framed: it sits over the drawing, and a strip of controls with
+    // line art showing through it is unreadable in exactly the case it is for.
+    transform_bar_->setFrameShape(QFrame::StyledPanel);
+    transform_bar_->setAutoFillBackground(true);
     transform_bar_->setVisible(false);
+
+    auto* row = new QHBoxLayout(transform_bar_);
+    row->setContentsMargins(8, 4, 8, 4);
+    row->setSpacing(4);
 
     const auto number = [&](const QString& label, double lowest, double highest, int decimals,
                             const QString& suffix) {
-        transform_bar_->addWidget(new QLabel(QStringLiteral(" %1 ").arg(label), transform_bar_));
+        row->addWidget(new QLabel(label, transform_bar_));
         auto* box = new QDoubleSpinBox(transform_bar_);
         box->setRange(lowest, highest);
         box->setDecimals(decimals);
@@ -539,19 +562,19 @@ void MainWindow::buildTransformBar() {
         connect(box, &QDoubleSpinBox::valueChanged, this,
                 [this](double) { onTransformFieldEdited(); });
         connect(box, &QDoubleSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
-        transform_bar_->addWidget(box);
+        row->addWidget(box);
         return box;
     };
 
     const auto whole = [&](const QString& label) {
-        transform_bar_->addWidget(new QLabel(QStringLiteral(" %1 ").arg(label), transform_bar_));
+        row->addWidget(new QLabel(label, transform_bar_));
         auto* box = new QSpinBox(transform_bar_);
         box->setRange(-100000, 100000);
         box->setSuffix(QStringLiteral(" px"));
         box->setFocusPolicy(Qt::ClickFocus);
         connect(box, &QSpinBox::valueChanged, this, [this](int) { onTransformFieldEdited(); });
         connect(box, &QSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
-        transform_bar_->addWidget(box);
+        row->addWidget(box);
         return box;
     };
 
@@ -569,13 +592,13 @@ void MainWindow::buildTransformBar() {
     transform_scale_y_ = number(QStringLiteral("scale Y"), 1.0, 10000.0, 1,
                                 QStringLiteral("%"));
 
-    transform_bar_->addSeparator();
+    row->addSpacing(12);
     const auto button = [&](const QString& text, const QString& tip, auto handler) {
         auto* b = new QPushButton(text, transform_bar_);
         b->setToolTip(tip);
         b->setFocusPolicy(Qt::NoFocus);  // keep the pen and the keyboard on the canvas
         connect(b, &QPushButton::clicked, this, handler);
-        transform_bar_->addWidget(b);
+        row->addWidget(b);
     };
     button(QStringLiteral("Apply"), QStringLiteral("Bake it into the drawing (Enter)"),
            [this] { canvas_->applyTransform(); });
@@ -583,6 +606,23 @@ void MainWindow::buildTransformBar() {
            QStringLiteral("Put it back where it was (Escape).\nNothing was written, so this "
                           "leaves no undo step."),
            [this] { canvas_->cancelTransform(); });
+}
+
+// Where the bar sits on the canvas.
+//
+// Centred along the top, which is the one place that is neither a corner
+// somebody has panned their drawing into nor the middle of what is being moved.
+// It is a child of the canvas and so belongs to no layout, which is the whole
+// point -- appearing costs the canvas no height -- and the price is that its
+// position is worked out here and nowhere else.
+void MainWindow::placeTransformBar() {
+    if (!transform_bar_ || !canvas_) return;
+
+    constexpr int kEdge = 8;
+    const QSize wanted = transform_bar_->sizeHint();
+    const int width = std::min(wanted.width(), std::max(0, canvas_->width() - 2 * kEdge));
+    const int x = std::max(kEdge, (canvas_->width() - width) / 2);
+    transform_bar_->setGeometry(x, kEdge, width, wanted.height());
 }
 
 // Entering the tool is what starts a transform. There is no "transform
@@ -645,7 +685,13 @@ void MainWindow::onTransformBegan() {
         transform_action_->setChecked(true);
         canvas_->setLassoing(false);
     }
-    if (transform_bar_) transform_bar_->setVisible(true);
+    if (transform_bar_) {
+        // Placed before it is shown: the fields have just been given their
+        // values, so this is the first moment its size hint means anything.
+        placeTransformBar();
+        transform_bar_->setVisible(true);
+        transform_bar_->raise();
+    }
     setShortcutMode(shortcuts::Mode::Transform);
     syncTransformFields();
     syncStatus();

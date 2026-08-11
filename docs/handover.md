@@ -861,6 +861,15 @@ the drawing jumps the moment you touch a handle. At the end of every drag it goe
 back to the middle of what was picked up, which is what keeps "rotation 30"
 meaning thirty degrees about the middle whatever the last drag did.
 
+**The bar floats over the canvas rather than taking a row above it.** It was a
+`QToolBar` on a row of its own, and a toolbar is in the window's layout — so the
+canvas lost the bar's height on the way into a transform and got it back on the
+way out, which moved the drawing on screen at exactly the two moments you are
+looking at where it has landed. It is a `QFrame` child of the canvas now,
+centred along the top. What that costs is that nothing lays it out: it is placed
+by hand when it appears and again from the canvas's resize, which the window's
+event filter forwards. Reported after the first build of it.
+
 **Two scale fields, not one.** The note says "dx / dy / rotation / scale" and
 also that edge handles scale one axis; those cannot both be true. Two fields was
 the user's call. Letting the handle decide is what frees Shift to constrain

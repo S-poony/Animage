@@ -3896,17 +3896,30 @@ void theNumericFieldsAndTheBoxAreOneThing() {
     WindowWithInk fixture;
     if (!fixture.canvas) return;
 
+    // The canvas keeps its size when the bar arrives, which is the whole reason
+    // the bar is a child of it rather than a row in the window: a canvas that
+    // loses height moves the drawing on screen at the moment you start placing
+    // it, and gets it back at the moment you finish.
+    const QSize canvas_was = fixture.canvas->size();
+
     fixture.action(shortcuts::Id::Transform)->trigger();
     QCoreApplication::processEvents();
+    CHECK_EQ(fixture.canvas->height(), canvas_was.height());
+    CHECK_EQ(fixture.canvas->width(), canvas_was.width());
 
     // The bar is there while the transform is and not before it.
-    QToolBar* bar = nullptr;
-    for (QToolBar* candidate : fixture.window.findChildren<QToolBar*>()) {
-        if (candidate->windowTitle() == QStringLiteral("Transform")) bar = candidate;
-    }
+    QFrame* bar = fixture.window.findChild<QFrame*>(QStringLiteral("transformBar"));
     CHECK(bar != nullptr);
     if (!bar) return;
     CHECK(bar->isVisible());
+
+    // Over the canvas rather than above it: appearing must not take height from
+    // the drawing, or the thing being placed moves on screen while it is being
+    // placed. A child of the canvas costs it nothing.
+    CHECK(bar->parentWidget() == fixture.canvas);
+    CHECK(bar->geometry().top() >= 0);
+    CHECK(bar->geometry().bottom() < fixture.canvas->height());
+    CHECK(bar->geometry().right() < fixture.canvas->width());
 
     QSpinBox* dx = bar->findChild<QSpinBox*>();
     CHECK(dx != nullptr);
@@ -3922,6 +3935,7 @@ void theNumericFieldsAndTheBoxAreOneThing() {
     fixture.canvas->cancelTransform();
     QCoreApplication::processEvents();
     CHECK(!bar->isVisible());
+    CHECK_EQ(fixture.canvas->height(), canvas_was.height());
 }
 
 void aLassoSelectsAndAClickClears() {
