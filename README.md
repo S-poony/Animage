@@ -132,7 +132,9 @@ cmake --build build --target animage && ./build/src/app/animage
 |---|---|
 | Draw | pen, or left mouse |
 | `B` / `E` | brush / eraser (turning the stylus over also erases) |
-| `T` | transform: move, turn or resize this drawing on the layer you are on |
+| `L` | lasso: loop round part of the drawing |
+| `T` | transform: move, turn or resize the selection, or the whole drawing |
+| Backspace | erase what is selected (`Delete` still deletes the drawing) |
 | Enter, Escape, arrows | during a transform: apply, cancel, nudge (`Shift` for ten) |
 | `[` / `]` | smaller / larger |
 | Wheel | zoom about the pointer |
@@ -144,8 +146,18 @@ cmake --build build --target animage && ./build/src/app/animage
 | `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
 
-**Transform** takes the whole drawing on the layer you are on — there is nothing
-to select with yet. Corner handles resize both ways and edge handles one way,
+**The lasso does not clip the brush.** You can draw anywhere whether or not
+something is selected, and drawing outside a selection is not blocked, masked or
+warned about — which is the largest difference from every other program with a
+lasso in it. What a selection is here is an argument to three operations,
+transform, erase and (later) copy, so it needs no mode and no panel, it is not
+saved with the project, and an ordinary click clears it. It is cleared by
+changing frame and survives changing layer: a loop is geometry, so re-lifting it
+from another layer of the same drawing means something, and carrying it to
+another drawing is how you transform the wrong thing.
+
+**Transform** takes the selection, or the whole drawing on the layer you are on
+if there is none. Corner handles resize both ways and edge handles one way,
 `Shift` constrains a rotation to fifteen degrees and a move to an axis, and the
 numeric fields on the bar are the way to place something exactly, or to move a
 box whose handles have gone off screen. Nothing is written until you apply, so

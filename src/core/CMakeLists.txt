@@ -11,6 +11,7 @@
   document.cpp
   gridflow.cpp
   lazybrush.cpp
+  selection.cpp
   track.cpp
   transform.cpp
 )

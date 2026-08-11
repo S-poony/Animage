@@ -19,6 +19,7 @@ class QTimer;
 #include "ctg.h"
 #include "ctg_solver.h"
 #include "document.h"
+#include "selection.h"
 #include "transform.h"
 
 // The drawing surface. Shows the whole scene at one frame -- every track,
@@ -135,6 +136,32 @@ public:
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
 
+    // --- selection -------------------------------------------------------
+
+    // The lasso is a tool because it competes with the brush for the pen. What
+    // it produces is not a mode and has no status of its own: a selection here
+    // cannot clip the brush -- you can draw anywhere whether or not something is
+    // selected -- so it is an argument to transform, copy and erase and nothing
+    // else, and an ordinary click clears it.
+    void setLassoing(bool lassoing);
+    bool isLassoing() const { return lassoing_; }
+
+    bool hasSelection() const { return !selection_.isEmpty(); }
+    const animage::Selection& selection() const { return selection_; }
+    void clearSelection();
+    // Everything drawn on the active layer, as a loop. Symmetrical with what
+    // the Transform tool does with no selection, and the reason it exists at
+    // all is that "select all" and "nothing selected" should not be two
+    // different pictures of the same thing.
+    void selectEverything();
+
+    // Erases what is inside the loop, in one command, and clears it. Backspace.
+    // Delete still deletes the drawing: the natural expectation on Delete is
+    // "erase what I selected" and the existing binding is "delete this
+    // drawing", which is a bad surprise in the dangerous direction -- and making
+    // it depend on whether a selection exists is a bad surprise in the other.
+    bool eraseSelection();
+
     // --- transform -------------------------------------------------------
 
     // Why a transform could not be started. Transform refuses where the brush
@@ -222,6 +249,10 @@ Q_SIGNALS:
     void transformNumbersChanged();
     void transformEnded();
 
+    // A loop was made or cleared. Nothing but the status bar listens: a
+    // selection has no panel and no state of its own to keep in step.
+    void selectionChanged();
+
     // A fill landed, so anything reporting on the colour is out of date. Emitted when a solve
     // is installed, which happens on a timer and no longer inside a paint; the
     // queued connection it is on can stay either way, and a fill arriving while
@@ -285,6 +316,16 @@ private:
     bool beginTransformDrag(const QPointF& widget_point);
     bool continueTransformDrag(const QPointF& widget_point);
     void endTransformDrag();
+
+    void beginLasso(const QPointF& widget_point);
+    void extendLasso(const QPointF& widget_point);
+    void endLasso();
+    void drawSelection(QPainter& painter) const;
+    // The part of the active layer's cel the selection covers, and the rest.
+    // With no selection everything is lifted and nothing stays behind, which is
+    // what makes "press Transform with nothing selected and it boxes the whole
+    // drawing" one code path rather than two.
+    animage::Lift liftForTransform() const;
 
     animage::Document& doc_;
     animage::Compositor compositor_;
@@ -401,6 +442,13 @@ private:
         animage::PixelRect bounds;
         animage::Transform values;
 
+        // The two halves of the layer: what is moving and what is not. The
+        // second stands in for the layer where it was, in the layer's own place
+        // in the stack, so the drawing has a hole in it exactly the shape of
+        // what was picked up.
+        animage::TileGrid lifted;
+        animage::TileGrid remaining;
+
         // The float: the layer alone, ready to be blitted through the matrix.
         //
         // The preview and the commit will not agree exactly, and that is
@@ -420,6 +468,18 @@ private:
     int grabbed_handle_ = -1;
     QPointF grab_image_;
     animage::Transform grab_values_;
+
+    // The loop, in image coordinates, and the gesture that is drawing one.
+    //
+    // Cleared by changing frame and kept through changing layer: a loop is
+    // geometry in image space, so re-lifting it from another layer of the same
+    // drawing is meaningful, and carrying it to another drawing is how you
+    // transform the wrong thing. It is not in the document and not saved.
+    animage::Selection selection_;
+    bool lassoing_ = false;      // the tool is selected
+    bool drawing_lasso_ = false; // and the pen is down
+    QPointF lasso_press_widget_;
+    bool lasso_passed_threshold_ = false;
 
     Background background_ = Background::White;
     bool passe_partout_ = true;

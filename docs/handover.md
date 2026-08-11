@@ -898,8 +898,69 @@ art is the whole of the line.
 goes through paths that do not settle it; `applyTransform` re-checks that the cel
 is still there and silently drops the transform if it is not, rather than
 enumerating call sites — a list of those to remember would be the same bug with
-more steps. Phases 2 to 4 — the lasso, copy and paste, and `bench_transform` —
-are not built.
+more steps. Phases 3 and 4 — copy and paste, and `bench_transform` — are not
+built.
+
+## The lasso
+
+Phase 2. A loop drawn with the pen, in image coordinates, rasterised to a
+coverage mask when one is needed. `src/core/selection.h` is Qt-free and
+`test_selection` drives all of it headlessly, which is the whole reason the
+polygon is in `core`.
+
+**A selection does not clip the brush**, which is the decision the rest of the
+feature falls out of. You can draw anywhere whether or not something is selected.
+So a selection has no independent life: it is an argument to transform, copy and
+erase, it has no mode, no panel and no place in the saved project, and a click
+clears it. The status bar is the only thing that says one exists.
+
+**Coverage, not a hard edge.** `lifted = src × c`, `remaining = src × (1 − c)`,
+which is exact and costs nothing *because* the pixels are premultiplied — with
+straight alpha each half would need its colour rescaling and the two would only
+add back up approximately. There is a test that they add back up exactly.
+
+**The lift is what makes the two cases one path.** `liftForTransform` returns
+both halves; with no loop everything is lifted and nothing stays. The remaining
+half then stands in for the layer through `SubstitutedLayer`, in the layer's own
+place in the stack rather than painted over the top — over the top it would cover
+the layers above it. That is a widening of the `lifted` layer id phase 1 added,
+and it replaced it.
+
+**A tile the loop does not reach is shared rather than copied**, so lassoing a
+corner of a drawing costs the tiles under the loop and nothing else.
+
+**What separates a click from a lasso is the drag threshold**, four *screen*
+pixels, so it means the same thing at every zoom — and never a threshold on the
+loop's area. A legitimate selection can be a single eyelash: long, thin, and
+near-zero area.
+
+**An empty lasso clears the selection and does not become select-all.** A loop
+enclosing no ink is the same as no selection — there is nothing to lift — but "no
+selection" also means "transform everything", so a stray loop over blank paper
+would quietly become a whole-drawing transform. There is a test.
+
+**Entering a transform dims what is not moving.** Selecting on one layer while
+looking at a composite of every track is a real surprise: you loop around a
+character and only the ink lifts. The veil goes under the float and over
+everything else, which is what says which of the things on screen the gesture is
+about.
+
+**Backspace erases the selection and Delete still deletes the drawing.** The
+natural expectation on Delete is "erase what I selected" and the existing binding
+is "delete this drawing", which is a bad surprise in the dangerous direction;
+making it depend on whether a selection exists is a bad surprise in the other.
+Two keys, no mode.
+
+**The loop is cleared by changing frame, survives changing layer, and is cleared
+by a transform that commits.** The first two are the design's; the third is not
+in it — after a commit the loop describes where those pixels *were*, and keeping
+it would offer a second transform of a shape that has moved out from under it.
+
+**Even-odd, so a loop that crosses itself has a hole in it**, which is what a
+figure of eight looks like to anybody drawing one. Eight sub-rows per pixel row
+and exact horizontal coverage: the horizontal half costs nothing and the vertical
+half costs a factor, so the two are deliberately not symmetrical. Four sub-rows
+was visibly banded on a near-horizontal edge and sixteen bought nothing.
 
 ## What is not what the plan asked for
 

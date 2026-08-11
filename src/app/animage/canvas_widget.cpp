@@ -56,6 +56,10 @@ constexpr double kTransformSmallestInterior = 16.0;
 // gives a blurred mirror that nothing complains about. See issue #24.
 constexpr double kSmallestScale = 0.01;
 constexpr double kRotationSnap = 15.0;
+// What separates a click from a drag, in screen pixels so that it means the same
+// thing at every zoom -- and never a threshold on the loop's area, because a
+// legitimate selection can be a single eyelash.
+constexpr double kDragThreshold = 4.0;
 constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
 
 // A corner or an edge middle of an untransformed box, clockwise from the top
@@ -211,6 +215,11 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // paste onto the wrong drawing waiting to happen, and there is nothing
     // useful it could mean out there.
     if (transform_ && slot != slot_) applyTransform();
+    // And the loop goes with it, while surviving a change of layer. A loop is
+    // geometry in image space, so re-lifting it from another layer of the same
+    // drawing is meaningful; carrying it to another drawing is how you transform
+    // the wrong thing.
+    if (slot != slot_) clearSelection();
 
     // Clamped to the scene and not to the current track: the timeline is shared,
     // so frame 40 is a real frame of the shot even when the track being edited
@@ -699,11 +708,14 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     area = intersect(snapToSampleGrid(cache_step_, area), cached_region_);
     if (area.isEmpty()) return;
 
-    // The layer being transformed is left out: it is drawn on top, through the
-    // matrix, so where it came from has to look empty. That is the whole of why
-    // the document does not have to be written until the transform is committed.
-    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_,
-                               transform_ ? transform_->layer : kNoId);
+    // The layer being transformed stands in for itself: what is left of it after
+    // the lift is drawn in its own place in the stack, and what was picked up is
+    // drawn on top through the matrix. That is the whole of why the document
+    // does not have to be written until the transform is committed.
+    const SubstitutedLayer substituted =
+        transform_ ? SubstitutedLayer{transform_->layer, &transform_->remaining}
+                   : SubstitutedLayer{};
+    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_, substituted);
 
     // Where this patch of entries sits in the cache.
     const long long first_column = cache_step_.entryAt(area.x);
@@ -872,7 +884,19 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     painter.drawImage(QRectF(origin, corner), display_);
 
     drawCanvasFrame(painter);
-    if (transform_) drawTransformPreview(painter);
+
+    // Dim what is not moving.
+    //
+    // Selecting on one layer while looking at a composite of every track is a
+    // real surprise: you loop around a character and only the ink lifts. The
+    // veil is what says which of the things on screen the gesture is about, and
+    // it goes under the float rather than over it for the same reason.
+    if (transform_) {
+        painter.fillRect(rect(), QColor(255, 255, 255, 110));
+        drawTransformPreview(painter);
+    } else {
+        drawSelection(painter);
+    }
 }
 
 // The canvas: the rectangle that will be exported, outlined, with everything
@@ -915,6 +939,160 @@ void CanvasWidget::drawCanvasFrame(QPainter& painter) {
     painter.restore();
 }
 
+// --- selection -----------------------------------------------------------
+
+void CanvasWidget::setLassoing(bool lassoing) {
+    if (lassoing_ == lassoing) return;
+    lassoing_ = lassoing;
+    drawing_lasso_ = false;
+    update();
+}
+
+void CanvasWidget::clearSelection() {
+    if (selection_.isEmpty()) return;
+    selection_ = Selection{};
+    update();
+    Q_EMIT selectionChanged();
+}
+
+void CanvasWidget::selectEverything() {
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    const PixelRect bounds = cel ? paintedBounds(cel->tiles()) : PixelRect{};
+    if (bounds.isEmpty()) {
+        clearSelection();
+        return;
+    }
+
+    const double left = bounds.x;
+    const double top = bounds.y;
+    const double right = bounds.x + bounds.width;
+    const double bottom = bounds.y + bounds.height;
+    selection_ = Selection{{{left, top}, {right, top}, {right, bottom}, {left, bottom}}};
+    update();
+    Q_EMIT selectionChanged();
+}
+
+// The active layer split along the loop. With no loop everything is lifted and
+// nothing stays, which is what makes the Transform tool's two cases one path.
+Lift CanvasWidget::liftForTransform() const {
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    if (!cel) return {};
+
+    if (selection_.isEmpty()) {
+        Lift whole;
+        whole.lifted = cel->tiles();
+        return whole;
+    }
+    return liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())));
+}
+
+bool CanvasWidget::eraseSelection() {
+    if (selection_.isEmpty() || track_ == kNoId || image_ == kNoId) return false;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    if (!layer || layer->locked || !layer->visible) return false;
+
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    if (!cel) return false;
+    const Lift split = liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())));
+    if (split.lifted.empty()) return false;  // the loop covered no ink
+
+    {
+        ScopedCommand command(doc_, "Erase selection");
+        if (Cel* writable = doc_.celForWriting(track_, image_, active_layer_)) {
+            writable->replaceTiles(split.remaining, doc_.journal());
+        }
+    }
+
+    clearSelection();
+    refreshAll();
+    Q_EMIT documentChanged();
+    return true;
+}
+
+void CanvasWidget::beginLasso(const QPointF& widget_point) {
+    drawing_lasso_ = true;
+    lasso_passed_threshold_ = false;
+    lasso_press_widget_ = widget_point;
+
+    const QPointF at = imageFromWidget(widget_point);
+    selection_ = Selection{{{at.x(), at.y()}}};
+    update();
+}
+
+void CanvasWidget::extendLasso(const QPointF& widget_point) {
+    if (!drawing_lasso_) return;
+
+    // The ordinary drag threshold, in *screen* pixels, so it means the same
+    // thing at every zoom -- and never a threshold on the loop's area. A
+    // legitimate selection can be a single eyelash: long, thin, and near-zero
+    // area. A click clears the selection; a drag makes one however small it is.
+    if (!lasso_passed_threshold_ &&
+        QLineF(lasso_press_widget_, widget_point).length() < kDragThreshold) {
+        return;
+    }
+    lasso_passed_threshold_ = true;
+
+    const QPointF at = imageFromWidget(widget_point);
+    // Points closer together than a pixel say nothing the one before did not.
+    if (!selection_.loop.empty()) {
+        const Vec2& last = selection_.loop.back();
+        if (std::abs(last.x - at.x()) < 1.0 && std::abs(last.y - at.y()) < 1.0) return;
+    }
+    selection_.loop.push_back({at.x(), at.y()});
+    update();
+}
+
+void CanvasWidget::endLasso() {
+    if (!drawing_lasso_) return;
+    drawing_lasso_ = false;
+
+    if (!lasso_passed_threshold_) {
+        // A click, which clears. Nothing is lost that cannot be recreated in
+        // two seconds, which is the whole reason a selection can be this cheap.
+        selection_ = Selection{};
+        update();
+        Q_EMIT selectionChanged();
+        return;
+    }
+
+    // An empty lasso must not become select-all. A loop enclosing no
+    // non-transparent pixel is the same as no selection -- there is nothing to
+    // lift -- but "no selection" also means "transform everything", so a stray
+    // loop over blank paper would quietly become a whole-drawing transform.
+    // Clear it, and stop.
+    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
+    const Lift split =
+        cel ? liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())))
+            : Lift{};
+    if (split.lifted.empty()) selection_ = Selection{};
+
+    update();
+    Q_EMIT selectionChanged();
+}
+
+void CanvasWidget::drawSelection(QPainter& painter) const {
+    if (selection_.loop.size() < 2) return;
+
+    QPolygonF loop;
+    for (const Vec2& point : selection_.loop) {
+        loop << widgetFromImage(QPointF(point.x, point.y));
+    }
+
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+    // Two passes, light under dark: a one-colour outline disappears against
+    // whichever of paper and ink it happens to cross, and a lasso crosses both
+    // by definition.
+    painter.setPen(QPen(QColor(255, 255, 255, 200), 3.0));
+    painter.drawPolygon(loop);
+    QPen dashes(QColor(20, 20, 20), 1.0, Qt::DashLine);
+    painter.setPen(dashes);
+    painter.drawPolygon(loop);
+    painter.restore();
+}
+
 // --- transform -----------------------------------------------------------
 
 QString CanvasWidget::explain(Refusal refusal) {
@@ -954,13 +1132,15 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
     if (layer->locked) return Refusal::LockedLayer;
     if (!layer->visible) return Refusal::HiddenLayer;
 
+    // The selection, or the whole cel if there is none. One path and not two,
+    // which is exactly what "the tool is the button" buys.
+    Lift split = liftForTransform();
     // The ink's bounds and not the tiles': a box 128 pixels bigger than the
     // drawing on every side is a picture of the tile grid, which is an
     // implementation detail nobody asked to see. This is also what freeing
     // emptied tiles was a prerequisite for -- without it the box would still be
     // drawn round a mark that was rubbed out.
-    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
-    const PixelRect bounds = cel ? paintedBounds(cel->tiles()) : PixelRect{};
+    const PixelRect bounds = paintedBounds(split.lifted);
     if (bounds.isEmpty()) return Refusal::NothingDrawn;
 
     LiveTransform live;
@@ -968,6 +1148,8 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
     live.image = image_;
     live.layer = active_layer_;
     live.bounds = bounds;
+    live.lifted = std::move(split.lifted);
+    live.remaining = std::move(split.remaining);
     live.values.pivot_x = bounds.x + bounds.width / 2.0;
     live.values.pivot_y = bounds.y + bounds.height / 2.0;
     transform_ = std::move(live);
@@ -995,9 +1177,21 @@ void CanvasWidget::buildTransformPicture() {
     live.step = SampleStep::fromRatio(std::max(1.0, static_cast<double>(longest) / kLongestSide));
     live.covers = snapToSampleGrid(live.step, live.bounds);
 
+    // The lifted half only, and through compositeGrids because these pixels are
+    // not in the document and never will be until the transform is committed.
+    const Track* track = doc_.scene().findTrack(live.track);
+    const Layer* layer = track ? track->findLayer(live.layer) : nullptr;
+    if (!layer) return;
+
     Framebuffer pixels;
-    compositor_.compositeLayers(doc_, live.track, live.image, {live.layer}, live.covers, pixels,
-                               live.step);
+    // The layer's own opacity is deliberately not applied: the preview shows
+    // where the pixels are going, and dimming them for a layer setting would
+    // make a transform on a half-opacity layer look like a transform that had
+    // lost something.
+    Layer opaque = *layer;
+    opaque.opacity = 1.0f;
+    const std::vector<LayerPass> pass{{&live.lifted, &opaque}};
+    compositor_.compositeGrids(pass, live.covers, pixels, live.step);
     if (pixels.isEmpty()) {
         live.picture = QImage();
         return;
@@ -1080,8 +1274,16 @@ void CanvasWidget::applyTransform() {
         // the layer under a live transform today, and "cannot happen" is worth
         // being wrong about cheaply.
         if (Cel* cel = doc_.celForWriting(live.track, live.image, live.layer)) {
-            cel->replaceTiles(transformTiles(cel->tiles(), live.values), doc_.journal());
+            // The moved half over the half that stayed. With no selection there
+            // is nothing underneath and mergeOver hands the moved grid straight
+            // back, which is what keeps a whole-drawing translation bit-exact.
+            cel->replaceTiles(mergeOver(transformTiles(live.lifted, live.values), live.remaining),
+                              doc_.journal());
         }
+        // The loop described where those pixels were, and they are not there
+        // any more. Keeping it would offer a second transform of a shape that
+        // has moved out from under it.
+        clearSelection();
     }
 
     refreshAll();
@@ -1363,10 +1565,14 @@ bool CanvasWidget::pickColourAt(const QPointF& image_point) {
     const PixelRect one{static_cast<int>(std::floor(image_point.x())),
                         static_cast<int>(std::floor(image_point.y())), 1, 1};
     Framebuffer sample;
-    // Without the layer a transform has picked up, for the same reason the
-    // display cache is composited without it: it is not there any more.
-    compositor_.compositeScene(doc_, slot_, one, sample, SampleStep{},
-                               transform_ ? transform_->layer : kNoId);
+    // Through whatever a live transform has left standing in the layer's place,
+    // for the same reason the display cache is: those pixels are not there any
+    // more, and picking a colour off them would be picking a colour off a
+    // drawing that is no longer under the pointer.
+    const SubstitutedLayer substituted =
+        transform_ ? SubstitutedLayer{transform_->layer, &transform_->remaining}
+                   : SubstitutedLayer{};
+    compositor_.compositeScene(doc_, slot_, one, sample, SampleStep{}, substituted);
     if (sample.isEmpty()) return false;
 
     // A CTG layer contributes the fill it last generated, which is what is on
@@ -1643,13 +1849,22 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         return;  // no stroke, whatever happened to Alt in the meantime
     }
 
-    // A live transform takes the pen: the tools are exclusive, so while the
-    // transform tool holds it the brush is not competing for it.
+    // A live transform, or the lasso, takes the pen: the tools are exclusive, so
+    // while one of them holds it the brush is not competing for it.
     if (transform_) {
         switch (event->type()) {
             case QEvent::TabletPress: beginTransformDrag(widget_point); break;
             case QEvent::TabletMove: continueTransformDrag(widget_point); break;
             case QEvent::TabletRelease: endTransformDrag(); break;
+            default: break;
+        }
+        return;
+    }
+    if (lassoing_) {
+        switch (event->type()) {
+            case QEvent::TabletPress: beginLasso(widget_point); break;
+            case QEvent::TabletMove: extendLasso(widget_point); break;
+            case QEvent::TabletRelease: endLasso(); break;
             default: break;
         }
         return;
@@ -1708,6 +1923,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
         beginTransformDrag(event->position());
         return;
     }
+    if (lassoing_) {
+        beginLasso(event->position());
+        return;
+    }
     beginStroke(imageFromWidget(event->position()), 1.0f);
 }
 
@@ -1720,6 +1939,10 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     }
     if (transform_) {
         continueTransformDrag(event->position());
+        return;
+    }
+    if (lassoing_) {
+        extendLasso(event->position());
         return;
     }
     if (stroking_) extendStroke(imageFromWidget(event->position()), 1.0f);
@@ -1738,6 +1961,10 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     }
     if (transform_) {
         endTransformDrag();
+        return;
+    }
+    if (lassoing_) {
+        endLasso();
         return;
     }
     endStroke();

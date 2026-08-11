@@ -3653,6 +3653,25 @@ struct WindowWithInk {
         return doc().celAt(track->id, canvas->currentImage(), track->layers.front().id);
     }
 
+    // A loop drawn with the pointer, the way one actually gets made: press,
+    // several moves, release. The threshold that separates a click from a drag
+    // is in screen pixels, so the loop has to be dragged rather than assigned.
+    void lasso(const QRectF& around) {
+        const QPointF corners[4] = {around.topLeft(), around.topRight(), around.bottomRight(),
+                                    around.bottomLeft()};
+        sendMouse(canvas, QEvent::MouseButtonPress, corners[0], Qt::LeftButton, Qt::LeftButton);
+        for (int side = 0; side < 4; ++side) {
+            const QPointF from = corners[side];
+            const QPointF to = corners[(side + 1) % 4];
+            for (int i = 1; i <= 8; ++i) {
+                sendMouse(canvas, QEvent::MouseMove, from + (to - from) * (i / 8.0), Qt::NoButton,
+                          Qt::LeftButton);
+            }
+        }
+        sendMouse(canvas, QEvent::MouseButtonRelease, corners[0], Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+    }
+
     void press(int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
         QKeyEvent down(QEvent::KeyPress, key, modifiers);
         QCoreApplication::sendEvent(canvas, &down);
@@ -3904,11 +3923,177 @@ void theNumericFieldsAndTheBoxAreOneThing() {
     CHECK(!bar->isVisible());
 }
 
+void aLassoSelectsAndAClickClears() {
+    TEST("a drag makes a selection and a click clears it");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->isLassoing());
+    CHECK(!fixture.canvas->hasSelection());
+
+    fixture.lasso(QRectF(280, 280, 90, 60));
+    CHECK(fixture.canvas->hasSelection());
+
+    // A click -- press and release without moving past the threshold -- clears
+    // it. Nothing is lost that cannot be recreated in two seconds, which is the
+    // whole reason a selection can be this cheap.
+    sendMouse(fixture.canvas, QEvent::MouseButtonPress, QPointF(600, 500), Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(fixture.canvas, QEvent::MouseButtonRelease, QPointF(601, 500), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->hasSelection());
+}
+
+// The trap the design note names first: a loop enclosing no ink is the same as
+// no selection, and "no selection" means "transform everything" -- so a stray
+// loop over blank paper would quietly become a whole-drawing transform.
+void anEmptyLassoDoesNotBecomeSelectAll() {
+    TEST("a loop enclosing no ink clears the selection instead of selecting all");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+
+    // A real loop, well away from the stroke the fixture drew.
+    fixture.lasso(QRectF(700, 550, 120, 90));
+    CHECK(!fixture.canvas->hasSelection());
+
+    // And the transform that follows takes the whole drawing rather than
+    // nothing, because that is what no selection means.
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+    fixture.canvas->cancelTransform();
+}
+
+void transformingASelectionMovesOnlyWhatWasSelected() {
+    TEST("a transform of a selection leaves the rest of the drawing alone");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    // A second stroke well away from the first, so there is something that must
+    // not move.
+    drawWithMouse(fixture.canvas, QPointF(700, 500), QPointF(800, 560), 10);
+    QCoreApplication::processEvents();
+
+    const animage::Cel* cel = fixture.ink();
+    CHECK(cel != nullptr);
+    if (!cel) return;
+    const animage::TileGrid before = cel->tiles();
+    const QPointF elsewhere = QPointF(750, 530);
+    const animage::PixelRect untouched{
+        static_cast<int>(elsewhere.x()) - 30, static_cast<int>(elsewhere.y()) - 30, 60, 60};
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    fixture.lasso(QRectF(270, 270, 180, 120));  // round the first stroke only
+    CHECK(fixture.canvas->hasSelection());
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+
+    for (int i = 0; i < 20; ++i) fixture.press(Qt::Key_Down, Qt::ShiftModifier);
+    fixture.press(Qt::Key_Return);
+    QCoreApplication::processEvents();
+
+    const animage::Cel* after = fixture.ink();
+    CHECK(after != nullptr);
+    if (!after) return;
+
+    // The second stroke is bit-identical: a selection is what the transform
+    // acts on, and nothing outside it may be touched.
+    std::size_t moved = 0;
+    for (int y = untouched.y; y < untouched.y + untouched.height; ++y) {
+        for (int x = untouched.x; x < untouched.x + untouched.width; ++x) {
+            if (!(before.pixel(x, y) == after->tiles().pixel(x, y))) ++moved;
+        }
+    }
+    CHECK_EQ(moved, std::size_t{0});
+
+    // And the first one is not where it was.
+    CHECK(before.pixel(340, 320).a > 0.5f);
+    CHECK(after->tiles().pixel(340, 320).a < 0.5f);
+
+    // The loop went with the pixels it described.
+    CHECK(!fixture.canvas->hasSelection());
+}
+
+void backspaceErasesTheSelectionAndDeleteStillDeletesTheDrawing() {
+    TEST("Backspace erases the selection; Delete still deletes the drawing");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const animage::TrackId track = doc.scene().tracks.front().id;
+    doc.addDrawing(track, 0);  // two drawings, so Delete has something to take
+    QCoreApplication::processEvents();
+    fixture.canvas->setFrame(0);
+    QCoreApplication::processEvents();
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    fixture.lasso(QRectF(270, 270, 180, 120));
+    CHECK(fixture.canvas->hasSelection());
+
+    const std::size_t drawings = doc.scene().findTrack(track)->images.size();
+    fixture.action(shortcuts::Id::EraseSelection)->trigger();
+    QCoreApplication::processEvents();
+
+    // The ink is gone and the drawing is not.
+    CHECK_EQ(doc.scene().findTrack(track)->images.size(), drawings);
+    CHECK(fixture.ink() == nullptr || fixture.ink()->tiles().pixel(340, 320).a < 0.5f);
+    CHECK(!fixture.canvas->hasSelection());
+
+    // And Delete still means what it always meant.
+    fixture.action(shortcuts::Id::DeleteDrawing)->trigger();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(track)->images.size(), drawings - 1);
+}
+
+void theSelectionSurvivesALayerChangeAndNotAFrameChange() {
+    TEST("a loop survives changing layer and is cleared by changing frame");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    animage::Document& doc = fixture.doc();
+    const animage::TrackId track = doc.scene().tracks.front().id;
+    const animage::LayerId second = doc.addLayer(track, "second", 0);
+    doc.addDrawing(track, 0);
+    QCoreApplication::processEvents();
+    fixture.canvas->setFrame(0);
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    fixture.lasso(QRectF(270, 270, 180, 120));
+    CHECK(fixture.canvas->hasSelection());
+
+    // A loop is geometry in image space, so re-lifting it from another layer of
+    // the same drawing is meaningful.
+    fixture.canvas->setActiveLayer(second);
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->hasSelection());
+
+    // Carrying it to another drawing is how you transform the wrong thing.
+    fixture.canvas->setFrame(1);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->hasSelection());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    aLassoSelectsAndAClickClears();
+    anEmptyLassoDoesNotBecomeSelectAll();
+    transformingASelectionMovesOnlyWhatWasSelected();
+    backspaceErasesTheSelectionAndDeleteStillDeletesTheDrawing();
+    theSelectionSurvivesALayerChangeAndNotAFrameChange();
     theWindowTakesItsKeysFromTheTable();
     theTransformToolTakesTheWholeDrawing();
     nudgingMovesTheDrawingExactly();

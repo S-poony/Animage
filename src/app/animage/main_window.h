@@ -276,6 +276,7 @@ private:
     QPushButton* play_button_ = nullptr;
     QAction* brush_action_ = nullptr;
     QAction* eraser_action_ = nullptr;
+    QAction* lasso_action_ = nullptr;
     QAction* transform_action_ = nullptr;
 
     QToolBar* transform_bar_ = nullptr;

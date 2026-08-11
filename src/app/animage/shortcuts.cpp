@@ -37,6 +37,17 @@ const std::vector<Entry>& built() {
         {Id::Redo, "&Redo", kSpelledOut,
          QKeyCombination(Qt::CTRL | Qt::SHIFT | Qt::Key_Z).toCombined(), kAlways},
 
+        {Id::SelectAll, "Select &all", QKeySequence::SelectAll, 0, kNormal},
+        {Id::Deselect, "&Deselect", kSpelledOut,
+         QKeyCombination(Qt::CTRL | Qt::SHIFT | Qt::Key_A).toCombined(), kNormal},
+        // Backspace erases what is selected and Delete still deletes the
+        // drawing. The natural expectation on Delete is "erase what I selected"
+        // and the existing binding is "delete this drawing", which is a bad
+        // surprise in the dangerous direction; making it depend on whether a
+        // selection exists is a bad surprise in the other. Two keys, no mode.
+        {Id::EraseSelection, "&Erase selection", kSpelledOut,
+         QKeyCombination(Qt::Key_Backspace).toCombined(), kNormal},
+
         {Id::Play, "Play", kSpelledOut, QKeyCombination(Qt::Key_Return).toCombined(), kNormal},
         {Id::PreviousFrame, "Previous frame", kSpelledOut,
          QKeyCombination(Qt::Key_Left).toCombined(), kNormal},
@@ -84,6 +95,7 @@ const std::vector<Entry>& built() {
 
         {Id::Brush, "Brush", kSpelledOut, QKeyCombination(Qt::Key_B).toCombined(), kAlways},
         {Id::Eraser, "Eraser", kSpelledOut, QKeyCombination(Qt::Key_E).toCombined(), kAlways},
+        {Id::Lasso, "Lasso", kSpelledOut, QKeyCombination(Qt::Key_L).toCombined(), kAlways},
         // A tool and not a button, because it competes with the brush for the
         // pen -- which is exactly what the exclusive group it joins means. It is
         // live in both modes: pressing it during a transform is how you would

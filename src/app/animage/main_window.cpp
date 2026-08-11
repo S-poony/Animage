@@ -114,6 +114,7 @@ MainWindow::MainWindow() {
     connect(canvas_, &CanvasWidget::transformNumbersChanged, this,
             &MainWindow::syncTransformFields);
     connect(canvas_, &CanvasWidget::transformEnded, this, &MainWindow::onTransformEnded);
+    connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
         syncStatus();
@@ -268,6 +269,16 @@ void MainWindow::buildActions() {
     edit->addAction(makeAction(Id::Redo, [this] { redo(); }));
 
     edit->addSeparator();
+    // Beside Undo and Redo, and nothing goes in the Track menu: a selection is
+    // an argument to editing operations rather than a property of a track.
+    edit->addAction(makeAction(Id::SelectAll, [this] { canvas_->selectEverything(); }));
+    edit->addAction(makeAction(Id::Deselect, [this] { canvas_->clearSelection(); }));
+    edit->addAction(makeAction(Id::EraseSelection, [this] {
+        canvas_->eraseSelection();
+        refreshEverything();
+    }));
+
+    edit->addSeparator();
     // The framerate and the canvas both belong to the scene, not to a track:
     // every track in the scene runs at one framerate and is composited into one
     // picture. Putting either in the timeline panel said otherwise.
@@ -367,21 +378,33 @@ void MainWindow::buildActions() {
     auto* mode = new QActionGroup(this);
     brush_action_ = makeAction(Id::Brush, [this] {
         canvas_->applyTransform();
+        canvas_->setLassoing(false);
         canvas_->setEraser(false);
         syncToolSettings();
     });
     eraser_action_ = makeAction(Id::Eraser, [this] {
         canvas_->applyTransform();
+        canvas_->setLassoing(false);
         canvas_->setEraser(true);
         syncToolSettings();
     });
+    lasso_action_ = makeAction(Id::Lasso, [this] {
+        canvas_->applyTransform();
+        canvas_->setEraser(false);
+        canvas_->setLassoing(true);
+        syncToolSettings();
+    });
     transform_action_ = makeAction(Id::Transform, [this] { chooseTransformTool(); });
-    for (QAction* action : {brush_action_, eraser_action_, transform_action_}) {
+    for (QAction* action : {brush_action_, eraser_action_, lasso_action_, transform_action_}) {
         action->setCheckable(true);
         mode->addAction(action);
         tools->addAction(action);
     }
     brush_action_->setChecked(true);
+    lasso_action_->setToolTip(
+        QStringLiteral("Loop round part of the drawing to transform, copy or erase it.\n"
+                       "It does not clip the brush: you can still draw anywhere.\n"
+                       "A click clears it, and it is not saved with the project."));
     transform_action_->setToolTip(
         QStringLiteral("Move, turn or resize this drawing on the layer you are on.\n"
                        "With nothing selected it takes the whole drawing.\n"
@@ -574,6 +597,7 @@ void MainWindow::chooseTransformTool() {
     statusBar()->showMessage(
         QStringLiteral("Cannot transform: %1").arg(CanvasWidget::explain(refusal)), 6000);
     brush_action_->setChecked(true);
+    canvas_->setLassoing(false);
     canvas_->setEraser(false);
     syncToolSettings();
 }
@@ -593,6 +617,7 @@ void MainWindow::onTransformEnded() {
     // handler that commits a transform.
     if (transform_action_ && transform_action_->isChecked()) {
         brush_action_->setChecked(true);
+        canvas_->setLassoing(false);
         canvas_->setEraser(false);
         syncToolSettings();
     }
@@ -1344,13 +1369,19 @@ void MainWindow::syncStatus() {
                                 ? QStringLiteral("   outside the shot")
                                 : QString();
 
+    // A selection has no panel and no mode, so the status bar is the only place
+    // it says it is there at all -- and it does clip what Transform and Erase
+    // selection act on, even though it deliberately does not clip the brush.
+    const QString selected =
+        canvas_->hasSelection() ? QStringLiteral("   selection") : QString();
+
     // The frame count is the scene's and the rest is the current track's, which
     // is the distinction the whole panel now rests on: one timeline, several
     // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   undo %10   %11 fps%12%13%14")
+                       "tiles %9   undo %10   %11 fps%12%13%14%15")
             .arg(slot + 1)
             .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
@@ -1364,7 +1395,8 @@ void MainWindow::syncStatus() {
             .arg(doc_.scene().framerate)
             .arg(colouring)
             .arg(past)
-            .arg(outside));
+            .arg(outside)
+            .arg(selected));
 }
 
 // The timeline dock follows the number of tracks, up to a point.
