@@ -998,6 +998,54 @@ cut has written anything. Found by a test that changed frame behind the
 timeline's back, which is a second thing worth remembering: the canvas and the
 timeline have to be moved together or the next refresh puts one of them back.
 
+## What a transform costs
+
+Phase 4. `bench_transform` was written before anything was optimised, and it
+found the thing nobody would have looked for: **the path that exists in order to
+be free was the slowest one in the feature.**
+
+`translated()` walked the *destination* asking the grid for each pixel — one hash
+lookup and one half → float → half round trip each — so nudging a 4K drawing
+three pixels took **289 ms** on the branch whose entire reason for existing is
+that a registration nudge must never cost anything. It is block copies now: each
+source tile lands across up to four destination tiles and each overlap is a run
+of whole rows, which is correct without blending because a translation is
+injective. A translation by a whole number of *tiles* re-keys the handles and
+copies nothing at all.
+
+Two other changes, both from the same run. Destination tiles with nothing under
+them are skipped before a pixel is read — the inverse-mapped corners of a tile
+bound where it can have come from, and line art is mostly paper. And the resample
+is spread across a short-lived thread pool by destination tile, exactly the way
+the compositor splits by rows, with one `GridReader` per worker because it holds
+a cursor.
+
+|  | before | after |
+|---|---|---|
+| nudge 4K, whole pixels | 289 ms | 43 ms |
+| rotate HD 7° | 178 ms | 27 ms |
+| rotate 4K 7° | 601 ms | 84 ms |
+| scale 4K to 200% | 2334 ms | 369 ms |
+| scale 4K to 25% | 39 ms | 7 ms |
+
+What is left is honest. 43 ms to nudge a 4K drawing is mostly allocating and
+zeroing six hundred fresh tiles — 78 MB — and no arrangement of the copy avoids
+that while a tile is a dense array. Scaling up to 200% is four times the
+destination pixels and costs four times as much; it is paid once, on commit, by
+somebody who has just decided where the drawing goes.
+
+The lift is 33 ms on 4K and single-threaded, and `paintedBounds` is 10 ms. Both
+are paid once when a gesture *starts*, which is why neither was worth chasing —
+but `paintedBounds` reads every pixel of every occupied tile, so it must not go
+in a loop. The benchmark measured it as 0.00 ms at first because the result was
+discarded and the whole call was optimised away; that is worth watching for in
+any benchmark of a pure function.
+
+**And the benchmark decides where the next problem will be.** Nothing here times
+the preview — the `QTransform` blit per frame is Qt's and this cannot see it —
+and nothing times a whole gesture end to end. If a transform ever feels heavy in
+a way these numbers do not explain, that is where to look first.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -1520,6 +1568,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
+./build/tests/bench_transform     # what moving a drawing costs, and where
 ```
 
 `bench_carry` is a measurement rather than a stopwatch, and it is the one to run
@@ -1614,14 +1663,18 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    brush-resize feedback (#5), and a non-modal colour panel (the parked half of
    #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
    its end (#20) are built — see the two sections above.
-7. **Lasso and transform**, designed and not built:
-   [lasso-and-transform.md](lasso-and-transform.md). It has a prerequisite worth
-   knowing about before starting — a shortcut table, because a live transform is
-   the first *mode* this program has, and every shortcut today is an
-   `ApplicationShortcut` that fires whatever the canvas is doing. Designing it
-   turned up three things that are not part of it and now have issues of their
-   own: the unbounded undo history (#23), flipping (#24), and transforming a
-   layer across time (#25).
+7. **Lasso and transform is built**, all four phases —
+   [lasso-and-transform.md](lasso-and-transform.md) is the design and the four
+   sections above are what happened. What is left of it is the three issues
+   designing it turned up, none of which is part of it: capping the undo history
+   ([#23](https://github.com/S-poony/Animage/issues/23)), which this makes more
+   visible and did not cause; flipping
+   ([#24](https://github.com/S-poony/Animage/issues/24)), which is one sign away
+   from the exact translation branch and must be built on it rather than as a −1
+   scale through the resampler; and transforming a layer across time
+   ([#25](https://github.com/S-poony/Animage/issues/25)), which wants
+   `LayerPass` widened from an offset to an affine — the same widening the live
+   preview already needed.
 
 ## Two things to be careful of
 

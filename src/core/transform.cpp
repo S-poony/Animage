@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "compositor.h"
 
@@ -11,6 +13,16 @@ namespace animage {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+
+// Threads cost about as much to start as a small job costs to do, so only
+// spread work that is worth spreading. The same shape as the compositor's own
+// heuristic, and for the same reason.
+int chooseWorkerCount(std::size_t tiles) {
+    if (tiles < 4) return 1;
+    const unsigned hardware = std::thread::hardware_concurrency();
+    const int available = static_cast<int>(hardware ? hardware : 1u);
+    return std::clamp(std::min(available, static_cast<int>(tiles / 2)), 1, 8);
+}
 
 // Reads a grid a pixel at a time, holding on to the tile it last looked in.
 //
@@ -221,24 +233,64 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
     // pixel or less, so there is nothing to average and everything to interpolate.
     const bool reducing = half_x > 0.5 || half_y > 0.5;
 
-    GridReader reader(source);
-    TileGrid out;
-
     const TileCoord first = tileCoordFor(destination.x, destination.y);
     const TileCoord last =
         tileCoordFor(destination.x + destination.width - 1, destination.y + destination.height - 1);
 
+    // Which destination tiles have anything under them at all.
+    //
+    // Line art is mostly paper: a drawing whose ink covers a third of the frame
+    // has two thirds of its destination tiles reading nothing but transparency,
+    // and reading it a pixel at a time is the most expensive way to find that
+    // out. The inverse-mapped corners of a tile bound where it can possibly have
+    // come from, and a tile the source does not occupy there cannot contribute.
+    std::vector<TileCoord> wanted;
     for (int ty = first.y; ty <= last.y; ++ty) {
         for (int tx = first.x; tx <= last.x; ++tx) {
+            const PixelRect square{tx * kTileSize, ty * kTileSize, kTileSize, kTileSize};
+            // Grown by the filter's reach, or a tile whose source sits just
+            // past its own edge loses the rim it should have had.
+            PixelRect from = transformedBounds(backward, square);
+            const int reach = static_cast<int>(std::ceil(std::max(half_x, half_y))) + 1;
+            from = {from.x - reach, from.y - reach, from.width + 2 * reach,
+                    from.height + 2 * reach};
+
+            const TileCoord source_first = tileCoordFor(from.x, from.y);
+            const TileCoord source_last =
+                tileCoordFor(from.x + from.width - 1, from.y + from.height - 1);
+
+            bool anything = false;
+            for (int sy = source_first.y; sy <= source_last.y && !anything; ++sy) {
+                for (int sx = source_first.x; sx <= source_last.x; ++sx) {
+                    const TileRef* held = source.findSlot({sx, sy});
+                    if (held && *held) {
+                        anything = true;
+                        break;
+                    }
+                }
+            }
+            if (anything) wanted.push_back({tx, ty});
+        }
+    }
+
+    std::vector<std::shared_ptr<Tile>> produced(wanted.size());
+
+    // One destination tile at a time, and the tiles are independent -- each
+    // reads the source and writes only its own pixels -- so this splits exactly
+    // the way the compositor already splits. Nothing outlives the call.
+    const auto fill = [&](std::size_t begin, std::size_t end) {
+        GridReader reader(source);  // one per worker: it holds a cursor
+        for (std::size_t i = begin; i < end; ++i) {
+            const TileCoord coord = wanted[i];
             auto made = std::make_shared<Tile>();
             bool any = false;
 
             for (int y = 0; y < kTileSize; ++y) {
-                const int py = ty * kTileSize + y;
+                const int py = coord.y * kTileSize + y;
                 if (py < destination.y || py >= destination.y + destination.height) continue;
 
                 for (int x = 0; x < kTileSize; ++x) {
-                    const int px = tx * kTileSize + x;
+                    const int px = coord.x * kTileSize + x;
                     if (px < destination.x || px >= destination.x + destination.width) continue;
 
                     // The centre of the pixel, not its corner. Sampling the
@@ -262,10 +314,31 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
                 }
             }
 
-            if (any) out.set({tx, ty}, std::move(made));
+            if (any) produced[i] = std::move(made);
         }
+    };
+
+    const int workers = chooseWorkerCount(wanted.size());
+    if (workers <= 1) {
+        fill(0, wanted.size());
+    } else {
+        const std::size_t band = (wanted.size() + workers - 1) / workers;
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<std::size_t>(workers) - 1);
+        for (int w = 1; w < workers; ++w) {
+            const std::size_t begin = std::min(wanted.size(), w * band);
+            const std::size_t end = std::min(wanted.size(), begin + band);
+            if (begin >= end) break;
+            pool.emplace_back(fill, begin, end);
+        }
+        fill(0, std::min(wanted.size(), band));  // this thread takes the first band
+        for (std::thread& worker : pool) worker.join();
     }
 
+    TileGrid out;
+    for (std::size_t i = 0; i < wanted.size(); ++i) {
+        if (produced[i]) out.set(wanted[i], std::move(produced[i]));
+    }
     return out;
 }
 

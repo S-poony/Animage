@@ -16,11 +16,15 @@ Two things are deliberately not here and have issues of their own: transforming
 a whole layer across time ([#25](https://github.com/S-poony/Animage/issues/25)),
 and flipping ([#24](https://github.com/S-poony/Animage/issues/24)).
 
-> **Correction, written while building it.** Phase 0 and phase 1 are built, so
-> "nothing here is built" is no longer true of them. What happened when they were
-> is in `handover.md` under "what the keyboard does, and when" and "moving a
-> drawing"; corrections to specific claims below are marked where they belong.
-> Phases 2, 3 and 4 are still ahead.
+> **Correction, written while building it.** All four phases are built, so
+> "nothing here is built" is no longer true of any of it. What happened is in
+> `handover.md` under "what the keyboard does, and when", "moving a drawing",
+> "the lasso", "copy, cut and paste" and "what a transform costs"; corrections to
+> specific claims below are marked where they belong. The document was right
+> about nearly all of it, including the two things it warned would be expensive
+> to find out twice: that a hard mask leaves a jagged rim, and that bilinear at a
+> four-times reduction loses line art entirely. Both were checked by building the
+> wrong version first and watching it fail.
 
 ## What a selection is here, and what it is not
 
@@ -400,3 +404,13 @@ code makes and a decision can be asserted exactly.
 - A whole-track pass touches each distinct drawing once.
 - Cancelling leaves the undo depth where it was.
 - No two actions live in the same mode share a key.
+
+> **What building it added to that list.** Two more that the note did not name
+> and that turned out to matter. *A thin line survives a four-times reduction* —
+> forcing the bilinear path makes it disappear entirely rather than merely thin,
+> so the box filter is load-bearing and not a refinement. And *no two bindings in
+> one mode differ only by Shift on a non-letter*, which is the actual mechanism
+> of #14 and which the conflict check above passes happily.
+>
+> Both were verified by breaking the code and watching the test go red, which is
+> the only way to know a test is testing anything.

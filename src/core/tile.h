@@ -247,38 +247,74 @@ inline PixelRect paintedBounds(const TileGrid& grid) {
 // the one place it is used -- a colour layer's marks are a few tiles, against
 // line art that is hundreds.
 inline TileGrid translated(const TileGrid& grid, int dx, int dy) {
-    TileGrid moved;
     if (dx == 0 && dy == 0) return grid;
 
-    // Every destination tile any source tile can reach: an offset that is not a
-    // multiple of the tile size spreads one tile over four.
+    TileGrid moved;
+
+    // A whole number of tiles: the handles are re-keyed and not one pixel is
+    // copied. Rare in practice and free when it happens.
+    if (dx % kTileSize == 0 && dy % kTileSize == 0) {
+        const int shift_x = dx / kTileSize;
+        const int shift_y = dy / kTileSize;
+        for (const auto& [coord, tile] : grid.tiles()) {
+            if (tile) moved.set({coord.x + shift_x, coord.y + shift_y}, tile);
+        }
+        return moved;
+    }
+
+    // Otherwise, scattered: each source tile lands across up to four
+    // destination tiles, and each overlap is a run of whole rows.
+    //
+    // Written as block copies and not as a walk over the destination asking the
+    // grid for each pixel, which is what this was. That version was one hash
+    // lookup and one half-to-float-to-half round trip per pixel -- 289 ms to
+    // nudge a 4K drawing by three pixels, on the path that exists precisely
+    // because a registration nudge must cost nothing. Measured in
+    // bench_transform. The translation is injective, so no two source tiles can
+    // write the same destination pixel and nothing has to be blended.
     std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+
     for (const auto& [coord, tile] : grid.tiles()) {
         if (!tile) continue;
-        for (int corner = 0; corner < 4; ++corner) {
-            const int px = coord.x * kTileSize + (corner % 2) * (kTileSize - 1) + dx;
-            const int py = coord.y * kTileSize + (corner / 2) * (kTileSize - 1) + dy;
-            built.emplace(tileCoordFor(px, py), nullptr);
+
+        const int from_x = coord.x * kTileSize;
+        const int from_y = coord.y * kTileSize;
+        const int to_x = from_x + dx;
+        const int to_y = from_y + dy;
+
+        const TileCoord first = tileCoordFor(to_x, to_y);
+        const TileCoord last = tileCoordFor(to_x + kTileSize - 1, to_y + kTileSize - 1);
+
+        for (int ty = first.y; ty <= last.y; ++ty) {
+            for (int tx = first.x; tx <= last.x; ++tx) {
+                const int tile_x = tx * kTileSize;
+                const int tile_y = ty * kTileSize;
+                const int x0 = std::max(to_x, tile_x);
+                const int y0 = std::max(to_y, tile_y);
+                const int x1 = std::min(to_x + kTileSize, tile_x + kTileSize);
+                const int y1 = std::min(to_y + kTileSize, tile_y + kTileSize);
+                if (x1 <= x0 || y1 <= y0) continue;
+
+                auto& destination = built[{tx, ty}];
+                if (!destination) destination = std::make_shared<Tile>();
+
+                const std::size_t run = static_cast<std::size_t>(x1 - x0) * 4;
+                for (int y = y0; y < y1; ++y) {
+                    const std::size_t source_index =
+                        (static_cast<std::size_t>(y - to_y) * kTileSize + (x0 - to_x)) * 4;
+                    const std::size_t destination_index =
+                        (static_cast<std::size_t>(y - tile_y) * kTileSize + (x0 - tile_x)) * 4;
+                    std::copy_n(tile->rgba.begin() + static_cast<std::ptrdiff_t>(source_index),
+                                run,
+                                destination->rgba.begin() +
+                                    static_cast<std::ptrdiff_t>(destination_index));
+                }
+            }
         }
     }
 
     for (auto& [coord, tile] : built) {
-        bool any = false;
-        auto made = std::make_shared<Tile>();
-        for (int y = 0; y < kTileSize; ++y) {
-            const int py = coord.y * kTileSize + y;
-            for (int x = 0; x < kTileSize; ++x) {
-                const int px = coord.x * kTileSize + x;
-                const Rgba pixel = grid.pixel(px - dx, py - dy);
-                if (pixel.a == 0.0f && pixel.r == 0.0f && pixel.g == 0.0f && pixel.b == 0.0f) {
-                    continue;
-                }
-                made->setPixel(x, y, pixel);
-                any = true;
-            }
-        }
-        if (any) moved.set(coord, std::move(made));
-        (void)tile;
+        if (tile && !tile->isFullyTransparent()) moved.set(coord, std::move(tile));
     }
     return moved;
 }

@@ -25,6 +25,10 @@ target_link_libraries(bench_composite PRIVATE animage::core)
 add_executable(bench_carry bench_carry.cpp)
 target_link_libraries(bench_carry PRIVATE animage::core)
 
+# What a transform costs, and where. Written before anything was optimised.
+add_executable(bench_transform bench_transform.cpp)
+target_link_libraries(bench_transform PRIVATE animage::core)
+
 # Interface tests need Qt, and run offscreen so they work on a build machine
 # with no display.
 # Saving and loading is the application's half -- ProjectIO, Qt's JSON and all
