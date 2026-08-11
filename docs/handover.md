@@ -1441,7 +1441,9 @@ and `inputs` names the scribble *cel* and not only its revision, because
 reordering changes which cel is read and moves no revision anywhere.
 
 **A rectangle built from tile coordinates remembers what you erased.**
-`celBounds` took the bounding box of a cel's tiles, and erasing empties a tile
+The bounds a cel derives from its tiles — `drawnBounds`, in `tile.h`, and called
+`celBounds` in these notes and in issue #23 by a name it has never had in the
+code — took the bounding box of a cel's tiles, and erasing empties a tile
 without releasing it — so the solve region went on describing a mark that was no
 longer there. That rectangle picks the solve resolution, so a stray scribble made
 and rubbed out left every later solve on that drawing permanently coarser than
@@ -1692,7 +1694,61 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    brush-resize feedback (#5), and a non-modal colour panel (the parked half of
    #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
    its end (#20) are built — see the two sections above.
-7. **Lasso and transform is built**, all four phases —
+7. **One place that decides what the pointer looks like**
+   ([#27](https://github.com/S-poony/Animage/issues/27)). This covers three
+   issues at once and they should not be done separately:
+   [#4](https://github.com/S-poony/Animage/issues/4) (the eraser should change
+   the cursor), [#5](https://github.com/S-poony/Animage/issues/5) (feedback while
+   Alt-right-drag resizes the brush), and the transform box — where move, resize,
+   rotate and *nothing* are four different outcomes of a press and the cursor is
+   `CrossCursor` for all of them. Dragging at a corner scales and dragging just
+   outside one rotates, and nothing on screen says so.
+
+   The reason to do them together is that there are **nine `setCursor` calls**
+   scattered through `canvas_widget.cpp` and three of them repeat the same
+   `space_held_ ? … : zoom_key_held_ ? …` chain by hand. That is the shape of
+   mistake the shortcut table removed for keys, and it is how a cursor ends up
+   stuck as a closed hand after some path nobody tested. What all three issues
+   want first is one function that answers from what is true — which tool, which
+   modifier is held, whether a gesture is live, what is under the pointer — so
+   that #4 and #5 become answers inside it rather than two more call sites.
+
+   Three things known before starting:
+
+   - **They are two mechanisms, not one.** Resize and rotate want *system*
+     cursors, and Qt has diagonal, horizontal and vertical size cursors that map
+     straight onto the corner and edge handles. Rotation has no standard cursor
+     anywhere, so it needs a drawn one — the first bitmap cursor in the program.
+     #4 and #5 want something else again: a circle at the tool's radius drawn
+     under the pointer, which is one mechanism answering both of them.
+   - **A screenshot cannot check any of it.** `QWidget::grab()` renders the
+     widget and not the screen, so no pointer appears in it. Cursors have to be
+     pinned by asserting `cursor().shape()` after moving the mouse to a place,
+     which is a better test than a picture anyway.
+   - A hover-driven cursor needs the move handler to run with no button down,
+     which during a transform it currently does not.
+
+8. **A screenshot target**
+   ([#28](https://github.com/S-poony/Animage/issues/28)), `tests/shots.cpp`,
+   shaped like `bench_zoom`: built, never run by `ctest`, takes a directory and
+   drives the real window through a list of named situations writing one PNG
+   each.
+
+   Every interface bug this file records — the mis-encoded character, the absent
+   button, the two identical red swatches, the transform box drawn round whole
+   tiles — was caught by looking, and none of them by a green build. What is
+   missing is not the will to look but the scaffolding: building lasso and
+   transform meant writing and deleting a throwaway screenshot function four
+   times, and a cycle that costs a build and leaves debris in a test file is a
+   cycle nobody runs when they are nearly finished.
+
+   Two things to be honest about. **It is not a test** — nothing asserts, and
+   golden-image comparison would go red on CI for font rendering rather than for
+   bugs, so it belongs with the benchmarks and should carry their instruction:
+   run it before and after anything that touches the canvas. And it is a file
+   that will rot unless it is cheap to run and named somewhere people read.
+
+9. **Lasso and transform is built**, all four phases —
    [lasso-and-transform.md](lasso-and-transform.md) is the design and the four
    sections above are what happened. What is left of it is the three issues
    designing it turned up, none of which is part of it: capping the undo history

@@ -168,6 +168,21 @@ you erased, because erasing empties a tile without releasing it. So freeing
 emptied tiles ("what I would do next", item 3) is a prerequisite for the box
 being in the right place, not a tidy-up to do afterwards.
 
+> **Correction: there is no `celBounds`, and there never was.** The function is
+> `drawnBounds`, which lived unexported in `ctg_job.cpp` and is now in `tile.h`.
+> Finding that out cost a grep and a read of the wrong file, which is a small
+> price paid by every reader rather than once by the writer — a note is better
+> off naming the concept and the file than a symbol it cannot keep in step.
+>
+> **And that rectangle turned out to be the wrong one for a box anyway.** It is
+> tile-aligned, so the first screenshot of the transform had a box drawn 128
+> pixels clear of the drawing on every side, which is a picture of the tile grid
+> rather than of the ink. `paintedBounds` reads every pixel and is what the box
+> uses; `drawnBounds` stops at the tile and is what a solve region wants, because
+> it is choosing a resolution rather than being looked at. Freeing emptied tiles
+> was still a prerequisite — without it the box is drawn round a mark you rubbed
+> out — but it was not sufficient, and only looking at it said so.
+
 **Handles are drawn at a fixed screen size**, and when the box is narrower than
 about three of them they sit outside its edge rather than on it. Below a minimum
 on-screen size the interior stops being a move target, because there is nothing
