@@ -213,6 +213,65 @@ void newCommandClearsRedo() {
     CHECK(!f.doc.canRedo());
 }
 
+// A tile whose pixels have all been cleared is dropped at the end of the
+// command that cleared them, and undo brings it back.
+//
+// It used to stay in the grid for ever -- written to every saved project,
+// counted in memory, pinned by the history -- and, which is why this is a
+// prerequisite for lasso and transform rather than a tidy-up, still lending its
+// whole square to the bounding box of a drawing that no longer has a mark in it.
+void emptiedTilesAreFreed() {
+    TEST("a tile that has been emptied is freed, and undo brings it back");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 20, 20, kRed);
+    }
+    CHECK_EQ(f.doc.totalTileCount(), std::size_t{1});
+
+    {
+        ScopedCommand command(f.doc, "Erase");
+        paint(f.doc, f.track, image, f.layer, 20, 20, Rgba{});
+    }
+    CHECK_EQ(f.doc.totalTileCount(), std::size_t{0});
+
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.doc.totalTileCount(), std::size_t{1});
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 20, 20).r, 1.0, 1e-3);
+
+    CHECK(f.doc.redo());
+    CHECK_EQ(f.doc.totalTileCount(), std::size_t{0});
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 20, 20).a, 0.0, 1e-3);
+}
+
+// And a command that found nothing and left nothing is not a change. Rubbing
+// out over blank paper allocated a tile, freed it again, and left an undo step
+// behind that put the empty tile back.
+void rubbingOutBlankPaperIsNotAnUndoStep() {
+    TEST("rubbing out over blank paper leaves no undo step");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 20, 20, kRed);
+    }
+    const std::size_t before = f.doc.undoDepth();
+    const std::size_t tiles = f.doc.totalTileCount();
+
+    {
+        // Well away from the stroke, so the cel already exists and this is
+        // nothing but a journal entry that records no difference.
+        ScopedCommand command(f.doc, "Erase");
+        paint(f.doc, f.track, image, f.layer, 600, 600, Rgba{});
+    }
+
+    CHECK_EQ(f.doc.undoDepth(), before);
+    CHECK_EQ(f.doc.totalTileCount(), tiles);
+}
+
 void nestedCommandsCollapse() {
     TEST("nested commands collapse into one undo step");
     Fixture f;
@@ -244,6 +303,8 @@ int main() {
     addLayerUndoes();
     undoOnExposedImageRestoresAllFrames();
     newCommandClearsRedo();
+    emptiedTilesAreFreed();
+    rubbingOutBlankPaperIsNotAnUndoStep();
     nestedCommandsCollapse();
     return testing::summarise("undo");
 }

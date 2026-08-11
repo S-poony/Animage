@@ -1138,6 +1138,22 @@ theories were measured and dropped first — eraser residue, which the hard labe
 write makes impossible, and the largest-first solve order, which is deterministic
 given the same seeds.
 
+**And the grid lets go of it now**, which is the other half and was left for
+later at the time. `Document::endCommand` drops every tile the command emptied,
+so absent and fully transparent stop being two states that mean the same thing.
+Three points about where it is done. It is at the *end* of the command rather
+than at the write, because a stroke crosses one tile many times and only the
+whole command knows when the writing stopped. Undo needs nothing added: the
+journal already recorded what the tile held before the first write, and
+`swapTile` is its own inverse whether or not either side is there. And it is
+deliberately not a revision bump — no pixel changed, and bumping would throw
+away a CTG fill that is still correct.
+
+An entry that then records no difference at all is dropped from the command with
+it, so rubbing out over blank paper is no longer an undo step that puts an empty
+tile back. This is also the cheap end of [#23](https://github.com/S-poony/Animage/issues/23):
+the tiles a command retains are what the history costs.
+
 **The confidence signal the design notes propose does not work, and the
 measurement is the only thing that says so.** Scoring a mark by the fraction of
 it the solver labelled with the mark's own colour comes out at exactly 1 across
@@ -1341,12 +1357,11 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    the ink repeats. Rung four is the paper written for this exact problem
    (Sýkora, Dingliana & Collins, NPAR 2009) and is what to read before designing
    anything past three.
-3. **Free the tiles that erasing has emptied.** A tile whose pixels are all
-   cleared stays in the grid forever — it is written to saved projects and
-   counted in memory. `Tile::isFullyTransparent` already exists and `celBounds`
-   already ignores such tiles, so the correctness problem is gone and only the
-   waste is left. The traps are the undo journal, which records tile snapshots
-   by (cel, coord), and the tiles copy-on-write shares between cels.
+3. **Freeing the tiles that erasing has emptied is done** — it was a stated
+   prerequisite for lasso and transform rather than a tidy-up, because the box
+   drawn round a drawing with no selection is that drawing's bounds. What it
+   cost and where it is done is in "a rectangle built from tile coordinates
+   remembers what you erased" above.
 4. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the

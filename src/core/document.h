@@ -221,6 +221,10 @@ private:
     CelId createCelCopy(const Cel& source);
     bool historyReferences(CelId id) const;
 
+    // Drops the tiles this command emptied, and the journal entries that then
+    // record no change at all. Called once, when the outermost command closes.
+    void releaseEmptiedTiles(std::vector<TileSnapshot>& tiles);
+
     // A new drawing with its own copy of every cel of `source`, refcounted and
     // numbered, but in no slot yet. Shared by both ways of duplicating one.
     std::optional<Image> copyOfImage(Track& track, ImageId source);

@@ -31,6 +31,13 @@ Tile* Cel::writableTile(TileCoord c, TileJournal& journal) {
     return raw;
 }
 
+bool Cel::releaseIfEmpty(TileCoord c) {
+    const TileRef* slot = grid_.findSlot(c);
+    if (!slot || !*slot || !(*slot)->isFullyTransparent()) return false;
+    grid_.set(c, TileRef{});
+    return true;
+}
+
 void Cel::swapTile(TileCoord c, TileRef& other) {
     TileRef current = grid_.find(c);
     grid_.set(c, std::move(other));

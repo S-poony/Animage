@@ -647,11 +647,40 @@ void Document::beginCommand(std::string label) {
     }
 }
 
+// A tile the command emptied is dropped here, at the end of it, rather than by
+// whoever wrote the last transparent pixel: a stroke crosses one tile many
+// times and only the whole command knows when the writing stopped. Doing it per
+// dab would also mean freeing a tile the next dab immediately allocates again.
+//
+// Undo needs nothing extra. The journal recorded what was in the tile before
+// the first write of the command, so putting that back is what it was always
+// going to do -- and redo swaps the absence back in, because swapTile is its
+// own inverse whether or not either side is there.
+//
+// An entry that found nothing and left nothing is then not a change at all, and
+// is dropped rather than being carried in the history: rubbing out over blank
+// paper used to leave an undo step that put an empty tile back.
+void Document::releaseEmptiedTiles(std::vector<TileSnapshot>& tiles) {
+    std::vector<TileSnapshot> kept;
+    kept.reserve(tiles.size());
+    for (TileSnapshot& snapshot : tiles) {
+        auto it = cels_.find(snapshot.cel);
+        const Cel* cel = (it == cels_.end()) ? nullptr : it->second.get();
+        if (it != cels_.end()) it->second->releaseIfEmpty(snapshot.coord);
+
+        const bool absent_now = !cel || !cel->tiles().find(snapshot.coord);
+        if (absent_now && !snapshot.tile) continue;
+        kept.push_back(std::move(snapshot));
+    }
+    tiles = std::move(kept);
+}
+
 void Document::endCommand() {
     if (command_depth_ == 0) return;
     if (--command_depth_ > 0) return;
 
     pending_.tiles = journal_.take();
+    releaseEmptiedTiles(pending_.tiles);
     if (!pending_.empty()) {
         undo_stack_.push_back(std::move(pending_));
         redo_stack_.clear();

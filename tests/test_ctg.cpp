@@ -974,9 +974,12 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     ctgStroke(f.doc, f.track, f.image, f.colour, 470, 500, 530, 500, 12.0f, 0, 0, 0, true);
     const CtgFill after = ctgFill(f.doc, f.track, f.image, f.colour);
 
-    // The tiles are still allocated -- that is a separate matter, and the point
-    // is that the solve no longer cares.
-    CHECK(cel->tiles().tileCount() > tiles_before);
+    // And the tiles go with it. This used to read "the tiles are still
+    // allocated -- that is a separate matter, and the point is that the solve no
+    // longer cares", because the solve had been taught to ignore an emptied tile
+    // while the grid went on holding one. The grid lets go of it now, so the two
+    // agree rather than one covering for the other. See Cel::releaseIfEmpty.
+    CHECK_EQ(cel->tiles().tileCount(), tiles_before);
     CHECK_EQ(after.colours, before.colours);
     CHECK(sameRect(after.solved, before.solved));
     CHECK_EQ(after.step, before.step);

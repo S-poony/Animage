@@ -86,6 +86,20 @@ public:
     // operation its own inverse.
     void swapTile(TileCoord c, TileRef& other);
 
+    // Drops a tile whose every pixel has been cleared, and says whether it did.
+    //
+    // Absent and fully transparent mean the same thing to everything that reads
+    // a grid, so a tile that erasing has emptied is pure waste: it is written to
+    // saved projects, counted in memory, held by the undo journal for ever, and
+    // it goes on putting the bounding box of a mark that is no longer there
+    // around a drawing that no longer has one.
+    //
+    // Not journalled and not a revision bump, both deliberately. Whoever emptied
+    // the tile recorded what it displaced before the first write and bumped the
+    // revision doing so; this changes no pixel, and a second bump would throw
+    // away a CTG fill that is still perfectly correct.
+    bool releaseIfEmpty(TileCoord c);
+
     // Takes a whole grid, for a cel that is being created rather than edited.
     // Not an edit and not undoable on its own: the only caller is the creation
     // of a cel that starts from marks it has moved, and what undoes that is the
