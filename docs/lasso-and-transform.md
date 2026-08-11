@@ -414,3 +414,9 @@ code makes and a decision can be asserted exactly.
 >
 > Both were verified by breaking the code and watching the test go red, which is
 > the only way to know a test is testing anything.
+>
+> One item on the list above has no subject: **"a whole-track pass touches each
+> distinct drawing once"**. Nothing here walks a track — a transform acts on one
+> drawing of one layer — so the trap it guards against, iterating slots rather
+> than distinct drawings, cannot be reached from this feature. It belongs to #25,
+> which is where the whole-track pass is.

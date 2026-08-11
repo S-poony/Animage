@@ -34,6 +34,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QHeaderView>
+#include <QMenu>
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
