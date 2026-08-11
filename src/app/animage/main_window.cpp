@@ -196,28 +196,72 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     return true;
 }
 
+// One action, from the row of the shortcut table that names it.
+//
+// The point is not that it saves a line at each call site. It is that "what key
+// is this on" and "when is it live" are now two columns of one table instead of
+// fifteen literals and a set of setEnabled calls nobody can enumerate. See
+// shortcuts.h.
+QAction* MainWindow::makeAction(shortcuts::Id id, std::function<void()> handler) {
+    const shortcuts::Entry& entry = shortcuts::entryFor(id);
+    auto* action = new QAction(QString::fromUtf8(entry.label), this);
+    if (entry.standard != QKeySequence::UnknownKey) {
+        action->setShortcut(QKeySequence(entry.standard));
+    } else if (entry.key != 0) {
+        action->setShortcut(QKeySequence(entry.key));
+    }
+    // Application-wide, as every shortcut here has always been: the canvas holds
+    // the keyboard and the menus still have to answer for it. What was missing
+    // was the other half -- which of them are live at all.
+    action->setShortcutContext(Qt::ApplicationShortcut);
+    if (handler) {
+        connect(action, &QAction::triggered, this, [call = std::move(handler)] { call(); });
+    }
+    keyed_actions_[id] = action;
+    return action;
+}
+
+QAction* MainWindow::actionForTesting(shortcuts::Id id) const {
+    const auto found = keyed_actions_.find(id);
+    return (found == keyed_actions_.end()) ? nullptr : found->second;
+}
+
+// What the keyboard means, changed in one place.
+//
+// A disabled QAction does not consume its shortcut, and that is the whole
+// mechanism rather than a side effect: turning Play off is what frees Return for
+// a transform to validate with, and turning the frame steps off is what frees
+// the arrows to nudge with. Nothing here has to know what the other mode does
+// with the key it is giving up.
+//
+// Undo and Redo are absent from the list on purpose -- they are live in both
+// modes and *redefined* in one, which the handlers ask about.
+void MainWindow::setShortcutMode(shortcuts::Mode mode) {
+    mode_ = mode;
+    for (const auto& [id, action] : keyed_actions_) {
+        action->setEnabled(shortcuts::liveIn(shortcuts::entryFor(id).modes, mode));
+    }
+    // The button goes with the action it duplicates. A button that still works
+    // while its own shortcut does not is worse than either alone.
+    if (play_button_) play_button_->setEnabled(mode == shortcuts::Mode::Normal);
+}
+
 void MainWindow::buildActions() {
+    using shortcuts::Id;
+
     QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
-    file->addAction(QStringLiteral("&New"), QKeySequence::New, this, &MainWindow::newProject);
-    file->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
-                    &MainWindow::openProject);
-    file->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
-                    &MainWindow::saveProject);
-    file->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs, this,
-                    &MainWindow::saveProjectAs);
+    file->addAction(makeAction(Id::NewProject, [this] { newProject(); }));
+    file->addAction(makeAction(Id::OpenProject, [this] { openProject(); }));
+    file->addAction(makeAction(Id::SaveProject, [this] { saveProject(); }));
+    file->addAction(makeAction(Id::SaveProjectAs, [this] { saveProjectAs(); }));
     file->addSeparator();
+    // No key, so no row: the table is what the keyboard does, and an action with
+    // nothing bound to it has nothing to say there.
     file->addAction(QStringLiteral("&Export sequences..."), this, &MainWindow::exportSequences);
-    for (QAction* action : file->actions()) action->setShortcutContext(Qt::ApplicationShortcut);
 
     QMenu* edit = menuBar()->addMenu(QStringLiteral("&Edit"));
-    QAction* undo_action = edit->addAction(QStringLiteral("&Undo"), QKeySequence::Undo, this,
-                                           &MainWindow::undo);
-    // Ctrl+Shift+Z, not the Ctrl+Y that QKeySequence::Redo gives on Windows.
-    QAction* redo_action = edit->addAction(QStringLiteral("&Redo"),
-                                           QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), this,
-                                           &MainWindow::redo);
-    undo_action->setShortcutContext(Qt::ApplicationShortcut);
-    redo_action->setShortcutContext(Qt::ApplicationShortcut);
+    edit->addAction(makeAction(Id::Undo, [this] { undo(); }));
+    edit->addAction(makeAction(Id::Redo, [this] { redo(); }));
 
     edit->addSeparator();
     // The framerate and the canvas both belong to the scene, not to a track:
@@ -226,36 +270,20 @@ void MainWindow::buildActions() {
     edit->addAction(QStringLiteral("Scene settings..."), this, &MainWindow::chooseSceneSettings);
 
     QMenu* animation = menuBar()->addMenu(QStringLiteral("&Animation"));
-    play_action_ = animation->addAction(QStringLiteral("Play"), QKeySequence(Qt::Key_Return), this,
-                                        &MainWindow::togglePlayback);
+    play_action_ = makeAction(Id::Play, [this] { togglePlayback(); });
+    animation->addAction(play_action_);
     animation->addSeparator();
-    animation->addAction(QStringLiteral("Previous frame"), QKeySequence(Qt::Key_Left), this,
-                         [this] { stepFrame(-1); });
-    animation->addAction(QStringLiteral("Next frame"), QKeySequence(Qt::Key_Right), this,
-                         [this] { stepFrame(1); });
-    // Up and down move by drawing, skipping over held frames -- the two
-    // questions "what is next in time" and "what is the next drawing" are
-    // different, and both get asked constantly.
-    animation->addAction(QStringLiteral("Previous drawing"), QKeySequence(Qt::Key_Up), this,
-                         [this] { stepDrawing(-1); });
-    animation->addAction(QStringLiteral("Next drawing"), QKeySequence(Qt::Key_Down), this,
-                         [this] { stepDrawing(1); });
+    animation->addAction(makeAction(Id::PreviousFrame, [this] { stepFrame(-1); }));
+    animation->addAction(makeAction(Id::NextFrame, [this] { stepFrame(1); }));
+    animation->addAction(makeAction(Id::PreviousDrawing, [this] { stepDrawing(-1); }));
+    animation->addAction(makeAction(Id::NextDrawing, [this] { stepDrawing(1); }));
     animation->addSeparator();
-    animation->addAction(QStringLiteral("Insert drawing"), QKeySequence(Qt::Key_Insert), this,
-                         &MainWindow::insertInterval);
-    animation->addAction(QStringLiteral("Duplicate drawing"),
-                         QKeySequence(Qt::CTRL | Qt::Key_D), this, &MainWindow::duplicateDrawing);
-    animation->addAction(QStringLiteral("Delete drawing"), QKeySequence(Qt::Key_Delete), this,
-                         &MainWindow::deleteDrawing);
+    animation->addAction(makeAction(Id::InsertDrawing, [this] { insertInterval(); }));
+    animation->addAction(makeAction(Id::DuplicateDrawing, [this] { duplicateDrawing(); }));
+    animation->addAction(makeAction(Id::DeleteDrawing, [this] { deleteDrawing(); }));
     animation->addSeparator();
-    animation->addAction(QStringLiteral("Hold longer"), QKeySequence(Qt::Key_Plus), this,
-                         &MainWindow::extendExposure);
-    animation->addAction(QStringLiteral("Hold shorter"), QKeySequence(Qt::Key_Minus), this,
-                         &MainWindow::shortenExposure);
-
-    for (QAction* action : animation->actions()) {
-        action->setShortcutContext(Qt::ApplicationShortcut);
-    }
+    animation->addAction(makeAction(Id::HoldLonger, [this] { extendExposure(); }));
+    animation->addAction(makeAction(Id::HoldShorter, [this] { shortenExposure(); }));
 
     // A menu of its own rather than more of Edit: a track is the other thing a
     // scene is made of, beside its layers, and the layer panel already has a
@@ -294,15 +322,12 @@ void MainWindow::buildActions() {
     }
 
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
-    view->addAction(QStringLiteral("Actual size"), QKeySequence(Qt::Key_1), canvas_,
-                    &CanvasWidget::resetView);
-    view->addAction(QStringLiteral("Fit canvas"), QKeySequence(Qt::Key_0), canvas_,
-                    &CanvasWidget::fitToCanvas);
+    view->addAction(makeAction(Id::ActualSize, [this] { canvas_->resetView(); }));
+    view->addAction(makeAction(Id::FitCanvas, [this] { canvas_->fitToCanvas(); }));
     // The drawing is not the canvas, and both are worth being able to frame:
     // one is what you are delivering, the other is everything you have made,
     // including whatever ran off the edge.
-    view->addAction(QStringLiteral("Fit drawing"), QKeySequence(Qt::SHIFT | Qt::Key_0), canvas_,
-                    &CanvasWidget::fitToDrawing);
+    view->addAction(makeAction(Id::FitDrawing, [this] { canvas_->fitToDrawing(); }));
     view->addSeparator();
 
     auto* backgrounds = new QActionGroup(this);
@@ -332,24 +357,20 @@ void MainWindow::buildActions() {
     tools->setMovable(false);
 
     auto* mode = new QActionGroup(this);
-    brush_action_ = tools->addAction(QStringLiteral("Brush"));
-    eraser_action_ = tools->addAction(QStringLiteral("Eraser"));
-    for (QAction* action : {brush_action_, eraser_action_}) {
-        action->setCheckable(true);
-        action->setShortcutContext(Qt::ApplicationShortcut);
-        mode->addAction(action);
-    }
-    brush_action_->setChecked(true);
-    brush_action_->setShortcut(QKeySequence(Qt::Key_B));
-    eraser_action_->setShortcut(QKeySequence(Qt::Key_E));
-    connect(brush_action_, &QAction::triggered, this, [this] {
+    brush_action_ = makeAction(Id::Brush, [this] {
         canvas_->setEraser(false);
         syncToolSettings();
     });
-    connect(eraser_action_, &QAction::triggered, this, [this] {
+    eraser_action_ = makeAction(Id::Eraser, [this] {
         canvas_->setEraser(true);
         syncToolSettings();
     });
+    for (QAction* action : {brush_action_, eraser_action_}) {
+        action->setCheckable(true);
+        mode->addAction(action);
+        tools->addAction(action);
+    }
+    brush_action_->setChecked(true);
 
     tools->addSeparator();
     tools->addWidget(new QLabel(QStringLiteral(" Size ")));
@@ -365,18 +386,10 @@ void MainWindow::buildActions() {
     connect(radius_, &QDoubleSpinBox::editingFinished, this, [this] { canvas_->setFocus(); });
     tools->addWidget(radius_);
 
-    // [ and ] are what every drawing program uses; not having them is jarring.
-    auto* smaller = new QAction(this);
-    smaller->setShortcut(QKeySequence(Qt::Key_BracketLeft));
-    smaller->setShortcutContext(Qt::ApplicationShortcut);
-    connect(smaller, &QAction::triggered, this, [this] { nudgeBrushRadius(1.0 / 1.25); });
-    addAction(smaller);
-
-    auto* larger = new QAction(this);
-    larger->setShortcut(QKeySequence(Qt::Key_BracketRight));
-    larger->setShortcutContext(Qt::ApplicationShortcut);
-    connect(larger, &QAction::triggered, this, [this] { nudgeBrushRadius(1.25); });
-    addAction(larger);
+    // In no menu and no toolbar, so they need adding to a widget by hand: an
+    // action nothing holds has a shortcut nothing listens for.
+    addAction(makeAction(Id::SmallerBrush, [this] { nudgeBrushRadius(1.0 / 1.25); }));
+    addAction(makeAction(Id::LargerBrush, [this] { nudgeBrushRadius(1.25); }));
 
     // Pressure driving opacity as well as size suits some hands and not
     // others, exactly as in Photoshop. Size stays on pressure regardless;
@@ -447,6 +460,12 @@ void MainWindow::buildActions() {
     clear->setFocusPolicy(Qt::NoFocus);
     connect(clear, &QPushButton::clicked, this, &MainWindow::clearCurrentLayer);
     tools->addWidget(clear);
+
+    // Said rather than assumed. Every action is enabled by default and the
+    // window opens in Normal, so this changes nothing today -- and it is the
+    // only place the enabled state is ever set, which is the property worth
+    // having: there is one answer to "why is this action off" and it is here.
+    setShortcutMode(shortcuts::Mode::Normal);
 }
 
 void MainWindow::buildLayerPanel() {

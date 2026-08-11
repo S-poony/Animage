@@ -136,11 +136,17 @@ cmake --build build --target animage && ./build/src/app/animage
 | Wheel | zoom about the pointer |
 | Space-drag, middle-drag | pan |
 | `1` / `0` | actual size / fit the canvas |
-| `Shift+0` | fit the drawing, including whatever ran off the edge |
+| `F` | fit the drawing, including whatever ran off the edge |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
 | `Alt`+right-drag | brush size |
 | `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
+
+Fitting the drawing is `F` and not the `Shift+0` it used to be. On a keyboard
+whose digit row is the shifted face of another row — AZERTY, for one — typing
+`0` at all means holding Shift, so `0` and `Shift+0` are one chord; Qt answers an
+ambiguous shortcut by cycling between the candidates rather than by complaining,
+which presents as the wrong thing happening every other press.
 
 The eyedropper is `Alt`+click on the drawing rather than the colour dialog's
 "pick screen colour", which cannot work with a stylus: Qt routes pen input as a

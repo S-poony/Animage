@@ -3,12 +3,15 @@
 
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <functional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "document.h"
 #include "export_sequence.h"
 #include "project_io.h"
+#include "shortcuts.h"
 
 class CanvasWidget;
 class TimelineWidget;
@@ -58,6 +61,12 @@ public:
     // situation the interface can only reach with a tablet in somebody's hand.
     animage::Document& documentForTesting() { return doc_; }
 
+    // The action a shortcut id names, or null if the window never made one.
+    // For tests that assert the window and the table agree about the keyboard --
+    // buildActions reading the table is exactly the thing that would rot
+    // silently, because a stale literal still builds and still works.
+    QAction* actionForTesting(shortcuts::Id id) const;
+
     // Writes the sequences to `folder` with a progress dialog over them, and
     // `folder` is the whole destination: the export dialog asks for a name and
     // joins it to the directory that was chosen, so a shot's sequences land in
@@ -81,6 +90,18 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    // Makes the action a shortcut id names -- its label, its key, its
+    // application-wide context -- and remembers it, so that changing mode is one
+    // loop over the table rather than setEnabled calls spread through the code
+    // that changes mode. The caller puts it in whatever menu or toolbar it
+    // belongs to; an action in neither needs addAction to be live at all.
+    QAction* makeAction(shortcuts::Id id, std::function<void()> handler);
+
+    // The one place the keyboard changes meaning. A disabled QAction does not
+    // consume its shortcut, which is the whole mechanism: what goes quiet here
+    // is what the canvas gets to hear.
+    void setShortcutMode(shortcuts::Mode mode);
+
     void buildActions();
     void buildLayerPanel();
     void buildTimelinePanel();
@@ -242,6 +263,11 @@ private:
     QPushButton* play_button_ = nullptr;
     QAction* brush_action_ = nullptr;
     QAction* eraser_action_ = nullptr;
+
+    // Every action the shortcut table names, by id. See setShortcutMode.
+    std::unordered_map<shortcuts::Id, QAction*> keyed_actions_;
+    shortcuts::Mode mode_ = shortcuts::Mode::Normal;
+
     QAction* overwrite_action_ = nullptr;
     // The three "past the last drawing" items, with what each one means.
     std::vector<std::pair<QAction*, animage::TrackEnd>> end_actions_;

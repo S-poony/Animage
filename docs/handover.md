@@ -762,6 +762,53 @@ end and stopped.
 **Still open:** whether the end behaviour should also decide how playback repeats
 — looped against a single pass — which was raised and deliberately not settled.
 
+## What the keyboard does, and when
+
+Phase 0 of [lasso-and-transform.md](lasso-and-transform.md), and the cheap half
+of [#14](https://github.com/S-poony/Animage/issues/14). Every shortcut was a
+`QKeySequence` literal at one of fifteen call sites in `buildActions`, all of
+them `ApplicationShortcut` — which means they fire regardless of what the canvas
+thinks it is doing. That is fine while the program has no modes and stops being
+fine the moment it has one.
+
+`shortcuts.h` is one table: id, label, default key, and **which modes the action
+is live in**. `buildActions` reads it, `MainWindow::setShortcutMode` is the only
+thing that ever calls `setEnabled` on one of them, and that is the whole of the
+mechanism — a disabled `QAction` does not consume its shortcut, so turning Play
+off is what frees Return for a transform to validate with and turning the frame
+steps off is what frees the arrows to nudge with. Modality written as
+`setEnabled` calls spread through the code that changes mode is how an action
+ends up stuck disabled after some cancel path nobody tested.
+
+It is deliberately not a rebinding interface. No settings file, no user-facing
+change, and `Id` is an internal name rather than a stored one; rebinding stays in
+#14.
+
+**The bug in #14 is not a duplicate binding and no table would have caught it.**
+`Fit canvas` was `0` and `Fit drawing` was `Shift+0` — two genuinely different
+sequences. They are one physical chord on a keyboard whose digit row is the
+shifted face of another row, which on AZERTY it is: producing `0` at all means
+holding Shift, so both bindings match, Qt calls the shortcut ambiguous, and it
+*cycles between the candidates* rather than complaining. That is why it presents
+as "sometimes the wrong thing happens" instead of as an error.
+
+Fit drawing is `F` now. No digit would have been safe, so the fix is to leave the
+digit alone rather than to pick another one, and `test_shortcuts` pins both
+rules: within one mode no two actions share a key, and no two bindings differ
+only by Shift on a key that is not a letter. The second one was checked by
+putting `Shift+0` back and watching it go red.
+
+Two things that rule has to be careful about, both found by writing it. Letters
+are exempt and must be — the unshifted face of a letter key is that letter on
+every layout, so `B` and `Shift+B` are two chords a hand can tell apart. And so
+is everything outside printable ASCII: Qt lists the dedicated `Key_Save` among
+the standard Save bindings and `Shift+Key_Save` among Save As's, which is a real
+pair on a keyboard that has such a key and no chord at all on one that has not.
+
+`[` and `]` are worth knowing about and are not fixed here: on AZERTY both need
+AltGr, which Windows reports as Ctrl+Alt. They work and they are awkward, and
+that is a rebinding question rather than a conflict.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and

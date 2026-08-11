@@ -3581,11 +3581,50 @@ void theFileMenuSavesAndOpens() {
     CHECK(!window.windowTitle().contains(QLatin1Char('*')));
 }
 
+// buildActions reads the shortcut table now, and this is what stops it quietly
+// going back to literals. A stale QKeySequence at a call site still builds and
+// still works, so nothing short of comparing the window against the table would
+// ever notice -- which is the same shape as the mis-encoded character and the
+// button that was never added: a green build proves nothing about the interface.
+void theWindowTakesItsKeysFromTheTable() {
+    TEST("every row of the shortcut table reaches an action in the window");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    for (const shortcuts::Entry& entry : shortcuts::table()) {
+        QAction* action = window.actionForTesting(entry.id);
+        CHECK(action != nullptr);
+        if (!action) continue;
+
+        const std::vector<QKeySequence> wanted = shortcuts::sequencesFor(entry);
+        CHECK(!wanted.empty());
+        if (!wanted.empty()) {
+            CHECK_EQ(action->shortcut().toString().toStdString(),
+                     wanted.front().toString().toStdString());
+        }
+        // Application-wide, every one of them: the canvas holds the keyboard,
+        // and a window-context shortcut stops working the moment a spin box in
+        // the toolbar takes focus.
+        CHECK_EQ(static_cast<int>(action->shortcutContext()),
+                 static_cast<int>(Qt::ApplicationShortcut));
+        // And something holds it. An action in no menu, no toolbar and on no
+        // widget is an action whose shortcut nothing will ever hear -- which is
+        // exactly what the two brush-size keys would be if the addAction that
+        // puts them on the window were dropped.
+        CHECK(!action->associatedObjects().isEmpty());
+        // And the window opens in Normal, where everything is live.
+        CHECK(action->isEnabled());
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    theWindowTakesItsKeysFromTheTable();
     touchingTheCanvasTakesTheKeyboardBack();
     altClickPicksTheColourUnderThePointer();
     theMouseStillWorksAfterThePenHasBeenUsed();

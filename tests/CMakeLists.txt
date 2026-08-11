@@ -41,6 +41,13 @@ if(TARGET animage_ui)
   target_include_directories(test_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_render COMMAND test_render -platform offscreen)
 
+  # The shortcut table, which needs Qt for QKeySequence and an application for
+  # the platform's standard keys -- but no window at all.
+  add_executable(test_shortcuts test_shortcuts.cpp)
+  target_link_libraries(test_shortcuts PRIVATE animage_ui)
+  target_include_directories(test_shortcuts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_shortcuts COMMAND test_shortcuts -platform offscreen)
+
   add_executable(test_serialise test_serialise.cpp)
   target_link_libraries(test_serialise PRIVATE animage_ui)
   target_include_directories(test_serialise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
