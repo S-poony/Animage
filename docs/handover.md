@@ -7,6 +7,30 @@ not here, the traps that cost the most time, and what I would do next.
 The French documents in [fr/](fr/) are still the specification. This file only
 records what happened when it was built.
 
+**Start with "how the program fits together"** if you are picking this up to
+change something. The rest of the file is a record — what was built, in the order
+it was built, and what each thing cost — and it is worth reading, but it is not
+the shape of the program. Those five maps are.
+
+| | |
+|---|---|
+| [Where it got to](#where-it-got-to) | what exists, milestone by milestone |
+| [**How the program fits together**](#how-the-program-fits-together) | five paths traced end to end, each across several files |
+| [Several tracks, and a track that overwrites](#several-tracks-and-a-track-that-overwrites) | what a second track changed, and what it broke |
+| [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
+| [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
+| [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
+| [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, and the first mode |
+| [Moving a drawing](#moving-a-drawing) | the transform tool |
+| [The lasso](#the-lasso) | and what a selection is here |
+| [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
+| [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
+| [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
+| [**The traps**](#the-traps) | the things that cost hours, worst first |
+| [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
+| [What I would do next](#what-i-would-do-next) | the queue |
+| [Two things to be careful of](#two-things-to-be-careful-of) | the two bets everything rests on |
+
 ## Where it got to
 
 M0 through M4 exist, and **M5 is done**: a project saves, opens, saves itself,
@@ -305,6 +329,171 @@ coordinates signed, so the drawing surface has no edges at all, which is
 deliberate and stays true. Drawing outside the canvas is still allowed; what is
 out there simply is not in the picture, which is why a colour fill stops at the
 frame.
+
+## How the program fits together
+
+Five paths, each traced end to end. They are here rather than further down
+because they are the thing worth having before changing anything, and because
+none of them is written in any single file it passes through — that is exactly
+why they are worth writing.
+
+Each one names the functions in the order they run. Where a decision inside one
+has a reason, the reason is elsewhere in this file; these are maps and not
+arguments.
+
+### Where a stroke becomes pixels on screen, in order
+
+The most-crossed path in the program, and the one anything about tools, input or
+rendering starts from.
+
+**Down.** The pen arrives at `CanvasWidget::tabletEvent`, which asks five
+questions before it draws anything: is a modal dialog up (leave the event alone —
+it has a better claim on the pen); is there a *child widget* under the pointer
+(the transform bar floats on the canvas, so the event must be left unaccepted for
+Qt to synthesise the mouse event that a spin box listens for); is this a
+navigation gesture (Space-drag, held Z, Alt and the right button); is Alt down
+(the eyedropper); is a transform or the lasso live. Only then `beginStroke`.
+
+`beginStroke` refuses where there is nothing to draw on — no cel, a locked layer,
+a hidden one — then copies the brush's or the eraser's settings, overrides them
+on a CTG layer so the mark is a hard label rather than paint, opens a
+`ScopedCommand`, and hands the stroke to `Brush`.
+
+**Into the document.** `Brush` asks `Document::celForWriting`, which creates the
+cel on first use and records that so undo removes it, then `Cel::writableTile`
+per tile touched — which copies the tile if anything else is sharing it, and
+journals the tile it displaced *once per command*, not once per dab. Nothing
+composites here. Each dab only calls `markDirty` with its rectangle and asks for
+a repaint of it.
+
+**Up, and onto the screen.** All the flattening happens in `paintEvent`, once,
+however many edits arrived since the last one. `ensureCacheCoversView` settles
+`cache_step_` — one cache entry per *screen* pixel, so the cache is the size of
+the window at every zoom — and the region it covers. `requestCtgFills` asks for
+any colour that has gone stale and computes none of it. Then either the whole
+cached region or the accumulated dirty rectangle goes through `refreshRegion`,
+which calls `Compositor::compositeScene` into `scratch_` and converts paper,
+onion skin and drawing to sRGB in `display_` across a short-lived thread pool.
+That conversion loop is the larger half of a refresh by a wide margin — see the
+traps. Finally `display_` is blitted through one `QRectF`, nearest-neighbour only
+above 3× magnification, and the canvas frame is drawn over it.
+
+**The pen lifts.** `endStroke` closes the command — which is where
+`Document::endCommand` drops the tiles the stroke emptied — refreshes everything
+and emits `documentChanged`. The colour solve is asked for by the *next* paint,
+never by the stroke.
+
+Worth knowing before touching any of it: **the cursor is set in nine different
+places** along this path and three of them repeat the same held-key chain by
+hand. That is what [#27](https://github.com/S-poony/Animage/issues/27) is for.
+
+### Where the colour comes from, in order
+
+The one map I wanted when I picked this up, because the path crosses four files
+and no single one of them says so.
+
+A stroke ends, and `CanvasWidget::paintEvent` calls `requestCtgFills`. That
+compares a hash of everything the fill depends on (`ctgInputsFor`) against the
+fill already in `Document::ctgCache()`, and if they differ it takes a `CtgJob` —
+a copy of the marks, the ink and the canvas, in shared tile handles — and hands
+it to `CtgSolver`. Nothing is computed on the interface thread; the paint
+finishes with whatever fill is in the cache, which is the last answer.
+
+A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
+marks were made (`estimateCtgShift`), flatten the ink into a barrier
+(`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
+(`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
+poll on the canvas collects the result, puts it in the cache, marks everything
+dirty and emits `colourChanged`; `MainWindow` refreshes the timeline, the layer
+panel and the status bar from that one signal.
+
+The compositor draws whatever fill is in the cache and never starts a solve —
+`Document::ctgFillFor` is const for exactly that reason.
+
+### Where a transform's pixels go, in order
+
+Nothing on this path writes the document until the last step, and that is the
+whole design rather than an optimisation.
+
+**Picking up.** The Transform tool calls `beginTransform`, which checks
+`refuseHere` — the same list the brush checks, plus the layer kind — and then
+`liftForTransform`. With a loop that is `rasterise` (an even-odd scanline fill
+producing a coverage mask) followed by `liftThrough`, which splits the cel in two:
+`lifted = src × c` and `remaining = src × (1 − c)`. With no loop everything is
+lifted and nothing remains, which is what makes the two cases one code path. The
+box is `paintedBounds` of the lifted half — every pixel, not every tile.
+
+**Holding.** `buildTransformPicture` composites the lifted half *once*, through
+`compositeGrids`, into an ARGB image bounded at 2048 on its longest side. Every
+paint after that draws the scene with `SubstitutedLayer{layer, &remaining}` — so
+the hole stands in the layer's own place in the stack rather than being painted
+over the top of it — then a veil over everything, then that image blitted through
+`from_picture * moving * to_widget`, then the box, the handles and the rotation
+knob. A drag edits the five numbers in `Transform` and nothing else;
+`endTransformDrag` puts the pivot back to the middle so the numeric fields keep
+meaning one thing.
+
+**Putting down.** `applyTransform` runs `transformTiles` — the exact block-copy
+path for a whole-pixel translation, bilinear for magnification and rotation, a
+box filter over the source footprint for reduction — then `mergeOver` to land it
+on the half that stayed, then `Cel::replaceTiles`, all inside one
+`ScopedCommand`. `replaceTiles` journals both sides, the tiles arriving and the
+tiles going away, so undo restores the drawing exactly.
+
+Cancel resets the state and leaves no undo entry, because nothing was ever
+written. An identity writes nothing either — except for a paste, where landing
+something at the coordinates it came from *is* the operation.
+
+### Where a frame change goes, in order
+
+Short, and worth having written down because getting it half right is silent.
+
+**One thing owns the playhead:** `TimelineWidget::current_slot_`.
+`setCurrentSlot` clamps it against `Scene::timelineFrames()` — everything
+reachable, which can be longer than the shot — and emits `currentSlotChanged`.
+`MainWindow::onSlotChanged` is the only listener that matters: it calls
+`canvas_->setFrame`, refreshes the layer flags and syncs the status bar.
+
+`CanvasWidget::setFrame` is where the consequences live. It commits a live
+transform, clears the selection, rebinds a stroke that is still in progress onto
+the new drawing inside the same command, re-reads which drawing this track
+*holds* here — `Track::imageAtSlot`, not `imageShownAt`, because past the end
+there is nothing to edit even when there is something to see — marks the onion
+skin dirty and refreshes.
+
+**And `MainWindow::refreshEverything` runs the other way**, pulling the canvas
+back to `timeline_widget_->currentSlot()`. So anything that moves the canvas
+without moving the timeline is undone by the next refresh. That is not
+hypothetical: it is how a paste committed itself before it could be placed, since
+a frame change is exactly what bakes a float. Move the two together.
+
+Playback is the same entry point at twenty-four frames a second.
+
+### Where a project goes to disk and comes back, in order
+
+`ProjectIO` is the only class that turns a folder into a document and back;
+`core` knows nothing about bytes on disk.
+
+**Out.** Save, Save As, autosave and `leaveCurrentDocument` all end in
+`ProjectIO::save(doc, folder, save_state_)`. It builds in a scratch folder beside
+the target, pixels first — so a failure never leaves a `scene.json` pointing at a
+cel that does not exist. A cel whose revision matches the `SaveState` from the
+last save of *this same folder* is carried forward as a hard link instead of
+re-encoded, which is what makes autosave affordable; a link that fails falls back
+to writing the bytes, so the state is a hint and never a promise. Then
+`scene.json`, then the swap: the old folder is moved aside, the new one renamed
+into place, and only then is the old one deleted.
+
+`encodeCel` drops fully transparent tiles, sorts the coordinates so an unchanged
+drawing encodes to identical bytes, and writes only the occupied span of each
+row — which is the difference between a 3 MB file and a 457 MB one.
+
+**In.** `load` reads `scene.json` into a **document of its own**, fills every cel
+it names, and only then assigns over the open document. A project with one bad
+cel in it therefore cannot leave you with half of it and none of what you had.
+`MainWindow::afterProjectLoaded` then rebinds everything that was holding ids
+from the document that has just gone: the canvas, the timeline, the layer panel
+and the status bar.
 
 ## Several tracks, and a track that overwrites
 
@@ -1567,28 +1756,9 @@ that uses it. The hard part of running a max-flow somewhere else is the queue,
 the superseding and the cancelling, and all of that is testable without a
 display; what is left in the widget is a timer and a map.
 
-### Where the colour comes from, in order
-
-The one map I wanted when I picked this up, because the path crosses four files
-and no single one of them says so.
-
-A stroke ends, and `CanvasWidget::paintEvent` calls `requestCtgFills`. That
-compares a hash of everything the fill depends on (`ctgInputsFor`) against the
-fill already in `Document::ctgCache()`, and if they differ it takes a `CtgJob` —
-a copy of the marks, the ink and the canvas, in shared tile handles — and hands
-it to `CtgSolver`. Nothing is computed on the interface thread; the paint
-finishes with whatever fill is in the cache, which is the last answer.
-
-A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
-marks were made (`estimateCtgShift`), flatten the ink into a barrier
-(`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
-(`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
-poll on the canvas collects the result, puts it in the cache, marks everything
-dirty and emits `colourChanged`; `MainWindow` refreshes the timeline, the layer
-panel and the status bar from that one signal.
-
-The compositor draws whatever fill is in the cache and never starts a solve —
-`Document::ctgFillFor` is const for exactly that reason.
+The five paths through it are in
+[how the program fits together](#how-the-program-fits-together), near the top,
+because they are what you want before changing anything rather than after.
 
 ```bash
 $env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH   # MSYS2 UCRT64, from PowerShell
@@ -1634,12 +1804,24 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
 
 ## What I would do next
 
-1. **TIFF export**, which is the half of the format list still missing. **EXR
-   is built** -- the decisions that used to sit here were taken and then acted
-   on; what they were and why is now in "export writes 16-bit PNG and EXR"
-   above. TIFF remains worth having for a different reason, and the reason is
-   worth keeping straight: it is the **compatibility** deliverable, not the
-   lossless one.
+A queue, and only a queue. Things that were on it and are now built have moved
+into sections of their own — this list kept growing entries that existed to say
+they were finished, which made it longer to read and harder to trust. What has
+come off it since the first build, with where the reasoning went:
+
+| | |
+|---|---|
+| EXR export | "export writes 16-bit PNG and EXR", and the section after it |
+| Several tracks (#1), overwrite (#9), track ends (#20) | the two sections on tracks |
+| Carrying marks, and moving them (#3, #6, #7) | "colour through time", parts one and two |
+| Freeing emptied tiles | "a rectangle built from tile coordinates remembers what you erased" |
+| Lasso and transform, all four phases | "moving a drawing" through "what a transform costs" |
+| The shortcut table, and the bug half of #14 | "what the keyboard does, and when" |
+
+1. **TIFF export**, which is the half of the format list still missing. It is
+   the **compatibility** deliverable and not the lossless one — EXR is the
+   lossless one and is built — and keeping that straight is what stops it being
+   argued about twice.
 
    It was raised that TIFF is the more common deliverable in 2D animation, and
    that is true -- TVPaint and Harmony both write it and scanned-drawing
@@ -1673,12 +1855,7 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    the ink repeats. Rung four is the paper written for this exact problem
    (Sýkora, Dingliana & Collins, NPAR 2009) and is what to read before designing
    anything past three.
-3. **Freeing the tiles that erasing has emptied is done** — it was a stated
-   prerequisite for lasso and transform rather than a tidy-up, because the box
-   drawn round a drawing with no selection is that drawing's bounds. What it
-   cost and where it is done is in "a rectangle built from tile coordinates
-   remembers what you erased" above.
-4. **A flag that means something.** There was one, built on `spread`, and it came
+3. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the
    drawing a mark came from, so it needs a correspondence between regions on two
@@ -1687,14 +1864,9 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    carrying is most likely to be wrong *and* most likely to be right. And it has
    to be computed for drawings nobody has opened, which is what the audit did and
    what `CtgSolver`'s second priority is still there for.
-5. **GPU compositing**, if `bench_composite` says it is worth it at real
+4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-6. **The rest of the open issues**: showing a track's end behaviour on the track
-   itself (#22), deleting every layer of a drawing (#2), an eraser cursor (#4),
-   brush-resize feedback (#5), and a non-modal colour panel (the parked half of
-   #8). Several tracks (#1), "overwrite drawings" (#9) and what a track does past
-   its end (#20) are built — see the two sections above.
-7. **One place that decides what the pointer looks like**
+5. **One place that decides what the pointer looks like**
    ([#27](https://github.com/S-poony/Animage/issues/27)). This covers three
    issues at once and they should not be done separately:
    [#4](https://github.com/S-poony/Animage/issues/4) (the eraser should change
@@ -1728,7 +1900,7 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    - A hover-driven cursor needs the move handler to run with no button down,
      which during a transform it currently does not.
 
-8. **A screenshot target**
+6. **A screenshot target**
    ([#28](https://github.com/S-poony/Animage/issues/28)), `tests/shots.cpp`,
    shaped like `bench_zoom`: built, never run by `ctest`, takes a directory and
    drives the real window through a list of named situations writing one PNG
@@ -1748,18 +1920,22 @@ Add the PE image base (`0x140000000`) to the offsets in the report.
    run it before and after anything that touches the canvas. And it is a file
    that will rot unless it is cheap to run and named somewhere people read.
 
-9. **Lasso and transform is built**, all four phases —
-   [lasso-and-transform.md](lasso-and-transform.md) is the design and the four
-   sections above are what happened. What is left of it is the three issues
-   designing it turned up, none of which is part of it: capping the undo history
-   ([#23](https://github.com/S-poony/Animage/issues/23)), which this makes more
-   visible and did not cause; flipping
+7. **The rest of the open issues.** Three came out of designing lasso and
+   transform and are each one small piece with the groundwork already under it:
+   capping the undo history
+   ([#23](https://github.com/S-poony/Animage/issues/23)), which the feature makes
+   more visible and did not cause; flipping
    ([#24](https://github.com/S-poony/Animage/issues/24)), which is one sign away
    from the exact translation branch and must be built on it rather than as a −1
    scale through the resampler; and transforming a layer across time
-   ([#25](https://github.com/S-poony/Animage/issues/25)), which wants
-   `LayerPass` widened from an offset to an affine — the same widening the live
-   preview already needed.
+   ([#25](https://github.com/S-poony/Animage/issues/25)), which wants `LayerPass`
+   widened from an offset to an affine — the same widening the live preview
+   already needed.
+
+   The rest are older: showing a track's end behaviour on the track itself (#22),
+   deleting every layer of a drawing (#2), the rebinding half of #14, a non-modal
+   colour panel (the parked half of #8), and this file being hard to navigate
+   ([#29](https://github.com/S-poony/Animage/issues/29)).
 
 ## Two things to be careful of
 
