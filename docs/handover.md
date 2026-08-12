@@ -1661,6 +1661,18 @@ The three-line shape is the part worth protecting — a situation nobody can add
 in three lines is one nobody adds at the end of an afternoon, and the end of an
 afternoon is when looking pays.
 
+**A gesture is said one piece at a time, on any widget, and that is deliberate.**
+`Stage::pressOn`, `dragTo` and `releaseOn` take the widget because the canvas is
+not the only thing in the window with gestures on it — the timeline has four —
+and the first situation that needed one built `QMouseEvent`s by hand inside the
+lambda: fifteen lines where the contract is three, most of it plumbing with
+nothing to do with what the picture was about. **Nothing releases for you**, and
+that is the other half: the interesting pictures here are the ones taken
+*during* a gesture. A drop caret exists only while a row is in hand, and so does
+the range an overwriting drop would take over. A situation that wants the
+mid-drag picture simply does not call `releaseOn`; one that wants the result
+does.
+
 **The cursors are the exception, and they are why the file is not just
 `grab()`.** `QWidget::grab()` renders the widget and never the pointer, so the
 rubber, the pipette and the rotation arrow appear in no screenshot of the canvas
@@ -1669,6 +1681,16 @@ the widget with `QCursor::pixmap()` after hovering what raises them, which
 checks the half a glyph cannot: that the right one comes up in the right place.
 Each is shown on paper and on ink, because the rule they follow is light under
 dark and a cursor crosses both by definition.
+
+**And the most useful thing it did was print rather than photograph**, which is
+worth knowing before trusting the sentence above about what looks wrong. Issue
+#12 was diagnosed by a throwaway situation that built sixty layers, added a
+colour layer and printed the scrollbar every twenty milliseconds — the answer
+was `value=29 max=44, at 13 ms, and never moves again`, and it is the whole of
+the diagnosis. The picture of that same bug is a layer list scrolled to layer 32
+of 61, which looks exactly like a layer list. So a situation is free to print,
+and the thing it prints may be the deliverable; the picture it also writes is
+sometimes only a formality.
 
 **Writing it found one thing, and it was in the harness rather than in the
 program** — worth recording because anyone driving this widget with synthetic

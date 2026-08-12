@@ -219,11 +219,54 @@ struct Stage {
     // centre() and an offset from it survive the window being resized.
     void stroke(const std::vector<QPointF>& through) {
         if (through.size() < 2) return;
-        sendMouse(QEvent::MouseButtonPress, through.front(), Qt::LeftButton, Qt::LeftButton);
+        sendMouse(canvas, QEvent::MouseButtonPress, through.front(), Qt::LeftButton,
+                  Qt::LeftButton);
         for (std::size_t i = 1; i < through.size(); ++i) {
-            sendMouse(QEvent::MouseMove, through[i], Qt::NoButton, Qt::LeftButton);
+            sendMouse(canvas, QEvent::MouseMove, through[i], Qt::NoButton, Qt::LeftButton);
         }
-        sendMouse(QEvent::MouseButtonRelease, through.back(), Qt::LeftButton, Qt::NoButton);
+        sendMouse(canvas, QEvent::MouseButtonRelease, through.back(), Qt::LeftButton,
+                  Qt::NoButton);
+        settle();
+    }
+
+    // --- a gesture, on any widget, said one piece at a time -----------------
+    //
+    // Two reasons this is not another stroke(). The canvas is not the only
+    // thing in the window with gestures on it -- the timeline has four, and the
+    // layer panel one -- and a situation that had to build QMouseEvents by hand
+    // to reach them is a situation nobody writes at the end of an afternoon,
+    // which is the whole of what this file is for.
+    //
+    // And the interesting pictures are the ones taken *during* a gesture. A
+    // drop caret exists only while a row is in hand; so does the range an
+    // overwriting drop would take over, and the closed hand above both. So
+    // nothing here releases for you: a situation that wants the picture
+    // mid-drag simply does not call releaseOn, and one that wants the result
+    // does.
+    void pressOn(QWidget* on, QPointF at) {
+        pointer_ = at;
+        sendMouse(on, QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        settle(1);
+    }
+
+    // Several moves and not one jump, from wherever the last one left off. A
+    // widget that decides for itself when a press has become a drag is watching
+    // the pointer cross a threshold, and a single leap to the destination is a
+    // drag some handlers never notice starting.
+    void dragTo(QWidget* on, QPointF at, int steps = 6) {
+        const QPointF from = pointer_;
+        for (int i = 1; i <= steps; ++i) {
+            const double t = static_cast<double>(i) / steps;
+            sendMouse(on, QEvent::MouseMove, from + (at - from) * t, Qt::NoButton,
+                      Qt::LeftButton);
+        }
+        pointer_ = at;
+        settle(1);
+    }
+
+    void releaseOn(QWidget* on, QPointF at) {
+        pointer_ = at;
+        sendMouse(on, QEvent::MouseButtonRelease, at, Qt::LeftButton, Qt::NoButton);
         settle();
     }
 
@@ -248,8 +291,10 @@ struct Stage {
         stroke(through);
     }
 
-    void hover(QPointF at) {
-        sendMouse(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+    void hover(QPointF at) { hover(canvas, at); }
+    void hover(QWidget* on, QPointF at) {
+        pointer_ = at;
+        sendMouse(on, QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
         settle(1);
     }
 
@@ -392,10 +437,10 @@ private:
         }
     }
 
-    void sendMouse(QEvent::Type type, QPointF at, Qt::MouseButton button,
+    void sendMouse(QWidget* to, QEvent::Type type, QPointF at, Qt::MouseButton button,
                    Qt::MouseButtons buttons) {
-        QMouseEvent event(type, at, canvas->mapToGlobal(at), button, buttons, held_);
-        QCoreApplication::sendEvent(canvas, &event);
+        QMouseEvent event(type, at, to->mapToGlobal(at), button, buttons, held_);
+        QCoreApplication::sendEvent(to, &event);
     }
 
     void sendKey(QEvent::Type type, int key) {
@@ -405,6 +450,9 @@ private:
     }
 
     Qt::KeyboardModifiers held_ = Qt::NoModifier;
+    // Where the pointer was last put, so a drag continues from it rather than
+    // making every situation say twice where it started.
+    QPointF pointer_;
 };
 
 // The cursors, side by side, each on paper and on ink -- because the rule they
@@ -486,6 +534,13 @@ struct Situation {
 //
 // At 1:1, so nothing here is the display path's own reduction, and magnified,
 // because the whole question is what happened to two pixels.
+// Where a track's name is, which is the handle a row is restacked by. In the
+// gutter, so it is an x the strip does not reach and a y the row's cells do.
+QPointF trackName(const Stage& s, int row) {
+    return QPointF(20.0,
+                   s.timeline->cellCentreForTesting(static_cast<std::size_t>(row), 0).y());
+}
+
 enum class Turned { Untouched, Live, Committed };
 
 void turnedArc(Stage& s, Turned when) {
@@ -622,25 +677,22 @@ const std::vector<Situation>& situations() {
          [](Stage& s) {
              s.choose("Add track");
              s.choose("Add track");
-             const auto nameOfRow = [&](int row) {
-                 return QPointF(
-                     20.0,
-                     s.timeline->cellCentreForTesting(static_cast<std::size_t>(row), 0).y());
-             };
-             const auto send = [&](QEvent::Type type, QPointF at, Qt::MouseButton button,
-                                   Qt::MouseButtons buttons) {
-                 QMouseEvent event(type, at, s.timeline->mapToGlobal(at), button, buttons,
-                                   Qt::NoModifier);
-                 QCoreApplication::sendEvent(s.timeline, &event);
-             };
              // The bottom row picked up by its name and carried to the top, and
              // never let go of -- a caret only exists while a row is in hand.
-             send(QEvent::MouseButtonPress, nameOfRow(2), Qt::LeftButton, Qt::LeftButton);
-             send(QEvent::MouseMove, nameOfRow(2) - QPointF(0.0, 20.0), Qt::NoButton,
-                  Qt::LeftButton);
-             send(QEvent::MouseMove, nameOfRow(0) - QPointF(0.0, 8.0), Qt::NoButton,
-                  Qt::LeftButton);
-             s.settle();
+             s.pressOn(s.timeline, trackName(s, 2));
+             s.dragTo(s.timeline, trackName(s, 0) - QPointF(0.0, 8.0));
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-drawing-being-dropped-on-a-hold",
+         "the caret is a range and not a line: on a track that overwrites -- which is "
+         "the default -- a drop takes over the rest of the hold it lands in rather than "
+         "being inserted between two frames",
+         [](Stage& s) {
+             for (int i = 0; i < 6; ++i) s.press(Id::HoldLonger);
+             s.press(Id::InsertDrawing);  // drawing 2 spends the rest of the hold
+             s.pressOn(s.timeline, QPointF(s.timeline->cellCentreForTesting(0, 0)));
+             s.dragTo(s.timeline, QPointF(s.timeline->cellCentreForTesting(0, 3)));
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
