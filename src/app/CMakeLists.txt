@@ -30,6 +30,8 @@ add_library(animage_ui STATIC
   animage/scene_settings_dialog.h
   animage/shortcuts.cpp
   animage/shortcuts.h
+  animage/shortcuts_dialog.cpp
+  animage/shortcuts_dialog.h
   animage/project_io.cpp
   animage/project_io.h
   animage/export_sequence.cpp

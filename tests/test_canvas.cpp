@@ -40,6 +40,8 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QToolBar>
+#include <QDialogButtonBox>
+#include <QKeySequenceEdit>
 
 #include "brush.h"
 #include "canvas_widget.h"
@@ -56,6 +58,7 @@
 #include "scribble.h"
 #include "timeline_widget.h"
 #include "scene_settings_dialog.h"
+#include "shortcuts_dialog.h"
 #include "testing.h"
 
 using namespace animage;
@@ -3659,6 +3662,14 @@ void theWindowTakesItsKeysFromTheTable() {
 
     for (const shortcuts::Entry& entry : shortcuts::table()) {
         QAction* action = window.actionForTesting(entry.id);
+        // Only the rows Qt is meant to deliver. The keys a live transform
+        // borrows are read off the event by the canvas, and the held keys are
+        // held rather than pressed -- an action for either would consume the key
+        // and be exactly the bug they are in the table to prevent.
+        if (entry.kind != shortcuts::Kind::Action) {
+            CHECK(action == nullptr);
+            continue;
+        }
         CHECK(action != nullptr);
         if (!action) continue;
 
@@ -3681,6 +3692,171 @@ void theWindowTakesItsKeysFromTheTable() {
         // And the window opens in Normal, where everything is live.
         CHECK(action->isEnabled());
     }
+}
+
+// The other half of issue #14: a control that names a key has to go on naming
+// the right one.
+//
+// Every one of these tooltips used to end in a typed-out "(Ctrl+D)" or
+// "(Enter)". That was already only as true as the last person to move a binding,
+// and it is false the first time anybody rebinds anything -- which is now a
+// thing they can do. So the sentence says what the control does and the key is
+// appended from the bindings.
+//
+// Nothing about the spelling is asserted, because it is the platform's: Ctrl+D
+// is "⌘D" on macOS and the test would be about which machine it ran on. What is
+// asserted is that the tooltip says what the bindings say, before and after.
+void theTooltipsFollowTheKeys() {
+    TEST("a control's tooltip names the key it is on, and follows a rebinding");
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    const auto native = [](shortcuts::Id id) {
+        return shortcuts::current().sequenceFor(id).toString(QKeySequence::NativeText);
+    };
+    const auto inBrackets = [](const QString& key) { return QStringLiteral("(%1)").arg(key); };
+
+    QPushButton* duplicate = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Duplicate")) duplicate = button;
+    }
+    CHECK(duplicate != nullptr);
+    if (!duplicate) return;
+
+    const QString was = native(shortcuts::Id::DuplicateDrawing);
+    CHECK(!was.isEmpty());
+    CHECK(duplicate->toolTip().contains(inBrackets(was)));
+
+    // Including the two tools that used to say nothing at all: a toolbar button
+    // with no tooltip is one whose key you find out about by reading the source.
+    for (const shortcuts::Id id : {shortcuts::Id::Brush, shortcuts::Id::Eraser,
+                                   shortcuts::Id::Lasso, shortcuts::Id::Transform}) {
+        QAction* tool = window.actionForTesting(id);
+        CHECK(tool != nullptr);
+        if (tool) CHECK(tool->toolTip().contains(inBrackets(native(id))));
+    }
+    // And a sentence that names *other* keys has them substituted rather than
+    // typed, which is the only way "Return applies" can survive Return moving.
+    QAction* transform = window.actionForTesting(shortcuts::Id::Transform);
+    if (transform) {
+        CHECK(transform->toolTip().contains(
+            QStringLiteral("%1 applies").arg(native(shortcuts::Id::TransformApply))));
+        CHECK(transform->toolTip().contains(
+            QStringLiteral("%1 cancels").arg(native(shortcuts::Id::TransformCancel))));
+    }
+
+    shortcuts::Bindings moved;
+    moved.set(shortcuts::Id::DuplicateDrawing,
+              QKeySequence(QStringLiteral("Ctrl+Shift+K"), QKeySequence::PortableText));
+    window.adoptShortcuts(moved);
+
+    const QString now = native(shortcuts::Id::DuplicateDrawing);
+    CHECK(duplicate->toolTip().contains(inBrackets(now)));
+    CHECK(!duplicate->toolTip().contains(inBrackets(was)));
+    // The action moved too, and not only the words about it.
+    CHECK_EQ(window.actionForTesting(shortcuts::Id::DuplicateDrawing)
+                 ->shortcut()
+                 .toString(QKeySequence::PortableText)
+                 .toStdString(),
+             std::string("Ctrl+Shift+K"));
+
+    // Put the keyboard back. The bindings are process-wide, so a test that left
+    // one changed would be a test that changed the ones after it.
+    window.adoptShortcuts(shortcuts::Bindings());
+    CHECK(duplicate->toolTip().contains(inBrackets(was)));
+}
+
+// What the panel is for, asserted through the panel rather than through the rule
+// underneath it: Apply is the gate, and a gate that is open is worth nothing.
+//
+// The situation is issue #14's own -- Fit drawing back on Shift+0 beside Fit
+// canvas on 0 -- because it is the collision that looks like two different keys.
+void theShortcutsPanelWillNotApplyACollision() {
+    TEST("the shortcuts panel refuses a collision, and takes it back once it is gone");
+    shortcuts::Bindings clashing;
+    clashing.set(shortcuts::Id::FitDrawing,
+                 QKeySequence(QStringLiteral("Shift+0"), QKeySequence::PortableText));
+
+    ShortcutsDialog dialog(clashing);
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    auto* buttons = dialog.findChild<QDialogButtonBox*>();
+    CHECK(buttons != nullptr);
+    if (!buttons) return;
+    QPushButton* apply = buttons->button(QDialogButtonBox::Apply);
+    CHECK(apply != nullptr);
+    if (!apply) return;
+    CHECK(!apply->isEnabled());
+
+    // And it says which two, in words. "Apply is greyed out" with nothing to
+    // read is a dialog people close.
+    bool named = false;
+    for (QLabel* said : dialog.findChildren<QLabel*>()) {
+        if (said->text().contains(QStringLiteral("Fit canvas")) &&
+            said->text().contains(QStringLiteral("Fit drawing"))) {
+            named = true;
+        }
+    }
+    CHECK(named);
+
+    // Typing a free key into the row that caused it. Found by what it holds
+    // rather than by its position, so adding a row above it does not move this
+    // test onto another one.
+    QKeySequenceEdit* offending = nullptr;
+    for (QKeySequenceEdit* edit : dialog.findChildren<QKeySequenceEdit*>()) {
+        if (edit->keySequence() ==
+            QKeySequence(QStringLiteral("Shift+0"), QKeySequence::PortableText)) {
+            offending = edit;
+        }
+    }
+    CHECK(offending != nullptr);
+    if (!offending) return;
+    offending->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Shift+F"),
+                                           QKeySequence::PortableText));
+    QCoreApplication::processEvents();
+
+    CHECK(apply->isEnabled());
+    // And what it would hand back is the edit, not the set it was opened on.
+    CHECK_EQ(dialog.bindings()
+                 .sequenceFor(shortcuts::Id::FitDrawing)
+                 .toString(QKeySequence::PortableText)
+                 .toStdString(),
+             std::string("Ctrl+Shift+F"));
+    // Nothing was installed by any of that: the panel edits a copy, and only
+    // MainWindow's Apply handler adopts it.
+    CHECK(shortcuts::current().isDefault(shortcuts::Id::FitDrawing));
+
+    // And a chord *typed* into a row lands in the bindings, which is the one
+    // part of this panel that nothing but a real key event exercises -- the
+    // editors are told to take one chord and no more, and a field that quietly
+    // waited for a second one would look identical until you pressed Apply.
+    QKeySequenceEdit* brush = nullptr;
+    for (QKeySequenceEdit* edit : dialog.findChildren<QKeySequenceEdit*>()) {
+        if (edit->keySequence() ==
+            QKeySequence(QStringLiteral("B"), QKeySequence::PortableText)) {
+            brush = edit;
+        }
+    }
+    CHECK(brush != nullptr);
+    if (!brush) return;
+    // Press *and* release. QKeySequenceEdit clears the field on the press and
+    // only settles on the release -- with one chord asked for it finishes there
+    // rather than waiting out its one-second timer -- so a test that pressed and
+    // walked away would be reading a field mid-edit and would say the row had
+    // been unbound.
+    QKeyEvent down(QEvent::KeyPress, Qt::Key_J, Qt::ControlModifier);
+    QCoreApplication::sendEvent(brush, &down);
+    QKeyEvent up(QEvent::KeyRelease, Qt::Key_J, Qt::ControlModifier);
+    QCoreApplication::sendEvent(brush, &up);
+    QCoreApplication::processEvents();
+    CHECK_EQ(dialog.bindings()
+                 .sequenceFor(shortcuts::Id::Brush)
+                 .toString(QKeySequence::PortableText)
+                 .toStdString(),
+             std::string("Ctrl+J"));
 }
 
 // --- lasso and transform -------------------------------------------------
@@ -3742,6 +3918,55 @@ struct WindowWithInk {
         QCoreApplication::processEvents();
     }
 };
+
+// The canvas asks the bindings which key applies rather than naming
+// Qt::Key_Return, and this is the check that goes red if anything puts the
+// literal back.
+//
+// It has to be asserted here and cannot be inferred from the table: a live
+// transform borrows keys from actions that have been *disabled*, so there is no
+// QAction anywhere holding these and nothing else in the program would ever
+// notice them being wrong.
+void theTransformKeysFollowTheirBindings() {
+    TEST("a rebound Apply applies the transform, and the key it left does not");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+
+    shortcuts::Bindings moved;
+    moved.set(shortcuts::Id::TransformApply,
+              QKeySequence(QStringLiteral("Ctrl+K"), QKeySequence::PortableText));
+    moved.set(shortcuts::Id::NudgeRight,
+              QKeySequence(QStringLiteral("Alt+Right"), QKeySequence::PortableText));
+    CHECK(moved.clashes().empty());
+    fixture.window.adoptShortcuts(moved);
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+
+    // The key it used to be on does nothing now -- and it is worth checking that
+    // it does *nothing* rather than something else: Play owns Return in the
+    // other mode, and a transform that started the animation would be a worse
+    // bug than one that ignored a key.
+    fixture.press(Qt::Key_Right);
+    CHECK_NEAR(fixture.canvas->transformValues().dx, 0.0, 1e-9);
+    fixture.press(Qt::Key_Return);
+    CHECK(fixture.canvas->transformIsLive());
+
+    fixture.press(Qt::Key_Right, Qt::AltModifier);
+    CHECK_NEAR(fixture.canvas->transformValues().dx, 1.0, 1e-9);
+    // Ten at a time is still "the binding, with a Shift it has not got", which
+    // is what keeps it working when the nudge keys move.
+    fixture.press(Qt::Key_Right, Qt::AltModifier | Qt::ShiftModifier);
+    CHECK_NEAR(fixture.canvas->transformValues().dx, 11.0, 1e-9);
+
+    fixture.press(Qt::Key_K, Qt::ControlModifier);
+    CHECK(!fixture.canvas->transformIsLive());
+
+    // Put the keyboard back: the bindings are process-wide.
+    fixture.window.adoptShortcuts(shortcuts::Bindings());
+}
 
 void theTransformToolTakesTheWholeDrawing() {
     TEST("the transform tool boxes the whole drawing with nothing selected");
@@ -5012,6 +5237,9 @@ int main(int argc, char** argv) {
     backspaceErasesTheSelectionAndDeleteStillDeletesTheDrawing();
     theSelectionSurvivesALayerChangeAndNotAFrameChange();
     theWindowTakesItsKeysFromTheTable();
+    theTooltipsFollowTheKeys();
+    theShortcutsPanelWillNotApplyACollision();
+    theTransformKeysFollowTheirBindings();
     theTransformToolTakesTheWholeDrawing();
     nudgingMovesTheDrawingExactly();
     cancellingLeavesTheUndoDepthWhereItWas();

@@ -184,11 +184,31 @@ before applying it, so nothing is written until you press Enter. The clipboard i
 the program's own and not the system one: a 16-bit-per-channel image handed to
 another program would lose precision, and it would be a different feature.
 
+**All of those keys can be changed**, under Edit > Keyboard shortcuts. The list
+is grouped and searchable, nothing changes until you press Apply, and Apply waits
+until no two shortcuts that are ever live at the same time collide — it names
+what has hit what rather than refusing the keys as you type them. Only what you
+change is written down, to `shortcuts.json` in the platform's per-user
+configuration directory — `%LOCALAPPDATA%\Animage\Animage` on Windows — so a
+default improved in a later version still reaches you everywhere you left one
+alone. Every tooltip in the program says
+which key its control is on, and says the one it is on now.
+
+Three things in that panel cannot be changed and are listed anyway. `Space`, `Z`
+and `Alt` are *held* while you click or drag rather than pressed, which a
+shortcut cannot express. Two of them still take their key, so an action rebound
+onto `Space` would take panning away with nothing to say it had; `Alt` takes
+nothing from anybody and is listed because the panel is where you go to find out
+what the keyboard does, and an answer without the eyedropper in it is the wrong
+answer.
+
 Fitting the drawing is `F` and not the `Shift+0` it used to be. On a keyboard
 whose digit row is the shifted face of another row — AZERTY, for one — typing
 `0` at all means holding Shift, so `0` and `Shift+0` are one chord; Qt answers an
 ambiguous shortcut by cycling between the candidates rather than by complaining,
-which presents as the wrong thing happening every other press.
+which presents as the wrong thing happening every other press. That pair is one
+of the two things the panel refuses, and it is the one nobody sees coming: they
+are genuinely different sequences, and a check for duplicates passes them both.
 
 The eyedropper is `Alt`+click on the drawing rather than the colour dialog's
 "pick screen colour", which cannot work with a stylus: Qt routes pen input as a

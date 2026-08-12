@@ -140,6 +140,15 @@ So: one table — id, label, default key, which modes the action is live in — 
 `buildActions` reads. No rebinding interface, no settings file, nothing
 user-facing changes. Rebinding stays in #14.
 
+> **Built, and #14 has since been finished on top of it.** The keys can be
+> changed now, which changed one thing about this phase: the keys a live
+> transform borrows are rows of the table too, and the canvas asks what Apply is
+> bound to rather than naming `Qt::Key_Return`. Without that a rebinding could
+> put another action on Left and take the nudge away with nothing able to notice
+> — the actions that own those keys normally are the ones being *disabled*, so
+> no `QAction` anywhere holds them. See "what the keyboard does, and when" in
+> [handover.md](handover.md).
+
 What must go quiet while a transform is live: Play, Previous/Next frame,
 Previous/Next drawing, Insert, Duplicate, Delete drawing, Hold longer, Hold
 shorter. Undo and Redo are the exception — they are not disabled but

@@ -64,6 +64,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QRect>
 #include <QString>
@@ -80,6 +81,7 @@
 #include "document.h"
 #include "main_window.h"
 #include "shortcuts.h"
+#include "shortcuts_dialog.h"
 #include "timeline_widget.h"
 
 using namespace animage;
@@ -703,6 +705,44 @@ const std::vector<Situation>& situations() {
              for (int i = 0; i < 30; ++i) s.choose("Add layer");
              s.choose("Add colour layer");
              s.picture = Stage::closeUpOf(s.layerPanel());
+         }},
+
+        {"the-keyboard-shortcuts-panel",
+         "issue #14: the groups are ordered by what somebody who has just opened this is "
+         "likely hunting for rather than by menu order, and the search box is what keeps "
+         "the list from being something anybody has to read all of",
+         [](Stage& s) {
+             auto* dialog = new ShortcutsDialog(shortcuts::current(), &s.window);
+             dialog->show();
+             s.settle();
+             s.picture = dialog->grab().toImage();
+         }},
+
+        {"searching-the-shortcuts-panel",
+         "the search has to reach into the folded groups, or half the list is unsearchable "
+         "and nothing says so -- this one lands in the held keys, which open folded",
+         [](Stage& s) {
+             auto* dialog = new ShortcutsDialog(shortcuts::current(), &s.window);
+             dialog->show();
+             if (auto* search = dialog->findChild<QLineEdit*>()) {
+                 search->setText(QStringLiteral("colour"));
+             }
+             s.settle();
+             s.picture = dialog->grab().toImage();
+         }},
+
+        {"a-shortcut-that-collides",
+         "Fit drawing put back on Shift+0, which is issue #14 itself -- two different "
+         "sequences and one chord on AZERTY. The clash should be named in words, both rows "
+         "marked, and Apply refused until one of them moves",
+         [](Stage& s) {
+             shortcuts::Bindings clashing;
+             clashing.set(Id::FitDrawing,
+                          QKeySequence(QStringLiteral("Shift+0"), QKeySequence::PortableText));
+             auto* dialog = new ShortcutsDialog(clashing, &s.window);
+             dialog->show();
+             s.settle();
+             s.picture = dialog->grab().toImage();
          }},
 
         {"the-drawn-cursors",

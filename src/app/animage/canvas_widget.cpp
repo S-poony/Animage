@@ -18,9 +18,11 @@
 #include <array>
 #include <cmath>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "color.h"
+#include "shortcuts.h"
 
 using namespace animage;
 
@@ -2625,24 +2627,40 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     // actions of their own because the actions that own them normally have been
     // disabled -- a disabled QAction does not consume its shortcut, so Return
     // and the arrows fall through to whatever has the keyboard, which is this.
-    // See shortcuts.h.
+    //
+    // What they are is asked rather than named, though, because they are rows of
+    // the shortcut table like any other and can be rebound. Naming Qt::Key_Return
+    // here is what would let a rebinding put another action on Left and take the
+    // nudge away with nothing anywhere to say the two had ever met. See
+    // shortcuts.h.
     if (transform_) {
-        const int step = (event->modifiers() & Qt::ShiftModifier) ? 10 : 1;
-        switch (event->key()) {
-            case Qt::Key_Return:
-            case Qt::Key_Enter:
-                applyTransform();
-                event->accept();
-                return;
-            case Qt::Key_Escape:
-                cancelTransform();
-                event->accept();
-                return;
-            case Qt::Key_Left: nudgeTransform(-step, 0); event->accept(); return;
-            case Qt::Key_Right: nudgeTransform(step, 0); event->accept(); return;
-            case Qt::Key_Up: nudgeTransform(0, -step); event->accept(); return;
-            case Qt::Key_Down: nudgeTransform(0, step); event->accept(); return;
-            default: break;
+        const shortcuts::Bindings& keys = shortcuts::current();
+        if (keys.activates(shortcuts::Id::TransformApply, *event)) {
+            applyTransform();
+            event->accept();
+            return;
+        }
+        if (keys.activates(shortcuts::Id::TransformCancel, *event)) {
+            cancelTransform();
+            event->accept();
+            return;
+        }
+        // Shift is ten pixels rather than one, and it is read as "the binding,
+        // with a Shift it does not have" -- which is what keeps it working
+        // whatever the nudge keys have been moved to.
+        const std::pair<shortcuts::Id, QPoint> nudges[] = {
+            {shortcuts::Id::NudgeLeft, QPoint(-1, 0)},
+            {shortcuts::Id::NudgeRight, QPoint(1, 0)},
+            {shortcuts::Id::NudgeUp, QPoint(0, -1)},
+            {shortcuts::Id::NudgeDown, QPoint(0, 1)},
+        };
+        for (const auto& [id, direction] : nudges) {
+            bool bigger = false;
+            if (!keys.activates(id, *event, &bigger)) continue;
+            const int step = bigger ? 10 : 1;
+            nudgeTransform(direction.x() * step, direction.y() * step);
+            event->accept();
+            return;
         }
     }
 

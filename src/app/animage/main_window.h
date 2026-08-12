@@ -70,6 +70,14 @@ public:
     // silently, because a stale literal still builds and still works.
     QAction* actionForTesting(shortcuts::Id id) const;
 
+    // Installs a set of bindings: every action gets its new key, and every
+    // tooltip that names one is composed again. What the shortcuts dialog hands
+    // back when Apply is pressed, and how a test rebinds something without one.
+    //
+    // It does not write them down. Saving is the menu handler's job, because a
+    // set of bindings adopted for the length of a test is not a settings file.
+    void adoptShortcuts(const shortcuts::Bindings& bindings);
+
     // Writes the sequences to `folder` with a progress dialog over them, and
     // `folder` is the whole destination: the export dialog asks for a name and
     // joins it to the directory that was chosen, so a shot's sequences land in
@@ -104,6 +112,26 @@ private:
     // consume its shortcut, which is the whole mechanism: what goes quiet here
     // is what the canvas gets to hear.
     void setShortcutMode(shortcuts::Mode mode);
+
+    // A tooltip that has to say which key it is on.
+    //
+    // The key is never typed into the sentence. Every one of these used to end
+    // in a literal "(Ctrl+D)" or "(Enter)", which was already only as true as
+    // the last person to move a binding, and rebinding makes it false the moment
+    // anybody uses it. So the sentence says what the control does and the key is
+    // appended here, from the bindings, every time they change.
+    //
+    // `more` is whatever follows on its own lines, and it may name other
+    // shortcuts as %1, %2 in the order of `also` -- for the same reason: prose
+    // that spells a key out is prose that goes stale.
+    void keyedTip(QAction* on, shortcuts::Id id, const QString& what,
+                  const QString& more = QString(), const std::vector<shortcuts::Id>& also = {});
+    void keyedTip(QWidget* on, shortcuts::Id id, const QString& what,
+                  const QString& more = QString(), const std::vector<shortcuts::Id>& also = {});
+    void syncTooltips();
+    // Edit > Keyboard shortcuts. Opens the dialog, and on Apply installs what it
+    // hands back and writes it down.
+    void chooseShortcuts();
 
     void buildActions();
     void buildLayerPanel();
@@ -309,6 +337,18 @@ private:
     // Every action the shortcut table names, by id. See setShortcutMode.
     std::unordered_map<shortcuts::Id, QAction*> keyed_actions_;
     shortcuts::Mode mode_ = shortcuts::Mode::Normal;
+
+    // Every tooltip that has to name a key, so that changing one is a loop
+    // rather than a hunt through the file for parentheses.
+    struct KeyedTip {
+        QAction* action = nullptr;  // one of these two, never both
+        QWidget* widget = nullptr;
+        shortcuts::Id id{};
+        QString what;
+        QString more;
+        std::vector<shortcuts::Id> also;
+    };
+    std::vector<KeyedTip> keyed_tips_;
 
     QAction* overwrite_action_ = nullptr;
     // The three "past the last drawing" items, with what each one means.

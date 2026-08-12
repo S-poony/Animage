@@ -50,6 +50,7 @@
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
+#include "shortcuts_dialog.h"
 #include "timeline_widget.h"
 
 using namespace animage;
@@ -104,6 +105,9 @@ MainWindow::MainWindow() {
     buildStatusBar();
     rebuildLayerList();
     syncTrackMenu();
+    // After all of them, because the tooltips that name a key are registered as
+    // the panels are built and this is what fills the key in.
+    syncTooltips();
 
     connect(canvas_, &CanvasWidget::brushSizeChanged, this, [this](double radius) {
         if (!radius_) return;
@@ -220,11 +224,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 QAction* MainWindow::makeAction(shortcuts::Id id, std::function<void()> handler) {
     const shortcuts::Entry& entry = shortcuts::entryFor(id);
     auto* action = new QAction(QString::fromUtf8(entry.label), this);
-    if (entry.standard != QKeySequence::UnknownKey) {
-        action->setShortcut(QKeySequence(entry.standard));
-    } else if (entry.key != 0) {
-        action->setShortcut(QKeySequence(entry.key));
-    }
+    // From the bindings and not from the row: the row is what the key was to
+    // begin with, and what it is now is whatever the person holding the keyboard
+    // last said. An empty sequence is a row unbound on purpose, and QAction
+    // takes that to mean no shortcut, which is exactly right.
+    action->setShortcut(shortcuts::current().sequenceFor(id));
     // Application-wide, as every shortcut here has always been: the canvas holds
     // the keyboard and the menus still have to answer for it. What was missing
     // was the other half -- which of them are live at all.
@@ -239,6 +243,69 @@ QAction* MainWindow::makeAction(shortcuts::Id id, std::function<void()> handler)
 QAction* MainWindow::actionForTesting(shortcuts::Id id) const {
     const auto found = keyed_actions_.find(id);
     return (found == keyed_actions_.end()) ? nullptr : found->second;
+}
+
+void MainWindow::adoptShortcuts(const shortcuts::Bindings& bindings) {
+    shortcuts::current() = bindings;
+    for (const auto& [id, action] : keyed_actions_) {
+        action->setShortcut(shortcuts::current().sequenceFor(id));
+    }
+    // The canvas needs nothing: it asks the bindings at the moment a key
+    // arrives rather than holding a copy of them. That is the whole reason the
+    // transform keys are asked for by id.
+    syncTooltips();
+}
+
+void MainWindow::keyedTip(QAction* on, shortcuts::Id id, const QString& what,
+                          const QString& more, const std::vector<shortcuts::Id>& also) {
+    if (!on) return;
+    keyed_tips_.push_back({on, nullptr, id, what, more, also});
+}
+
+void MainWindow::keyedTip(QWidget* on, shortcuts::Id id, const QString& what,
+                          const QString& more, const std::vector<shortcuts::Id>& also) {
+    if (!on) return;
+    keyed_tips_.push_back({nullptr, on, id, what, more, also});
+}
+
+void MainWindow::syncTooltips() {
+    const shortcuts::Bindings& keys = shortcuts::current();
+    const auto spelled = [&keys](shortcuts::Id id) {
+        return keys.sequenceFor(id).toString(QKeySequence::NativeText);
+    };
+
+    for (const KeyedTip& tip : keyed_tips_) {
+        QString text = tip.what;
+        // An unbound action gets the sentence and no parentheses. "( )" after a
+        // sentence is worse than nothing: it reads as a key that failed to
+        // print rather than as one that is not there.
+        const QString key = spelled(tip.id);
+        if (!key.isEmpty()) text += QStringLiteral(" (%1)").arg(key);
+        if (!tip.more.isEmpty()) {
+            QString rest = tip.more;
+            for (const shortcuts::Id named : tip.also) rest = rest.arg(spelled(named));
+            text += QLatin1Char('\n') + rest;
+        }
+        if (tip.action) tip.action->setToolTip(text);
+        if (tip.widget) tip.widget->setToolTip(text);
+    }
+}
+
+void MainWindow::chooseShortcuts() {
+    ShortcutsDialog dialog(shortcuts::current(), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    adoptShortcuts(dialog.bindings());
+
+    QString trouble;
+    if (shortcuts::current().save(shortcuts::userFilePath(), &trouble)) return;
+    // The keyboard has already changed and works. What has failed is only
+    // remembering it, so this says exactly that rather than implying the
+    // rebinding did not happen.
+    QMessageBox::warning(this, QStringLiteral("Animage"),
+                         QStringLiteral("The shortcuts are changed, but could not be written "
+                                        "down, so they will be back as they were next time:\n%1")
+                             .arg(trouble));
 }
 
 // What the keyboard means, changed in one place.
@@ -297,6 +364,10 @@ void MainWindow::buildActions() {
     // every track in the scene runs at one framerate and is composited into one
     // picture. Putting either in the timeline panel said otherwise.
     edit->addAction(QStringLiteral("Scene settings..."), this, &MainWindow::chooseSceneSettings);
+    // Beside it rather than in a Preferences of its own, which there is not one
+    // of: this is the second thing about the program that is the animator's
+    // rather than the project's, and the first is next to it.
+    edit->addAction(QStringLiteral("Keyboard shortcuts..."), this, &MainWindow::chooseShortcuts);
 
     QMenu* animation = menuBar()->addMenu(QStringLiteral("&Animation"));
     play_action_ = makeAction(Id::Play, [this] { togglePlayback(); });
@@ -415,14 +486,24 @@ void MainWindow::buildActions() {
         tools->addAction(action);
     }
     brush_action_->setChecked(true);
-    lasso_action_->setToolTip(
-        QStringLiteral("Loop round part of the drawing to transform, copy or erase it.\n"
-                       "It does not clip the brush: you can still draw anywhere.\n"
-                       "A click clears it, and it is not saved with the project."));
-    transform_action_->setToolTip(
-        QStringLiteral("Move, turn or resize this drawing on the layer you are on.\n"
-                       "With nothing selected it takes the whole drawing.\n"
-                       "Enter applies, Escape cancels, the arrows nudge."));
+    // Every tool says which key it is on, including the two that said nothing at
+    // all. A toolbar button with no tooltip is a button whose key you find out
+    // about by reading the source.
+    keyedTip(brush_action_, Id::Brush, QStringLiteral("Draw on the layer you are on"),
+             QStringLiteral("The pen's pressure sets the width.\n"
+                            "Alt+click picks up the colour under the pointer."));
+    keyedTip(eraser_action_, Id::Eraser, QStringLiteral("Rub out what is under the pointer"),
+             QStringLiteral("Alt+right-drag changes its size, the same as the brush's."));
+    keyedTip(lasso_action_, Id::Lasso,
+             QStringLiteral("Loop round part of the drawing to transform, copy or erase it"),
+             QStringLiteral("It does not clip the brush: you can still draw anywhere.\n"
+                            "A click clears it, and it is not saved with the project."));
+    keyedTip(transform_action_, Id::Transform,
+             QStringLiteral("Move, turn or resize this drawing on the layer you are on"),
+             QStringLiteral("With nothing selected it takes the whole drawing.\n"
+                            "%1 applies, %2 cancels, and the nudge keys move it a pixel at a "
+                            "time."),
+             {Id::TransformApply, Id::TransformCancel});
 
     tools->addSeparator();
     tools->addWidget(new QLabel(QStringLiteral(" Size ")));
@@ -594,18 +675,20 @@ void MainWindow::buildTransformBar() {
                                 QStringLiteral("%"));
 
     row->addSpacing(12);
-    const auto button = [&](const QString& text, const QString& tip, auto handler) {
+    const auto button = [&](const QString& text, shortcuts::Id id, const QString& what,
+                            const QString& more, auto handler) {
         auto* b = new QPushButton(text, transform_bar_);
-        b->setToolTip(tip);
         b->setFocusPolicy(Qt::NoFocus);  // keep the pen and the keyboard on the canvas
+        keyedTip(b, id, what, more);
         connect(b, &QPushButton::clicked, this, handler);
         row->addWidget(b);
     };
-    button(QStringLiteral("Apply"), QStringLiteral("Bake it into the drawing (Enter)"),
+    button(QStringLiteral("Apply"), shortcuts::Id::TransformApply,
+           QStringLiteral("Bake it into the drawing"), QString(),
            [this] { canvas_->applyTransform(); });
-    button(QStringLiteral("Cancel"),
-           QStringLiteral("Put it back where it was (Escape).\nNothing was written, so this "
-                          "leaves no undo step."),
+    button(QStringLiteral("Cancel"), shortcuts::Id::TransformCancel,
+           QStringLiteral("Put it back where it was"),
+           QStringLiteral("Nothing was written, so this leaves no undo step."),
            [this] { canvas_->cancelTransform(); });
 }
 
@@ -924,39 +1007,43 @@ void MainWindow::buildTimelinePanel() {
     auto* row = new QHBoxLayout(controls);
     row->setContentsMargins(0, 0, 0, 0);
 
-    const auto button = [&](const QString& text, const QString& tip, auto handler) {
+    // Every one of these buttons duplicates an action, so every one of them used
+    // to end its tooltip in a typed-out key: "(Enter)", "(Ctrl+D)", "(Delete)".
+    // They are composed from the bindings now -- see keyedTip.
+    const auto button = [&](const QString& text, shortcuts::Id id, const QString& what,
+                            const QString& more, auto handler) {
         auto* b = new QPushButton(text, controls);
-        b->setToolTip(tip);
         b->setFocusPolicy(Qt::NoFocus);  // keep the pen working after a click
+        keyedTip(b, id, what, more);
         connect(b, &QPushButton::clicked, this, handler);
         row->addWidget(b);
         return b;
     };
 
-    play_button_ = button(QStringLiteral("Play"),
-                          QStringLiteral("Play the timeline in a loop (Enter)"),
+    play_button_ = button(QStringLiteral("Play"), shortcuts::Id::Play,
+                          QStringLiteral("Play the timeline in a loop"), QString(),
                           &MainWindow::togglePlayback);
     row->addSpacing(12);
 
-    button(QStringLiteral("+ Drawing"),
-           QStringLiteral("Insert a new empty drawing after this one (Insert)"),
+    button(QStringLiteral("+ Drawing"), shortcuts::Id::InsertDrawing,
+           QStringLiteral("Insert a new empty drawing after this one"), QString(),
            &MainWindow::insertInterval);
-    button(QStringLiteral("Duplicate"),
-           QStringLiteral("Copy this drawing into a new one (Ctrl+D)\n"
-                          "A real copy, not a hold: the cels are independent."),
+    button(QStringLiteral("Duplicate"), shortcuts::Id::DuplicateDrawing,
+           QStringLiteral("Copy this drawing into a new one"),
+           QStringLiteral("A real copy, not a hold: the cels are independent."),
            &MainWindow::duplicateDrawing);
-    button(QStringLiteral("Delete drawing"),
-           QStringLiteral("Delete this drawing and every frame it is held on (Delete).\n"
-                          "To shorten a hold instead, use Hold -."),
+    button(QStringLiteral("Delete drawing"), shortcuts::Id::DeleteDrawing,
+           QStringLiteral("Delete this drawing and every frame it is held on"),
+           QStringLiteral("To shorten a hold instead, use Hold -."),
            &MainWindow::deleteDrawing);
 
     row->addSpacing(12);
-    button(QStringLiteral("Hold +"),
-           QStringLiteral("Hold this drawing one frame longer (+)\n"
-                          "Repeats the same drawing; costs nothing."),
+    button(QStringLiteral("Hold +"), shortcuts::Id::HoldLonger,
+           QStringLiteral("Hold this drawing one frame longer"),
+           QStringLiteral("Repeats the same drawing; costs nothing."),
            &MainWindow::extendExposure);
-    button(QStringLiteral("Hold -"), QStringLiteral("Hold it one frame less (-)"),
-           &MainWindow::shortenExposure);
+    button(QStringLiteral("Hold -"), shortcuts::Id::HoldShorter,
+           QStringLiteral("Hold it one frame less"), QString(), &MainWindow::shortenExposure);
 
     row->addSpacing(16);
     row->addWidget(new QLabel(QStringLiteral("Onion"), controls));

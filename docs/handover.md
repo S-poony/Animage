@@ -21,7 +21,7 @@ the shape of the program. Those five maps are.
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
-| [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, and the first mode |
+| [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, the first mode, and changing a key |
 | [Moving a drawing](#moving-a-drawing) | the transform tool |
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
@@ -1101,9 +1101,63 @@ steps off is what frees the arrows to nudge with. Modality written as
 `setEnabled` calls spread through the code that changes mode is how an action
 ends up stuck disabled after some cancel path nobody tested.
 
-It is deliberately not a rebinding interface. No settings file, no user-facing
-change, and `Id` is an internal name rather than a stored one; rebinding stays in
-#14.
+**And now the other half of #14: the keys can be changed.** `Bindings` is what
+the keyboard is bound to *now* — the table's defaults with the user's changes
+over the top — and `shortcuts::current()` is the one the program is running on.
+`Edit > Keyboard shortcuts` edits a copy of it and installs it on Apply.
+
+Four things about that are decisions rather than mechanics.
+
+**Nothing changes until Apply, and Apply is the refusal.** The obvious version
+rejects the chord as you type it, which can say "no" and cannot say *what you
+have hit* — and the collision this exists to prevent is one nobody sees coming.
+So the chord goes in, both rows go red, a sentence underneath names them, and
+Apply stays grey until one of them moves. The user asked for it this way and it
+is better than what was planned.
+
+**Only what differs from a default is written down**, to `shortcuts.json` in the
+platform's config directory, keyed by a stored name. That is what lets a default
+improved in a later version reach everybody who never touched that action. It is
+also why `Entry::name` must never be edited: it is what a rebinding is keyed by,
+so changing one does not rename a binding, it silently discards it. `Id` stays
+internal and can be renamed freely.
+
+**The two collision rules moved out of the test and into the program.** A rule
+that only a test knows can say the defaults are fine and nothing else, and the
+dialog has to refuse on exactly the rules the table is pinned by. `test_shortcuts`
+now asserts both that the defaults obey them and that the rules would notice if
+they did not — the second half being the one that stops a rule that has quietly
+stopped working from looking green forever.
+
+**The keys a live transform borrows are rows now**, and the canvas asks
+`activates(Id::TransformApply, event)` rather than naming `Qt::Key_Return`. This
+is the part that would have been easy to skip and is load-bearing: those keys
+belong to actions that have been *disabled*, so no QAction anywhere holds them,
+and without a row for each, a rebinding could put Fit drawing on Left and take
+the nudge away with nothing in the program able to notice. Shift for ten pixels
+is read as "the binding, with a Shift it has not got", which is one rule instead
+of four more rows.
+
+`Space`, `Z` and `Alt` are rows too, and cannot be rebound: they are held for as
+long as a click or a drag lasts, which `QAction` cannot express. Two reasons, and
+the first one alone got the third of them left out of the first build. `Space`
+and `Z` *consume* their key, and an application-wide shortcut wins it before the
+canvas ever sees the press, so an action rebound onto `Space` would take panning
+away silently — that is a conflict, and the table has to know about it. `Alt`
+consumes nothing (the canvas watches it without accepting it, because it is the
+menu bar's own key on Windows) and so can never be in a collision at all. It is
+listed because the panel is where somebody goes to find out what the keyboard
+does, and an answer with the eyedropper missing from it is the wrong answer.
+Reported, and the correction is the point: "which keys could collide" and "which
+keys are there" are two different questions, and the panel answers the second.
+
+**Every tooltip that names a key is composed rather than typed.** They used to
+end in literals — `(Ctrl+D)`, `(Enter)`, `(Delete)` — which were already only as
+true as the last person to move a binding and are false the first time anybody
+rebinds anything. `MainWindow::keyedTip` registers the sentence and the id, and
+`syncTooltips` fills the key in and does it again after every Apply. A sentence
+that names *other* keys says `%1` and lists them, for the same reason. Two tools
+had no tooltip at all and now say what they are and what key they are on.
 
 **The bug in #14 is not a duplicate binding and no table would have caught it.**
 `Fit canvas` was `0` and `Fit drawing` was `Shift+0` — two genuinely different
@@ -1126,9 +1180,29 @@ is everything outside printable ASCII: Qt lists the dedicated `Key_Save` among
 the standard Save bindings and `Shift+Key_Save` among Save As's, which is a real
 pair on a keyboard that has such a key and no chord at all on one that has not.
 
-`[` and `]` are worth knowing about and are not fixed here: on AZERTY both need
-AltGr, which Windows reports as Ctrl+Alt. They work and they are awkward, and
-that is a rebinding question rather than a conflict.
+`[` and `]` were the other thing recorded here and are answered rather than
+fixed: on AZERTY both need AltGr, which Windows reports as Ctrl+Alt. They work
+and they are awkward, and being awkward is a rebinding question — so they are
+named rows in the panel now (they used to have no label, being in no menu) and
+they are the first two anybody will want to move.
+
+**What a picture caught, and a green build did not.** The first build of the
+panel had a Reset button on all thirty-odd rows, because they were made and then
+hidden: a widget handed to a tree is one the view manages, and it shows it again
+on the next relayout. They are made and unmade now, so a Reset exists only beside
+a row that has something to undo. `shots` has the panel as it opens and the panel
+with `Shift+0` typed back into Fit drawing, which is the collision this issue was
+raised for, shown being refused — and a third of the search reaching into a
+folded group, which is the half of the search that can break silently.
+
+**One trap for anyone driving `QKeySequenceEdit` with synthetic events**, which
+is the same shape as the one `Stage` records about held modifiers. It *clears the
+field on the key press* — emitting `keySequenceChanged` with an empty sequence —
+and settles only on the release. So a test that sends a press and reads the
+binding is reading a field mid-edit and will report that the row was unbound. It
+also means an edit abandoned after a bare modifier leaves the row unbound, which
+is Qt's behaviour rather than ours: the field is empty and so is the binding, and
+Reset is beside it.
 
 ## Moving a drawing
 
@@ -2306,7 +2380,7 @@ ctest --test-dir build --output-on-failure
 `shots` is the one that is not a number. It drives the real window through a
 list of named situations and writes a PNG each, into `build/shots/` unless told
 otherwise; `--list` says what they are and a bare word runs only the ones whose
-name matches, so looking at one thing costs one picture rather than eleven. It
+name matches, so looking at one thing costs one picture rather than twenty. It
 runs offscreen without being asked to. **Add situations to it freely** — nothing
 depends on any of them being there, which is the point. See
 [looking at the interface](#looking-at-the-interface).
@@ -2355,7 +2429,7 @@ come off it since the first build, with where the reasoning went:
 | Carrying marks, and moving them (#3, #6, #7) | "colour through time", parts one and two |
 | Freeing emptied tiles | "a rectangle built from tile coordinates remembers what you erased" |
 | Lasso and transform, all four phases | "moving a drawing" through "what a transform costs" |
-| The shortcut table, and the bug half of #14 | "what the keyboard does, and when" |
+| The shortcut table, and all of #14 | "what the keyboard does, and when" |
 | One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
 | A screenshot target (#28) | "looking at the interface" |
 | Capping the undo history (#23) | "what the history is allowed to cost" |
@@ -2419,8 +2493,8 @@ come off it since the first build, with where the reasoning went:
    already needed.
 
    The rest are older: showing a track's end behaviour on the track itself (#22),
-   deleting every layer of a drawing (#2), the rebinding half of #14, a non-modal
-   colour panel (the parked half of #8), and this file being hard to navigate
+   deleting every layer of a drawing (#2), a non-modal colour panel (the parked
+   half of #8), and this file being hard to navigate
    ([#29](https://github.com/S-poony/Animage/issues/29)).
 
 ## Three things to be careful of
