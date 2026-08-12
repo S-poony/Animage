@@ -1006,7 +1006,7 @@ void MainWindow::updateTitle() {
     const QString name = project_folder_.isEmpty()
                              ? QStringLiteral("Untitled")
                              : QFileInfo(project_folder_).fileName();
-    const bool changed = doc_.undoDepth() != saved_undo_depth_;
+    const bool changed = doc_.historyStamp() != saved_history_stamp_;
     setWindowTitle(QStringLiteral("%1%2 - Animage").arg(name, changed ? QStringLiteral("*")
                                                                      : QString()));
 }
@@ -1017,12 +1017,12 @@ bool MainWindow::leaveCurrentDocument() {
     // committing loses it -- and leaving is not a way to discard, which is the
     // rule the rest of this function is built on.
     canvas_->applyTransform();
-    if (doc_.undoDepth() == saved_undo_depth_) return true;  // nothing to lose
+    if (doc_.historyStamp() == saved_history_stamp_) return true;  // nothing to lose
 
     if (!project_folder_.isEmpty()) {
         QString error;
         if (ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
-            saved_undo_depth_ = doc_.undoDepth();
+            saved_history_stamp_ = doc_.historyStamp();
             updateTitle();
             return true;
         }
@@ -1047,7 +1047,7 @@ bool MainWindow::leaveCurrentDocument() {
     // Save As can itself be cancelled, or fail, and either way the answer to
     // "may I leave" is no -- otherwise choosing Save loses the work.
     saveProjectAs();
-    return doc_.undoDepth() == saved_undo_depth_;
+    return doc_.historyStamp() == saved_history_stamp_;
 }
 
 void MainWindow::resetToNewDocument() {
@@ -1117,7 +1117,7 @@ void MainWindow::afterProjectLoaded() {
     canvas_->refreshAll();
     canvas_->fitToCanvas();
 
-    saved_undo_depth_ = doc_.undoDepth();
+    saved_history_stamp_ = doc_.historyStamp();
 
     syncStatus();
     updateTitle();
@@ -1349,7 +1349,7 @@ bool MainWindow::saveTo(const QString& folder) {
         return false;
     }
     project_folder_ = folder;
-    saved_undo_depth_ = doc_.undoDepth();
+    saved_history_stamp_ = doc_.historyStamp();
     updateTitle();
     statusBar()->showMessage(QStringLiteral("Saved to %1").arg(folder), 4000);
     return true;
@@ -1362,7 +1362,7 @@ void MainWindow::onAutosaveTick() {
 
     // Nothing has moved since the last write. Undoing back to where the last
     // save stood counts as unchanged, because it is.
-    if (doc_.undoDepth() == saved_undo_depth_) return;
+    if (doc_.historyStamp() == saved_history_stamp_) return;
 
     // Never in the middle of a stroke or a playback pass: a save is a tenth of
     // a second, which is invisible between two strokes and a stutter inside one.
@@ -1378,7 +1378,7 @@ void MainWindow::onAutosaveTick() {
         // it is reporting -- and Save still says so properly when asked.
         statusBar()->showMessage(QStringLiteral("Autosave failed: %1").arg(error), 8000);
     } else {
-        saved_undo_depth_ = doc_.undoDepth();
+        saved_history_stamp_ = doc_.historyStamp();
         updateTitle();
         statusBar()->showMessage(QStringLiteral("Autosaved"), 2000);
     }
@@ -1469,13 +1469,21 @@ void MainWindow::syncStatus() {
     const QString selected =
         canvas_->hasSelection() ? QStringLiteral("   selection") : QString();
 
+    // The history is capped in bytes, so the steps alone no longer say what it
+    // costs -- one of them can be worth forty of another. This is the number
+    // the cap is applied to, and the only way to see it about to bite.
+    const QString history =
+        QStringLiteral("undo %1 (%2 MB)")
+            .arg(doc_.undoDepth())
+            .arg(static_cast<double>(doc_.historyBytes()) / (1024.0 * 1024.0), 0, 'f', 0);
+
     // The frame count is the scene's and the rest is the current track's, which
     // is the distinction the whole panel now rests on: one timeline, several
     // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   undo %10   %11 fps%12%13%14%15")
+                       "tiles %9   %10   %11 fps%12%13%14%15")
             .arg(slot + 1)
             .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
@@ -1485,7 +1493,7 @@ void MainWindow::syncStatus() {
             .arg(track->layers.size())
             .arg(canvas_->zoom() * 100.0, 0, 'f', 0)
             .arg(doc_.totalTileCount())
-            .arg(doc_.undoDepth())
+            .arg(history)
             .arg(doc_.scene().framerate)
             .arg(colouring)
             .arg(past)

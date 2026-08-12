@@ -144,4 +144,14 @@ void SceneCanvasOp::applySwap(Document& doc) {
     std::swap(doc.mutableScene().height, height_);
 }
 
+std::size_t Command::retainedBytes() const {
+    std::size_t bytes = 0;
+    for (const TileSnapshot& snapshot : tiles) {
+        // A null handle is "the tile was absent", which costs the entry and no
+        // pixels: undoing it removes a tile rather than restoring one.
+        if (snapshot.tile) bytes += sizeof(Tile);
+    }
+    return bytes;
+}
+
 }  // namespace animage

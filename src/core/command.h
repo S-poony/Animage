@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -172,7 +174,30 @@ struct Command {
     std::vector<std::unique_ptr<Op>> ops;
     std::vector<TileSnapshot> tiles;
 
+    // Handed out once, when the command is pushed, and never reused. It names
+    // the state the document is in rather than counting the steps that got it
+    // there, which is what "changed since the last save" has to be asked with:
+    // a depth answers that question wrongly when you undo a step and do a
+    // different one, and cannot answer it at all now that the oldest steps can
+    // be dropped from underneath it.
+    std::uint64_t stamp = 0;
+
     bool empty() const { return ops.empty() && tiles.empty(); }
+
+    // The pixels this command is keeping alive: the tiles it displaced, which
+    // are held as TileRefs and would otherwise have been freed.
+    //
+    // The ops are not counted. They copy layer lists, slot vectors and Image
+    // records, which are two to three orders of magnitude below a tile grid --
+    // and pricing them properly would mean a virtual on every Op estimating
+    // the size of containers it does not own. What bounds a history made
+    // entirely of them is the step cap, not this.
+    //
+    // A tile is counted once per command holding it, so two commands sharing
+    // one are charged for both. That over-counts only where two cels shared a
+    // tile before either was written to; it trims sooner rather than later,
+    // which is the safe direction for a memory cap.
+    std::size_t retainedBytes() const;
 };
 
 }  // namespace animage

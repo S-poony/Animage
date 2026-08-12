@@ -3,6 +3,7 @@
 
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 #include <utility>
@@ -319,12 +320,13 @@ private:
     QElapsedTimer playback_clock_;
     std::size_t playback_start_slot_ = 0;
 
-    // Empty until the project has been saved somewhere. `saved_undo_depth_` is
-    // where the history stood when it was last written, which is a cheap and
-    // honest test for "changed since": undoing back to it counts as unchanged,
-    // because it is.
+    // Empty until the project has been saved somewhere. `saved_history_stamp_`
+    // is which state of the document was written, taken from
+    // `Document::historyStamp`, so undoing back to it counts as unchanged --
+    // because it is -- and every other position in the history counts as
+    // changed, including one the history happens to have the same depth at.
     QString project_folder_;
-    std::size_t saved_undo_depth_ = 0;
+    std::uint64_t saved_history_stamp_ = 0;
 
     // What the last save or open put in `project_folder_`, so the next save
     // only re-encodes the drawings that moved. Held by the window because it

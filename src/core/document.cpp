@@ -697,8 +697,13 @@ void Document::endCommand() {
     pending_.tiles = journal_.take();
     releaseEmptiedTiles(pending_.tiles);
     if (!pending_.empty()) {
+        pending_.stamp = ++command_stamps_;
         undo_stack_.push_back(std::move(pending_));
         redo_stack_.clear();
+        // The only moment the history grows. Undo and redo move a command from
+        // one stack to the other and free nothing, so nothing else can put it
+        // over its budget.
+        trimHistory();
     }
     pending_ = Command{};
 }
@@ -741,6 +746,66 @@ bool Document::redo() {
 
     undo_stack_.push_back(std::move(command));
     return true;
+}
+
+std::uint64_t Document::historyStamp() const {
+    return undo_stack_.empty() ? 0 : undo_stack_.back().stamp;
+}
+
+std::size_t Document::historyBytes() const {
+    std::size_t bytes = 0;
+    for (const Command& command : undo_stack_) bytes += command.retainedBytes();
+    for (const Command& command : redo_stack_) bytes += command.retainedBytes();
+    return bytes;
+}
+
+void Document::setHistoryBudget(std::size_t bytes) {
+    history_budget_ = bytes;
+    trimHistory();
+}
+
+// The oldest end of the undo stack is what goes, because it is the part of the
+// history furthest from being wanted and because everything above it has to
+// stay reachable: undo is a walk backwards and a hole in it is not a history.
+//
+// The redo stack is never touched. Everything on it is *newer* than everything
+// on the undo stack -- it is the branch that was undone away from -- so dropping
+// from there would take the recent work and leave the old.
+void Document::trimHistory() {
+    std::size_t bytes = historyBytes();
+    std::size_t steps = undo_stack_.size() + redo_stack_.size();
+
+    std::size_t drop = 0;
+    // Never the last one. A single 4K transform can be most of the budget on
+    // its own, and a history that dropped the command it had just recorded
+    // would make the edit you are looking at the one thing you cannot take back.
+    while (drop + 1 < undo_stack_.size() && (bytes > history_budget_ || steps > kHistoryStepCap)) {
+        bytes -= undo_stack_[drop].retainedBytes();
+        --steps;
+        ++drop;
+    }
+    if (drop == 0) return;
+
+    // Those commands are exactly what was holding the cels the collector could
+    // not take -- a deleted drawing's cel outlives the deletion for as long as
+    // undo can bring it back. Only the ids they mentioned can have become
+    // collectable, so an orphan among them is what decides whether the scan is
+    // worth running at all: collectGarbage is O(cels x history) and this runs
+    // at the end of a stroke.
+    std::vector<CelId> mentioned;
+    for (std::size_t i = 0; i < drop; ++i) {
+        for (const TileSnapshot& snapshot : undo_stack_[i].tiles) mentioned.push_back(snapshot.cel);
+        for (const auto& op : undo_stack_[i].ops) op->collectCelIds(mentioned);
+    }
+
+    undo_stack_.erase(undo_stack_.begin(), undo_stack_.begin() + static_cast<std::ptrdiff_t>(drop));
+
+    for (CelId id : mentioned) {
+        auto it = cels_.find(id);
+        if (it == cels_.end() || it->second->imageRefcount() > 0) continue;
+        collectGarbage();
+        break;
+    }
 }
 
 void Document::clearHistory() {

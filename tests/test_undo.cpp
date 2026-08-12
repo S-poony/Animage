@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstddef>
+#include <cstdint>
+
 #include "document.h"
 #include "testing.h"
 
@@ -272,6 +275,152 @@ void rubbingOutBlankPaperIsNotAnUndoStep() {
     CHECK_EQ(f.doc.totalTileCount(), tiles);
 }
 
+// The history is capped in bytes and not in steps, because one command is worth
+// forty of another. A stroke over paper that already has a tile displaces it,
+// which is what a command retaining pixels looks like.
+void theHistoryStaysInsideItsBudget() {
+    TEST("the history drops its oldest steps to stay inside its budget");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+    f.doc.setHistoryBudget(4 * sizeof(Tile));
+
+    for (int i = 0; i < 20; ++i) {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 10 + i, 10, kRed);
+    }
+
+    CHECK(f.doc.historyBytes() <= f.doc.historyBudget());
+    CHECK(f.doc.undoDepth() >= std::size_t{1});
+    CHECK(f.doc.undoDepth() <= std::size_t{5});
+
+    // And what is left is a history and not a set of steps: the newest edits
+    // undo, in order, until the bottom of what was kept.
+    CHECK(f.doc.undo());
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 29, 10).a, 0.0, 1e-3);
+    CHECK(f.doc.undo());
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 28, 10).a, 0.0, 1e-3);
+}
+
+// Which end goes matters: undo is a walk backwards, so the part that has to
+// survive is the part nearest to now.
+void theOldestStepsAreTheOnesThatGo() {
+    TEST("what a capped history keeps is the newest end of it");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+
+    {
+        ScopedCommand command(f.doc, "First stroke");
+        paint(f.doc, f.track, image, f.layer, 5, 5, kRed);
+    }
+    f.doc.setHistoryBudget(3 * sizeof(Tile));
+    for (int i = 0; i < 30; ++i) {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 10 + i, 10, kGreen);
+    }
+
+    while (f.doc.undo()) {
+    }
+    CHECK(!f.doc.canUndo());
+
+    // The first stroke is out of reach rather than undone: the step that made
+    // it was dropped, so the pixels stay and nothing can take them back.
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 5, 5).r, 1.0, 1e-3);
+    // The last few are gone, which is what the history was kept for.
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 39, 10).a, 0.0, 1e-3);
+}
+
+// A full-cel transform can be most of a budget on its own, and the edit you are
+// looking at must not be the one thing you cannot take back.
+void theNewestStepSurvivesABudgetSmallerThanItself() {
+    TEST("a command larger than the whole budget is still undoable");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+    f.doc.setHistoryBudget(0);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 20, 20, kRed);
+    }
+    {
+        ScopedCommand command(f.doc, "Second stroke");
+        paint(f.doc, f.track, image, f.layer, 21, 21, kGreen);
+    }
+
+    CHECK_EQ(f.doc.undoDepth(), std::size_t{1});
+    CHECK(f.doc.undo());
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 21, 21).a, 0.0, 1e-3);
+    CHECK_NEAR(read(f.doc, f.track, image, f.layer, 20, 20).r, 1.0, 1e-3);
+    CHECK(!f.doc.undo());
+}
+
+// The whole point of dropping a step: the history counts as a reference on a
+// cel, so deleting a drawing frees nothing until the steps that mention it go.
+void droppedStepsReleaseTheirCels() {
+    TEST("dropping a step frees the cels it was the last thing holding");
+    Fixture f;
+    const ImageId doomed = f.doc.insertImage(f.track, 0);
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, doomed, f.layer, 7, 7, kRed);
+    }
+    const CelId cel_id = f.tl().findImage(doomed)->celFor(f.layer);
+    CHECK(cel_id != kNoId);
+
+    const ImageId kept = f.doc.insertImage(f.track, 1);
+    f.doc.removeSlot(f.track, 0);
+    CHECK(f.tl().findImage(doomed) == nullptr);
+    CHECK_EQ(f.doc.collectGarbage(), std::size_t{0});  // the history still holds it
+    CHECK(f.doc.cel(cel_id) != nullptr);
+
+    f.doc.setHistoryBudget(2 * sizeof(Tile));
+    for (int i = 0; i < 12; ++i) {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, kept, f.layer, 10 + i, 10, kGreen);
+    }
+
+    CHECK(f.doc.cel(cel_id) == nullptr);
+}
+
+// A stamp names the state, which a depth cannot: two different states can stand
+// at the same depth, and a capped history can be at the same depth over work
+// that has only grown.
+void aStampNamesTheStateAndNotTheStepCount() {
+    TEST("the history stamp says which state, not how many steps");
+    Fixture f;
+    const ImageId image = f.doc.insertImage(f.track, 0);
+
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        paint(f.doc, f.track, image, f.layer, 1, 1, kRed);
+    }
+    const std::uint64_t first = f.doc.historyStamp();
+    {
+        ScopedCommand command(f.doc, "Second stroke");
+        paint(f.doc, f.track, image, f.layer, 2, 2, kRed);
+    }
+    const std::uint64_t second = f.doc.historyStamp();
+    CHECK(second != first);
+
+    // Undo and redo walk the same stamps, so coming back to a state gives the
+    // number it had -- which is what lets "undone back to where the last save
+    // stood" count as unchanged.
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.doc.historyStamp(), first);
+    CHECK(f.doc.redo());
+    CHECK_EQ(f.doc.historyStamp(), second);
+
+    // A different edit from the same depth is a different state, and the stamp
+    // is the only thing that says so.
+    CHECK(f.doc.undo());
+    const std::size_t depth = f.doc.undoDepth();
+    {
+        ScopedCommand command(f.doc, "Other stroke");
+        paint(f.doc, f.track, image, f.layer, 3, 3, kGreen);
+    }
+    CHECK_EQ(f.doc.undoDepth(), depth + 1);  // the same depth the second stroke had
+    CHECK(f.doc.historyStamp() != second);
+}
+
 void nestedCommandsCollapse() {
     TEST("nested commands collapse into one undo step");
     Fixture f;
@@ -305,6 +454,11 @@ int main() {
     newCommandClearsRedo();
     emptiedTilesAreFreed();
     rubbingOutBlankPaperIsNotAnUndoStep();
+    theHistoryStaysInsideItsBudget();
+    theOldestStepsAreTheOnesThatGo();
+    theNewestStepSurvivesABudgetSmallerThanItself();
+    droppedStepsReleaseTheirCels();
+    aStampNamesTheStateAndNotTheStepCount();
     nestedCommandsCollapse();
     return testing::summarise("undo");
 }

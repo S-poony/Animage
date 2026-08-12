@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -197,6 +198,50 @@ public:
     std::size_t undoDepth() const { return undo_stack_.size(); }
     std::string undoLabel() const;
 
+    // Which state the document is in: the stamp of the command on top of the
+    // undo stack, and 0 when there is nothing on it. Undo and redo move along
+    // the same stamps, so coming back to a state gives the number it had.
+    //
+    // This is what "changed since the last save" is asked with, and a depth is
+    // not: undoing one step and doing a different one leaves the count where it
+    // was over a document that has moved, and a trimmed history can lose steps
+    // off the bottom while the work only grows.
+    std::uint64_t historyStamp() const;
+
+    // --- what the history is allowed to cost ------------------------------
+
+    // A command retains the tiles it displaced, and nothing else can free them
+    // while it holds them. One command is worth forty of another -- a stroke
+    // crosses two to six tiles and pins a quarter to three quarters of a
+    // megabyte, a full-cel 4K transform replaces every tile the cel has and
+    // pins about seventy-five -- so a cap counting steps caps an amount of
+    // memory nobody chose. This one counts bytes.
+    //
+    // Past the budget the oldest commands go, oldest first, and the cels they
+    // were the last reference to go with them. The newest command is never
+    // dropped: what you have just done stays undoable even when it is larger
+    // than the whole budget on its own.
+    //
+    // 512 MB is about a thousand strokes, or six 4K transforms, on top of
+    // whatever the document itself is holding.
+    static constexpr std::size_t kDefaultHistoryBudget = std::size_t{512} * 1024 * 1024;
+
+    // And a ceiling on the number of steps, which is deliberately not the
+    // budget: at half a megabyte a stroke the bytes bind ten times sooner, so
+    // this never ends a drawing session's history. It is here because a command
+    // that displaces no tile at all -- retiming, restacking, renaming, every
+    // one of which copies a vector -- is not free either, and a byte budget
+    // that only sees pixels would let a day of them grow without limit.
+    static constexpr std::size_t kHistoryStepCap = 10000;
+
+    // Lowering it takes effect immediately, which is what makes it testable.
+    void setHistoryBudget(std::size_t bytes);
+    std::size_t historyBudget() const { return history_budget_; }
+
+    // What the history is retaining now, in tile bytes. Both stacks: undoing
+    // moves a command from one to the other and frees nothing.
+    std::size_t historyBytes() const;
+
     // Drops cels that no image references and no history entry mentions. The
     // history counts as a reference: a cel must survive the deletion of the
     // last image showing it for as long as undo can bring that image back.
@@ -235,6 +280,10 @@ private:
     // record no change at all. Called once, when the outermost command closes.
     void releaseEmptiedTiles(std::vector<TileSnapshot>& tiles);
 
+    // Drops the oldest commands until the history is inside its budget, and
+    // collects the cels they were the last thing holding.
+    void trimHistory();
+
     // A new drawing with its own copy of every cel of `source`, refcounted and
     // numbered, but in no slot yet. Shared by both ways of duplicating one.
     std::optional<Image> copyOfImage(Track& track, ImageId source);
@@ -253,6 +302,8 @@ private:
 
     std::vector<Command> undo_stack_;
     std::vector<Command> redo_stack_;
+    std::uint64_t command_stamps_ = 0;
+    std::size_t history_budget_ = kDefaultHistoryBudget;
 
     CtgFillCache ctg_cache_;
     CtgShifts ctg_shifts_;

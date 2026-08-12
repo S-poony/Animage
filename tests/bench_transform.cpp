@@ -202,8 +202,34 @@ int main() {
         start = Clock::now();
         long long total = 0;
         for (int i = 0; i < 5; ++i) total += paintedBounds(ink).width;
-        std::printf("    paintedBounds        %8.2f ms   (%lld)\n\n",
+        std::printf("    paintedBounds        %8.2f ms   (%lld)\n",
                     milliseconds(start, Clock::now()) / 5, total);
+
+        // And what one costs the history, which is the number the undo budget
+        // is chosen against rather than guessed at. A transform replaces every
+        // tile the cel has and journals both sides, so one command retains a
+        // whole drawing -- against a stroke's two to six tiles.
+        {
+            Document doc;
+            const TrackId track = doc.addTrack("main");
+            const LayerId layer = doc.addLayer(track, "ink");
+            const ImageId image = doc.insertImage(track, 0);
+            {
+                ScopedCommand command(doc, "Draw");
+                doc.celForWriting(track, image, layer)->replaceTiles(ink, doc.journal());
+            }
+            const std::size_t before = doc.historyBytes();
+            {
+                ScopedCommand command(doc, "Transform");
+                doc.celForWriting(track, image, layer)
+                    ->replaceTiles(transformTiles(ink, turn), doc.journal());
+            }
+            const std::size_t retained = doc.historyBytes() - before;
+            std::printf("    one in the history   %8.2f MB   (%zu of them in the %zu MB budget)\n\n",
+                        static_cast<double>(retained) / (1024.0 * 1024.0),
+                        retained == 0 ? 0 : Document::kDefaultHistoryBudget / retained,
+                        Document::kDefaultHistoryBudget / (1024 * 1024));
+        }
     }
 
     return 0;

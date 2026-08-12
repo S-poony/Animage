@@ -2246,6 +2246,65 @@ void autosaveWritesOnlyWhenSomethingMoved() {
     CHECK(!back.scene().tracks.empty());
 }
 
+// Undoing a stroke and drawing a different one leaves the history at the depth
+// it was saved at, over a document that is not the one on disk. It read as
+// saved, silently, and the answer is that the marker is a position in the
+// history and not a count of it -- which is also what stops a history that
+// drops its oldest steps from making every long session read as saved.
+void adifferentEditFromTheSameDepthIsUnsaved() {
+    TEST("undoing and drawing something else still counts as unsaved");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    QCoreApplication::processEvents();
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+
+    // Back one step and forward a different one. Same number of steps, another
+    // drawing.
+    QAction* undo = actionCalled(window, QStringLiteral("&Undo"));
+    CHECK(undo != nullptr);
+    if (!undo) return;
+    const std::size_t depth = window.documentForTesting().undoDepth();
+    undo->trigger();
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    drawWithMouse(canvas, QPointF(500, 300), QPointF(560, 340), 4);
+    QCoreApplication::processEvents();
+    CHECK_EQ(window.documentForTesting().undoDepth(), depth);
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    // And it is not merely the title: the tick that decides whether to write
+    // has to agree, or the change is never saved at all.
+    const QString cels = folder + QStringLiteral("/cels");
+    const QStringList names = QDir(cels).entryList(QDir::Files);
+    CHECK(!names.isEmpty());
+    if (names.isEmpty()) return;
+    const QString hostage = cels + QStringLiteral("/") + names.first();
+    CHECK(QFile::remove(hostage));
+
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(QFileInfo::exists(hostage));
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));
+}
+
 // A stroke must never be interrupted by a save: a tenth of a second is nothing
 // between two strokes and a stutter inside one.
 void autosaveWaitsForTheStrokeToFinish() {
@@ -4983,6 +5042,7 @@ int main(int argc, char** argv) {
     savingElsewhereCarriesNothingForward();
     openingLeavesTheFolderKnown();
     autosaveWritesOnlyWhenSomethingMoved();
+    adifferentEditFromTheSameDepthIsUnsaved();
     autosaveWaitsForTheStrokeToFinish();
     closingWritesTheLastChanges();
     leavingAnUntitledDocumentAsksFirst();

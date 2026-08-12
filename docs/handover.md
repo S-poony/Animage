@@ -29,6 +29,7 @@ the shape of the program. Those five maps are.
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
+| [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
 | [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
@@ -1703,6 +1704,96 @@ system stamps the live modifier state on all of them. So a hover sent with
 absent when it was the harness that had let go. `Stage` holds the modifiers and
 stamps them on, the way the window system does.
 
+## What the history is allowed to cost
+
+Issue #23. `undo_stack_` only ever grew — `clearHistory` and loading a project
+emptied it and nothing else ever took anything off it — and a command retains
+the tiles it displaced, as handles to tiles that would otherwise have been
+freed. Nothing broke: the failure is memory over a long session, and it has a
+second half that is easy to miss. `historyReferences` counts the history as a
+reference on a cel, so deleting a drawing frees nothing at all while a step that
+mentions it is still on the stack.
+
+**The cap is in bytes and not in steps, because one command is worth forty of
+another.** Measured rather than estimated, at the end of each size in
+`bench_transform`:
+
+| what one command retains | |
+|---|---|
+| a stroke | 0.25–0.75 MB, being the two to six tiles it crossed |
+| a full-cel transform, PAL | 6.5 MB |
+| the same, HD | 22 MB |
+| the same, 4K | 74 MB |
+
+A tile is 128×128 half RGBA, so 128 KB, and a transform replaces every tile the
+cel has while `Cel::replaceTiles` journals both sides. "Keep the last hundred
+steps" is therefore fifty megabytes of strokes or seven gigabytes of transforms,
+which is one rule choosing two numbers that are nothing like each other. That is
+the whole argument for counting bytes.
+
+`Document::kDefaultHistoryBudget` is 512 MB — about a thousand strokes,
+twenty-three HD transforms or six 4K ones — and `setHistoryBudget` moves it and
+takes effect immediately, which is also how the tests reach it. Past the budget
+the oldest commands go, oldest first, and then `collectGarbage` takes the cels
+they were the last thing holding. That second step is the point rather than
+housekeeping: those commands are exactly what was standing between the collector
+and the drawings somebody had already deleted.
+
+Four things about it were decisions rather than mechanics.
+
+- **The newest command is never dropped**, even when it is larger than the whole
+  budget on its own — which one 4K transform nearly is. What you have just done
+  has to be undoable, and a cap that made the edit in front of you the one thing
+  you could not take back would be a worse bug than the memory it saved.
+- **Only the undo stack is trimmed.** Everything on the redo stack is *newer*
+  than everything on the undo stack, it being the branch that was undone away
+  from, so dropping from that end would take the recent work and keep the old.
+- **The collector is not run for nothing.** `collectGarbage` is O(cels ×
+  history) and this happens at the end of every stroke once the budget is full,
+  so the cel ids the dropped commands mentioned are gathered first and the scan
+  runs only if one of them is now orphaned. A dropped stroke on a drawing that
+  still exists costs a handful of comparisons.
+- **The ops are not weighed, and a step cap is what bounds them.** A command's
+  ops copy layer lists, slot vectors and `Image` records — two to three orders
+  of magnitude below a tile grid — and pricing them properly would mean a
+  virtual on every `Op` estimating the size of containers it does not own. So
+  `kHistoryStepCap` is 10 000 steps, which is deliberately *not* the budget: at
+  half a megabyte a stroke the bytes bind ten times sooner, so it never ends a
+  drawing session's history. It exists because a day of retiming and restacking
+  records commands that hold no tile at all, and a byte budget that only sees
+  pixels would let those grow without limit.
+
+Freeing tiles that erasing had emptied was the other end of the same number and
+is already done — `Document::endCommand` drops them, and a command that then
+records no difference at all is not put on the stack to be counted. See
+["a rectangle built from tile coordinates remembers what you erased"](#the-traps).
+
+**And the save marker had to stop being a step count.** `MainWindow` asked
+"changed since the last save" as `undoDepth() == saved_undo_depth_`, which a
+capped history breaks outright: drop one step off the bottom, push one on the
+top, and a document with a whole session in it reads as saved — so the title
+loses its `*` and, far worse, autosave decides there is nothing to write. It was
+already wrong in a smaller way before any of this, and had been from the start:
+undo one step, draw a different one, and the count is back where it was over a
+drawing that is not the one on disk.
+
+It is `Document::historyStamp()` now — the stamp of the command on top of the
+undo stack, 0 when there is none, handed out once and never reused. Undo and
+redo walk the same stamps, so "undone back to where the last save stood" still
+counts as unchanged, which was the good half of the depth and the only one.
+`adifferentEditFromTheSameDepthIsUnsaved` pins it through the real window, and
+the depth it asserts is *equal* is precisely what the old marker was reading.
+
+The status bar says `undo 12 (34 MB)` rather than `undo 12`, because with a
+budget in bytes the step count no longer says what the history costs, and the
+megabytes are the only warning that the next stroke will drop the oldest one.
+
+**What would change the number.** Six 4K transforms is thin, and somebody
+working at that size who runs out of undo where they did not expect to is the
+report that should raise it — it is one constant, and the arithmetic to argue
+with is printed by `bench_transform`. What that report must not produce is a
+step count, which is the thing this replaced.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -2208,7 +2299,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
-./build/tests/bench_transform     # what moving a drawing costs, and where
+./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ```
 
@@ -2267,6 +2358,7 @@ come off it since the first build, with where the reasoning went:
 | The shortcut table, and the bug half of #14 | "what the keyboard does, and when" |
 | One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
 | A screenshot target (#28) | "looking at the interface" |
+| Capping the undo history (#23) | "what the history is allowed to cost" |
 
 1. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the
@@ -2316,11 +2408,9 @@ come off it since the first build, with where the reasoning went:
    what `CtgSolver`'s second priority is still there for.
 4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-5. **The rest of the open issues.** Three came out of designing lasso and
+5. **The rest of the open issues.** Two came out of designing lasso and
    transform and are each one small piece with the groundwork already under it:
-   capping the undo history
-   ([#23](https://github.com/S-poony/Animage/issues/23)), which the feature makes
-   more visible and did not cause; flipping
+   flipping
    ([#24](https://github.com/S-poony/Animage/issues/24)), which is one sign away
    from the exact translation branch and must be built on it rather than as a −1
    scale through the resampler; and transforming a layer across time
@@ -2338,7 +2428,10 @@ come off it since the first build, with where the reasoning went:
 **The undo model rests on cel ids never being reused.** Deleting a drawing and
 then undoing a stroke made on a drawing that shared its cel only works because
 of that, and because the history counts as a reference on a cel. Both are
-tested; neither is obvious from reading the code in one place.
+tested; neither is obvious from reading the code in one place. What is new is
+that the history is finite: a step past the budget is dropped and its cels are
+collected, so "undo can always bring it back" is true only as far back as
+[the history is allowed to cost](#what-the-history-is-allowed-to-cost).
 
 **Layers belong to the track and timing belongs to the image.** This is the
 project's central bet and the code depends on it everywhere: adding a layer must
