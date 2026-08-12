@@ -50,7 +50,6 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
-    void leaveEvent(QEvent* event) override;
 
 private:
     const animage::Track* trackAt(std::size_t row) const;
@@ -62,6 +61,16 @@ private:
     // The row under a y, clamped to a real row; false if y is in the ruler.
     bool rowAtY(int y, std::size_t* row) const;
     int rowTop(std::size_t row) const;
+
+public:
+    // Where a test should press to land on a cell or in the ruler. Asked of the
+    // widget rather than recomputed, for the same reason the transform box's
+    // handles are: a test that lays the strip out for itself agrees happily
+    // with a card drawn where no hand could reach it.
+    QPoint cellCentreForTesting(std::size_t row, std::size_t slot) const;
+    QPoint rulerPointForTesting(std::size_t slot) const;
+
+private:
 
     std::size_t slotAt(int x) const;
     // Where the shot ends, in x. The boundary is grabbed in the ruler and
@@ -75,6 +84,17 @@ private:
     std::pair<std::size_t, std::size_t> runAt(std::size_t row, std::size_t slot) const;
     bool isOnRunEdge(std::size_t row, int x, std::size_t* run_start) const;
     std::vector<int> drawingNumbers(const animage::Track& track) const;
+
+    // What a press here would do, and the only thing that decides the cursor.
+    //
+    // It was decided in five places along mouseMoveEvent, with a flag to
+    // remember whether one of them had already fired -- and the ruler, which is
+    // the first thing the pointer crosses coming down from the canvas, claimed
+    // a pointing hand. So the timeline turned into a hand the moment you
+    // entered it, and the hand that means "this drawing can be picked up" was
+    // the same hand. Reported, and it had been there from the beginning.
+    Qt::CursorShape cursorAt(int x, int y) const;
+    void refreshCursor(int x, int y) { setCursor(cursorAt(x, y)); }
 
     // What a drawing's colour layers are doing, in what the card can show.
     struct ColourState {
@@ -92,7 +112,6 @@ private:
     bool stretching_ = false;
     std::size_t stretch_row_ = 0;
     std::size_t stretch_run_start_ = 0;
-    bool hovering_edge_ = false;
 
     // Dragging in the ruler band scrubs. Keeping it in its own strip is what
     // stops a scrub from turning into an exposure change by accident.

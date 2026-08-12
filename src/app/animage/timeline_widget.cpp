@@ -88,6 +88,18 @@ int TimelineWidget::rowTop(std::size_t row) const {
     return kRulerHeight + static_cast<int>(row) * kRowHeight;
 }
 
+// The middle of a cell, and a point in the ruler above it. For tests that press
+// where a hand would press rather than working the layout out for themselves --
+// which would agree perfectly with a card drawn somewhere nobody can reach.
+QPoint TimelineWidget::cellCentreForTesting(std::size_t row, std::size_t slot) const {
+    return {kGutterWidth + static_cast<int>(slot) * kCellWidth + kCellWidth / 2,
+            rowTop(row) + kRowHeight / 2};
+}
+
+QPoint TimelineWidget::rulerPointForTesting(std::size_t slot) const {
+    return {kGutterWidth + static_cast<int>(slot) * kCellWidth + kCellWidth / 2, kRulerHeight / 2};
+}
+
 bool TimelineWidget::rowAtY(int y, std::size_t* row) const {
     if (y < kRulerHeight || rowCount() == 0) return false;
     const std::size_t at = static_cast<std::size_t>((y - kRulerHeight) / kRowHeight);
@@ -373,6 +385,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     if (y < kRulerHeight) {
         if (isOnSceneEnd(x)) {
             dragging_end_ = true;
+            refreshCursor(x, y);
             // One command for the whole drag, as the exposure stretch does, so
             // dragging the boundary about undoes in a single step.
             doc_.beginCommand("Scene length");
@@ -401,6 +414,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         stretching_ = true;
         stretch_row_ = row;
         stretch_run_start_ = run_start;
+        refreshCursor(x, y);
         // One command for the whole drag: nested commands collapse, so every
         // slot change during the drag undoes in a single step.
         doc_.beginCommand("Change exposure");
@@ -457,7 +471,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 
     if (may_drag_ && !dragging_ && std::abs(x - press_x_) >= kDragThreshold) {
         dragging_ = true;
-        setCursor(Qt::ClosedHandCursor);
+        refreshCursor(x, y);
     }
     if (dragging_) {
         const Track* line = trackAt(drag_row_);
@@ -498,40 +512,49 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    if (!stretching_ && y < kRulerHeight) {
-        hovering_edge_ = false;
-        setCursor(isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::PointingHandCursor);
-        return;
-    }
-
     if (stretching_) {
         applyStretch(x);
         return;
     }
 
+    refreshCursor(x, y);
+}
+
+// One question, asked of everything that is true at once. The same shape as the
+// canvas's own -- see CanvasWidget::pointingAt -- and here for the same reason:
+// spread across the paths of a move handler, a cursor is decided by whichever
+// path happened to run rather than by what is under the pointer.
+Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
+    // A gesture under way outranks what is beneath the pointer.
+    if (dragging_) return Qt::ClosedHandCursor;
+    if (dragging_end_ || stretching_) return Qt::SplitHCursor;
+
+    // The ruler. It scrubs, and it used to say so with a pointing hand -- which
+    // is the first thing crossed on the way in from the canvas, so the timeline
+    // read as a hand everywhere before you had touched anything. A hand here
+    // means one thing now: this drawing can be picked up and moved.
+    if (y < kRulerHeight) return isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::ArrowCursor;
+
     std::size_t row = 0;
-    if (!rowAtY(y, &row) || x < kGutterWidth) {
-        hovering_edge_ = false;
-        setCursor(Qt::ArrowCursor);
-        return;
-    }
+    if (!rowAtY(y, &row) || x < kGutterWidth) return Qt::ArrowCursor;
 
-    if (isOnRunEdge(row, x, nullptr)) {
-        if (!hovering_edge_) {
-            hovering_edge_ = true;
-            setCursor(Qt::SplitHCursor);
-        }
-        return;
-    }
-    hovering_edge_ = false;
+    // The boundary between two runs, which stretches the exposure.
+    if (isOnRunEdge(row, x, nullptr)) return Qt::SplitHCursor;
 
+    // And only the numbered card can be picked up. Pressing a held frame
+    // selects it and nothing more -- there is no separate object there to drag
+    // -- so this is the same test mousePressEvent uses to decide whether a drag
+    // may start, and it has to stay the same test.
     const Track* line = trackAt(row);
     const std::size_t slot = slotAt(x);
     const bool on_card = line && slot < line->slots.size() && runAt(row, slot).first == slot;
-    setCursor(on_card ? Qt::OpenHandCursor : Qt::ArrowCursor);
+    return on_card ? Qt::OpenHandCursor : Qt::ArrowCursor;
 }
 
-void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
+void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
+    const int x = static_cast<int>(event->position().x());
+    const int y = static_cast<int>(event->position().y());
+
     if (dragging_) {
         const Track* line = trackAt(drag_row_);
         const TrackId dropped_in = line ? line->id : kNoId;
@@ -544,7 +567,9 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
         drag_image_ = kNoId;
         drop_index_ = -1;
         drop_overwrites_ = false;
-        setCursor(Qt::ArrowCursor);
+        // Whatever is under the pointer now, which after dropping a card on
+        // itself is that card: the hand opens rather than becoming an arrow.
+        refreshCursor(x, y);
 
         if (dropped_in != kNoId && drop >= 0) {
             // Two different questions, and neither answer can be derived from
@@ -569,6 +594,7 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
 
     if (dragging_end_) {
         dragging_end_ = false;
+        refreshCursor(x, y);
         doc_.endCommand();
         Q_EMIT documentChanged();
         return;
@@ -580,15 +606,9 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
     }
     if (!stretching_) return;
     stretching_ = false;
+    refreshCursor(x, y);
     doc_.endCommand();
     Q_EMIT documentChanged();
-}
-
-void TimelineWidget::leaveEvent(QEvent*) {
-    if (hovering_edge_) {
-        hovering_edge_ = false;
-        setCursor(Qt::ArrowCursor);
-    }
 }
 
 void TimelineWidget::applyStretch(int pointer_x) {

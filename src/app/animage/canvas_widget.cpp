@@ -132,6 +132,41 @@ QCursor buildRotateCursor() {
     return QCursor(pixmap, kDrawnCursorSize / 2, kDrawnCursorSize / 2);
 }
 
+// The eraser, which is the tool with nothing else on screen to announce it.
+//
+// A drawn glyph rather than a circle at the tool's radius, and the reason is
+// worth keeping: **anything drawn by the widget arrives a frame late.** The
+// pointer is moved by the hardware and a ring is painted by us, so a ring
+// following the pointer trails behind it at exactly the speed the hand is
+// moving. It was built that way first and it reads as lag, because it is lag.
+// What must sit under a moving pointer has to *be* the cursor.
+QCursor buildEraseCursor() {
+    QPixmap pixmap(kDrawnCursorSize, kDrawnCursorSize);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    // Drawn upright and turned, like the pipette: the working end lands at the
+    // bottom left, where a hand holding one would put it.
+    painter.translate(16.0, 16.0);
+    painter.rotate(45.0);
+
+    const QRectF block(-5.0, -7.5, 10.0, 15.5);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(255, 255, 255), 3.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawRoundedRect(block, 1.6, 1.6);
+    painter.setPen(QPen(QColor(20, 20, 24), 1.4));
+    painter.setBrush(QColor(255, 255, 255));
+    painter.drawRoundedRect(block, 1.6, 1.6);
+    // The band across it, which is the whole of what makes a white block read
+    // as a rubber and says which end of it does the rubbing.
+    painter.drawLine(QPointF(-5.0, 3.0), QPointF(5.0, 3.0));
+    painter.end();
+
+    // The middle of the working face, turned: (0, 8) about the middle.
+    return QCursor(pixmap, 10, 22);
+}
+
 // Alt picks the colour under the pointer, which is a press that does something
 // with nothing on screen to say so -- the same complaint as the transform box,
 // one modifier away. A pipette is what every program draws for it.
@@ -185,6 +220,11 @@ const QCursor& rotateCursor() {
     return *cursor;
 }
 
+const QCursor& eraseCursor() {
+    static const QCursor* cursor = new QCursor(buildEraseCursor());
+    return *cursor;
+}
+
 const QCursor& pickCursor() {
     static const QCursor* cursor = new QCursor(buildPickCursor());
     return *cursor;
@@ -193,12 +233,15 @@ const QCursor& pickCursor() {
 QCursor cursorFor(CanvasWidget::Pointing pointing) {
     using Pointing = CanvasWidget::Pointing;
     switch (pointing) {
-        // The brush, the eraser and the lasso all place a point, and a cross is
-        // what says where it will land. What separates the first two is the
-        // ring the canvas draws, not the cursor.
+        // The brush and the lasso both place a point, and a cross is what says
+        // where it will land.
         case Pointing::Draw:
-        case Pointing::Erase:
         case Pointing::Lasso: return QCursor(Qt::CrossCursor);
+        // The eraser puts its own glyph *in place of* the cross rather than
+        // beside it. A ring at its radius was the first version and it was
+        // wrong twice over: it trailed the pointer, and two marks under one
+        // hand read as two pointers rather than as one tool.
+        case Pointing::Erase: return eraseCursor();
         case Pointing::Pick: return pickCursor();
         case Pointing::PanReady: return QCursor(Qt::OpenHandCursor);
         case Pointing::Panning: return QCursor(Qt::ClosedHandCursor);
@@ -1949,7 +1992,6 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
 
 void CanvasWidget::updatePointerAt(const QPointF& widget_point) {
     pointer_at_ = widget_point;
-    pointer_inside_ = true;
     refreshPointer();
 }
 
@@ -1966,25 +2008,20 @@ void CanvasWidget::refreshPointer() {
     updateToolRing();
 }
 
-void CanvasWidget::leaveEvent(QEvent* event) {
-    pointer_inside_ = false;
-    updateToolRing();
-    QWidget::leaveEvent(event);
-}
-
 std::optional<CanvasWidget::ToolRing> CanvasWidget::toolRing() const {
+    // Only while the radius is being dragged, and there is a rule behind that
+    // rather than a preference. What the widget draws is a frame behind where
+    // the pointer is, so nothing drawn here can follow a pointer without
+    // trailing it -- which is why the eraser is a cursor and this is not.
+    //
+    // This one is anchored to where the drag began and holds still while the
+    // pointer moves away from it, so there is nothing to trail: the pointer is
+    // measuring a distance out from that point and the circle is what the
+    // distance means. A ring that travelled with it would also be the one thing
+    // on screen not holding still to be compared against.
+    if (!sizing_) return std::nullopt;
     const BrushSettings& tool = erasing_ ? eraser_settings_ : brush_settings_;
-
-    // While the radius is being dragged the ring stays where the gesture
-    // started rather than following the pointer away. The pointer is measuring
-    // a distance out from that point and the circle is what the distance means;
-    // a ring that travelled with it would be the one thing on screen not
-    // holding still to be compared against.
-    if (sizing_) return ToolRing{size_anchor_widget_, tool.radius * zoom_};
-
-    if (!pointer_inside_) return std::nullopt;
-    if (pointing_ != Pointing::Erase) return std::nullopt;
-    return ToolRing{pointer_at_, eraser_settings_.radius * zoom_};
+    return ToolRing{size_anchor_widget_, tool.radius * zoom_};
 }
 
 // What the ring covers on screen, or an empty rectangle when there is none.

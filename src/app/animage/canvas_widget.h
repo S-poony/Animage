@@ -246,7 +246,7 @@ public:
     // of them has no shape in Qt at all, which is what a drawn cursor is for.
     enum class Pointing {
         Draw,
-        Erase,     // the same cross, with the ring under it saying which tool
+        Erase,     // a rubber, drawn: the tool nothing else announces
         Pick,      // Alt: the eyedropper, drawn
         PanReady,  // Space held, nothing dragged yet
         Panning,
@@ -272,14 +272,17 @@ public:
     Pointing pointing() const { return pointing_.value_or(Pointing::Draw); }
     Pointing pointingAt(const QPointF& widget_point) const;
 
-    // The circle at the tool's radius, drawn under the pointer.
+    // The circle at the tool's radius, while a drag is setting that radius, at
+    // the point the drag started from. Nothing otherwise.
     //
-    // Drawn by the canvas rather than carried on the cursor, which is the whole
-    // reason one mechanism answers both the eraser (#4) and the resize gesture
-    // (#5): a cursor is a small bitmap and a brush here is up to 400 pixels
-    // across. It also puts the one piece of pointer feedback that *can* be
-    // photographed into the picture -- QWidget::grab() renders the widget and
-    // never the pointer, so nothing else about this is visible to a screenshot.
+    // Drawn by the canvas because no cursor could be: a brush here goes up to
+    // 400 pixels across and a cursor is a 32-pixel bitmap. The price of drawing
+    // it is that it arrives a frame after the pointer does, which is why this
+    // one is anchored and why the eraser is a cursor instead -- feedback that
+    // has to sit under a *moving* pointer cannot be painted by us.
+    //
+    // It is also the one piece of pointer feedback a screenshot can catch:
+    // QWidget::grab() renders the widget and never the pointer.
     struct ToolRing {
         QPointF at;
         double radius = 0.0;  // screen pixels
@@ -357,7 +360,6 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
-    void leaveEvent(QEvent* event) override;
 
 private:
     QPointF imageFromWidget(const QPointF& widget_point) const;
@@ -487,11 +489,10 @@ private:
     // clears it: the pen has been put down and its last attitude means nothing.
     bool hover_eraser_ = false;
 
-    // Where the pointer was last seen, and whether it is over the canvas at
-    // all. A decision made from what is under the pointer needs somewhere to
-    // read that from when what changed is the state and not the pointer.
+    // Where the pointer was last seen. A decision made from what is under the
+    // pointer needs somewhere to read that from when what changed is the state
+    // and not the pointer -- a tool being picked, a key going down.
     QPointF pointer_at_;
-    bool pointer_inside_ = false;
     // What the cursor on screen is saying. Empty before the first answer, which
     // is how one function can be both "decide" and "decide for the first time".
     std::optional<Pointing> pointing_;

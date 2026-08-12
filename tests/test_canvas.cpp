@@ -4441,38 +4441,28 @@ void theBoxCursorsTurnWithTheBox() {
 // screen said the eraser was -- including when it came up because the pen had
 // been turned over.
 void theEraserSaysSoBeforeYouDraw() {
-    TEST("the eraser shows its own size under the pointer");
+    TEST("the eraser puts its own glyph where the crosshair was");
     Fixture f;
     f.draw(200.0f, 200.0f, 600.0f, 400.0f);
 
     hover(&f.canvas, QPointF(400.0, 300.0));
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK(!f.canvas.toolRing().has_value());
-    const QImage with_the_brush = f.render();
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
 
+    // Picking the tool is enough: the pointer does not have to move for the
+    // canvas to say which tool is now under it.
     f.canvas.setEraser(true);
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Erase));
-    // At the tool's own radius, in screen pixels, which is what makes it a
-    // readout and not a decoration.
-    CHECK(f.canvas.toolRing().has_value());
-    CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * f.canvas.zoom(),
-               1e-6);
-    CHECK_NEAR(f.canvas.toolRing()->at.x(), 400.0, 1e-6);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
-    // And it is on the screen. This is the one part of pointer feedback a
-    // picture can catch, because the canvas draws it rather than the system:
-    // the same view with the eraser up is a different picture.
-    const QImage with_the_eraser = f.render();
-    CHECK(with_the_eraser != with_the_brush);
-
-    // Half the size at half the zoom, because it is the tool's size on the
-    // drawing that is being shown and not a fixed badge.
-    f.canvas.setZoom(0.5, QPointF(400.0, 300.0));
-    hover(&f.canvas, QPointF(400.0, 300.0));
-    CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * 0.5, 1e-6);
+    // In place of the crosshair and not beside it, and nothing is drawn on the
+    // canvas for it. A ring at the tool's radius was the first version: it
+    // trailed the pointer, because a widget paints a frame after the hardware
+    // has moved, and two marks under one hand read as two pointers.
+    CHECK(!f.canvas.toolRing().has_value());
 
     f.canvas.setEraser(false);
-    CHECK(!f.canvas.toolRing().has_value());
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
 }
 
 void turningThePenOverShowsTheEraser() {
@@ -4493,7 +4483,7 @@ void turningThePenOverShowsTheEraser() {
 
     CHECK(!f.canvas.isErasing());  // the tool button was never touched
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Erase));
-    CHECK(f.canvas.toolRing().has_value());
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
     // And a real mouse says the pen has been put down, whichever way up it was.
     // The window that tells a promoted mouse event from a real one has to pass
@@ -4501,7 +4491,7 @@ void turningThePenOverShowsTheEraser() {
     waitMs(300);
     hover(&f.canvas, QPointF(480.0, 300.0));
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK(!f.canvas.toolRing().has_value());
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
 }
 
 // Issue #5. The gesture already worked and the only feedback was a number in
@@ -4518,9 +4508,16 @@ void theResizeGestureShowsWhatItIsSetting() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::SizeHorCursor));
     CHECK(f.canvas.toolRing().has_value());
 
+    // And it is on the screen. The ring is the one piece of pointer feedback a
+    // picture can catch, because the canvas draws it rather than the system --
+    // which is also why it is anchored: what we draw arrives a frame late, and
+    // only something holding still can afford that.
+    const QImage while_sizing = f.render();
+
     sendMouseWith(&f.canvas, QEvent::MouseMove, anchor + QPointF(120.0, 40.0), Qt::NoButton,
                   Qt::RightButton, Qt::AltModifier);
     CHECK(f.canvas.brushSettings().radius > was);
+    CHECK(f.render() != while_sizing);
     CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * f.canvas.zoom(),
                1e-6);
     // Still where the drag started, not under the pointer. The pointer is
@@ -4540,6 +4537,58 @@ void theResizeGestureShowsWhatItIsSetting() {
     hover(&f.canvas, anchor);
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+}
+
+// An old bug, reported while the canvas's pointer was being built: the timeline
+// turned into a hand the moment the pointer entered it. The ruler is the first
+// thing crossed coming down from the canvas and it claimed a pointing hand, so
+// the hand that means "this drawing can be picked up" was the same hand as the
+// one that meant nothing in particular.
+void theTimelineIsAHandOnlyWhereADrawingCanBePickedUp() {
+    TEST("the timeline is a hand only over a drawing that can be moved");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    // One drawing held over four frames, so there is a card, a held frame and
+    // empty track beyond it -- three different answers in one row.
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 3);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    // Coming in from the canvas, the ruler is what the pointer crosses first.
+    // It scrubs; scrubbing is not picking anything up.
+    hover(timeline, timeline->rulerPointForTesting(1));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+
+    // The numbered card is the one thing here that can be moved.
+    hover(timeline, timeline->cellCentreForTesting(0, 0));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::OpenHandCursor));
+
+    // A held frame is the same drawing still showing. There is no second object
+    // there to drag, and pressing it selects the frame and nothing more -- the
+    // same test mousePressEvent makes before it allows a drag.
+    hover(timeline, timeline->cellCentreForTesting(0, 2));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+
+    // Past the end of the track, and in the strip of track names.
+    hover(timeline, timeline->cellCentreForTesting(0, 9));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+    hover(timeline, QPointF(20.0, timeline->cellCentreForTesting(0, 0).y()));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+
+    // The end of the run still stretches the exposure, which is a different
+    // gesture and says so.
+    const QPoint last = timeline->cellCentreForTesting(0, 3);
+    hover(timeline, QPointF(last.x() + 12.0, last.y()));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::SplitHCursor));
 }
 
 void theHandDoesNotGetStuckClosed() {
@@ -4590,6 +4639,7 @@ int main(int argc, char** argv) {
     turningThePenOverShowsTheEraser();
     theResizeGestureShowsWhatItIsSetting();
     theHandDoesNotGetStuckClosed();
+    theTimelineIsAHandOnlyWhereADrawingCanBePickedUp();
     thePenReachesTheTransformBar();
     theBoxHasSomethingToRotateBy();
     aPasteLandsWhereItWasCopiedFrom();

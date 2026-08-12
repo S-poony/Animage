@@ -25,7 +25,7 @@ the shape of the program. Those five maps are.
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
-| [What the pointer says](#what-the-pointer-says) | one place deciding it, and two things it draws |
+| [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
 | [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
@@ -1312,37 +1312,47 @@ without being told.
   deliberately *not* applied — a corner of a box squashed flat still points
   nearly sideways and still scales both axes, and a cursor describing the
   drawing's own axes would be describing the wrong thing.
-- *Drawn cursors* for the two operations the system has no glyph for: rotation,
-  and the eyedropper on Alt. The first bitmap cursors in the program. Light
-  under dark, the rule the transform box already follows, because a cursor
-  crosses paper and ink by definition.
-- *A ring the canvas draws itself* for the tool's radius. Not a cursor at all,
-  and it cannot be one: a brush here goes up to 400 pixels across and a cursor
-  is a 32-pixel bitmap. That is what answers #4 and #5 both.
+- *Drawn cursors* for the three things the system has no glyph for: rotation,
+  the eyedropper on Alt, and the eraser. The first bitmap cursors in the
+  program. Light under dark, the rule the transform box already follows, because
+  a cursor crosses paper and ink by definition.
+- *A ring the canvas draws itself*, at the tool's radius, while a drag is
+  setting that radius. Not a cursor and it could not be one: a brush here goes
+  up to 400 pixels across and a cursor is a 32-pixel bitmap.
 
-**The ring is what says the eraser is up**, including when it came up because
-the pen was turned over — which is read from hover now and not only from the
-press, since the whole complaint was that you found out by drawing. It is drawn
-for the eraser and not for the brush: the two tools then differ at rest, which
-is what #4 asked for, and a ring on both would have said only "a tool has a
-size". While Alt and the right button are resizing either of them, the ring is
-drawn for that too, at the anchor rather than under the pointer — the pointer is
-measuring a distance out from where the drag began and a ring that travelled
-with it would be the one thing on screen not holding still to be compared
-against.
+**What the widget draws arrives a frame after the pointer does, and that decides
+which mechanism a thing belongs to.** The eraser was built first as a ring at
+its radius following the pointer — which is what #4 and #5 sharing a mechanism
+was going to mean — and it was reported straight back: the ring lags, and it sat
+on top of the crosshair so one hand had two marks under it. Both faults are the
+same fault. The pointer is moved by the hardware and the ring is painted by us,
+one repaint later, so a ring chasing a pointer trails it at exactly the speed
+the hand is moving; and a mark that is not the cursor is a second pointer.
+
+So the rule is: **anything that must sit under a moving pointer has to be the
+cursor.** The eraser is a drawn rubber in place of the crosshair, which is also
+what makes it visible when the pen is turned over — read from hover now, not
+from the press, since the whole complaint was that you found out by drawing.
+The ring survives for the resize gesture alone, and it is fine there for exactly
+the reason it failed for the eraser: it is anchored to where the drag began and
+holds still while the pointer moves away from it. There is nothing to trail.
+It is also the right picture for that gesture — the pointer is measuring a
+distance out from that point and the circle is what the distance means.
 
 **A screenshot cannot check almost any of this**, which was known before
 starting and is why the tests assert `cursor().shape()` and the decision behind
 it after moving the pointer somewhere. `QWidget::grab()` renders the widget and
 never the pointer. Two consequences worth having written down:
 
-- The ring is the exception, and deliberately: because the canvas draws it, the
-  same view with the eraser up **is a different picture**, and there is a test
-  that says so. It is the only piece of pointer feedback a picture can catch.
+- The ring is the exception, and deliberately: because the canvas draws it, a
+  view taken during a resize **is a different picture** from the one before the
+  radius moved, and there is a test that says so. It is the only piece of
+  pointer feedback a picture can catch.
 - A drawn cursor can still be looked at, through `QCursor::pixmap()`. Nothing
-  asserts on it, but it is how the glyphs were checked, and both needed it: the
-  first eyedropper was a thumb and the second was a magnifying glass, which in a
-  program with a zoom on a held key is worse than no glyph at all.
+  asserts on it, but it is how the glyphs were checked and every one of them
+  needed it: the first eyedropper was a thumb, the second was a magnifying glass
+  — which in a program with a zoom on a held key is worse than no glyph at all —
+  and neither is a thing any assertion here would have noticed.
 
 **`beginNavigation` takes the event's modifiers now, not the machine's.** It
 read `QGuiApplication::keyboardModifiers()`, which answers for whatever the
@@ -1363,6 +1373,23 @@ only when the decision *changes*, not on every mouse move. `pointing_` is an
 optional for exactly that — empty until the first answer, which is what lets the
 constructor go through the same function instead of being a second place that
 knows what a cursor is.
+
+**And the timeline had the same disease, which is how it got found.** Reported
+while this was being built: the pointer turned into a hand the moment it entered
+the timeline. The cause is the shape rather than the pixel — the cursor was
+decided at five points along `mouseMoveEvent`, with a `hovering_edge_` flag
+remembering whether one of them had already fired, and the ruler claimed
+`PointingHandCursor` because scrubbing is a click. The ruler is the first thing
+the pointer crosses coming down from the canvas, so the whole strip read as a
+hand before you had reached anything, and the hand that means *this drawing can
+be picked up* was the same hand.
+
+`TimelineWidget::cursorAt` is now the one place, in the same order as the
+canvas's: a gesture under way, then the ruler, then what is under the pointer.
+The ruler is an arrow with a split-arrow on the end-of-shot grip, and a hand
+means one thing — a numbered card, which is exactly the test `mousePressEvent`
+makes before it will let a drag start. Those two must stay the same test. The
+flag is gone, and with it `leaveEvent`, which existed only to undo it.
 
 ## What is not what the plan asked for
 
