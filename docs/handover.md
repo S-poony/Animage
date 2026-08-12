@@ -25,6 +25,7 @@ the shape of the program. Those five maps are.
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
+| [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
@@ -1032,12 +1033,12 @@ aimed at and only resamples. This is the branch an axis mirror
 ([#24](https://github.com/S-poony/Animage/issues/24)) is one sign away from, and
 the reason it must not be built as a −1 scale through the resampler.
 
-**Minification box-filters the footprint, and it is load-bearing.** Bilinear
-reads four neighbours whatever the reduction, so a one-pixel line reduced four
-times falls through the holes — measured by forcing the bilinear path and
-watching the line vanish entirely rather than merely thin. The number of samples
-per axis is bounded by `boxSampleStride` and the compositor's own constant, so
-there is one decision about this in the program and not two.
+**A reduction needs a filter as wide as the reduction, and it is load-bearing.**
+A fixed four-neighbour read at a four-times reduction drops line art entirely —
+measured by forcing that path and watching a one-pixel line vanish rather than
+merely thin. What it argues for is a kernel scaled to the transform, which is not
+the same claim as "box-filter when reducing"; the second is what was built, and
+[what a commit does to a line](#what-a-commit-does-to-a-line) is what that cost.
 
 **The box is the ink's bounds and not the tiles'.** `paintedBounds` reads every
 pixel of every occupied tile; `drawnBounds` stops at the tile. Which one you want
@@ -1269,6 +1270,81 @@ the preview — the `QTransform` blit per frame is Qt's and this cannot see it �
 and nothing times a whole gesture end to end. If a transform ever feels heavy in
 a way these numbers do not explain, that is where to look first.
 
+Those numbers are the ones the box filter ran at. What replaced it costs more,
+and [the next section](#what-a-commit-does-to-a-line) is why that was worth
+paying.
+
+## What a commit does to a line
+
+Reported as "it looks good until you press Enter", and it was one line of the
+resampler choosing between two filters on the wrong quantity.
+
+`transformTiles` decided whether to interpolate or to average a block from the
+axis-aligned box of a destination pixel's footprint in the source, `(|a| + |b|) /
+2` per axis. For a rotation that is `(|cos θ| + |sin θ|) / 2`, which is **greater
+than half a pixel at every angle that is not a multiple of ninety degrees** —
+0.509 at one degree, 0.557 at seven, 0.707 at forty-five. So every rotation was
+treated as a reduction and sent through a filter meant for one.
+
+**The damage was not blur, which is what makes it worth writing down.** The block
+was unweighted and its bounds were rounded outward to whole pixels, so it had no
+sub-pixel response at all: whether it spanned two pixels or three flipped with
+the fractional coordinate, and where an edge fell *inside* a pixel was rounded
+away. Every anti-aliased rim the brush had laid down came back as stair-steps.
+A filter that had merely been too soft would have been reported years later, if
+at all; this was reported the first time somebody rotated something.
+
+It also could not weigh what it read. Ink came out 5% light at nine tenths and
+26% heavy at a quarter — the error changes sign because it is footprint rounding
+and not a bias, which is why no test of the "does it darken" shape would have
+found it.
+
+**What is there now is one tent, and no second filter.** Its support along each
+source axis is `max(1, 1/scale)` source pixels: one pixel when the drawing is
+magnified or only turned, which is bilinear exactly, and `1/scale` when it
+shrinks. The scale comes from the `Transform`'s own numbers and never from the
+mapped footprint — that substitution is the whole of the fix.
+
+It is separable along the *source* axes rather than the destination's because
+`matrixOf` builds `R · S`: the scale sits next to the source, so the prefilter a
+reduction wants is axis-aligned there, and a rotation, being rigid, wants none.
+That is a property of this program's `Transform` being a similarity and not a
+general affine, and it is the second thing that decision has paid for.
+
+`boxSampleStride` went with it, and its absence is not an oversight. The
+compositor caps its samples because a display cache is rebuilt on every pan; a
+commit is paid once and kept forever, and those are different decisions however
+much they look like one. A tent scaled to the reduction also reads about four
+samples per *source* pixel whatever the scale, so nothing here grows without
+bound the way a fixed footprint would.
+
+|  | box filter | tent |
+|---|---|---|
+| nudge 4K, whole pixels | 43 ms | 43 ms |
+| rotate 4K 7° | 84 ms | 100 ms |
+| scale 4K to 200% | 369 ms | 362 ms |
+| scale 4K to 25% | 7 ms | 59 ms |
+
+The exact path and magnification are untouched, because neither ever entered the
+branch — 150% looked identical before and after, and that is what said the branch
+and not the arithmetic was at fault. A rotation costs a fifth more. A four-times
+reduction costs eight times what it did, which is the honest price of reading the
+block it is averaging instead of three samples across it.
+
+**Two tests pin it, and both were watched going red against the old filter.**
+That mattered more than usual here: the first version of the rotation test
+asserted that the darkest pixel of the turned line was at least half opaque, and
+it **passed against the filter it was written to catch** — a block average leaves
+a third where it spans three pixels and a half where it spans two, the span
+alternates with the phase, and two hundred pixels of line contain plenty of both.
+What separates them is that the line is dark *all along*, so the assertion is on
+the palest column and not on the darkest pixel.
+
+**What found it was looking.** The numbers say a rotation loses about 45% of its
+edge contrast, which is a figure nobody would act on; the magnified screenshot of
+a committed arc beside a live one is unarguable. Both are in
+[looking at the interface](#looking-at-the-interface).
+
 ## What the pointer says
 
 Issues #27, #4 and #5, built together because all three wanted the same missing
@@ -1425,7 +1501,13 @@ PNG each.
 build** — the mis-encoded character, the "Add colour layer" button an edit
 silently failed to add, the two identical red swatches, the transform box drawn
 128 pixels clear of the drawing because it was made from tile-aligned bounds,
-the blue rim on every timeline row. What was missing was never the will to look
+the blue rim on every timeline row. The first thing it caught after it existed
+was not an interface bug at all: a magnified crop of a committed rotation beside
+a live one is what turned "the quality drops on Enter" from "a one-pixel line
+loses 45% of its edge contrast", which is a figure nobody could act on, into
+stair-steps nobody could argue with — and the shape of the picture is what said
+the defect was a lost sub-pixel phase rather than blur, which is a different fix. See [what a commit does to a
+line](#what-a-commit-does-to-a-line). What was missing was never the will to look
 but the scaffolding: building lasso and transform meant writing a throwaway
 screenshot function into `test_canvas.cpp`, building, looking and deleting it
 again, four times. A cycle that costs a build and leaves debris in a test file

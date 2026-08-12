@@ -110,10 +110,17 @@ PixelRect transformedBounds(const Matrix& m, const PixelRect& rect);
 //
 // Premultiplied pixels are what makes the filtering honest -- interpolating
 // straight alpha against colour produces a rim of the wrong colour, and there is
-// nothing here doing that. Minification box-filters the source footprint,
-// because bilinear at a four-times reduction drops line art entirely; the number
-// of samples per axis is bounded by the same reasoning, and the same constant,
-// as the compositor's own reduction.
+// nothing here doing that.
+//
+// One filter, whatever the transform: a tent whose support along each source
+// axis is max(1, 1/scale) source pixels. At a scale of one that is bilinear
+// however far the drawing has been turned, and below one it widens into a
+// weighted reduction -- because a fixed four-neighbour read at a four-times
+// reduction drops line art entirely, while averaging a block for a rotation,
+// which reduces nothing, rounds every edge to a whole pixel and hands back the
+// stair-steps this used to be reported for. The scale is read from `t` and never
+// from the mapped footprint, which is the distinction the version before it
+// missed. See "what a commit does to a line" in docs/handover.md.
 TileGrid transformTiles(const TileGrid& source, const Transform& t);
 
 }  // namespace animage

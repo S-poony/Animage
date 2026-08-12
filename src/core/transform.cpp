@@ -7,8 +7,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "compositor.h"
-
 namespace animage {
 namespace {
 
@@ -51,75 +49,105 @@ private:
     bool looked_ = false;
 };
 
-// Four neighbours, weighted. Correct on premultiplied pixels and only on
-// premultiplied pixels: interpolating a straight colour against its alpha is
-// what puts a rim of the wrong colour round everything soft.
-Rgba bilinear(GridReader& source, double x, double y) {
-    const double fx = std::floor(x);
-    const double fy = std::floor(y);
-    const int x0 = static_cast<int>(fx);
-    const int y0 = static_cast<int>(fy);
-    const float ax = static_cast<float>(x - fx);
-    const float ay = static_cast<float>(y - fy);
-
-    const Rgba p00 = source.at(x0, y0);
-    const Rgba p10 = source.at(x0 + 1, y0);
-    const Rgba p01 = source.at(x0, y0 + 1);
-    const Rgba p11 = source.at(x0 + 1, y0 + 1);
-
-    const float w00 = (1.0f - ax) * (1.0f - ay);
-    const float w10 = ax * (1.0f - ay);
-    const float w01 = (1.0f - ax) * ay;
-    const float w11 = ax * ay;
-
-    return {p00.r * w00 + p10.r * w10 + p01.r * w01 + p11.r * w11,
-            p00.g * w00 + p10.g * w10 + p01.g * w01 + p11.g * w11,
-            p00.b * w00 + p10.b * w10 + p01.b * w01 + p11.b * w11,
-            p00.a * w00 + p10.a * w10 + p01.a * w01 + p11.a * w11};
+// One kernel radius, falling from one to nothing.
+double tent(double x) {
+    x = std::abs(x);
+    return x < 1.0 ? 1.0 - x : 0.0;
 }
 
-// The average of the source pixels one destination pixel covers.
+// How wide the kernel is along one source axis, in source pixels: one when the
+// drawing is magnified or only turned, and 1/scale when it shrinks.
 //
-// Bilinear reads four neighbours whatever the reduction, so at four times down
-// it reads four pixels out of every sixteen and line art -- which is thin, and
-// mostly gaps -- simply falls through the holes. That is the same trap
-// ctgBarrier records from the other end, and the same lesson as the sample
-// grid: half a filter is worse than none.
+// Zero is the case worth naming. The interface cannot offer it -- a drag stops
+// at one per cent and the field's range starts there -- but this is `core`, and
+// a scale of zero has no inverse: `inverseOf` hands back the identity rather
+// than make every caller check. The kernel agrees with it and stays a pixel
+// wide, which is a decision and not a fallback, and it keeps a support of
+// infinity out of a cast that would be undefined.
+double kernelSpread(double scale) {
+    if (scale == 0.0) return 1.0;
+    return std::max(1.0, 1.0 / std::abs(scale));
+}
+
+// The one filter, and there is deliberately no second one.
 //
-// The footprint is read on a lattice rather than every pixel of it, bounded by
-// boxSampleStride, which is the compositor's own answer to "a hundred reads for
-// one pixel nobody can see a hundredth of" -- and its constant, so there is one
-// decision about this in the program and not two.
-// `x` and `y` are continuous source coordinates -- the middle of the footprint,
-// where pixel i covers [i, i+1). One pixel's worth of footprint about the middle
-// of pixel i is [i, i+1], which is pixel i and nothing else, which is what makes
-// this agree with the direct read at 1:1 rather than smearing across two.
-Rgba boxFilter(GridReader& source, double x, double y, double half_x, double half_y) {
-    const int x0 = static_cast<int>(std::floor(x - half_x));
-    const int x1 = static_cast<int>(std::ceil(x + half_x));
-    const int y0 = static_cast<int>(std::floor(y - half_y));
-    const int y1 = static_cast<int>(std::ceil(y + half_y));
+// A tent whose support along each *source* axis is `spread` source pixels:
+// max(1, 1/scale). At a scale of one that is a single pixel and the kernel is
+// exactly bilinear, whatever the rotation; below one it widens into a weighted
+// reduction. So magnifying, turning and shrinking come out of one expression
+// with no branch to be on the wrong side of -- which is what the version this
+// replaces got wrong. It chose between interpolating and averaging a block from
+// the axis-aligned box of a destination pixel's footprint, and that box exceeds
+// one pixel for *any* rotation, however small: a seven-degree turn averaged a
+// two- or three-pixel span, unweighted, so the sub-pixel position of every edge
+// was rounded to a whole pixel and the brush's anti-aliasing came back as
+// stair-steps. See "what a commit does to a line" in docs/handover.md.
+//
+// The support is axis-aligned in source space because `matrixOf` builds R * S:
+// the scale sits next to the source, so the prefilter a reduction needs is
+// separable along the source's own axes -- and a rotation, being rigid, needs
+// no prefilter at all and only wants interpolating.
+//
+// Correct on premultiplied pixels and only on premultiplied pixels:
+// interpolating a straight colour against its alpha is what puts a rim of the
+// wrong colour round everything soft.
+//
+// `x` and `y` are continuous source coordinates, where pixel i covers [i, i+1)
+// and is centred on i + 0.5. A worker holds one of these because the weight
+// buffers are scratch: they are cleared and refilled per pixel, and exist only
+// so that a reduction does not allocate once per pixel of it.
+class Kernel {
+public:
+    Kernel(double spread_x, double spread_y)
+        : spread_x_(spread_x), spread_y_(spread_y), over_x_(1.0 / spread_x),
+          over_y_(1.0 / spread_y) {}
 
-    const int stride_x = boxSampleStride(SampleStep::fromRatio(2.0 * half_x));
-    const int stride_y = boxSampleStride(SampleStep::fromRatio(2.0 * half_y));
+    Rgba at(GridReader& source, double x, double y) {
+        // Which source pixel *centres* the support covers, which is why these
+        // are half a pixel off the extent itself.
+        const int x0 = static_cast<int>(std::ceil(x - spread_x_ - 0.5));
+        const int x1 = static_cast<int>(std::floor(x + spread_x_ - 0.5));
+        const int y0 = static_cast<int>(std::ceil(y - spread_y_ - 0.5));
+        const int y1 = static_cast<int>(std::floor(y + spread_y_ - 0.5));
 
-    Rgba sum{};
-    int taken = 0;
-    for (int py = y0; py < y1; py += stride_y) {
-        for (int px = x0; px < x1; px += stride_x) {
-            const Rgba pixel = source.at(px, py);
-            sum.r += pixel.r;
-            sum.g += pixel.g;
-            sum.b += pixel.b;
-            sum.a += pixel.a;
-            ++taken;
+        across_.clear();
+        for (int sx = x0; sx <= x1; ++sx) across_.push_back(tent((sx + 0.5 - x) * over_x_));
+        down_.clear();
+        for (int sy = y0; sy <= y1; ++sy) down_.push_back(tent((sy + 0.5 - y) * over_y_));
+
+        double r = 0.0, g = 0.0, b = 0.0, a = 0.0, total = 0.0;
+        for (int sy = y0, j = 0; sy <= y1; ++sy, ++j) {
+            const double wy = down_[static_cast<std::size_t>(j)];
+            if (wy == 0.0) continue;
+            for (int sx = x0, i = 0; sx <= x1; ++sx, ++i) {
+                const double w = across_[static_cast<std::size_t>(i)] * wy;
+                if (w == 0.0) continue;
+                const Rgba pixel = source.at(sx, sy);
+                r += pixel.r * w;
+                g += pixel.g * w;
+                b += pixel.b * w;
+                a += pixel.a * w;
+                total += w;
+            }
         }
+        // Divided by the weight actually taken rather than by the one the
+        // kernel promises. They agree to the last bit almost everywhere -- a
+        // tent tiles to unity -- and where they do not, it is an edge of the
+        // support, which is exactly where dimming a rim would show.
+        if (total <= 0.0) return {};
+        const double share = 1.0 / total;
+        return {static_cast<float>(r * share), static_cast<float>(g * share),
+                static_cast<float>(b * share), static_cast<float>(a * share)};
     }
-    if (taken == 0) return bilinear(source, x - 0.5, y - 0.5);
 
-    const float share = 1.0f / static_cast<float>(taken);
-    return {sum.r * share, sum.g * share, sum.b * share, sum.a * share};
-}
+private:
+    double spread_x_;
+    double spread_y_;
+    double over_x_;
+    double over_y_;
+    std::vector<double> across_;
+    std::vector<double> down_;
+};
 
 }  // namespace
 
@@ -214,24 +242,25 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
     const Matrix forward = matrixOf(t);
     const Matrix backward = inverseOf(forward);
 
-    // A pixel at the edge of the destination reads a footprint that reaches
-    // past it, so the box has to be grown by one before anything is written or
-    // the outermost row comes out dimmer than the one inside it.
-    PixelRect destination = transformedBounds(forward, drawn);
-    destination = {destination.x - 1, destination.y - 1, destination.width + 2,
-                   destination.height + 2};
-    if (destination.isEmpty()) return {};
+    // Taken from the transform's own numbers and never from the mapped
+    // footprint, because a rotation's footprint is wider than a pixel while a
+    // rotation reduces nothing. That substitution is the whole of the fix.
+    const double spread_x = kernelSpread(t.scale_x);
+    const double spread_y = kernelSpread(t.scale_y);
 
-    // How far one destination pixel reaches back into the source, per axis. A
-    // step of one along the destination x maps to (a, c) in the source and one
-    // along y to (b, d), so the axis-aligned footprint is their sum -- which is
-    // the rotated parallelogram's bounding box, and is what makes a rotation
-    // read a slightly wider block than an axis-aligned reduction would.
-    const double half_x = (std::abs(backward.a) + std::abs(backward.b)) / 2.0;
-    const double half_y = (std::abs(backward.c) + std::abs(backward.d)) / 2.0;
-    // Magnifying, or turning: the block under a destination pixel is one source
-    // pixel or less, so there is nothing to average and everything to interpolate.
-    const bool reducing = half_x > 0.5 || half_y > 0.5;
+    // A pixel at the edge of the destination reads a footprint that reaches
+    // past it, so the box has to be grown before anything is written or the
+    // outermost row comes out dimmer than the one inside it. The kernel is one
+    // destination pixel wide by construction, so the reach is one either way
+    // when shrinking and `scale` when magnifying; the two are added rather than
+    // taken separately because a rotation mixes the axes.
+    PixelRect destination = transformedBounds(forward, drawn);
+    const int grow = static_cast<int>(std::ceil(std::max(1.0, std::abs(t.scale_x)) +
+                                                std::max(1.0, std::abs(t.scale_y)))) +
+                     1;
+    destination = {destination.x - grow, destination.y - grow, destination.width + 2 * grow,
+                   destination.height + 2 * grow};
+    if (destination.isEmpty()) return {};
 
     const TileCoord first = tileCoordFor(destination.x, destination.y);
     const TileCoord last =
@@ -251,7 +280,7 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
             // Grown by the filter's reach, or a tile whose source sits just
             // past its own edge loses the rim it should have had.
             PixelRect from = transformedBounds(backward, square);
-            const int reach = static_cast<int>(std::ceil(std::max(half_x, half_y))) + 1;
+            const int reach = static_cast<int>(std::ceil(std::max(spread_x, spread_y))) + 1;
             from = {from.x - reach, from.y - reach, from.width + 2 * reach,
                     from.height + 2 * reach};
 
@@ -280,6 +309,7 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
     // the way the compositor already splits. Nothing outlives the call.
     const auto fill = [&](std::size_t begin, std::size_t end) {
         GridReader reader(source);  // one per worker: it holds a cursor
+        Kernel kernel(spread_x, spread_y);  // and one of these: it holds scratch
         for (std::size_t i = begin; i < end; ++i) {
             const TileCoord coord = wanted[i];
             auto made = std::make_shared<Tile>();
@@ -296,15 +326,14 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
                     // The centre of the pixel, not its corner. Sampling the
                     // corner shifts the whole picture half a pixel up and left,
                     // which is invisible until it is compared with the original.
+                    // There is one convention now and nothing to keep in step
+                    // with it: the kernel weighs source pixels by where their
+                    // centres fall against this continuous coordinate. The two
+                    // filters it replaces disagreed about that half pixel, and
+                    // getting it wrong shifts the whole picture by half a pixel,
+                    // which nothing shows until it is put beside the original.
                     const Vec2 from = apply(backward, {px + 0.5, py + 0.5});
-                    // Bilinear works between pixel centres and the box works in
-                    // continuous coordinates, so one of them is offset by half
-                    // a pixel and the other is not. Getting that wrong shifts
-                    // the whole picture by half a pixel, which nothing shows
-                    // until it is put beside the original.
-                    const Rgba pixel = reducing
-                                           ? boxFilter(reader, from.x, from.y, half_x, half_y)
-                                           : bilinear(reader, from.x - 0.5, from.y - 0.5);
+                    const Rgba pixel = kernel.at(reader, from.x, from.y);
                     if (pixel.a == 0.0f && pixel.r == 0.0f && pixel.g == 0.0f &&
                         pixel.b == 0.0f) {
                         continue;

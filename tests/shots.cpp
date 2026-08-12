@@ -324,6 +324,27 @@ struct Stage {
     // that width to a screen has thrown away more than the magnification added.
     // Measured from the top-left corner out, so a dock keeps the title bar it
     // paints itself and no child sits in.
+    // A patch of the canvas, magnified, about a point in the canvas's own
+    // coordinates. What a picture of the whole window cannot show is a rim: the
+    // filter bug that "a turned drawing" is about was a two-pixel stair-step on
+    // an edge, invisible at 1400 px across and unarguable at eight times.
+    //
+    // It is here rather than in the situation that first needed it because
+    // getting it right took three builds -- the first crop missed the ink, the
+    // second had the transform box's own outline lying across the thing being
+    // judged, and the third did not follow the drawing when it was scaled. None
+    // of that is about transforms, and the next situation that wants a close-up
+    // should not pay for it again.
+    QImage closeUpAt(QPointF at, QSize area, int magnify = 8) const {
+        const QImage shot = canvas->grab().toImage();
+        const QRect patch(static_cast<int>(at.x()) - area.width() / 2,
+                          static_cast<int>(at.y()) - area.height() / 2, area.width(),
+                          area.height());
+        const QImage used = shot.copy(patch.intersected(shot.rect()));
+        return used.scaled(used.width() * magnify, used.height() * magnify,
+                           Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+
     static QImage closeUpOf(QWidget* widget, int magnify = 2) {
         if (!widget) return {};
         const QImage shot = widget->grab().toImage();
@@ -454,6 +475,39 @@ struct Situation {
     std::function<void(Stage&)> set_up;
 };
 
+// The same seven degrees at three moments -- before, live, and committed -- so
+// that what the preview shows and what the commit bakes can be put side by side.
+//
+// These three stay because the thing they watch regresses silently: the resample
+// is one expression, nothing on screen announces which filter ran, and the
+// version before this one damaged every rotation for months under a green suite.
+// The tests pin the arithmetic; only a picture says whether a rim still looks
+// like a rim. See "what a commit does to a line" in docs/handover.md.
+//
+// At 1:1, so nothing here is the display path's own reduction, and magnified,
+// because the whole question is what happened to two pixels.
+enum class Turned { Untouched, Live, Committed };
+
+void turnedArc(Stage& s, Turned when) {
+    s.canvas->setZoom(1.0, s.centre());
+    s.circle(s.centre(), 150.0);
+    if (when != Turned::Untouched) {
+        s.press(Id::Transform);
+        Transform turned = s.canvas->transformValues();
+        turned.rotation = 7.0;
+        s.canvas->setTransformValues(turned);
+        s.settle();
+    }
+    if (when == Turned::Committed) {
+        s.canvas->applyTransform();
+        s.settle();
+    }
+    // Off the top-left of the arc: inside the box, and clear of every edge and
+    // handle it draws. The overlay is the one thing that cannot be compared
+    // against a picture that has none.
+    s.picture = s.closeUpAt(s.centre() + QPointF(-75.0, -130.0), QSize(120, 30));
+}
+
 const std::vector<Situation>& situations() {
     static const std::vector<Situation> list = {
         {"the-window-as-it-opens",
@@ -475,6 +529,20 @@ const std::vector<Situation>& situations() {
              s.line(s.centre(), s.centre() + QPointF(9.0, 6.0), 3);
              s.press(Id::Transform);
          }},
+
+        {"a-turned-drawing-before-anything",
+         "the arc as drawn, magnified: what the other two are compared against",
+         [](Stage& s) { turnedArc(s, Turned::Untouched); }},
+
+        {"a-turned-drawing-while-it-is-live",
+         "the float, blitted by Qt through a QTransform: the arc turned seven degrees, "
+         "still live",
+         [](Stage& s) { turnedArc(s, Turned::Live); }},
+
+        {"a-turned-drawing-once-it-is-committed",
+         "the same seven degrees after Apply, through transformTiles -- the rim should "
+         "be the rim it was, and was stair-steps until the filter was one filter",
+         [](Stage& s) { turnedArc(s, Turned::Committed); }},
 
         {"a-lasso-round-part-of-a-drawing",
          "the loop, and what it says about what is caught: a selection here clips "

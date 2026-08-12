@@ -125,29 +125,37 @@ int main() {
         std::printf("    nudge, whole pixels  %8.2f ms   %s\n", timeTransform(ink, nudge, 5),
                     nudge.isWholePixelTranslation() ? "(exact path)" : "(RESAMPLED!)");
 
+        // What each of these says about the filter is worth reading twice. The
+        // labels here used to name the path taken, and they were wrong for
+        // years about the one that mattered: "rotate 7 degrees (bilinear)" was
+        // printed by a case that had never once been bilinear, because the
+        // branch treated every rotation as a reduction. A label is a claim, and
+        // an unchecked one hides exactly the bug it describes -- so these now
+        // say the kernel's width, which is a number the code computes rather
+        // than a name somebody wrote down.
         Transform half;
         half.dx = 3.5;
         half.dy = -2.0;
-        std::printf("    nudge, half a pixel  %8.2f ms   (bilinear)\n",
+        std::printf("    nudge, half a pixel  %8.2f ms   (kernel 1 px)\n",
                     timeTransform(ink, half, 5));
 
         Transform turn;
         turn.rotation = 7.0;
         turn.pivot_x = drawn.x + drawn.width / 2.0;
         turn.pivot_y = drawn.y + drawn.height / 2.0;
-        std::printf("    rotate 7 degrees     %8.2f ms   (bilinear)\n",
+        std::printf("    rotate 7 degrees     %8.2f ms   (kernel 1 px: a turn reduces nothing)\n",
                     timeTransform(ink, turn, 5));
 
         Transform grow = turn;
         grow.rotation = 0.0;
         grow.scale_x = grow.scale_y = 2.0;
-        std::printf("    scale 200%%           %8.2f ms   (bilinear, 4x the pixels)\n",
+        std::printf("    scale 200%%           %8.2f ms   (kernel 1 px, 4x the pixels)\n",
                     timeTransform(ink, grow, 5));
 
         Transform shrink = turn;
         shrink.rotation = 0.0;
         shrink.scale_x = shrink.scale_y = 0.25;
-        std::printf("    scale 25%%            %8.2f ms   (box filter)\n",
+        std::printf("    scale 25%%            %8.2f ms   (kernel 4 px)\n",
                     timeTransform(ink, shrink, 5));
 
         // The lift: rasterising the loop and splitting the drawing along it,

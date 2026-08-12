@@ -254,6 +254,18 @@ looking at while dragging. That is the same class of honesty as the PNG and the
 EXR not containing the same numbers, and it should be documented rather than
 chased.
 
+> **Correction: "slightly" is doing work here, and it hid a bug for a while.**
+> The paragraph is right that the two cannot agree and right that chasing exact
+> agreement is not worth it. What it does not say is which of them should be
+> worse, and that turns out to be the whole question: Qt's blit interpolates, so
+> for four months the preview was the *better* picture and the commit was where
+> the drawing got damaged. A disagreement that always runs one way is a defect
+> wearing this paragraph as a disguise.
+>
+> Both now interpolate at a scale of one, so what is left is genuinely small and
+> has no direction. If they diverge again, the question to ask first is not how
+> far apart they are but which one is worse.
+
 ## What a commit costs, and why looking must never commit
 
 A commit resamples. Rotating five degrees ten times is visibly softer than
@@ -278,6 +290,30 @@ line art entirely: the same trap `ctgBarrier` records from the other end, and th
 same lesson as the sample grid — half a filter is worse than none. Box-filter the
 source footprint when scaling down, reusing the `SampleStep` reasoning rather
 than inventing a second one.
+
+> **Correction, from the report that the quality drops on Enter.** The first
+> sentence is right and the last one is wrong twice over, and the two are easy to
+> read as one claim. What a four-times reduction needs is a kernel *as wide as
+> the reduction*; "box-filter the footprint when scaling down" is a different
+> statement, and it was the one that got built.
+>
+> It cost two things. **The footprint is not the reduction.** Whether to reduce
+> was decided from the mapped footprint's axis-aligned box, which is wider than a
+> pixel for *any* rotation — so every turn, down to one degree, was filtered as
+> though it were a minification, and a turn minifies nothing. And **an unweighted
+> box has no sub-pixel response**: its bounds round outward to whole pixels, so
+> the position of an edge within a pixel is thrown away and the brush's
+> anti-aliasing comes back as stair-steps. That is what "the quality drops the
+> moment you press Enter" was.
+>
+> Reusing `SampleStep` was the third mistake and the most reasonable-sounding.
+> The compositor caps its samples because a display cache is rebuilt on every
+> pan; a commit is paid once and kept. Wanting one decision in the program rather
+> than two is right whenever it is one decision, and this was two.
+>
+> What is there now is a single tent of support `max(1, 1/scale)` source pixels,
+> which is bilinear at a scale of one whatever the rotation and a weighted
+> reduction below it. See "what a commit does to a line" in `handover.md`.
 
 Write `bench_transform` before optimising any of it. This repository's most
 repeated lesson is that a benchmark decides where you will look next.
@@ -429,6 +465,21 @@ code makes and a decision can be asserted exactly.
 >
 > Both were verified by breaking the code and watching the test go red, which is
 > the only way to know a test is testing anything.
+>
+> **And two more, from the quality report.** *A thin line stays dark when it is
+> only turned*, and *a reduction writes the ink it read, scaled*. Neither is
+> covered by the reduction test above, which is why a filter that ruined every
+> rotation passed a green suite for as long as it did: one test of the filter at
+> one scale says nothing about the case it is not the filter for.
+>
+> The first of them is also the sharpest lesson here about how to write one of
+> these. It began as "the darkest pixel of the turned line is at least half
+> opaque", which **passed against the very filter it was written to catch** — a
+> block average leaves a third of the ink where it spans three pixels and a half
+> where it spans two, and a two-hundred-pixel line contains both. Breaking the
+> code is what said so. The assertion that separates them is on the *palest
+> column*, because what a good filter guarantees is that the line is dark all
+> along it rather than dark somewhere.
 >
 > One item on the list above has no subject: **"a whole-track pass touches each
 > distinct drawing once"**. Nothing here walks a track — a transform acts on one

@@ -257,6 +257,134 @@ void reducingKeepsAThinLine() {
     CHECK_EQ(lit, last - first + 1);
 }
 
+// The other end of the same trap, and the one that shipped. A filter chosen
+// from the mapped footprint rather than from the scale treats every rotation as
+// a reduction -- the footprint's axis-aligned box is (|cos| + |sin|) / 2 wide,
+// which exceeds half a pixel at any angle at all -- and averaging a block for a
+// transform that reduces nothing is what turned an anti-aliased rim into
+// stair-steps.
+//
+// Asserted on the ink rather than on the path, because "which filter ran" is
+// not what was wrong with it: a one-pixel line has to survive being turned.
+void turningKeepsALineDark() {
+    TEST("a thin line stays dark when it is only turned");
+
+    const TileGrid source = gridWith({50, 120, 200, 1}, kInk);
+
+    for (const double angle : {1.0, 7.0, 45.0}) {
+        Transform t;
+        t.rotation = angle;
+        t.pivot_x = 150.0;
+        t.pivot_y = 120.0;
+
+        const TileGrid moved = transformTiles(source, t);
+        const PixelRect bounds = drawnBounds(moved);
+        CHECK(!bounds.isEmpty());
+
+        // The darkest pixel of *every* column, and not the darkest pixel there
+        // is. A turn spreads a one-pixel line across two rows with the weight
+        // of one between them, so whichever of the two is darker keeps at least
+        // half -- everywhere along it, at every sub-pixel phase.
+        //
+        // Asserting the maximum over the whole line instead is what the first
+        // version of this test did, and it passed against the filter it was
+        // written to catch: a block average leaves a third where it spans three
+        // pixels and a half where it spans two, the span alternates with the
+        // phase, and 200 pixels of line contain plenty of both. What separates
+        // the two is that one of them is dark *all along*, which is the same
+        // property "a thin line survives a four-times reduction" is about --
+        // that the line has not come back dashed.
+        // Between the first and last lit column and not across the bounds,
+        // which are tile-aligned and therefore mostly paper -- and inside them
+        // by three, because the two ends of a line are where it is allowed to
+        // be pale. Getting this wrong measures the end caps and fails whatever
+        // the filter did.
+        const auto darkestIn = [&](int x) {
+            float darkest = 0.0f;
+            for (int y = bounds.y; y < bounds.y + bounds.height; ++y) {
+                darkest = std::max(darkest, moved.pixel(x, y).a);
+            }
+            return darkest;
+        };
+
+        int first = bounds.x;
+        while (first < bounds.x + bounds.width && darkestIn(first) == 0.0f) ++first;
+        int last = bounds.x + bounds.width - 1;
+        while (last > first && darkestIn(last) == 0.0f) --last;
+
+        double mass = 0.0;
+        float palest = 1.0f;
+        for (int x = first + 3; x <= last - 3; ++x) palest = std::min(palest, darkestIn(x));
+        for (int y = bounds.y; y < bounds.y + bounds.height; ++y) {
+            for (int x = bounds.x; x < bounds.x + bounds.width; ++x) mass += moved.pixel(x, y).a;
+        }
+        CHECK(palest >= 0.5f);
+        // And it is the same line: a rotation is rigid, so none of the ink is
+        // spent widening it.
+        CHECK(mass > 190.0);
+        CHECK(mass < 215.0);
+    }
+}
+
+// A reduction has to weigh the source pixels it covers, not count them. The
+// version this replaces read whole pixels between bounds rounded outward, so
+// the block was two or three wide depending on where the destination pixel fell
+// -- which wrote 26% too much ink at a quarter and 5% too little at nine
+// tenths. The error changed sign because it was rounding rather than bias,
+// which is why neither a "does it darken" nor a "does it lighten" test would
+// have caught it.
+void reducingKeepsTheInkItRead() {
+    TEST("a reduction writes the ink it read, scaled");
+
+    const TileGrid source = gridWith({50, 120, 200, 1}, kInk);
+    double before = 0.0;
+    const PixelRect drawn = drawnBounds(source);
+    for (int y = drawn.y; y < drawn.y + drawn.height; ++y) {
+        for (int x = drawn.x; x < drawn.x + drawn.width; ++x) before += source.pixel(x, y).a;
+    }
+
+    for (const double scale : {0.9, 0.5, 0.25}) {
+        Transform t;
+        t.scale_x = t.scale_y = scale;
+        t.pivot_x = 150.0;
+        t.pivot_y = 120.0;
+
+        const TileGrid moved = transformTiles(source, t);
+        double after = 0.0;
+        const PixelRect bounds = drawnBounds(moved);
+        for (int y = bounds.y; y < bounds.y + bounds.height; ++y) {
+            for (int x = bounds.x; x < bounds.x + bounds.width; ++x) after += moved.pixel(x, y).a;
+        }
+
+        // Within a twentieth, which is loose enough for the pixel at each end
+        // that the kernel reaches past and tight enough to fail the counting
+        // version at every one of these three scales.
+        const double wanted = before * scale * scale;
+        CHECK(after > wanted * 0.95);
+        CHECK(after < wanted * 1.05);
+    }
+}
+
+// The interface cannot reach this -- a drag stops at one per cent and the
+// field's range starts there -- but the resampler is in `core` and takes a
+// Transform from anybody. A scale of zero has no inverse, so the kernel would
+// ask for a support of one over nothing; the tests run under UBSan, which is
+// what makes this two lines rather than a paragraph of argument.
+void aScaleOfZeroIsSurvivable() {
+    TEST("a scale of zero neither crashes nor reaches for infinity");
+
+    const TileGrid source = gridWith({40, 40, 30, 20}, kInk);
+    Transform t;
+    t.scale_x = 0.0;
+    t.scale_y = 0.0;
+    t.pivot_x = 55.0;
+    t.pivot_y = 50.0;
+
+    const TileGrid flattened = transformTiles(source, t);
+    // Whatever it hands back, it hands back: the claim is that asking is safe.
+    CHECK(flattened.tileCount() < 1000u);
+}
+
 void transformedBoundsCoversEveryCorner() {
     TEST("transformed bounds maps all four corners");
 
@@ -329,6 +457,9 @@ int main() {
     repivotMovesNothing();
     aHalfTurnPutsTheShapeOnTheOtherSide();
     reducingKeepsAThinLine();
+    turningKeepsALineDark();
+    reducingKeepsTheInkItRead();
+    aScaleOfZeroIsSurvivable();
     transformedBoundsCoversEveryCorner();
     committingATransformUndoesInOneStep();
     return testing::summarise("transform");
