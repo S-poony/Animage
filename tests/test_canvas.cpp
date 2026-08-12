@@ -3968,6 +3968,119 @@ void theTransformKeysFollowTheirBindings() {
     fixture.window.adoptShortcuts(shortcuts::Bindings());
 }
 
+// --- flipping (#24) -------------------------------------------------------
+
+QPushButton* buttonCalled(const MainWindow& window, const QString& text) {
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == text) return button;
+    }
+    return nullptr;
+}
+
+void theFlipButtonsMirrorTheDrawing() {
+    TEST("Flip X mirrors the drawing exactly, and flipping back writes nothing");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+
+    QPushButton* flip_x = buttonCalled(fixture.window, QStringLiteral("Flip X"));
+    CHECK(flip_x != nullptr);
+    CHECK(buttonCalled(fixture.window, QStringLiteral("Flip Y")) != nullptr);
+    if (!flip_x) return;
+    // The bar exists only while a transform does, and so do these.
+    CHECK(!flip_x->isVisible());
+
+    const animage::Cel* cel = fixture.ink();
+    CHECK(cel != nullptr);
+    if (!cel) return;
+    const animage::TileGrid before = cel->tiles();
+    const animage::PixelRect box = animage::paintedBounds(before);
+    CHECK(!box.isEmpty());
+    const std::size_t depth = fixture.doc().undoDepth();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(flip_x->isVisible());
+    CHECK(!flip_x->isChecked());
+
+    flip_x->click();
+    QCoreApplication::processEvents();
+    // The button says which way round the drawing is, so it stays down.
+    CHECK(flip_x->isChecked());
+    CHECK(fixture.canvas->transformValues().flip_x);
+
+    fixture.canvas->applyTransform();
+    QCoreApplication::processEvents();
+    CHECK_EQ(fixture.doc().undoDepth(), depth + 1);
+
+    const animage::Cel* after = fixture.ink();
+    CHECK(after != nullptr);
+    if (!after) return;
+
+    // Bit-exact and mirrored, which is the whole of issue #24: a flip built as a
+    // scale of -1 through the resampler would come back soft and half a pixel
+    // out, and nothing on screen would say so.
+    const int mirror_x = 2 * box.x + box.width - 1;
+    std::size_t differing = 0;
+    for (int y = box.y; y < box.y + box.height; ++y) {
+        for (int x = box.x; x < box.x + box.width; ++x) {
+            if (!(before.pixel(x, y) == after->tiles().pixel(mirror_x - x, y))) ++differing;
+        }
+    }
+    CHECK_EQ(differing, static_cast<std::size_t>(0));
+
+    // And a flip and a flip back is not an edit. It is the same rule that stops
+    // picking a drawing up and putting it down costing a resample -- which
+    // matters more here, because a flip is one click away from being undone by
+    // another one.
+    const std::size_t settled = fixture.doc().undoDepth();
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    flip_x->click();
+    flip_x->click();
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformValues().flip_x);
+    CHECK(!flip_x->isChecked());
+    fixture.canvas->applyTransform();
+    QCoreApplication::processEvents();
+    CHECK_EQ(fixture.doc().undoDepth(), settled);
+}
+
+// The handle maths has to carry the flip's sign, and this is what says so.
+//
+// A mirrored box has its top-left handle over on the right, so a drag measured
+// against the unmirrored arm asks for a negative factor -- and the clamp that
+// keeps scale positive turns that into a collapse to one per cent. It looks like
+// the box imploding the moment you touch it after flipping.
+void aFlippedBoxStillScalesTheRightWay() {
+    TEST("a corner drag on a flipped box grows it rather than collapsing it");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    animage::Transform flipped = fixture.canvas->transformValues();
+    flipped.flip_x = true;
+    fixture.canvas->setTransformValues(flipped);
+    QCoreApplication::processEvents();
+
+    const QPointF centre = fixture.canvas->transformCentreForTesting();
+    const QPointF corner = fixture.canvas->transformHandlesForTesting()[0];
+    // Straight out along the arm it is already on: whatever the flip did to
+    // where that handle is drawn, dragging away from the middle is bigger.
+    drawWithMouse(fixture.canvas, corner, centre + (corner - centre) * 1.5, 6);
+
+    const animage::Transform grown = fixture.canvas->transformValues();
+    CHECK(grown.scale_x > 1.2);
+    CHECK(grown.scale_y > 1.2);
+    // And the mirror is still a mirror: a drag scales, it does not unflip.
+    CHECK(grown.flip_x);
+
+    fixture.canvas->cancelTransform();
+}
+
 void theTransformToolTakesTheWholeDrawing() {
     TEST("the transform tool boxes the whole drawing with nothing selected");
     WindowWithInk fixture;
@@ -5240,6 +5353,8 @@ int main(int argc, char** argv) {
     theTooltipsFollowTheKeys();
     theShortcutsPanelWillNotApplyACollision();
     theTransformKeysFollowTheirBindings();
+    theFlipButtonsMirrorTheDrawing();
+    aFlippedBoxStillScalesTheRightWay();
     theTransformToolTakesTheWholeDrawing();
     nudgingMovesTheDrawingExactly();
     cancellingLeavesTheUndoDepthWhereItWas();

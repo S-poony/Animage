@@ -171,6 +171,12 @@ and they must never soften a line. `translated()` in `tile.h` already does
 exactly this. Axis mirrors are the same branch with a sign, which is why #24 is
 cheap later and why it must not be built on the general path.
 
+> **Built, and it was that cheap.** `Transform::isAxisMirror` sits beside
+> `isWholePixelTranslation` and `mirrorTiles` beside `translated`. The one thing
+> the note did not anticipate: the flip has to be *excluded* from
+> `isWholePixelTranslation`, or a mirror satisfies every other clause in it and
+> the commit hands back a drawing nobody has flipped.
+
 **The box for "no selection" is the ink's bounds, not the canvas.** Which means
 it comes from `celBounds` — the rectangle that famously goes on describing marks
 you erased, because erasing empties a tile without releasing it. So freeing
@@ -449,7 +455,9 @@ Then, separately and not here: transforming a layer across time
 ([#25](https://github.com/S-poony/Animage/issues/25)), flipping
 ([#24](https://github.com/S-poony/Animage/issues/24)), and capping the undo
 history ([#23](https://github.com/S-poony/Animage/issues/23)) — which this
-feature makes more visible but did not cause.
+feature makes more visible but did not cause. The second and third of those are
+built; see "moving a drawing" and "what the history is allowed to cost" in
+[handover.md](handover.md).
 
 ## What to test
 

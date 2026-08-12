@@ -223,6 +223,15 @@ private:
     void onTransformEnded();
     void syncTransformFields();
     void onTransformFieldEdited();
+
+    // Which way a flip mirrors. Named rather than a bool, because "flip
+    // horizontal" is ambiguous in exactly the way that matters here: what is
+    // named is the *axis*, and X mirrors left to right.
+    enum class FlipAxis { X, Y };
+    // Issue #24. A state of the live transform and not an operation on the
+    // drawing: pressing it twice is where you started, and nothing is written
+    // until the transform is applied like any other.
+    void flipTransform(FlipAxis axis);
     // What the Transform tool does, including saying why when it will not.
     void chooseTransformTool();
 
@@ -332,6 +341,10 @@ private:
     QDoubleSpinBox* transform_rotation_ = nullptr;
     QDoubleSpinBox* transform_scale_x_ = nullptr;
     QDoubleSpinBox* transform_scale_y_ = nullptr;
+    // Checkable, because a flip is a state of the transform rather than a thing
+    // that happens: the button shows which way round the drawing currently is.
+    QPushButton* transform_flip_x_ = nullptr;
+    QPushButton* transform_flip_y_ = nullptr;
     bool updating_transform_fields_ = false;
 
     // Every action the shortcut table names, by id. See setShortcutMode.

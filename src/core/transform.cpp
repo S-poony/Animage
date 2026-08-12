@@ -149,6 +149,60 @@ private:
     std::vector<double> down_;
 };
 
+// The exact mirror, which is the same kind of thing translated() is and exists
+// for the same reason: issue #24 asks for flipping, and a flip built as a scale
+// of -1 through the resampler carries a half-pixel phase error and hands back a
+// blurred mirror that nothing anywhere complains about.
+//
+// `dest = sign * source + shift` on each axis, with sign either +1 or -1, so
+// this is a permutation of pixels and no arithmetic on any of them. Raw half
+// copies rather than pixel() and setPixel(), which would be a half -> float ->
+// half round trip per pixel on the one path whose whole claim is that it does
+// not touch the numbers -- the same mistake translated() was measured making.
+TileGrid mirrorTiles(const TileGrid& source, int sign_x, int shift_x, int sign_y, int shift_y) {
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+
+    for (const auto& [coord, tile] : source.tiles()) {
+        if (!tile) continue;
+
+        for (int ly = 0; ly < kTileSize; ++ly) {
+            const int to_y = sign_y * (coord.y * kTileSize + ly) + shift_y;
+
+            // Held across the row. A run of 128 destination pixels crosses at
+            // most one tile boundary, so the map is asked once or twice a row
+            // rather than once a pixel -- and a reference into an unordered_map
+            // survives the insertions that follow it, which is what makes
+            // holding one safe.
+            std::shared_ptr<Tile>* held = nullptr;
+            TileCoord held_at{};
+            bool looked = false;
+
+            for (int lx = 0; lx < kTileSize; ++lx) {
+                const int to_x = sign_x * (coord.x * kTileSize + lx) + shift_x;
+                const TileCoord where = tileCoordFor(to_x, to_y);
+                if (!looked || !(where == held_at)) {
+                    held = &built[where];
+                    if (!*held) *held = std::make_shared<Tile>();
+                    held_at = where;
+                    looked = true;
+                }
+
+                const std::size_t from = (static_cast<std::size_t>(ly) * kTileSize + lx) * 4;
+                const std::size_t into =
+                    (static_cast<std::size_t>(tileLocal(to_y)) * kTileSize + tileLocal(to_x)) * 4;
+                std::copy_n(tile->rgba.begin() + static_cast<std::ptrdiff_t>(from), 4,
+                            (*held)->rgba.begin() + static_cast<std::ptrdiff_t>(into));
+            }
+        }
+    }
+
+    TileGrid out;
+    for (auto& [coord, tile] : built) {
+        if (tile && !tile->isFullyTransparent()) out.set(coord, std::move(tile));
+    }
+    return out;
+}
+
 }  // namespace
 
 Matrix matrixOf(const Transform& t) {
@@ -156,11 +210,19 @@ Matrix matrixOf(const Transform& t) {
     const double cosine = std::cos(radians);
     const double sine = std::sin(radians);
 
+    // The mirror is a sign on the scale, applied here and nowhere else. Every
+    // other piece of this file reads the matrix, so this one multiplication is
+    // the whole of what a flip means to the arithmetic -- including the
+    // resampler, which handles a negative determinant already because the
+    // kernel takes the scale's magnitude.
+    const double scale_x = t.scale_x * t.signX();
+    const double scale_y = t.scale_y * t.signY();
+
     Matrix m;
-    m.a = cosine * t.scale_x;
-    m.b = -sine * t.scale_y;
-    m.c = sine * t.scale_x;
-    m.d = cosine * t.scale_y;
+    m.a = cosine * scale_x;
+    m.b = -sine * scale_y;
+    m.c = sine * scale_x;
+    m.d = cosine * scale_y;
     // Rotate and scale about the pivot, then move: the pivot maps to itself
     // plus the translation, which is what makes dragging a corner handle leave
     // the opposite corner exactly where it was.
@@ -234,6 +296,20 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
     // transform free as well as lossless.
     if (t.isWholePixelTranslation()) {
         return translated(source, static_cast<int>(t.dx), static_cast<int>(t.dy));
+    }
+
+    // The other exact path, and the reason a flip is a sign rather than a scale
+    // of -1: this is a permutation like the one above. A destination pixel
+    // centre comes from source centre 2*pivot + d - centre, so the source pixel
+    // is (2*pivot + d - 1) - destination -- and both constants are whole
+    // numbers exactly when isAxisMirror says they are.
+    if (t.isAxisMirror()) {
+        const auto shiftOn = [](bool flip, double pivot, double delta) {
+            return flip ? static_cast<int>(std::lround(2.0 * pivot + delta)) - 1
+                        : static_cast<int>(std::lround(delta));
+        };
+        return mirrorTiles(source, t.flip_x ? -1 : 1, shiftOn(t.flip_x, t.pivot_x, t.dx),
+                           t.flip_y ? -1 : 1, shiftOn(t.flip_y, t.pivot_y, t.dy));
     }
 
     const PixelRect drawn = drawnBounds(source);

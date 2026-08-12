@@ -177,6 +177,15 @@ cancelling leaves no undo step; moving by a whole number of pixels does not
 resample, so registration nudges never soften a line. Colour layers are excluded:
 a mark there is a label rather than paint, and interpolating one invents colours.
 
+**Flip X and Flip Y** are on the same bar, and they mirror about the middle of the
+box. A flip is a state of the transform rather than something that happens to the
+drawing — press it twice and you are exactly where you started — and it is exact:
+mirroring moves the pixels without resampling them, so a flipped drawing is the
+drawing, to the bit. That is why a handle dragged past its anchor squashes to
+nothing instead of flipping: a mirror made out of a −1 scale would go through the
+resampler, and a blurred mirror half a pixel out of place is not something
+anything on screen would tell you about.
+
 **A paste is a transform that came from the clipboard.** It lands at the
 coordinates it was copied from — you paste to re-register something, not to drop
 it wherever the view happens to be — and it arrives as a float you can place

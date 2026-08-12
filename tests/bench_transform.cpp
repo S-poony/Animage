@@ -125,6 +125,17 @@ int main() {
         std::printf("    nudge, whole pixels  %8.2f ms   %s\n", timeTransform(ink, nudge, 5),
                     nudge.isWholePixelTranslation() ? "(exact path)" : "(RESAMPLED!)");
 
+        // The other exact path (#24). It is here beside the nudge rather than
+        // among the resampled cases because that is the claim being made about
+        // it: a mirror is a permutation of pixels, so it should cost what moving
+        // them costs and not what filtering them costs.
+        Transform mirror;
+        mirror.flip_x = true;
+        mirror.pivot_x = drawn.x + drawn.width / 2.0;
+        mirror.pivot_y = drawn.y + drawn.height / 2.0;
+        std::printf("    flip X               %8.2f ms   %s\n", timeTransform(ink, mirror, 5),
+                    mirror.isAxisMirror() ? "(exact path)" : "(RESAMPLED!)");
+
         // What each of these says about the filter is worth reading twice. The
         // labels here used to name the path taken, and they were wrong for
         // years about the one that mattered: "rotate 7 degrees (bilinear)" was

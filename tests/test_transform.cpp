@@ -118,6 +118,185 @@ void aFractionOfAPixelIsNotAWholeOne() {
     CHECK(!scaled.isWholePixelTranslation());
 }
 
+// --- flipping (#24) -------------------------------------------------------
+//
+// The claim under all of these is that a mirror is the translation branch with a
+// sign and not a scale of -1 through the resampler: a bilinear read at -1 is
+// exact nowhere, carries a half-pixel phase error, and gives back a blurred
+// mirror that nothing complains about. So the predicate is asserted as directly
+// as isWholePixelTranslation is, and the bits are asserted separately.
+
+// The mark, read back mirrored: pixel (x, y) of the source has to be pixel
+// (mirror_x - x, y) of the result, bit for bit.
+bool sameBitsMirrored(const TileGrid& source, const TileGrid& moved, const PixelRect& over,
+                      bool flip_x, bool flip_y, int mirror_x, int mirror_y) {
+    for (int y = over.y; y < over.y + over.height; ++y) {
+        for (int x = over.x; x < over.x + over.width; ++x) {
+            const int to_x = flip_x ? mirror_x - x : x;
+            const int to_y = flip_y ? mirror_y - y : y;
+            if (!(source.pixel(x, y) == moved.pixel(to_x, to_y))) return false;
+        }
+    }
+    return true;
+}
+
+void aFlipIsNotATranslation() {
+    TEST("what counts as an axis mirror, and what a flip is not");
+
+    const PixelRect area{40, 40, 30, 20};
+    Transform t;
+    t.pivot_x = area.x + area.width / 2.0;
+    t.pivot_y = area.y + area.height / 2.0;
+    t.flip_x = true;
+
+    CHECK(t.isAxisMirror());
+    // The one that would be a silent wrong answer rather than a slow one: every
+    // other clause of isWholePixelTranslation is satisfied by a mirror, so
+    // without the flip in it the commit would take the translation branch and
+    // hand back a drawing nobody had flipped.
+    CHECK(!t.isWholePixelTranslation());
+    // And picking a drawing up, flipping it and putting it back is an edit,
+    // which is what stops applyTransform deciding there is nothing to write.
+    CHECK(!t.isIdentity());
+
+    // Unflipped again is a translation once more, and an identity.
+    Transform back = t;
+    back.flip_x = false;
+    CHECK(!back.isAxisMirror());
+    CHECK(back.isWholePixelTranslation());
+    CHECK(back.isIdentity());
+
+    // A mirror that also moves is still exact: whole pixels either way.
+    Transform moved = t;
+    moved.dx = -12.0;
+    moved.dy = 5.0;
+    CHECK(moved.isAxisMirror());
+
+    // Anything that resamples is not this path, however small.
+    Transform turned = t;
+    turned.rotation = 1e-12;
+    CHECK(!turned.isAxisMirror());
+    Transform scaled = t;
+    scaled.scale_y = 1.5;
+    CHECK(!scaled.isAxisMirror());
+    Transform part = t;
+    part.dx = 0.5;
+    CHECK(!part.isAxisMirror());
+
+    // And the clause about where the axis falls. The interface cannot produce
+    // this -- the pivot is the middle of a whole-pixel rectangle, so twice it is
+    // always whole -- but a quarter-pixel axis maps centres to gaps, and coming
+    // out of the exact path would mean coming out shifted.
+    Transform askew = t;
+    askew.pivot_x += 0.25;
+    CHECK(!askew.isAxisMirror());
+    // Only the flipped axis has to answer for it, though: the other one is a
+    // translation and does not care where the pivot is.
+    Transform sideways = t;
+    sideways.pivot_y += 0.25;
+    CHECK(sideways.isAxisMirror());
+}
+
+void aFlipReturnsTheSameBitsMirrored() {
+    TEST("a flip mirrors the bits and does not resample");
+
+    // Deliberately not symmetrical, in position or in colour: a mirror of a
+    // shape that is its own mirror is a test that passes when nothing happens.
+    const PixelRect area{40, 40, 31, 20};
+    TileGrid source = gridWith(area, kInk);
+    {
+        Document doc;
+        const TrackId track = doc.addTrack("t");
+        const LayerId layer = doc.addLayer(track, "l");
+        const ImageId image = doc.insertImage(track, 0);
+        ScopedCommand command(doc, "Fill");
+        Cel* cel = doc.celForWriting(track, image, layer);
+        for (const TileCoord& coord : source.coords()) {
+            *cel->writableTile(coord, doc.journal()) = *source.find(coord);
+        }
+        // One corner marked, so that "which way round is it" has an answer.
+        Tile* tile = cel->writableTile(tileCoordFor(area.x, area.y), doc.journal());
+        tile->setPixel(tileLocal(area.x), tileLocal(area.y), {1.0f, 0.5f, 0.25f, 1.0f});
+        source = cel->tiles();
+    }
+
+    Transform t;
+    t.pivot_x = area.x + area.width / 2.0;
+    t.pivot_y = area.y + area.height / 2.0;
+    t.flip_x = true;
+    CHECK(t.isAxisMirror());
+
+    const TileGrid moved = transformTiles(source, t);
+    // 2*pivot - 1 is the sum a mirrored pair of pixel indices adds up to.
+    const int mirror_x = 2 * area.x + area.width - 1;
+    CHECK(sameBitsMirrored(source, moved, {0, 0, 200, 200}, true, false, mirror_x, 0));
+    CHECK_EQ(drawnPixels(moved), drawnPixels(source));
+    // The marked corner is on the other side and is the colour it was.
+    const Rgba marked{1.0f, 0.5f, 0.25f, 1.0f};
+    CHECK(moved.pixel(mirror_x - area.x, area.y) == marked);
+
+    // Both axes at once, and with a translation on top, which is the general
+    // shape of the exact path.
+    Transform both = t;
+    both.flip_y = true;
+    both.dx = 9.0;
+    both.dy = -7.0;
+    CHECK(both.isAxisMirror());
+    const TileGrid corner = transformTiles(source, both);
+    CHECK(sameBitsMirrored(source, corner, {0, 0, 200, 200}, true, true,
+                           mirror_x + static_cast<int>(both.dx),
+                           2 * area.y + area.height - 1 + static_cast<int>(both.dy)));
+    CHECK_EQ(drawnPixels(corner), drawnPixels(source));
+}
+
+void flippingTwiceIsWhereItStarted() {
+    TEST("a flip and a flip back is the drawing that was picked up");
+
+    const PixelRect area{40, 40, 31, 21};
+    const TileGrid source = gridWith(area, kInk);
+
+    Transform t;
+    t.pivot_x = area.x + area.width / 2.0;
+    t.pivot_y = area.y + area.height / 2.0;
+    t.flip_x = true;
+    t.flip_y = true;
+
+    // Not "press it twice", which is the interface's business -- the same
+    // mirror applied to its own output, which is what that has to come to.
+    const TileGrid there = transformTiles(source, t);
+    const TileGrid back = transformTiles(there, t);
+    CHECK(sameBits(source, back, 0, 0, {0, 0, 200, 200}));
+}
+
+void aFlippedRotationStillResamples() {
+    TEST("a flip that is also turned goes through the resampler and survives it");
+
+    const PixelRect area{40, 40, 40, 20};
+    const TileGrid source = gridWith(area, kInk);
+
+    Transform t;
+    t.pivot_x = area.x + area.width / 2.0;
+    t.pivot_y = area.y + area.height / 2.0;
+    t.flip_x = true;
+    t.rotation = 90.0;
+
+    // No exact path for this one, and no special case either: the sign is in the
+    // matrix, so the general path already handles a negative determinant.
+    CHECK(!t.isAxisMirror());
+    CHECK(!t.isWholePixelTranslation());
+
+    const TileGrid moved = transformTiles(source, t);
+    // paintedBounds and not drawnBounds: the second one stops at the tile, and
+    // this whole shape is inside one, so it would answer 128 by 128 about every
+    // transform there is.
+    const PixelRect bounds = paintedBounds(moved);
+    // Turned a quarter and mirrored: a 40x20 rectangle about its own middle
+    // comes back 20 wide and 40 tall, wherever the resampler puts its rim.
+    CHECK(!bounds.isEmpty());
+    CHECK(bounds.width < bounds.height);
+    CHECK(moved.pixel(static_cast<int>(t.pivot_x), static_cast<int>(t.pivot_y)).a > 0.9f);
+}
+
 void rotatingAQuarterTurnLandsWhereItShould() {
     TEST("a quarter turn about a pivot lands where the arithmetic says");
 
@@ -452,6 +631,10 @@ int main() {
     identityReturnsTheSameBits();
     aWholePixelTranslationDoesNotResample();
     aFractionOfAPixelIsNotAWholeOne();
+    aFlipIsNotATranslation();
+    aFlipReturnsTheSameBitsMirrored();
+    flippingTwiceIsWhereItStarted();
+    aFlippedRotationStillResamples();
     rotatingAQuarterTurnLandsWhereItShould();
     theInverseUndoesTheMatrix();
     repivotMovesNothing();

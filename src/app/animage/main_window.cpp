@@ -674,6 +674,33 @@ void MainWindow::buildTransformBar() {
     transform_scale_y_ = number(QStringLiteral("scale Y"), 1.0, 10000.0, 1,
                                 QStringLiteral("%"));
 
+    // The two mirrors, next to the numbers rather than beside Apply: they change
+    // what the transform is, the way the fields do, and Apply is what ends it.
+    //
+    // Checkable, because a flip is a state of the transform and not a thing that
+    // happens to the drawing -- pressing it twice is exactly where you started,
+    // and until Apply nothing has been written either way.
+    row->addSpacing(8);
+    const auto mirror = [&](const QString& text, const QString& tip, FlipAxis axis) {
+        auto* b = new QPushButton(text, transform_bar_);
+        b->setCheckable(true);
+        b->setToolTip(tip);
+        b->setFocusPolicy(Qt::NoFocus);  // keep the pen and the keyboard on the canvas
+        connect(b, &QPushButton::clicked, this, [this, axis] { flipTransform(axis); });
+        row->addWidget(b);
+        return b;
+    };
+    transform_flip_x_ =
+        mirror(QStringLiteral("Flip X"),
+               QStringLiteral("Mirror it left to right, about the middle of the box.\n"
+                              "A mirror is exact: it moves the pixels and does not resample "
+                              "them."),
+               FlipAxis::X);
+    transform_flip_y_ = mirror(QStringLiteral("Flip Y"),
+                               QStringLiteral("Mirror it top to bottom, about the middle of "
+                                              "the box."),
+                               FlipAxis::Y);
+
     row->addSpacing(12);
     const auto button = [&](const QString& text, shortcuts::Id id, const QString& what,
                             const QString& more, auto handler) {
@@ -806,12 +833,36 @@ void MainWindow::syncTransformFields() {
     transform_rotation_->setValue(values.rotation);
     transform_scale_x_->setValue(values.scale_x * 100.0);
     transform_scale_y_->setValue(values.scale_y * 100.0);
+    // The buttons say which way round the drawing is now, which is why they are
+    // checkable and why this is the only place they are set. setChecked emits
+    // toggled and not clicked, and the handler is on clicked, so this cannot
+    // come back round and flip it again.
+    if (transform_flip_x_) transform_flip_x_->setChecked(values.flip_x);
+    if (transform_flip_y_) transform_flip_y_->setChecked(values.flip_y);
     updating_transform_fields_ = false;
+}
+
+void MainWindow::flipTransform(FlipAxis axis) {
+    if (!canvas_->transformIsLive()) return;
+
+    Transform values = canvas_->transformValues();
+    if (axis == FlipAxis::X) {
+        values.flip_x = !values.flip_x;
+    } else {
+        values.flip_y = !values.flip_y;
+    }
+    // Through setTransformValues like the fields, which puts the pivot back to
+    // the middle of what was picked up -- so the mirror is about the middle of
+    // the box whatever the last handle drag pivoted on, and the numbers go on
+    // meaning what they said.
+    canvas_->setTransformValues(values);
 }
 
 void MainWindow::onTransformFieldEdited() {
     if (updating_transform_fields_ || !canvas_->transformIsLive()) return;
 
+    // Started from what the transform is rather than from the fields alone, so
+    // that the two flips -- which have no field -- survive typing a number.
     Transform values = canvas_->transformValues();
     values.dx = transform_dx_->value();
     values.dy = transform_dy_->value();

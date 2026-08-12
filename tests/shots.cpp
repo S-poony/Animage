@@ -579,6 +579,25 @@ const std::vector<Situation>& situations() {
              s.press(Id::Transform);
          }},
 
+        {"a-flipped-drawing",
+         "issue #24: Flip X is down, the bar has two more buttons on it, and the preview is "
+         "mirrored about the middle of the box -- an arc opening the other way, in the same "
+         "place, at the same size",
+         [](Stage& s) {
+             s.canvas->setZoom(1.0, s.centre());
+             // An arc rather than a circle, and off-centre: a mirror of
+             // something symmetrical is a picture of nothing happening.
+             std::vector<QPointF> arc;
+             for (int i = 0; i <= 32; ++i) {
+                 const double t = kTau * (0.10 + 0.42 * i / 32.0);
+                 arc.push_back(s.centre() + QPointF(150.0 * std::cos(t), 150.0 * std::sin(t)));
+             }
+             s.stroke(arc);
+             s.press(Id::Transform);
+             s.choose("Flip X");
+             s.picture = s.canvas->grab().toImage();
+         }},
+
         {"a-transform-box-round-something-tiny",
          "the handles are a fixed screen size, so a box narrower than three of them has "
          "nowhere left to put them -- and the numeric bar is the only way to place it",

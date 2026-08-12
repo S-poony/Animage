@@ -1230,9 +1230,10 @@ path.** `Transform::isWholePixelTranslation` is asserted directly by a test,
 because bit equality alone would not say which path ran — bilinear at an integer
 offset lands one weight on one sample and is exact too. A drag rounds `dx` and
 `dy` to whole pixels for the same reason: half a pixel of translation cannot be
-aimed at and only resamples. This is the branch an axis mirror
-([#24](https://github.com/S-poony/Animage/issues/24)) is one sign away from, and
-the reason it must not be built as a −1 scale through the resampler.
+aimed at and only resamples. The axis mirror
+([#24](https://github.com/S-poony/Animage/issues/24)) is that same branch with a
+sign, built beside it as `isAxisMirror` and never as a −1 scale through the
+resampler.
 
 **A reduction needs a filter as wide as the reduction, and it is load-bearing.**
 A fixed four-neighbour read at a four-times reduction drops line art entirely —
@@ -1294,7 +1295,48 @@ a modifier that switches between one axis and two.
 **Scale is clamped positive rather than allowed through zero.** Dragging a handle
 past its anchor squashes to nothing instead of flipping, because a flip has to be
 the exact path and not a bilinear resample at −1, which carries a half-pixel
-phase error and gives a blurred mirror that nothing complains about. See #24.
+phase error and gives a blurred mirror that nothing complains about.
+
+**And that is what the two Flip buttons are** — issue #24, and the reason the
+clamp stays. `flip_x` and `flip_y` are two more numbers on the transform rather
+than an operation on the drawing: pressing one twice is exactly where you
+started, nothing is written until Apply like everything else on that bar, and the
+buttons are checkable because what they show is which way round the drawing
+currently is.
+
+The sign is a `bool` and not a negative scale, which is a decision. The scale
+stays a magnitude because that is what the bar's two per-cent fields show, and
+"−100%" is not a number anybody types into one. `matrixOf` multiplies the sign in
+and **that is the only place in the arithmetic that knows** — the resampler, the
+bounds and the pivot all read the matrix, and the kernel already took the scale's
+magnitude.
+
+**`isAxisMirror` is the second exact path**, beside `isWholePixelTranslation`,
+and `mirrorTiles` is `translated` with a sign: a permutation of pixels, copied as
+raw halves rather than through `pixel`/`setPixel`, which would be a half → float →
+half round trip per pixel on the one path whose whole claim is that it does not
+touch the numbers. It carries a clause the translation does not need — twice the
+pivot has to be a whole number, because a mirror maps a destination pixel centre
+to `2·pivot + d − centre` and an axis a quarter of a pixel off maps centres into
+gaps. The interface cannot produce one (the pivot is the middle of a whole-pixel
+rectangle), and this is `core`, where "cannot happen" is worth being wrong about
+cheaply.
+
+`bench_transform` prints it beside the nudge, which is where the claim belongs:
+59 ms against 43 at 4K, 17 against 12 at HD. The gap is that a mirrored run is
+reversed, so it copies four halves at a time where `translated` copies a whole
+row — the same order of cost, paid once on Apply, and nothing like the 200 ms a
+rotation of the same drawing costs.
+
+**Two things this broke, and both are pinned.** Leaving the flip out of
+`isWholePixelTranslation` is the one that would have shipped: a mirror answers
+yes to every other clause in it, so the commit takes the translation branch and
+hands back a drawing nobody has flipped, silently. And the handle drag measures
+against an arm that has to carry the sign — a mirrored box has its top-left
+handle over on the right, so an unsigned arm asks for a negative factor and the
+clamp that keeps scale positive turns that into the box collapsing to one per
+cent the moment you touch it after flipping. Both were checked by putting the
+defect back and watching the test go red.
 
 **Leaving commits, and that was a decision.** Changing frame, changing layer,
 changing track, picking another tool and leaving the document all bake it;
@@ -2380,7 +2422,7 @@ ctest --test-dir build --output-on-failure
 `shots` is the one that is not a number. It drives the real window through a
 list of named situations and writes a PNG each, into `build/shots/` unless told
 otherwise; `--list` says what they are and a bare word runs only the ones whose
-name matches, so looking at one thing costs one picture rather than twenty. It
+name matches, so looking at one thing costs one picture rather than twenty-one. It
 runs offscreen without being asked to. **Add situations to it freely** — nothing
 depends on any of them being there, which is the point. See
 [looking at the interface](#looking-at-the-interface).
@@ -2482,12 +2524,9 @@ come off it since the first build, with where the reasoning went:
    what `CtgSolver`'s second priority is still there for.
 4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-5. **The rest of the open issues.** Two came out of designing lasso and
-   transform and are each one small piece with the groundwork already under it:
-   flipping
-   ([#24](https://github.com/S-poony/Animage/issues/24)), which is one sign away
-   from the exact translation branch and must be built on it rather than as a −1
-   scale through the resampler; and transforming a layer across time
+5. **The rest of the open issues.** One came out of designing lasso and
+   transform and is one small piece with the groundwork already under it:
+   transforming a layer across time
    ([#25](https://github.com/S-poony/Animage/issues/25)), which wants `LayerPass`
    widened from an offset to an affine — the same widening the live preview
    already needed.

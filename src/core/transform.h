@@ -36,28 +36,74 @@ struct Transform {
     double scale_x = 1.0;
     double scale_y = 1.0;
 
+    // A mirror, as a sign rather than as a negative scale.
+    //
+    // The scale stays a magnitude -- it is what the bar's two fields show, and
+    // "-100%" is not a thing anybody types into a per cent field -- so the sign
+    // lives here and `matrixOf` multiplies it in. Nothing else in the arithmetic
+    // has to know: the matrix carries the sign, and the resampler, the bounds
+    // and the pivot all read the matrix.
+    //
+    // flip_x mirrors across the vertical axis through the pivot, so left becomes
+    // right. flip_y is top and bottom.
+    bool flip_x = false;
+    bool flip_y = false;
+
     double pivot_x = 0.0;
     double pivot_y = 0.0;
 
     bool isIdentity() const {
-        return dx == 0.0 && dy == 0.0 && rotation == 0.0 && scale_x == 1.0 && scale_y == 1.0;
+        return dx == 0.0 && dy == 0.0 && rotation == 0.0 && scale_x == 1.0 && scale_y == 1.0 &&
+               !flip_x && !flip_y;
     }
+
+    // The sign each axis carries, which is the whole of what a flip is.
+    double signX() const { return flip_x ? -1.0 : 1.0; }
+    double signY() const { return flip_y ? -1.0 : 1.0; }
 
     // Whether this moves pixels without resampling them.
     //
     // Registration nudges are the most common transform in animation by a wide
     // margin, and they must never soften a line -- so the exact path is a branch
     // here rather than a special case of the general one that happens to come
-    // out sharp. An axis mirror is this same branch with a sign, which is what
-    // makes flipping (#24) cheap later and why it must not be built on the
-    // resampler.
+    // out sharp.
     //
     // Exact comparisons on purpose. dx and dy are whole pixels by construction,
     // and a rotation of 1e-15 degrees is a rotation: coming out sharp for one
     // number and soft for the next would be worse than always resampling.
+    //
+    // A flip is not one of these, and saying so is load-bearing rather than
+    // tidy: a mirror with the rotation at zero and the scale at one answers yes
+    // to every other clause here, so without it the commit would take the
+    // translation branch and hand back a drawing that had not been flipped at
+    // all.
     bool isWholePixelTranslation() const {
         return rotation == 0.0 && scale_x == 1.0 && scale_y == 1.0 && dx == std::floor(dx) &&
-               dy == std::floor(dy);
+               dy == std::floor(dy) && !flip_x && !flip_y;
+    }
+
+    // Whether this is a mirror that lands on the pixel grid, which is the other
+    // exact path and issue #24's whole point.
+    //
+    // A mirror is the translation branch with a sign, and it must be built as
+    // that rather than as a scale of -1 through the resampler: a bilinear read
+    // at -1 carries a half-pixel phase error and gives back a blurred mirror
+    // that nothing anywhere complains about. Flipping a drawing is not an
+    // operation that should cost it anything.
+    //
+    // The extra clause is where the axis falls. Under a mirror a destination
+    // pixel centre comes from source centre 2*pivot + d - centre, so it lands on
+    // a centre exactly when twice the pivot is a whole number -- which it always
+    // is in the interface, the pivot being the middle of a whole-pixel rectangle
+    // -- but this is `core`, and a pivot a quarter of a pixel off would silently
+    // resample everything if the predicate merely assumed it.
+    bool isAxisMirror() const {
+        if (!flip_x && !flip_y) return false;
+        if (rotation != 0.0 || scale_x != 1.0 || scale_y != 1.0) return false;
+        if (dx != std::floor(dx) || dy != std::floor(dy)) return false;
+        if (flip_x && 2.0 * pivot_x != std::floor(2.0 * pivot_x)) return false;
+        if (flip_y && 2.0 * pivot_y != std::floor(2.0 * pivot_y)) return false;
+        return true;
     }
 };
 

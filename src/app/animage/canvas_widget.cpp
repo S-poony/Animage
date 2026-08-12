@@ -1889,7 +1889,13 @@ bool CanvasWidget::continueTransformDrag(const QPointF& widget_point) {
 
         case Grab::Handle: {
             const Vec2 handle = handleInImage(transform_->bounds, grabbed_handle_);
-            const Vec2 arm{handle.x - values.pivot_x, handle.y - values.pivot_y};
+            // The arm carries the flip's sign, because the handle's position
+            // does: a mirrored box has its top-left handle over on the right,
+            // and a drag measured against the unmirrored arm asks for a
+            // negative factor -- which the clamp below turns into a collapse to
+            // nothing. The scale stays a magnitude and the sign stays a flip.
+            const Vec2 arm{values.signX() * (handle.x - values.pivot_x),
+                           values.signY() * (handle.y - values.pivot_y)};
 
             // Where the handle has to land, measured before the rotation is
             // applied: what is left once the turn is taken back out is exactly
