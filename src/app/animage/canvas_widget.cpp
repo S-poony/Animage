@@ -2,11 +2,13 @@
 #include "canvas_widget.h"
 
 #include <QApplication>
+#include <QCursor>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPointingDevice>
 #include <QResizeEvent>
 #include <QTabletEvent>
@@ -67,6 +69,188 @@ constexpr double kRotationSnap = 15.0;
 // legitimate selection can be a single eyelash.
 constexpr double kDragThreshold = 4.0;
 constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
+// Below this the ring under the pointer is a smudge on the crosshair rather
+// than a size, so it is not drawn at all. A one-pixel circle says less than
+// nothing: it says the tool is one pixel across when the tool is six and the
+// view is at 20%.
+constexpr double kSmallestToolRing = 2.0;
+
+// Cursors this program draws, because the system has none for what they mean.
+//
+// Both are built once, on first use, and deliberately never destroyed: a static
+// QPixmap outlives QGuiApplication and destroying one after it has gone is
+// undefined on some platforms. A cursor's worth of pixels is not a leak worth
+// arguing about.
+//
+// Light under dark in both, the rule the transform box already follows: a
+// cursor crosses paper and ink by definition, and a one-colour glyph disappears
+// against one of them.
+constexpr int kDrawnCursorSize = 32;
+
+// Rotation has no standard cursor anywhere -- every system cursor is a size, a
+// hand or an arrow -- so the circular arrow every program that turns things has
+// settled on is drawn here.
+QCursor buildRotateCursor() {
+    QPixmap pixmap(kDrawnCursorSize, kDrawnCursorSize);
+    pixmap.fill(Qt::transparent);
+
+    const QPointF centre(16.0, 16.0);
+    constexpr double kRadius = 8.0;
+    const QRectF circle(centre.x() - kRadius, centre.y() - kRadius, 2 * kRadius, 2 * kRadius);
+
+    // Most of a turn, with a gap where the arrowhead goes, so that the glyph
+    // reads as a movement and not as a ring.
+    constexpr double kFrom = 300.0;
+    constexpr double kSweep = 250.0;
+    QPainterPath arc;
+    arc.arcMoveTo(circle, kFrom);
+    arc.arcTo(circle, kFrom, kSweep);
+
+    // At the end of the sweep, pointing the way the arc travels. Qt's arc angles
+    // run anticlockwise on screen, so the tangent does too.
+    const double end = (kFrom + kSweep) * kRadiansPerDegree;
+    const QPointF tip_at(centre.x() + kRadius * std::cos(end), centre.y() - kRadius * std::sin(end));
+    const QPointF along(-std::sin(end), -std::cos(end));
+    const QPointF across(-along.y(), along.x());
+    QPolygonF head;
+    head << tip_at + along * 5.5 << tip_at + across * 4.0 << tip_at - across * 4.0;
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(255, 255, 255), 3.6, Qt::SolidLine, Qt::RoundCap));
+    painter.drawPath(arc);
+    painter.setPen(QPen(QColor(255, 255, 255), 3.6, Qt::SolidLine, Qt::RoundCap, Qt::MiterJoin));
+    painter.drawPolygon(head);
+    painter.setPen(QPen(QColor(20, 20, 24), 1.6, Qt::SolidLine, Qt::RoundCap));
+    painter.drawPath(arc);
+    painter.setPen(QPen(QColor(20, 20, 24), 1.0));
+    painter.setBrush(QColor(20, 20, 24));
+    painter.drawPolygon(head);
+    painter.end();
+
+    return QCursor(pixmap, kDrawnCursorSize / 2, kDrawnCursorSize / 2);
+}
+
+// Alt picks the colour under the pointer, which is a press that does something
+// with nothing on screen to say so -- the same complaint as the transform box,
+// one modifier away. A pipette is what every program draws for it.
+QCursor buildPickCursor() {
+    QPixmap pixmap(kDrawnCursorSize, kDrawnCursorSize);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    // Drawn upright and turned, so the shape is written once: the tip ends up
+    // at the bottom left, where a hand holding a pipette would put it.
+    painter.translate(16.0, 16.0);
+    painter.rotate(45.0);
+
+    // A needle and a bulb, kept apart. Drawn as one filled shape the two ran
+    // together into a lump at this size -- a cursor is thirty-two pixels and
+    // the first version proved it by looking like a thumb.
+    QPainterPath needle;
+    needle.moveTo(0.0, 10.5);  // the tip, which is the hotspot
+    needle.lineTo(-1.9, 5.0);
+    needle.lineTo(1.9, 5.0);
+    needle.closeSubpath();
+    needle.addRect(QRectF(-1.2, -1.0, 2.4, 6.0));
+    // Narrow and square-shouldered rather than round. A circle on a stem is a
+    // magnifying glass, and this program has a zoom gesture on a held key --
+    // two glyphs a hand could confuse are worse than one glyph fewer.
+    const QRectF bulb(-2.8, -11.5, 5.6, 10.0);
+
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(255, 255, 255), 3.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawPath(needle);
+    painter.drawRoundedRect(bulb, 1.6, 1.6);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(20, 20, 24));
+    painter.drawPath(needle);
+    // The bulb is hollow, which is the whole of what makes the glyph read: a
+    // dark outline round white says pipette, and a second dark lump says
+    // nothing at all.
+    painter.setPen(QPen(QColor(20, 20, 24), 1.4));
+    painter.setBrush(QColor(255, 255, 255));
+    painter.drawRoundedRect(bulb, 1.6, 1.6);
+    painter.end();
+
+    // Where the tip landed once the glyph was turned: (0, 10.5) about the middle.
+    return QCursor(pixmap, 9, 23);
+}
+
+const QCursor& rotateCursor() {
+    static const QCursor* cursor = new QCursor(buildRotateCursor());
+    return *cursor;
+}
+
+const QCursor& pickCursor() {
+    static const QCursor* cursor = new QCursor(buildPickCursor());
+    return *cursor;
+}
+
+QCursor cursorFor(CanvasWidget::Pointing pointing) {
+    using Pointing = CanvasWidget::Pointing;
+    switch (pointing) {
+        // The brush, the eraser and the lasso all place a point, and a cross is
+        // what says where it will land. What separates the first two is the
+        // ring the canvas draws, not the cursor.
+        case Pointing::Draw:
+        case Pointing::Erase:
+        case Pointing::Lasso: return QCursor(Qt::CrossCursor);
+        case Pointing::Pick: return pickCursor();
+        case Pointing::PanReady: return QCursor(Qt::OpenHandCursor);
+        case Pointing::Panning: return QCursor(Qt::ClosedHandCursor);
+        // Two different things, one gesture: a horizontal drag changing a
+        // number. The cursor says what the hand has to do, and it is the same.
+        case Pointing::Zoom:
+        case Pointing::SizeBrush: return QCursor(Qt::SizeHorCursor);
+        case Pointing::Move: return QCursor(Qt::SizeAllCursor);
+        case Pointing::Rotate: return rotateCursor();
+        case Pointing::ScaleHorizontal: return QCursor(Qt::SizeHorCursor);
+        case Pointing::ScaleVertical: return QCursor(Qt::SizeVerCursor);
+        case Pointing::ScaleFalling: return QCursor(Qt::SizeFDiagCursor);
+        case Pointing::ScaleRising: return QCursor(Qt::SizeBDiagCursor);
+        // Not a drawing cursor and not a sizing one: an arrow, which is what
+        // the rest of the interface uses for "this is not a place to draw".
+        case Pointing::Nothing: return QCursor(Qt::ArrowCursor);
+    }
+    return QCursor(Qt::CrossCursor);
+}
+
+// Which way a handle stretches the drawing, on screen.
+//
+// The box turns, so the answer turns with it: the top edge of a box rotated a
+// quarter turn stretches sideways, and a cursor that still said "vertical"
+// there would be describing the drawing's own axes, which are not the ones the
+// hand is moving along.
+CanvasWidget::Pointing scalePointingFor(int handle, double rotation_degrees) {
+    // Outward from the box, clockwise from the top left, in screen directions.
+    // Even is a corner and odd is an edge middle, the same as the handles.
+    constexpr double kOutward[8][2] = {{-1.0, -1.0}, {0.0, -1.0}, {1.0, -1.0}, {1.0, 0.0},
+                                       {1.0, 1.0},   {0.0, 1.0},  {-1.0, 1.0}, {-1.0, 0.0}};
+    const std::size_t index = static_cast<std::size_t>(handle & 7);
+    const double radians = rotation_degrees * kRadiansPerDegree;
+    const double cosine = std::cos(radians);
+    const double sine = std::sin(radians);
+    // The scale is not applied. A corner of a box squashed flat still points
+    // nearly sideways, and it still scales both axes: what the cursor names is
+    // the operation, turned to where the hand has to drag for it.
+    const double x = kOutward[index][0] * cosine - kOutward[index][1] * sine;
+    const double y = kOutward[index][0] * sine + kOutward[index][1] * cosine;
+
+    // A size cursor points both ways, so only the line matters and not which
+    // end of it the handle is on.
+    double angle = std::atan2(y, x) / kRadiansPerDegree;
+    while (angle < 0.0) angle += 180.0;
+    while (angle >= 180.0) angle -= 180.0;
+
+    if (angle < 22.5 || angle >= 157.5) return CanvasWidget::Pointing::ScaleHorizontal;
+    if (angle < 67.5) return CanvasWidget::Pointing::ScaleFalling;
+    if (angle < 112.5) return CanvasWidget::Pointing::ScaleVertical;
+    return CanvasWidget::Pointing::ScaleRising;
+}
 
 // Where the rotation knob sits, given the eight handles: out from the middle of
 // the top edge, away from the box, at a fixed distance on screen.
@@ -195,7 +379,6 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     setAttribute(Qt::WA_TabletTracking);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
-    setCursor(Qt::CrossCursor);
 
     brush_settings_.radius = 6.0f;
     brush_settings_.hardness = 0.6f;
@@ -212,6 +395,10 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     ctg_poll_ = new QTimer(this);
     ctg_poll_->setInterval(16);
     connect(ctg_poll_, &QTimer::timeout, this, &CanvasWidget::collectColour);
+
+    // The one place the cursor is set, from the start. Nothing else in this
+    // file calls setCursor.
+    refreshPointer();
 
     clock_.start();
 }
@@ -290,7 +477,12 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
     active_layer_ = layer;
 }
 
-void CanvasWidget::setEraser(bool erasing) { erasing_ = erasing; }
+void CanvasWidget::setEraser(bool erasing) {
+    erasing_ = erasing;
+    // Which tool is up is half of what the pointer answers, so picking one is a
+    // reason to ask again. This is where the eraser stopped being invisible.
+    refreshPointer();
+}
 
 void CanvasWidget::setBrushColour(float r, float g, float b) {
     brush_settings_.r = r;
@@ -919,6 +1111,10 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     } else {
         drawSelection(painter);
     }
+
+    // Over everything, because it is where the hand is rather than part of the
+    // picture.
+    drawToolRing(painter);
 }
 
 // The canvas: the rectangle that will be exported, outlined, with everything
@@ -967,6 +1163,7 @@ void CanvasWidget::setLassoing(bool lassoing) {
     if (lassoing_ == lassoing) return;
     lassoing_ = lassoing;
     drawing_lasso_ = false;
+    refreshPointer();
     update();
 }
 
@@ -1197,6 +1394,7 @@ CanvasWidget::Refusal CanvasWidget::paste() {
 
     buildTransformPicture();
     refreshAll();
+    refreshPointer();
     Q_EMIT transformBegan();
     return Refusal::None;
 }
@@ -1263,6 +1461,9 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
 
     buildTransformPicture();
     refreshAll();
+    // Four outcomes of a press appear at once, so the question is asked again
+    // before the hand has had to move to find out which of them is where.
+    refreshPointer();
     Q_EMIT transformBegan();
     return Refusal::None;
 }
@@ -1394,6 +1595,7 @@ void CanvasWidget::applyTransform() {
     }
 
     refreshAll();
+    refreshPointer();
     Q_EMIT documentChanged();
     Q_EMIT transformEnded();
 }
@@ -1403,6 +1605,7 @@ void CanvasWidget::cancelTransform() {
     transform_.reset();
     grab_ = Grab::None;
     refreshAll();
+    refreshPointer();
     Q_EMIT transformEnded();
 }
 
@@ -1526,67 +1729,77 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     painter.restore();
 }
 
-// What a press on the box grabbed, and the pivot the gesture wants.
+// What a press on the box would grab.
+//
+// Asked by the press and by the pointer, which is the whole point of it being a
+// function: dragging *at* a corner scales and dragging just outside one rotates,
+// and while these were two pieces of code they looked identical on screen and
+// there was nothing to say they were not the same answer.
 //
 // Handles are tested before the interior because they sometimes sit outside the
 // box, and anything asking "is this inside" first would eat half of them.
-bool CanvasWidget::beginTransformDrag(const QPointF& widget_point) {
-    if (!transform_) return false;
+CanvasWidget::BoxTarget CanvasWidget::boxTargetAt(const QPointF& widget_point) const {
+    if (!transform_) return {};
 
     const std::array<QPointF, 8> handles = transformHandles();
-    grab_image_ = imageFromWidget(widget_point);
 
     // The knob first: it is the one thing on the box that says what it does, and
     // it is drawn outside the box where nothing else is competing for the press.
     if (QLineF(widget_point, rotationGizmo(handles)).length() <=
         kTransformRotateKnob + kTransformHandleGrab) {
-        centreTransformPivot();
-        grab_values_ = transform_->values;
-        grab_ = Grab::Rotate;
-        return true;
+        return {Grab::Rotate, -1};
     }
 
     for (int i = 0; i < 8; ++i) {
-        if (QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length() >
+        if (QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length() <=
             kTransformHandleGrab) {
-            continue;
+            return {Grab::Handle, i};
         }
-        // Scale about the handle opposite, which is what makes dragging one
-        // corner leave the other exactly where it was.
-        const Vec2 anchor = handleInImage(transform_->bounds, i + 4);
-        repivot(transform_->values, anchor.x, anchor.y);
-        grab_values_ = transform_->values;
-        grab_ = Grab::Handle;
-        grabbed_handle_ = i;
-        return true;
     }
 
-    // And a ring just outside each corner does the same, which is where a hand
-    // reaches without being told. Letting the handle decide what a drag means is
-    // what frees Shift to constrain the rotation to fifteen-degree steps and a
-    // move to an axis, which is worth more than a modifier that switches between
-    // scaling one axis and two.
+    // And a ring just outside each corner does the same as the knob, which is
+    // where a hand reaches without being told. It stays now that the knob
+    // exists -- that was asked and answered -- and what it needed was for the
+    // pointer to say so, since a band nobody can see is otherwise a second
+    // unlabelled way to do a labelled thing.
     for (int i = 0; i < 8; i += 2) {
         const double reach = QLineF(widget_point, handles[static_cast<std::size_t>(i)]).length();
-        if (reach > kTransformRotateBand) continue;
-        centreTransformPivot();
-        grab_values_ = transform_->values;
-        grab_ = Grab::Rotate;
-        return true;
+        if (reach <= kTransformRotateBand) return {Grab::Rotate, -1};
     }
 
     QPolygonF box;
     box << handles[0] << handles[2] << handles[4] << handles[6];
     const bool roomy = QLineF(handles[0], handles[2]).length() > kTransformSmallestInterior &&
                        QLineF(handles[0], handles[6]).length() > kTransformSmallestInterior;
-    if (roomy && box.containsPoint(widget_point, Qt::OddEvenFill)) {
+    if (roomy && box.containsPoint(widget_point, Qt::OddEvenFill)) return {Grab::Move, -1};
+
+    return {};
+}
+
+// And the pivot the gesture wants, which is the half that writes something down.
+bool CanvasWidget::beginTransformDrag(const QPointF& widget_point) {
+    if (!transform_) return false;
+
+    const BoxTarget target = boxTargetAt(widget_point);
+    if (target.grab == Grab::None) return false;
+
+    grab_image_ = imageFromWidget(widget_point);
+    if (target.grab == Grab::Handle) {
+        // Scale about the handle opposite, which is what makes dragging one
+        // corner leave the other exactly where it was. Letting the handle decide
+        // what a drag means is what frees Shift to constrain the rotation to
+        // fifteen-degree steps and a move to an axis.
+        const Vec2 anchor = handleInImage(transform_->bounds, target.handle + 4);
+        repivot(transform_->values, anchor.x, anchor.y);
+    } else {
         centreTransformPivot();
-        grab_values_ = transform_->values;
-        grab_ = Grab::Move;
-        return true;
     }
 
-    return false;
+    grab_values_ = transform_->values;
+    grab_ = target.grab;
+    grabbed_handle_ = target.grab == Grab::Handle ? target.handle : -1;
+    refreshPointer();
+    return true;
 }
 
 bool CanvasWidget::continueTransformDrag(const QPointF& widget_point) {
@@ -1681,7 +1894,139 @@ void CanvasWidget::endTransformDrag() {
     // means one thing however the last drag pivoted.
     centreTransformPivot();
     update();
+    refreshPointer();
     Q_EMIT transformNumbersChanged();
+}
+
+// --- the pointer ---------------------------------------------------------
+
+// What a press would do here, asked of everything that is true at once.
+//
+// The order is the order a press resolves in, and it has to be: a pointer that
+// answers a different question from the press under it is worse than the
+// crosshair this replaced, which at least never claimed anything.
+CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) const {
+    // A gesture already under way outranks the rest. What is beneath the
+    // pointer stopped mattering when the button went down, and this is the half
+    // that was getting lost: the cursor was put back by hand at the end of each
+    // gesture, from a chain of held-key tests repeated at three call sites, and
+    // a path that forgot one left the closed hand on screen.
+    if (panning_) return Pointing::Panning;
+    if (zooming_) return Pointing::Zoom;
+    if (sizing_) return Pointing::SizeBrush;
+    if (picking_) return Pointing::Pick;
+
+    // Then the held keys, which say what a press will do wherever it lands --
+    // including over a transform box, because navigation is available inside
+    // every tool and the box would otherwise appear to swallow it.
+    if (space_held_) return Pointing::PanReady;
+    if (zoom_key_held_) return Pointing::Zoom;
+    if (alt_held_) return Pointing::Pick;
+
+    if (transform_) {
+        // Mid-drag the answer is what was grabbed and not what is underneath:
+        // a corner handle dragged past the opposite one leaves the pointer
+        // nowhere near the box, and the gesture is still a scale.
+        const BoxTarget target =
+            grab_ == Grab::None ? boxTargetAt(widget_point) : BoxTarget{grab_, grabbed_handle_};
+        switch (target.grab) {
+            case Grab::Move: return Pointing::Move;
+            case Grab::Rotate: return Pointing::Rotate;
+            case Grab::Handle: return scalePointingFor(target.handle, transform_->values.rotation);
+            case Grab::None: break;
+        }
+        // Off the box, where a press does nothing at all. That is the fourth
+        // outcome the crosshair used to be shown for, and the only one of the
+        // four that is worth saying with a cursor from another family.
+        return Pointing::Nothing;
+    }
+
+    if (lassoing_) return Pointing::Lasso;
+    // The pen turned over is the eraser as much as the button is, and it is the
+    // case with nothing else on screen to announce it.
+    return (erasing_ || hover_eraser_) ? Pointing::Erase : Pointing::Draw;
+}
+
+void CanvasWidget::updatePointerAt(const QPointF& widget_point) {
+    pointer_at_ = widget_point;
+    pointer_inside_ = true;
+    refreshPointer();
+}
+
+void CanvasWidget::refreshPointer() {
+    const Pointing now = pointingAt(pointer_at_);
+    // Only when the answer changes. Every mouse move comes through here, and a
+    // cursor is set through the platform rather than into a variable. Empty
+    // until the first call, which is what lets the constructor use this instead
+    // of being a second place that knows what a cursor is.
+    if (pointing_ != now) {
+        pointing_ = now;
+        setCursor(cursorFor(now));
+    }
+    updateToolRing();
+}
+
+void CanvasWidget::leaveEvent(QEvent* event) {
+    pointer_inside_ = false;
+    updateToolRing();
+    QWidget::leaveEvent(event);
+}
+
+std::optional<CanvasWidget::ToolRing> CanvasWidget::toolRing() const {
+    const BrushSettings& tool = erasing_ ? eraser_settings_ : brush_settings_;
+
+    // While the radius is being dragged the ring stays where the gesture
+    // started rather than following the pointer away. The pointer is measuring
+    // a distance out from that point and the circle is what the distance means;
+    // a ring that travelled with it would be the one thing on screen not
+    // holding still to be compared against.
+    if (sizing_) return ToolRing{size_anchor_widget_, tool.radius * zoom_};
+
+    if (!pointer_inside_) return std::nullopt;
+    if (pointing_ != Pointing::Erase) return std::nullopt;
+    return ToolRing{pointer_at_, eraser_settings_.radius * zoom_};
+}
+
+// What the ring covers on screen, or an empty rectangle when there is none.
+QRect CanvasWidget::toolRingRect() const {
+    const std::optional<ToolRing> ring = toolRing();
+    if (!ring || ring->radius < kSmallestToolRing) return {};
+    const double reach = ring->radius + 3.0;  // the outline has a width of its own
+    return QRectF(ring->at.x() - reach, ring->at.y() - reach, 2 * reach, 2 * reach)
+        .toAlignedRect();
+}
+
+void CanvasWidget::updateToolRing() {
+    const QRect wanted = toolRingRect();
+    if (wanted == ring_drawn_) return;
+
+    // Both rectangles, because the ring has to come off where it was as well as
+    // go on where it is. Repainting the whole widget per mouse move would be the
+    // easy version, and it would recomposite the viewport on every one of them.
+    if (!ring_drawn_.isNull()) update(ring_drawn_);
+    if (!wanted.isNull()) update(wanted);
+    ring_drawn_ = wanted;
+}
+
+void CanvasWidget::drawToolRing(QPainter& painter) {
+    const std::optional<ToolRing> ring = toolRing();
+    // Where the ring is now, recorded by the paint that drew it rather than by
+    // whatever asked for that paint. A zoom changes the radius on screen
+    // without the pointer moving at all, and something has to know where the
+    // last one went in order to take it off.
+    ring_drawn_ = toolRingRect();
+    if (!ring || ring->radius < kSmallestToolRing) return;
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    // Light under dark, the same rule as the transform box: a circle over line
+    // art crosses paper and ink by definition.
+    painter.setPen(QPen(QColor(255, 255, 255, 170), 3.0));
+    painter.drawEllipse(ring->at, ring->radius, ring->radius);
+    painter.setPen(QPen(QColor(30, 30, 34), 1.0));
+    painter.drawEllipse(ring->at, ring->radius, ring->radius);
+    painter.restore();
 }
 
 // --- picking -------------------------------------------------------------
@@ -1853,30 +2198,34 @@ void CanvasWidget::endStroke() {
 
 // --- navigation ----------------------------------------------------------
 
-bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton button) {
+// The modifiers come from the event rather than from the keyboard. They used to
+// be read with QGuiApplication::keyboardModifiers(), which answers for the
+// machine and not for the event -- so the resize gesture could not be driven by
+// a test at all, and #5 was about a gesture nothing was watching.
+bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton button,
+                                   Qt::KeyboardModifiers modifiers) {
     // Alt and the right button, dragged sideways, resizes the brush without
     // leaving the drawing -- the gesture Photoshop and Krita already taught
     // everyone's hands.
-    if (button == Qt::RightButton &&
-        (QGuiApplication::keyboardModifiers() & Qt::AltModifier)) {
+    if (button == Qt::RightButton && (modifiers & Qt::AltModifier)) {
         sizing_ = true;
         size_anchor_widget_ = widget_point;
         radius_at_press_ = brushSettings().radius;
-        setCursor(Qt::SizeHorCursor);
+        refreshPointer();
         return true;
     }
     if (zoom_key_held_) {
         zooming_ = true;
         zoom_anchor_widget_ = widget_point;
         zoom_at_press_ = zoom_;
-        setCursor(Qt::SizeHorCursor);
+        refreshPointer();
         return true;
     }
     if (button == Qt::MiddleButton || (space_held_ && button == Qt::LeftButton)) {
         panning_ = true;
         pan_anchor_widget_ = widget_point;
         pan_anchor_image_ = pan_;
-        setCursor(Qt::ClosedHandCursor);
+        refreshPointer();
         return true;
     }
     return false;
@@ -1888,6 +2237,9 @@ bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
         const float radius = static_cast<float>(
             std::clamp(radius_at_press_ * std::exp(dx * kSizeDragPerPixel), 0.5, 400.0));
         brushSettings().radius = radius;
+        // The ring is the whole of what this gesture shows, so it is put back on
+        // screen here rather than waiting for the next thing to repaint.
+        updateToolRing();
         Q_EMIT brushSizeChanged(radius);
         return true;
     }
@@ -1919,9 +2271,9 @@ void CanvasWidget::endNavigation() {
     panning_ = false;
     zooming_ = false;
     sizing_ = false;
-    setCursor(zoom_key_held_  ? Qt::SizeHorCursor
-              : space_held_   ? Qt::OpenHandCursor
-                              : Qt::CrossCursor);
+    // This used to be the held-key chain written out by hand, and two others
+    // like it were elsewhere. Whatever is true now is what the pointer says now.
+    refreshPointer();
 }
 
 // --- input ---------------------------------------------------------------
@@ -1966,7 +2318,19 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
 
     const QPointF widget_point = event->position();
 
-    if (event->type() == QEvent::TabletPress && beginNavigation(widget_point, Qt::LeftButton)) {
+    // Which way up the pen is, on every event and not only on a press. Turning
+    // it over is the one way of reaching for the eraser that changes nothing on
+    // screen, which is half of what #4 was about.
+    if (const QPointingDevice* hovering = event->pointingDevice()) {
+        hover_eraser_ = hovering->pointerType() == QPointingDevice::PointerType::Eraser;
+    }
+    alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
+    updatePointerAt(widget_point);
+
+    // The tip, whatever button the platform calls it: the pen's own gestures
+    // here are Space-drag and held Z, and both are the tip with a key down.
+    if (event->type() == QEvent::TabletPress &&
+        beginNavigation(widget_point, Qt::LeftButton, event->modifiers())) {
         return;
     }
     if ((panning_ || zooming_ || sizing_) && event->type() == QEvent::TabletMove) {
@@ -2071,7 +2435,10 @@ bool CanvasWidget::eventIsSynthesisedFromPen(QMouseEvent* event) const {
 
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     setFocus(Qt::MouseFocusReason);
-    if (beginNavigation(event->position(), event->button())) return;
+    alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
+    if (!eventIsSynthesisedFromPen(event)) hover_eraser_ = false;
+    updatePointerAt(event->position());
+    if (beginNavigation(event->position(), event->button(), event->modifiers())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
     if (event->modifiers() & Qt::AltModifier) {
@@ -2093,6 +2460,16 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
+    // Before anything decides to swallow the event. A hover-driven pointer needs
+    // the move handler to run with no button down and with a transform live,
+    // which is exactly the path that used to return here having done nothing --
+    // so the box knew what a press would do and never said.
+    //
+    // A real mouse means the pen has been put down, whichever way up it was.
+    alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
+    if (!eventIsSynthesisedFromPen(event)) hover_eraser_ = false;
+    updatePointerAt(event->position());
+
     if (continueNavigation(event->position())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (picking_) {
@@ -2111,6 +2488,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
+    alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
+    updatePointerAt(event->position());
     if (panning_ || zooming_ || sizing_) {
         endNavigation();
         return;
@@ -2234,7 +2613,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_Space:
             if (!event->isAutoRepeat()) {
                 space_held_ = true;
-                if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::OpenHandCursor);
+                refreshPointer();
             }
             event->accept();
             return;
@@ -2243,10 +2622,17 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
             // more attention than the zoom is worth.
             if (!event->isAutoRepeat()) {
                 zoom_key_held_ = true;
-                if (!panning_ && !zooming_ && !sizing_) setCursor(Qt::SizeHorCursor);
+                refreshPointer();
             }
             event->accept();
             return;
+        case Qt::Key_Alt:
+            // Watched and deliberately not accepted. Alt is the eyedropper here
+            // and the menu bar's own key on Windows, and taking it would be
+            // buying a cursor with the menus.
+            alt_held_ = true;
+            refreshPointer();
+            break;
         default: break;
     }
     QWidget::keyPressEvent(event);
@@ -2257,21 +2643,21 @@ void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
         case Qt::Key_Space:
             if (!event->isAutoRepeat()) {
                 space_held_ = false;
-                if (!panning_ && !zooming_ && !sizing_) {
-                    setCursor(zoom_key_held_ ? Qt::SizeHorCursor : Qt::CrossCursor);
-                }
+                refreshPointer();
             }
             event->accept();
             return;
         case Qt::Key_Z:
             if (!event->isAutoRepeat()) {
                 zoom_key_held_ = false;
-                if (!panning_ && !zooming_ && !sizing_) {
-                    setCursor(space_held_ ? Qt::OpenHandCursor : Qt::CrossCursor);
-                }
+                refreshPointer();
             }
             event->accept();
             return;
+        case Qt::Key_Alt:
+            alt_held_ = false;
+            refreshPointer();
+            break;
         default: break;
     }
     QWidget::keyReleaseEvent(event);

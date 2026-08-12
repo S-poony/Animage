@@ -4311,11 +4311,285 @@ void theBoxHasSomethingToRotateBy() {
     fixture.canvas->cancelTransform();
 }
 
+// --- what the pointer says -----------------------------------------------
+//
+// A screenshot cannot check any of this. QWidget::grab() renders the widget and
+// not the screen, so no pointer appears in it -- which is why these assert the
+// decision and the cursor shape after moving the pointer somewhere, and it is a
+// better test than a picture would have been: a decision can be asserted
+// exactly, an appearance can only be compared.
+//
+// Driven through an unshown CanvasWidget rather than a window on purpose. A
+// widget nobody can see receives no real mouse events, so nothing the person
+// running the tests happens to be doing with their own pointer can reach it.
+
+int shapeOf(const QWidget* widget) { return static_cast<int>(widget->cursor().shape()); }
+int pointingOf(const CanvasWidget& canvas) { return static_cast<int>(canvas.pointing()); }
+int pointing(CanvasWidget::Pointing value) { return static_cast<int>(value); }
+int shape(Qt::CursorShape value) { return static_cast<int>(value); }
+
+void hover(QWidget* canvas, const QPointF& at) {
+    sendMouse(canvas, QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+}
+
+void sendMouseWith(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
+                   Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
+    QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, modifiers);
+    QCoreApplication::sendEvent(widget, &event);
+    QCoreApplication::processEvents();
+}
+
+// A live transform on a widget with nothing else attached to it. The tool is
+// the button, so entering it is the whole of starting one.
+struct BoxFixture {
+    Fixture f;
+
+    BoxFixture() {
+        f.draw(300.0f, 300.0f, 420.0f, 360.0f);
+        f.canvas.beginTransform();
+    }
+};
+
+void thePointerSaysWhatAPressOnTheBoxWillDo() {
+    TEST("the pointer says which of the four things a press on the box will do");
+    BoxFixture box;
+    CanvasWidget& canvas = box.f.canvas;
+    CHECK(canvas.transformIsLive());
+
+    const std::array<QPointF, 8> handles = canvas.transformHandlesForTesting();
+    const QPointF centre = canvas.transformCentreForTesting();
+
+    // Inside: the drawing moves.
+    hover(&canvas, centre);
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Move));
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeAllCursor));
+
+    // The corners scale both axes, and which diagonal is the one the hand has
+    // to drag along.
+    hover(&canvas, handles[0]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeFDiagCursor));  // top left, "\"
+    hover(&canvas, handles[2]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeBDiagCursor));  // top right, "/"
+
+    // The edge middles scale one, along their own normal.
+    hover(&canvas, handles[1]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeVerCursor));
+    hover(&canvas, handles[3]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeHorCursor));
+
+    // The knob turns it. Nothing in Qt says "rotate", so this one is drawn --
+    // which is why the decision is asserted as well as the shape: every drawn
+    // cursor answers Qt::BitmapCursor whatever was drawn on it.
+    hover(&canvas, canvas.rotationHandleForTesting());
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Rotate));
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::BitmapCursor));
+    // What it looks like was checked by saving cursor().pixmap() and looking at
+    // it, which is the one way a drawn cursor can be seen -- grab() renders the
+    // widget and the pointer is not in the widget. The first eyedropper was a
+    // thumb and the first bulb was a magnifying glass; neither is a thing any
+    // assertion here would have noticed.
+
+    // And so does the band just outside a corner, which was the whole of the
+    // complaint: dragging at a corner and dragging just outside one did two
+    // different things and looked identical. The band stays -- it is where a
+    // hand reaches without being told -- and now it says so.
+    const QPointF outward = (handles[0] - centre) / QLineF(centre, handles[0]).length();
+    hover(&canvas, handles[0] + outward * 16.0);
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Rotate));
+
+    // Well outside it a press does nothing at all, which is the fourth outcome
+    // and the one the crosshair was least honest about.
+    hover(&canvas, QPointF(60.0, 60.0));
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Nothing));
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::ArrowCursor));
+
+    // Leaving the tool puts the pointer back without the pointer moving. This is
+    // the shape of bug the one decision point exists to make impossible: a
+    // cursor left over from a state that has ended.
+    hover(&canvas, centre);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeAllCursor));
+    canvas.cancelTransform();
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::CrossCursor));
+}
+
+void theBoxCursorsTurnWithTheBox() {
+    TEST("a rotated box stretches sideways where it used to stretch upwards");
+    BoxFixture box;
+    CanvasWidget& canvas = box.f.canvas;
+    CHECK(canvas.transformIsLive());
+
+    animage::Transform turned = canvas.transformValues();
+    turned.rotation = 90.0;
+    canvas.setTransformValues(turned);
+
+    // The top edge's handle, wherever a quarter turn has put it. What it names
+    // is the direction the hand drags in, and that followed the box round.
+    const std::array<QPointF, 8> handles = canvas.transformHandlesForTesting();
+    hover(&canvas, handles[1]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeHorCursor));
+    hover(&canvas, handles[3]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeVerCursor));
+    // A corner's diagonal swaps with it.
+    hover(&canvas, handles[0]);
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeBDiagCursor));
+
+    canvas.cancelTransform();
+}
+
+// Issue #4. The canvas was a crosshair whichever tool was up, so nothing on
+// screen said the eraser was -- including when it came up because the pen had
+// been turned over.
+void theEraserSaysSoBeforeYouDraw() {
+    TEST("the eraser shows its own size under the pointer");
+    Fixture f;
+    f.draw(200.0f, 200.0f, 600.0f, 400.0f);
+
+    hover(&f.canvas, QPointF(400.0, 300.0));
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+    CHECK(!f.canvas.toolRing().has_value());
+    const QImage with_the_brush = f.render();
+
+    f.canvas.setEraser(true);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Erase));
+    // At the tool's own radius, in screen pixels, which is what makes it a
+    // readout and not a decoration.
+    CHECK(f.canvas.toolRing().has_value());
+    CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * f.canvas.zoom(),
+               1e-6);
+    CHECK_NEAR(f.canvas.toolRing()->at.x(), 400.0, 1e-6);
+
+    // And it is on the screen. This is the one part of pointer feedback a
+    // picture can catch, because the canvas draws it rather than the system:
+    // the same view with the eraser up is a different picture.
+    const QImage with_the_eraser = f.render();
+    CHECK(with_the_eraser != with_the_brush);
+
+    // Half the size at half the zoom, because it is the tool's size on the
+    // drawing that is being shown and not a fixed badge.
+    f.canvas.setZoom(0.5, QPointF(400.0, 300.0));
+    hover(&f.canvas, QPointF(400.0, 300.0));
+    CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * 0.5, 1e-6);
+
+    f.canvas.setEraser(false);
+    CHECK(!f.canvas.toolRing().has_value());
+}
+
+void turningThePenOverShowsTheEraser() {
+    TEST("turning the pen over shows the eraser before it touches the tablet");
+    Fixture f;
+    QPointingDevice rubber(QStringLiteral("test eraser"), 2, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Eraser,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+
+    // Hovering, with nothing pressed: the whole point is that this is visible
+    // before the stroke that would otherwise be how you found out.
+    const QPointF at(500.0, 300.0);
+    QTabletEvent hovering(QEvent::TabletMove, &rubber, at, f.canvas.mapToGlobal(at), 0.0, 0, 0, 0,
+                          0, 0, Qt::NoModifier, Qt::NoButton, Qt::NoButton);
+    QCoreApplication::sendEvent(&f.canvas, &hovering);
+    QCoreApplication::processEvents();
+
+    CHECK(!f.canvas.isErasing());  // the tool button was never touched
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Erase));
+    CHECK(f.canvas.toolRing().has_value());
+
+    // And a real mouse says the pen has been put down, whichever way up it was.
+    // The window that tells a promoted mouse event from a real one has to pass
+    // first, which is what makes this a real mouse and not the pen's own echo.
+    waitMs(300);
+    hover(&f.canvas, QPointF(480.0, 300.0));
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+    CHECK(!f.canvas.toolRing().has_value());
+}
+
+// Issue #5. The gesture already worked and the only feedback was a number in
+// the toolbar, which is not where the hand is looking.
+void theResizeGestureShowsWhatItIsSetting() {
+    TEST("Alt and the right button dragged sideways shows the size it is setting");
+    Fixture f;
+    const QPointF anchor(500.0, 300.0);
+    const double was = f.canvas.brushSettings().radius;
+
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, anchor, Qt::RightButton, Qt::RightButton,
+                  Qt::AltModifier);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::SizeBrush));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::SizeHorCursor));
+    CHECK(f.canvas.toolRing().has_value());
+
+    sendMouseWith(&f.canvas, QEvent::MouseMove, anchor + QPointF(120.0, 40.0), Qt::NoButton,
+                  Qt::RightButton, Qt::AltModifier);
+    CHECK(f.canvas.brushSettings().radius > was);
+    CHECK_NEAR(f.canvas.toolRing()->radius, f.canvas.brushSettings().radius * f.canvas.zoom(),
+               1e-6);
+    // Still where the drag started, not under the pointer. The pointer is
+    // measuring a distance out from that point and the circle is what the
+    // distance means; a ring that travelled with it would be the one thing on
+    // screen not holding still to be compared against.
+    CHECK_NEAR(f.canvas.toolRing()->at.x(), anchor.x(), 1e-6);
+    CHECK_NEAR(f.canvas.toolRing()->at.y(), anchor.y(), 1e-6);
+
+    sendMouseWith(&f.canvas, QEvent::MouseButtonRelease, anchor + QPointF(120.0, 40.0),
+                  Qt::RightButton, Qt::NoButton, Qt::AltModifier);
+    // Alt is still down, so what is offered now is the eyedropper -- which is
+    // the other press with nothing on screen to announce it.
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Pick));
+    CHECK(!f.canvas.toolRing().has_value());
+
+    hover(&f.canvas, anchor);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+}
+
+void theHandDoesNotGetStuckClosed() {
+    TEST("the hand opens again after a pan and goes away with the key");
+    Fixture f;
+    hover(&f.canvas, QPointF(400.0, 300.0));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+
+    QKeyEvent space_down(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &space_down);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::OpenHandCursor));
+
+    sendMouse(&f.canvas, QEvent::MouseButtonPress, QPointF(400.0, 300.0), Qt::LeftButton,
+              Qt::LeftButton);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::ClosedHandCursor));
+    sendMouse(&f.canvas, QEvent::MouseMove, QPointF(340.0, 260.0), Qt::NoButton, Qt::LeftButton);
+    sendMouse(&f.canvas, QEvent::MouseButtonRelease, QPointF(340.0, 260.0), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    // Open again, because Space is still down. This is the chain that used to
+    // be written out by hand at three call sites.
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::OpenHandCursor));
+
+    QKeyEvent space_up(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &space_up);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+
+    // And a held zoom key underneath it comes back rather than being forgotten.
+    QKeyEvent zoom_down(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &zoom_down);
+    QCoreApplication::sendEvent(&f.canvas, &space_down);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::OpenHandCursor));
+    QCoreApplication::sendEvent(&f.canvas, &space_up);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::SizeHorCursor));
+    QKeyEvent zoom_up(QEvent::KeyRelease, Qt::Key_Z, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &zoom_up);
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    thePointerSaysWhatAPressOnTheBoxWillDo();
+    theBoxCursorsTurnWithTheBox();
+    theEraserSaysSoBeforeYouDraw();
+    turningThePenOverShowsTheEraser();
+    theResizeGestureShowsWhatItIsSetting();
+    theHandDoesNotGetStuckClosed();
     thePenReachesTheTransformBar();
     theBoxHasSomethingToRotateBy();
     aPasteLandsWhereItWasCopiedFrom();

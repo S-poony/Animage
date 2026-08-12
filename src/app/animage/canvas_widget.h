@@ -216,18 +216,75 @@ public:
     void setTransformValues(const animage::Transform& values);
     void nudgeTransform(int dx, int dy);
 
-    // Where the rotation knob and the middle of the box are, in widget
-    // coordinates. For tests that press the knob rather than recomputing where
-    // it ought to be -- a test that worked the position out for itself would
-    // agree happily with a knob drawn where nobody can press it.
+    // Where the rotation knob, the eight handles and the middle of the box are,
+    // in widget coordinates. For tests that press them rather than recomputing
+    // where they ought to be -- a test that worked the position out for itself
+    // would agree happily with a knob drawn where nobody can press it.
     QPointF rotationHandleForTesting() const;
     QPointF transformCentreForTesting() const;
+    std::array<QPointF, 8> transformHandlesForTesting() const { return transformHandles(); }
 
     // Bakes it. One resample, one command, and nothing at all if the transform
     // is an identity -- looking at a drawing and putting it back is not an edit.
     void applyTransform();
     // Leaves no undo entry, because nothing was ever written.
     void cancelTransform();
+
+    // --- the pointer -----------------------------------------------------
+
+    // What a press would do where the pointer is.
+    //
+    // One enum and one function that answers it from everything true at once --
+    // which tool, which modifier is held, whether a gesture is under way, what
+    // is under the pointer -- because the cursor used to be set from nine places
+    // and three of them repeated the same held-key chain by hand. State spread
+    // across call sites is how a cursor ends up stuck as a closed hand after
+    // some path nobody tested; the shortcut table is the same fix for keys.
+    //
+    // These are decisions and not appearances. Two of them come out as the same
+    // shape -- a zoom and a brush resize are both a horizontal drag -- and one
+    // of them has no shape in Qt at all, which is what a drawn cursor is for.
+    enum class Pointing {
+        Draw,
+        Erase,     // the same cross, with the ring under it saying which tool
+        Pick,      // Alt: the eyedropper, drawn
+        PanReady,  // Space held, nothing dragged yet
+        Panning,
+        Zoom,       // Z held, or a scrubby zoom under way
+        SizeBrush,  // Alt and the right button, dragged sideways
+        Lasso,
+        Move,    // inside the transform box
+        Rotate,  // the knob, or the band just outside a corner. Drawn.
+        // The eight handles, by the direction they stretch the drawing *on
+        // screen*, which follows the box round as it turns.
+        ScaleHorizontal,
+        ScaleVertical,
+        ScaleFalling,  // "\", top left to bottom right
+        ScaleRising,   // "/", bottom left to top right
+        Nothing,       // during a transform, off the box: a press does nothing
+    };
+
+    // The decision the pointer is showing, and what it would be somewhere else.
+    //
+    // Worth asserting alongside cursor().shape() rather than instead of it: a
+    // drawn cursor's shape is Qt::BitmapCursor whatever was drawn on it, so the
+    // shape alone cannot tell the rotate cursor from the eyedropper.
+    Pointing pointing() const { return pointing_.value_or(Pointing::Draw); }
+    Pointing pointingAt(const QPointF& widget_point) const;
+
+    // The circle at the tool's radius, drawn under the pointer.
+    //
+    // Drawn by the canvas rather than carried on the cursor, which is the whole
+    // reason one mechanism answers both the eraser (#4) and the resize gesture
+    // (#5): a cursor is a small bitmap and a brush here is up to 400 pixels
+    // across. It also puts the one piece of pointer feedback that *can* be
+    // photographed into the picture -- QWidget::grab() renders the widget and
+    // never the pointer, so nothing else about this is visible to a screenshot.
+    struct ToolRing {
+        QPointF at;
+        double radius = 0.0;  // screen pixels
+    };
+    std::optional<ToolRing> toolRing() const;
 
     // Entries in the composite cache. Exposed so a test can assert this tracks
     // the size of the window rather than the size of the visible image area.
@@ -300,6 +357,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     QPointF imageFromWidget(const QPointF& widget_point) const;
@@ -328,7 +386,8 @@ private:
     void rebindStrokeToCurrentImage();
     bool eventIsSynthesisedFromPen(QMouseEvent* event) const;
 
-    bool beginNavigation(const QPointF& widget_point, Qt::MouseButton button);
+    bool beginNavigation(const QPointF& widget_point, Qt::MouseButton button,
+                         Qt::KeyboardModifiers modifiers);
     bool continueNavigation(const QPointF& widget_point);
     void endNavigation();
 
@@ -346,6 +405,17 @@ private:
     bool beginTransformDrag(const QPointF& widget_point);
     bool continueTransformDrag(const QPointF& widget_point);
     void endTransformDrag();
+
+    // The pointer moved. Everything else that changes what a press would do
+    // calls refreshPointer, which asks the same question from where the pointer
+    // was last seen -- a tool being picked, a key going down, a gesture ending.
+    void updatePointerAt(const QPointF& widget_point);
+    void refreshPointer();
+    // Takes the last ring off the screen and puts the new one on, and nothing
+    // at all when they are the same. Every mouse move goes through here.
+    void updateToolRing();
+    void drawToolRing(QPainter& painter);
+    QRect toolRingRect() const;
 
     // Everything the brush checks before it draws, plus the layer kind. Shared
     // by the transform tool and by all three clipboard operations, because
@@ -410,6 +480,29 @@ private:
     animage::BrushSettings eraser_settings_;
     bool erasing_ = false;
     bool stylus_eraser_ = false;  // the pen was turned over for this stroke
+    // And is turned over *now*, which is a different question and the one the
+    // pointer answers. Read from hover rather than from the press, because the
+    // whole of #4 is that the eraser coming up has to be visible before the
+    // stroke that would otherwise be how you found out. Any real mouse event
+    // clears it: the pen has been put down and its last attitude means nothing.
+    bool hover_eraser_ = false;
+
+    // Where the pointer was last seen, and whether it is over the canvas at
+    // all. A decision made from what is under the pointer needs somewhere to
+    // read that from when what changed is the state and not the pointer.
+    QPointF pointer_at_;
+    bool pointer_inside_ = false;
+    // What the cursor on screen is saying. Empty before the first answer, which
+    // is how one function can be both "decide" and "decide for the first time".
+    std::optional<Pointing> pointing_;
+    // Held from the events themselves rather than read off the keyboard when
+    // asked. QGuiApplication::keyboardModifiers() answers for the machine, so a
+    // test driving this widget with synthetic events would be answered about
+    // whichever keys the person running it happened to be leaning on.
+    bool alt_held_ = false;
+    // What the last paint put on screen for the ring, so the next one can take
+    // it off again. Empty means there is nothing there.
+    QRect ring_drawn_;
 
     // The cached composite, in sRGB, covering `cached_region_` in image
     // coordinates. `cached_region_` is snapped to the sampling grid, so the
@@ -506,6 +599,16 @@ private:
 
     // What a press on the box grabbed.
     enum class Grab { None, Move, Rotate, Handle };
+
+    // And what a press *would* grab, which is the same question asked before the
+    // press. One function answers both, because a pointer that promises one
+    // thing and a press that does another is worse than no pointer at all.
+    struct BoxTarget {
+        Grab grab = Grab::None;
+        int handle = -1;
+    };
+    BoxTarget boxTargetAt(const QPointF& widget_point) const;
+
     Grab grab_ = Grab::None;
     int grabbed_handle_ = -1;
     QPointF grab_image_;

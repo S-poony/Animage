@@ -25,6 +25,7 @@ the shape of the program. Those five maps are.
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
+| [What the pointer says](#what-the-pointer-says) | one place deciding it, and two things it draws |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
 | [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
@@ -383,9 +384,11 @@ above 3× magnification, and the canvas frame is drawn over it.
 and emits `documentChanged`. The colour solve is asked for by the *next* paint,
 never by the stroke.
 
-Worth knowing before touching any of it: **the cursor is set in nine different
-places** along this path and three of them repeat the same held-key chain by
-hand. That is what [#27](https://github.com/S-poony/Animage/issues/27) is for.
+Worth knowing before touching any of it: **nothing along this path sets the
+cursor**. There is one function that decides what the pointer looks like, from
+what is true rather than from where the code has got to — see
+[what the pointer says](#what-the-pointer-says). It used to be nine `setCursor`
+calls, three of them repeating the same held-key chain by hand.
 
 ### Where the colour comes from, in order
 
@@ -1264,6 +1267,103 @@ the preview — the `QTransform` blit per frame is Qt's and this cannot see it �
 and nothing times a whole gesture end to end. If a transform ever feels heavy in
 a way these numbers do not explain, that is where to look first.
 
+## What the pointer says
+
+Issues #27, #4 and #5, built together because all three wanted the same missing
+piece first and none of them is worth much without it. Through a whole transform
+the cursor was `CrossCursor`, and a press meant one of four things depending on
+where it landed — move, scale one axis, scale both, rotate — or nothing at all.
+
+**One enum and one function**, `CanvasWidget::Pointing` and `pointingAt`. It
+answers from everything true at once — a gesture already under way, then the
+held keys, then what is under the pointer, then which tool is up — and it is the
+only thing in the file that calls `setCursor`. The nine calls it replaced were
+the problem rather than a symptom of it: three of them wrote out the same
+`space_held_ ? … : zoom_key_held_ ? …` chain by hand, which is how a cursor ends
+up stuck as a closed hand after a path nobody tested. Same shape of fix as the
+shortcut table, for the same reason.
+
+**The order the question resolves in is the order a press resolves in**, and it
+has to be. Mid-drag the answer is what was *grabbed* and not what is underneath:
+a corner handle dragged past the opposite one leaves the pointer nowhere near
+the box and the gesture is still a scale. Held keys come next because navigation
+is available inside every tool — a box that appeared to swallow Space would be
+saying something false about what a press does.
+
+**The hit test is now one function asked by both halves.** `boxTargetAt` answers
+"what would a press here grab", and `beginTransformDrag` is that plus the pivot
+arithmetic. While they were two pieces of code there was nothing keeping the
+promise and the press in step, and the case that made this worth doing is
+exactly the one where they disagree by design: dragging *at* a corner scales,
+dragging *just outside* one rotates.
+
+**The invisible band survives, and now says so.** That was the open design
+question in #27 — a band nobody can see is a second unlabelled way to do
+something the knob already does labelled — and the answer was to keep it and
+change the cursor there, which was the user's call. It is where a hand reaches
+without being told.
+
+**Three mechanisms, not one, and knowing which is which is most of the work.**
+
+- *System cursors* for the eight handles. Qt has diagonal, horizontal and
+  vertical size cursors and they map straight on. What they name is the
+  direction the **hand drags**, so it follows the box round as it turns: the top
+  edge of a box rotated a quarter turn stretches sideways. The scale is
+  deliberately *not* applied — a corner of a box squashed flat still points
+  nearly sideways and still scales both axes, and a cursor describing the
+  drawing's own axes would be describing the wrong thing.
+- *Drawn cursors* for the two operations the system has no glyph for: rotation,
+  and the eyedropper on Alt. The first bitmap cursors in the program. Light
+  under dark, the rule the transform box already follows, because a cursor
+  crosses paper and ink by definition.
+- *A ring the canvas draws itself* for the tool's radius. Not a cursor at all,
+  and it cannot be one: a brush here goes up to 400 pixels across and a cursor
+  is a 32-pixel bitmap. That is what answers #4 and #5 both.
+
+**The ring is what says the eraser is up**, including when it came up because
+the pen was turned over — which is read from hover now and not only from the
+press, since the whole complaint was that you found out by drawing. It is drawn
+for the eraser and not for the brush: the two tools then differ at rest, which
+is what #4 asked for, and a ring on both would have said only "a tool has a
+size". While Alt and the right button are resizing either of them, the ring is
+drawn for that too, at the anchor rather than under the pointer — the pointer is
+measuring a distance out from where the drag began and a ring that travelled
+with it would be the one thing on screen not holding still to be compared
+against.
+
+**A screenshot cannot check almost any of this**, which was known before
+starting and is why the tests assert `cursor().shape()` and the decision behind
+it after moving the pointer somewhere. `QWidget::grab()` renders the widget and
+never the pointer. Two consequences worth having written down:
+
+- The ring is the exception, and deliberately: because the canvas draws it, the
+  same view with the eraser up **is a different picture**, and there is a test
+  that says so. It is the only piece of pointer feedback a picture can catch.
+- A drawn cursor can still be looked at, through `QCursor::pixmap()`. Nothing
+  asserts on it, but it is how the glyphs were checked, and both needed it: the
+  first eyedropper was a thumb and the second was a magnifying glass, which in a
+  program with a zoom on a held key is worse than no glyph at all.
+
+**`beginNavigation` takes the event's modifiers now, not the machine's.** It
+read `QGuiApplication::keyboardModifiers()`, which answers for whatever the
+person at the keyboard is leaning on — so the resize gesture could not be driven
+by a test at all, and #5 turned out to be a gesture with nothing watching it.
+The same reasoning put `alt_held_` on the widget rather than a global query
+behind the eyedropper cursor.
+
+**And a hover-driven cursor needs the move handler to run with no button down**,
+which during a transform it did not: `mouseMoveEvent` handed the event to
+`continueTransformDrag`, which returns immediately when nothing is grabbed. So
+the box knew perfectly well what a press would do and had no occasion to say it.
+The pointer is now updated at the top of the handler, before anything decides to
+swallow the event.
+
+One thing measured rather than assumed: the cursor is pushed to the platform
+only when the decision *changes*, not on every mouse move. `pointing_` is an
+optional for exactly that — empty until the first answer, which is what lets the
+constructor go through the same function instead of being a second place that
+knows what a cursor is.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -1817,6 +1917,7 @@ come off it since the first build, with where the reasoning went:
 | Freeing emptied tiles | "a rectangle built from tile coordinates remembers what you erased" |
 | Lasso and transform, all four phases | "moving a drawing" through "what a transform costs" |
 | The shortcut table, and the bug half of #14 | "what the keyboard does, and when" |
+| One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
 
 1. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the
@@ -1866,41 +1967,7 @@ come off it since the first build, with where the reasoning went:
    what `CtgSolver`'s second priority is still there for.
 4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-5. **One place that decides what the pointer looks like**
-   ([#27](https://github.com/S-poony/Animage/issues/27)). This covers three
-   issues at once and they should not be done separately:
-   [#4](https://github.com/S-poony/Animage/issues/4) (the eraser should change
-   the cursor), [#5](https://github.com/S-poony/Animage/issues/5) (feedback while
-   Alt-right-drag resizes the brush), and the transform box — where move, resize,
-   rotate and *nothing* are four different outcomes of a press and the cursor is
-   `CrossCursor` for all of them. Dragging at a corner scales and dragging just
-   outside one rotates, and nothing on screen says so.
-
-   The reason to do them together is that there are **nine `setCursor` calls**
-   scattered through `canvas_widget.cpp` and three of them repeat the same
-   `space_held_ ? … : zoom_key_held_ ? …` chain by hand. That is the shape of
-   mistake the shortcut table removed for keys, and it is how a cursor ends up
-   stuck as a closed hand after some path nobody tested. What all three issues
-   want first is one function that answers from what is true — which tool, which
-   modifier is held, whether a gesture is live, what is under the pointer — so
-   that #4 and #5 become answers inside it rather than two more call sites.
-
-   Three things known before starting:
-
-   - **They are two mechanisms, not one.** Resize and rotate want *system*
-     cursors, and Qt has diagonal, horizontal and vertical size cursors that map
-     straight onto the corner and edge handles. Rotation has no standard cursor
-     anywhere, so it needs a drawn one — the first bitmap cursor in the program.
-     #4 and #5 want something else again: a circle at the tool's radius drawn
-     under the pointer, which is one mechanism answering both of them.
-   - **A screenshot cannot check any of it.** `QWidget::grab()` renders the
-     widget and not the screen, so no pointer appears in it. Cursors have to be
-     pinned by asserting `cursor().shape()` after moving the mouse to a place,
-     which is a better test than a picture anyway.
-   - A hover-driven cursor needs the move handler to run with no button down,
-     which during a transform it currently does not.
-
-6. **A screenshot target**
+5. **A screenshot target**
    ([#28](https://github.com/S-poony/Animage/issues/28)), `tests/shots.cpp`,
    shaped like `bench_zoom`: built, never run by `ctest`, takes a directory and
    drives the real window through a list of named situations writing one PNG
@@ -1920,7 +1987,13 @@ come off it since the first build, with where the reasoning went:
    run it before and after anything that touches the canvas. And it is a file
    that will rot unless it is cheap to run and named somewhere people read.
 
-7. **The rest of the open issues.** Three came out of designing lasso and
+   One situation it should carry that is not a view of the window: the drawn
+   cursors, saved with `QCursor::pixmap()` after hovering the thing that raises
+   them. They cannot appear in a `grab()` of the canvas and both of them were
+   wrong the first time in a way only looking would catch. See
+   [what the pointer says](#what-the-pointer-says).
+
+6. **The rest of the open issues.** Three came out of designing lasso and
    transform and are each one small piece with the groundwork already under it:
    capping the undo history
    ([#23](https://github.com/S-poony/Animage/issues/23)), which the feature makes
