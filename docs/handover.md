@@ -1388,9 +1388,25 @@ be picked up* was the same hand.
 `TimelineWidget::cursorAt` is now the one place, in the same order as the
 canvas's: a gesture under way, then the ruler, then what is under the pointer.
 The ruler is an arrow with a split-arrow on the end-of-shot grip, and a hand
-means one thing — a numbered card, which is exactly the test `mousePressEvent`
-makes before it will let a drag start. Those two must stay the same test. The
-flag is gone, and with it `leaveEvent`, which existed only to undo it.
+means one thing — a numbered card. The flag is gone, and with it `leaveEvent`,
+which existed only to undo it.
+
+**And asking the same question in two places found a real bug under it.** The
+first fix asked "is there a card here" the way `mousePressEvent` already did —
+through `slotAt`, which **clamps** x to the last frame. Past the end of the
+strip that answers "the last slot", so the whole width of the widget beyond the
+drawings offered the last one: an open hand out there, and a drag that really
+did pick that drawing up and move it. Reported, and only visible in a track of
+**single-frame drawings** — with anything held, the clamp lands mid-run,
+`runBounds(slot).first != slot`, and the wrong answer looks exactly like the
+right one.
+
+`cardAt` is the honest version and both the press and the pointer go through it.
+The distinction it draws is worth keeping: **a clamp is right for the playhead
+and wrong for hit-testing.** Clicking past the end still means the last frame,
+because there is always a frame you are standing on — but "what is under the
+pointer" has to be able to answer *nothing*, and a function that cannot say so
+will invent something plausible instead.
 
 ## What is not what the plan asked for
 

@@ -171,6 +171,33 @@ std::pair<std::size_t, std::size_t> TimelineWidget::runAt(std::size_t row,
     return line->runBounds(slot);
 }
 
+// The numbered card under x, if there is one.
+//
+// Deliberately not built on slotAt, which *clamps*: past the end of the strip it
+// answers "the last slot", and everything downstream then believes there is a
+// card under a pointer that is nowhere near one. With every drawing held for a
+// frame or two the clamp lands mid-run and the mistake is invisible, so this is
+// a bug that only appears in a track of single-frame drawings -- where the last
+// slot is its own run, and the whole width of the widget past the strip offers
+// that drawing to be dragged.
+//
+// A clamp is right for the playhead: clicking past the end means the last frame,
+// because there is always a frame you are standing on. It is wrong for "what is
+// under the pointer", because sometimes the answer is nothing.
+bool TimelineWidget::cardAt(std::size_t row, int x, std::size_t* slot) const {
+    const Track* line = trackAt(row);
+    if (!line || x < kGutterWidth) return false;
+
+    const std::size_t at = static_cast<std::size_t>((x - kGutterWidth) / kCellWidth);
+    if (at >= line->slots.size()) return false;
+    // A held frame is the same drawing still showing. There is no second object
+    // there to pick up, so only the first slot of a run is a card.
+    if (line->runBounds(at).first != at) return false;
+
+    if (slot) *slot = at;
+    return true;
+}
+
 bool TimelineWidget::isOnRunEdge(std::size_t row, int x, std::size_t* run_start) const {
     const Track* line = trackAt(row);
     if (!line || line->slots.empty()) return false;
@@ -421,15 +448,18 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    const std::size_t slot = slotAt(x);
-    setCurrentSlot(slot);
+    // The playhead clamps: past the end of the strip you are still standing on
+    // the last frame there is.
+    setCurrentSlot(slotAt(x));
 
-    // Only the numbered card starts a move. Pressing a held frame selects it
-    // and nothing more -- there is no separate object there to drag.
-    if (slot < line->slots.size() && runAt(row, slot).first == slot) {
+    // A move does not. Only the numbered card starts one, and past the end of
+    // the strip there is no card -- which is the same question the cursor asks,
+    // and it has to be the same answer or the pointer is lying.
+    std::size_t card = 0;
+    if (cardAt(row, x, &card)) {
         may_drag_ = true;
         drag_row_ = row;
-        drag_image_ = line->slots[slot];
+        drag_image_ = line->slots[card];
         press_x_ = x;
     }
 }
@@ -541,14 +571,10 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // The boundary between two runs, which stretches the exposure.
     if (isOnRunEdge(row, x, nullptr)) return Qt::SplitHCursor;
 
-    // And only the numbered card can be picked up. Pressing a held frame
-    // selects it and nothing more -- there is no separate object there to drag
-    // -- so this is the same test mousePressEvent uses to decide whether a drag
-    // may start, and it has to stay the same test.
-    const Track* line = trackAt(row);
-    const std::size_t slot = slotAt(x);
-    const bool on_card = line && slot < line->slots.size() && runAt(row, slot).first == slot;
-    return on_card ? Qt::OpenHandCursor : Qt::ArrowCursor;
+    // And only the numbered card can be picked up -- the same function the
+    // press asks, which is what stops the pointer promising a drag that will
+    // not happen or staying an arrow over one that will.
+    return cardAt(row, x, nullptr) ? Qt::OpenHandCursor : Qt::ArrowCursor;
 }
 
 void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {

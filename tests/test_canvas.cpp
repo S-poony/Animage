@@ -4591,6 +4591,56 @@ void theTimelineIsAHandOnlyWhereADrawingCanBePickedUp() {
     CHECK_EQ(shapeOf(timeline), shape(Qt::SplitHCursor));
 }
 
+// The case the first version of that fix missed, reported: a track of drawings
+// with no holds. slotAt clamps to the last slot, so past the end of the strip
+// every question about "what is under the pointer" was answered with the last
+// drawing -- and with anything held, the clamp lands mid-run and nothing shows.
+void pastTheEndOfATrackThereIsNoCardToPickUp() {
+    TEST("past the end of a track of single-frame drawings there is no card");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    // Two drawings, one frame each, and no holds anywhere.
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.insertImage(track, 1);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().tracks.front().slots.size(), std::size_t{2});
+
+    // Both cards can be picked up.
+    hover(timeline, timeline->cellCentreForTesting(0, 0));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::OpenHandCursor));
+    hover(timeline, timeline->cellCentreForTesting(0, 1));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::OpenHandCursor));
+
+    // And the empty width past them cannot.
+    const QPoint beyond = timeline->cellCentreForTesting(0, 6);
+    hover(timeline, beyond);
+    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+
+    // Which is a claim about the press and not only about the picture: a drag
+    // out here was picking up the last drawing and moving it. Dragging from
+    // past the end to the front of the track must do nothing at all.
+    const std::vector<ImageId> before = doc.scene().tracks.front().slots;
+    sendMouse(timeline, QEvent::MouseButtonPress, QPointF(beyond), Qt::LeftButton,
+              Qt::LeftButton);
+    const QPoint front = timeline->cellCentreForTesting(0, 0);
+    for (int i = 1; i <= 6; ++i) {
+        const QPointF at = QPointF(beyond) + (QPointF(front) - QPointF(beyond)) * (i / 6.0);
+        sendMouse(timeline, QEvent::MouseMove, at, Qt::NoButton, Qt::LeftButton);
+    }
+    sendMouse(timeline, QEvent::MouseButtonRelease, QPointF(front), Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK(doc.scene().tracks.front().slots == before);
+}
+
 void theHandDoesNotGetStuckClosed() {
     TEST("the hand opens again after a pan and goes away with the key");
     Fixture f;
@@ -4640,6 +4690,7 @@ int main(int argc, char** argv) {
     theResizeGestureShowsWhatItIsSetting();
     theHandDoesNotGetStuckClosed();
     theTimelineIsAHandOnlyWhereADrawingCanBePickedUp();
+    pastTheEndOfATrackThereIsNoCardToPickUp();
     thePenReachesTheTransformBar();
     theBoxHasSomethingToRotateBy();
     aPasteLandsWhereItWasCopiedFrom();

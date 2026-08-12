@@ -83,6 +83,10 @@ private:
     // in the given row's track.
     std::pair<std::size_t, std::size_t> runAt(std::size_t row, std::size_t slot) const;
     bool isOnRunEdge(std::size_t row, int x, std::size_t* run_start) const;
+    // The numbered card under x, if there is one -- the only thing in a row
+    // that can be picked up. Not slotAt, which clamps to the last slot and so
+    // answers "a card" for the whole width of the widget past the strip.
+    bool cardAt(std::size_t row, int x, std::size_t* slot) const;
     std::vector<int> drawingNumbers(const animage::Track& track) const;
 
     // What a press here would do, and the only thing that decides the cursor.
