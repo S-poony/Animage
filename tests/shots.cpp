@@ -616,6 +616,43 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
+        {"a-track-being-restacked",
+         "left mid-drag on purpose: the caret is where the row would land, and it goes "
+         "across the whole width because the whole row moves and not just its name",
+         [](Stage& s) {
+             s.choose("Add track");
+             s.choose("Add track");
+             const auto nameOfRow = [&](int row) {
+                 return QPointF(
+                     20.0,
+                     s.timeline->cellCentreForTesting(static_cast<std::size_t>(row), 0).y());
+             };
+             const auto send = [&](QEvent::Type type, QPointF at, Qt::MouseButton button,
+                                   Qt::MouseButtons buttons) {
+                 QMouseEvent event(type, at, s.timeline->mapToGlobal(at), button, buttons,
+                                   Qt::NoModifier);
+                 QCoreApplication::sendEvent(s.timeline, &event);
+             };
+             // The bottom row picked up by its name and carried to the top, and
+             // never let go of -- a caret only exists while a row is in hand.
+             send(QEvent::MouseButtonPress, nameOfRow(2), Qt::LeftButton, Qt::LeftButton);
+             send(QEvent::MouseMove, nameOfRow(2) - QPointF(0.0, 20.0), Qt::NoButton,
+                  Qt::LeftButton);
+             send(QEvent::MouseMove, nameOfRow(0) - QPointF(0.0, 8.0), Qt::NoButton,
+                  Qt::LeftButton);
+             s.settle();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-colour-layer-at-the-bottom-of-a-long-stack",
+         "issue #12: the colour layer is the bottom row and has to be in view the moment "
+         "it is made -- the scroll is against the panel *with* the Colour layer box in it",
+         [](Stage& s) {
+             for (int i = 0; i < 30; ++i) s.choose("Add layer");
+             s.choose("Add colour layer");
+             s.picture = Stage::closeUpOf(s.layerPanel());
+         }},
+
         {"the-drawn-cursors",
          "the three glyphs the system has none for, read off the widget after hovering "
          "what raises them -- grab() renders the widget and never the pointer",

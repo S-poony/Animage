@@ -17,6 +17,7 @@ the shape of the program. Those five maps are.
 | [Where it got to](#where-it-got-to) | what exists, milestone by milestone |
 | [**How the program fits together**](#how-the-program-fits-together) | five paths traced end to end, each across several files |
 | [Several tracks, and a track that overwrites](#several-tracks-and-a-track-that-overwrites) | what a second track changed, and what it broke |
+| [Restacking by dragging](#restacking-by-dragging) | layers and tracks, one gesture, and where the panel had been scrolling to |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
@@ -697,6 +698,131 @@ And **`Timeline` is now `Track`** throughout, including the French
 specification. A `Track` is one stack of layers with its own time; the timeline
 is the scene's shared time axis and the panel that shows it. A scene has several
 tracks and one timeline. If you find the old name anywhere, it meant the track.
+
+## Restacking by dragging
+
+Both stacks are dragged now — layers in the panel, tracks in the timeline — and
+the Move up and Move down buttons are gone. The buttons were one click per
+position, so a layer of ten going to the bottom was nine of them, and neither
+button ever said what it was about to move past. Tracks had no way to be
+restacked at all, which meant a background made second stayed in front of the
+character for good.
+
+**The two are the same shape and are deliberately not the same code.** A drop
+lands on a *boundary* between rows, and both models count a destination in the
+list with the dragged row already taken out of it — so `boundary - 1` going down
+and `boundary` going up, and the two agree only in one direction. That
+subtraction is the whole of the arithmetic and it is the thing that would be
+wrong: it is `LayerList::destinationFor`, which is public and static so a test
+can reach it, and the same three lines by hand in
+`TimelineWidget::mouseReleaseEvent`. Sharing them would have meant a header
+for one expression that each side states differently anyway — the timeline's
+boundary comes from a y and a row height, the panel's from Qt's drop indicator.
+
+**Qt's drag and drop cannot be driven by a test, and that decided how much of
+this is Qt's.** A `QDropEvent` sent to the view, or to its viewport, reaches
+neither handler: only the platform's drag manager delivers these, and the
+offscreen platform has none. An hour went into finding that out, so it is
+written down rather than left to be re-discovered.
+
+What is left is tested from both ends and joined in the middle. The *start* is
+ordinary mouse events and those do arrive: a press on a row and a three-pixel
+move put the view in `DraggingState`, which is what `dragHasBegunForTesting`
+reports and is the moment before the platform takes over — deliberately under
+`QApplication::startDragDistance()`, because one pixel further runs `startDrag`,
+which blocks in a drag loop offscreen has no way to finish. The *end* is
+`LayerList::reordered` called directly, with the document and the panel checked
+after it. In between is Qt's, plus `destinationFor`, which is pinned on its own.
+
+The timeline's drag needs none of that: it is built out of ordinary mouse events
+throughout, so it is tested end to end.
+
+**The layer list refuses to reorder itself, and that is the point of
+`LayerList` rather than an implementation detail.** `QTreeWidget`'s own drop
+takes the item out and puts it back somewhere else, which leaves the panel
+showing a stack the document has never heard of — until the next rebuild, which
+would then silently undo the drag. So `dropEvent` is overridden, sets
+`Qt::IgnoreAction` and changes nothing; the document moves the layer and the
+list is rebuilt from it. IgnoreAction is load-bearing twice over:
+`QAbstractItemView::startDrag` deletes the row it dragged when the drop comes
+back `MoveAction`.
+
+Two smaller things about it. The items have `Qt::ItemIsDropEnabled` *cleared*,
+because a layer is not a place to put another layer — with it on, Qt offers a
+third drop position, "onto this row", drawn as a box round the row, meaning
+something a flat stack cannot do. And `LayerList` has no `Q_OBJECT`: it has no
+signals of its own, a `std::function` is enough for one caller, and it keeps
+`findChild<QTreeWidget*>` — which is how the tests and `shots` reach the panel —
+finding it.
+
+**Restacking a track is `Document::moveTrack`, and its undo is two numbers.**
+`TrackOrderOp` holds the move that undoes it and flips itself on apply, like
+every other op here. Deliberately not a pair of `TrackOp`s and not "swap the
+whole track list": both would copy every `Image` record in the scene to record an
+edit that touches no drawing at all. Nothing else moves — no cel refcount, no
+slot, no image — so a track keeps its own time whatever it is stacked against,
+and `restackingATrackMovesNoDrawing` pins that along with the inverse being exact
+in both directions.
+
+The handle is the name strip and not the row, which the gutter was already free
+to be: there is no frame under it, so nothing is competing for the press. A press
+there still selects the track, as it always did, and a drag only starts once the
+pointer has moved `kDragThreshold` *vertically* — where a card needs the same
+distance horizontally. Neither can start the other, because they begin on
+different sides of the gutter.
+
+**And the hand now means two things, which is still one thing.** The timeline's
+cursor rule was "a hand means this drawing can be picked up" — see
+[what the pointer says](#what-the-pointer-says), where it cost a bug to get
+there. It is now "this can be picked up and carried somewhere else", which is
+true of a drawing along its track and of a track up its stack, and false
+everywhere else in the widget. The gutter was an arrow before and there is a test
+that used to say so.
+
+**The word "overwrite" is off the gutter.** It was under the track name in small
+text, and it was reported as clutter: the setting is on by default, so it was on
+nearly every row nearly all the time, which is how a label stops being read. It
+is in the row's tooltip now, along with the name and the fact that the row can be
+dragged — asked for rather than read past — and the status bar still says
+`(overwrite)` about the track being edited. That reverses what the code used to
+argue, which was that it "has to be visible from the row itself"; the argument
+was right about the fact mattering and wrong about a permanent label being how
+you make somebody notice one.
+
+### Where the layer panel had been scrolling to
+
+Issue #12, and it is worth reading before touching `rebuildLayerList`, because
+the mechanism generalises to any panel that changes shape when its selection
+does.
+
+Reported as "the layer list waits a few seconds and then slowly scrolls to the
+new colour layer". What was measured is the other half of that: **with 60 layers
+the new colour layer was not scrolled to at all.** The list settled at scrollbar
+value 29 where 44 was needed, immediately, and stayed there.
+
+The cause is that `setCurrentItem` scrolls by itself, and it scrolls against the
+panel *as it stands at that moment*. A colour layer goes to the bottom of the
+stack, and selecting one makes the Colour layer box appear underneath the list —
+which takes about half the list's height with it. So the scroll was worked out
+for a list of 32 rows and applied to one of 17. Every ingredient is ordinary and
+the combination is not: the row that most needs scrolling to is the one whose
+selection shrinks the thing being scrolled.
+
+`showCurrentLayer` is the fix and the interesting line in it is
+`layout()->activate()`: it lays the panel out *now*, so the `scrollToItem` after
+it is measured against the height the list actually ends up with. Without that
+the call is a second guess at the same wrong number.
+
+It is called from the three places that make or move a layer and not from
+`rebuildLayerList`, which is deliberate — a rebuild runs on every frame change,
+and a list that scrolled back to the current layer each time you scrubbed would
+be a worse bug than the one being fixed. `setCurrentItem` is silent when the
+current row has not changed, and that silence is what makes scrolling somewhere
+to look at another layer survive a scrub.
+
+The multi-second crawl in the report was never reproduced offscreen; the scroll
+lands in one step either way now, and a `scrollTo` on a row that is already
+visible does nothing, so whatever was nudging it has nothing left to nudge.
 
 ## Colour through time
 
@@ -1465,8 +1591,12 @@ be picked up* was the same hand.
 `TimelineWidget::cursorAt` is now the one place, in the same order as the
 canvas's: a gesture under way, then the ruler, then what is under the pointer.
 The ruler is an arrow with a split-arrow on the end-of-shot grip, and a hand
-means one thing — a numbered card. The flag is gone, and with it `leaveEvent`,
-which existed only to undo it.
+means one thing — this can be picked up and carried somewhere else. The flag is
+gone, and with it `leaveEvent`, which existed only to undo it.
+
+That rule was "a numbered card" until the gutter became the handle a track is
+restacked by; it is two places now and still one meaning. See
+[restacking by dragging](#restacking-by-dragging).
 
 **And asking the same question in two places found a real bug under it.** The
 first fix asked "is there a card here" the way `mousePressEvent` already did —

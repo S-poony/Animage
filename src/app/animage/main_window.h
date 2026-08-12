@@ -15,6 +15,7 @@
 
 class CanvasWidget;
 class TimelineWidget;
+class LayerList;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QSlider;
@@ -126,7 +127,15 @@ private:
     void addLayer();
     void addColourLayer();
     void removeCurrentLayer();
-    void moveCurrentLayer(int delta);
+    // What a row dropped somewhere else in the list means. Both indices are rows
+    // in the panel, and `to` is counted with the dragged row taken out of it --
+    // see LayerList and Document::moveLayer, which agree about that.
+    void moveLayerTo(int from, int to);
+    // Puts the current layer in view, now rather than eventually. See issue #12:
+    // the list scrolls itself when the selection changes, and it does it against
+    // the panel as it stands at that moment rather than the one it is about to
+    // become.
+    void showCurrentLayer();
     void onLayerSelected();
     void onLayerItemChanged(QTreeWidgetItem* item, int column);
     void onOpacityChanged(int percent);
@@ -266,7 +275,7 @@ private:
     // and there is one per frame change -- would shove the dock back to the
     // height the track count implies, undoing a drag the moment you scrubbed.
     int timeline_rows_shown_ = 0;
-    QTreeWidget* layer_list_ = nullptr;
+    LayerList* layer_list_ = nullptr;
     QSlider* opacity_ = nullptr;
     QDoubleSpinBox* radius_ = nullptr;
     QLabel* status_ = nullptr;

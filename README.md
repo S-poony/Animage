@@ -215,6 +215,11 @@ while the canvas goes on showing all of them. The Track menu adds, renames and
 deletes them; a new track arrives at the bottom of the stack, with a layer and a
 drawing so there is something to draw on.
 
+Drag a track's name up or down the strip on the left to restack it — the top row
+is the front of the picture, so that is how a background gets behind a character.
+Hovering a name says what the track is and what it does with a drawing put down
+on it.
+
 Tracks need not be the same length. What a track shows once the playhead is past
 its last drawing is set under Track ▸ Past the last drawing: show nothing (the
 default), keep showing its last drawing, or cycle. That is about the picture, so
@@ -359,10 +364,11 @@ Cancelling halfway would splice two shots together at the seam. A folder that is
 *not* an export — the project folder itself, most obviously — is never offered
 for deletion; it asks for another name instead.
 
-The layer panel on the right adds, removes, reorders, hides and fades layers.
-Layers belong to the track rather than to the image, which is the point of the
-whole model: adding a layer touches no drawing, and a drawing held over five
-frames holds every one of its layers for those five frames.
+The layer panel on the right adds, removes, hides and fades layers, and layers
+are restacked by dragging a row up or down the list — the top row is the top of
+the stack. Layers belong to the track rather than to the image, which is the
+point of the whole model: adding a layer touches no drawing, and a drawing held
+over five frames holds every one of its layers for those five frames.
 
 ## Measuring pen latency
 

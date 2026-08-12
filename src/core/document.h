@@ -29,6 +29,16 @@ public:
     TrackId addTrack(std::string name);
     void removeTrack(TrackId track);
     void updateTrack(TrackId track, const TrackProperties& properties);
+
+    // Restacks a track: index 0 is the top row of the timeline and the top group
+    // of the composite. `to` is counted in the list with the track already taken
+    // out of it, which is the same convention moveLayer uses and is what makes
+    // moveTrack(to, from) the exact inverse.
+    //
+    // Reordering only: no image, no cel and no slot is touched, so a track keeps
+    // its own time whatever it is stacked against.
+    void moveTrack(std::size_t from, std::size_t to);
+
     void setFramerate(int framerate);
 
     // How long the shot is. `fixed` off takes it from the tracks, which is the

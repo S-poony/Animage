@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QScrollBar>
 #include <QPainter>
 #include <QThread>
 #include <QKeyEvent>
@@ -42,6 +43,7 @@
 
 #include "brush.h"
 #include "canvas_widget.h"
+#include "layer_list.h"
 #include "export_sequence.h"
 #include "color.h"
 #include "half.h"
@@ -4578,11 +4580,16 @@ void theTimelineIsAHandOnlyWhereADrawingCanBePickedUp() {
     hover(timeline, timeline->cellCentreForTesting(0, 2));
     CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
 
-    // Past the end of the track, and in the strip of track names.
+    // Past the end of the track there is nothing to pick up.
     hover(timeline, timeline->cellCentreForTesting(0, 9));
     CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+
+    // The strip of track names is the second thing that can be picked up, and
+    // it is why the hand still means one thing rather than two: a drawing moves
+    // along its track, a track moves up the stack, and both are "this can be
+    // carried somewhere else".
     hover(timeline, QPointF(20.0, timeline->cellCentreForTesting(0, 0).y()));
-    CHECK_EQ(shapeOf(timeline), shape(Qt::ArrowCursor));
+    CHECK_EQ(shapeOf(timeline), shape(Qt::OpenHandCursor));
 
     // The end of the run still stretches the exposure, which is a different
     // gesture and says so.
@@ -4639,6 +4646,249 @@ void pastTheEndOfATrackThereIsNoCardToPickUp() {
     sendMouse(timeline, QEvent::MouseButtonRelease, QPointF(front), Qt::LeftButton, Qt::NoButton);
     QCoreApplication::processEvents();
     CHECK(doc.scene().tracks.front().slots == before);
+}
+
+// Restacking a track by dragging its name, which is the whole of the interface
+// for it: there is no menu item and there are no buttons.
+//
+// Two things are worth driving through the real events rather than calling
+// Document::moveTrack. The gesture has to survive a press that also *selects*
+// the row it lands on -- selecting is what a press in the gutter did before
+// this, and it still does -- and the caret is a boundary between rows while the
+// model wants a position with the row taken out, which is exactly the
+// arithmetic that is off by one in one direction only.
+void draggingATracksNameRestacksIt() {
+    TEST("dragging a track's name restacks it, and dropping it back does not");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId first = doc.scene().tracks.front().id;
+    doc.addTrack("second");
+    doc.addTrack("third");
+    timeline->refresh();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t{3});
+    const TrackId second = doc.scene().tracks[1].id;
+    const TrackId third = doc.scene().tracks[2].id;
+
+    // Somewhere in the name strip of a row, which is the only place a track can
+    // be picked up.
+    const auto nameOfRow = [&](std::size_t row) {
+        return QPointF(20.0, timeline->cellCentreForTesting(row, 0).y());
+    };
+    const auto dragRow = [&](std::size_t from, QPointF to) {
+        const QPointF at = nameOfRow(from);
+        sendMouse(timeline, QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        for (int i = 1; i <= 6; ++i) {
+            sendMouse(timeline, QEvent::MouseMove, at + (to - at) * (i / 6.0), Qt::NoButton,
+                      Qt::LeftButton);
+        }
+        sendMouse(timeline, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+    };
+    const auto order = [&] {
+        std::vector<TrackId> ids;
+        for (const Track& track : doc.scene().tracks) ids.push_back(track.id);
+        return ids;
+    };
+
+    // The bottom row to the top, which is what putting a background behind a
+    // character is.
+    dragRow(2, nameOfRow(0) - QPointF(0.0, 20.0));
+    CHECK((order() == std::vector<TrackId>{third, first, second}));
+    // And the row you dragged is the one you are now editing, because pressing
+    // it selected it.
+    CHECK_EQ(timeline->track(), third);
+
+    // Back down again, past the last row: the far end is the far end, not a
+    // refusal, and this is the direction whose arithmetic differs.
+    dragRow(0, nameOfRow(2) + QPointF(0.0, 20.0));
+    CHECK((order() == std::vector<TrackId>{first, second, third}));
+
+    // Dropped where it already was -- a drag that wandered and came back --
+    // changes nothing and leaves nothing on the undo stack to be spent.
+    const std::size_t depth = doc.undoDepth();
+    dragRow(1, nameOfRow(1) + QPointF(0.0, 4.0));
+    CHECK((order() == std::vector<TrackId>{first, second, third}));
+    CHECK_EQ(doc.undoDepth(), depth);
+
+    // A press with no drag in it still only selects, which is what the gutter
+    // has always been for.
+    const QPointF at = nameOfRow(2);
+    sendMouse(timeline, QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, at, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK((order() == std::vector<TrackId>{first, second, third}));
+    CHECK_EQ(timeline->track(), third);
+}
+
+// The one piece of a layer drop that is ours: a drop indicator sits *between*
+// two rows, and moveLayer counts the destination in the list with the dragged
+// row already taken out of it. The two agree going up and differ by one going
+// down, which is the shape of mistake that leaves a feature half working.
+void whereADroppedRowLands() {
+    TEST("a row dropped between two others lands where moveLayer counts it");
+    // Four rows, so the boundaries between them are 0 to 4.
+    CHECK_EQ(LayerList::destinationFor(0, 0, 4), 0);  // above itself: no move
+    CHECK_EQ(LayerList::destinationFor(0, 1, 4), 0);  // below itself: no move
+    CHECK_EQ(LayerList::destinationFor(0, 2, 4), 1);
+    CHECK_EQ(LayerList::destinationFor(0, 4, 4), 3);  // to the very bottom
+
+    CHECK_EQ(LayerList::destinationFor(3, 0, 4), 0);  // to the very top
+    CHECK_EQ(LayerList::destinationFor(3, 3, 4), 3);  // above itself: no move
+    CHECK_EQ(LayerList::destinationFor(3, 4, 4), 3);  // below itself: no move
+    CHECK_EQ(LayerList::destinationFor(3, 2, 4), 2);
+
+    // Off either end, and a list too short to reorder at all.
+    CHECK_EQ(LayerList::destinationFor(1, -3, 4), 0);
+    CHECK_EQ(LayerList::destinationFor(1, 40, 4), 3);
+    CHECK_EQ(LayerList::destinationFor(0, 1, 1), 0);
+}
+
+// Restacking a layer by dragging its row, which replaced Move up and Move down.
+//
+// The gesture is driven at the seam rather than end to end, and that limitation
+// is worth stating: Qt's drag and drop cannot be driven by synthetic events --
+// a QDropEvent sent to the view or to its viewport reaches neither handler,
+// because only the platform's drag manager delivers these -- so this calls what
+// the drop reports and tests everything downstream of it. What the drop works
+// out on the way in is pinned above.
+//
+// What it is really pinning is that the list changes nothing by itself: Qt's
+// InternalMove would reorder the *items* and leave the document alone, so the
+// panel would show a stack nothing composites until the next rebuild silently
+// put it back.
+void aLayerDroppedOnAnotherRowRestacksTheStack() {
+    TEST("a layer dropped on another row restacks the stack, and the document says so");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    // No metaobject of its own -- see LayerList -- so it is found as what it
+    // derives from and known to be what it is. The window has one tree.
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    CHECK(layers != nullptr);
+    if (!layers) return;
+    CHECK(static_cast<bool>(layers->reordered));
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.addLayer(track, "clean", 0);
+    doc.addLayer(track, "rough", 1);
+    // The setup Qt's own half of the gesture needs, since that half cannot be
+    // driven from here: the view drags and drops onto itself, and a row is
+    // draggable without being somewhere to drop *onto* -- which is what keeps
+    // the indicator to above and below.
+    CHECK(layers->dragDropMode() == QAbstractItemView::InternalMove);
+    CHECK(layers->dragEnabled());
+    CHECK(layers->acceptDrops());
+    // Through the button, so the panel is rebuilt the way it is in use.
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add layer")) button->click();
+    }
+    QCoreApplication::processEvents();
+
+    const auto names = [&] {
+        std::vector<std::string> out;
+        for (const Layer& layer : doc.scene().findTrack(track)->layers) out.push_back(layer.name);
+        return out;
+    };
+    const std::vector<std::string> before = names();
+    CHECK_EQ(before.size(), std::size_t{4});
+    if (before.size() != 4) return;
+    CHECK_EQ(layers->topLevelItemCount(), 4);
+    CHECK((layers->topLevelItem(0)->flags() & Qt::ItemIsDragEnabled) != 0);
+    CHECK((layers->topLevelItem(0)->flags() & Qt::ItemIsDropEnabled) == 0);
+
+    // A press on a row and a small move: Qt decides here that this press is
+    // becoming a drag, and it is the last moment before the platform takes over.
+    // Kept under QApplication::startDragDistance on purpose -- one pixel further
+    // and startDrag runs, which blocks in a drag loop that offscreen has no way
+    // to finish.
+    const QRect row = layers->visualItemRect(layers->topLevelItem(0));
+    sendMouse(layers->viewport(), QEvent::MouseButtonPress, QPointF(row.center()),
+              Qt::LeftButton, Qt::LeftButton);
+    sendMouse(layers->viewport(), QEvent::MouseMove, QPointF(row.center() + QPoint(0, 3)),
+              Qt::NoButton, Qt::LeftButton);
+    CHECK(layers->dragHasBegunForTesting());
+    sendMouse(layers->viewport(), QEvent::MouseButtonRelease,
+              QPointF(row.center() + QPoint(0, 3)), Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+
+    // The top row to the bottom of the stack.
+    layers->setCurrentItem(layers->topLevelItem(0));
+    QCoreApplication::processEvents();
+    layers->reordered(0, 3);
+    std::vector<std::string> wanted(before.begin() + 1, before.end());
+    wanted.push_back(before[0]);
+    CHECK((names() == wanted));
+
+    // The panel is a picture of the document and not a second copy of it, and
+    // the row you were holding is the row you are still on -- picked by layer
+    // rather than put back by index, which is what the buttons used to do.
+    CHECK_EQ(layers->topLevelItem(3)->text(0).toStdString(), before[0]);
+    CHECK_EQ(layers->indexOfTopLevelItem(layers->currentItem()), 3);
+
+    // And back to the top, which is the other direction.
+    layers->reordered(3, 0);
+    CHECK((names() == before));
+
+    // A drop that asks for where it already is, or for a row that is not there,
+    // does nothing -- and leaves nothing on the undo stack to be spent by a
+    // Ctrl+Z meant for the stroke before it.
+    const std::size_t depth = doc.undoDepth();
+    layers->reordered(1, 1);
+    layers->reordered(0, 9);
+    layers->reordered(-1, 2);
+    CHECK((names() == before));
+    CHECK_EQ(doc.undoDepth(), depth);
+}
+
+// Issue #12. A colour layer goes to the bottom of the stack, so in a track with
+// enough layers to need a scrollbar the layer you have just made is off the end
+// of the panel -- and the list scrolled itself against the panel as it stood
+// before the Colour layer box appeared underneath and took half of its height.
+void aNewColourLayerIsInViewWhenItArrives() {
+    TEST("a new colour layer is in view the moment it is made");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = window.findChild<QTreeWidget*>();
+    CHECK(layers != nullptr);
+    if (!layers) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    for (int i = 0; i < 60; ++i) doc.addLayer(track, "layer " + std::to_string(i + 2), 0);
+
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) button->click();
+    }
+    QCoreApplication::processEvents();
+
+    // The list is worth scrolling at all, or this would pass on a panel that
+    // shows every layer whatever it does.
+    CHECK(layers->verticalScrollBar()->maximum() > 0);
+
+    QTreeWidgetItem* current = layers->currentItem();
+    CHECK(current != nullptr);
+    if (!current) return;
+    CHECK_EQ(layers->indexOfTopLevelItem(current), layers->topLevelItemCount() - 1);
+
+    // In view now, in one step, and not somewhere a later scroll would have to
+    // reach: the rect the view gives for the row has to be inside the viewport.
+    const QRect row = layers->visualItemRect(current);
+    CHECK(layers->viewport()->rect().contains(row.center()));
 }
 
 void theHandDoesNotGetStuckClosed() {
@@ -4775,5 +5025,9 @@ int main(int argc, char** argv) {
     theTimelineDockFollowsTheTrackCount();
     theTimelineDockCanBeResizedByHand();
     theInsertButtonObeysTheOverwriteSetting();
+    draggingATracksNameRestacksIt();
+    whereADroppedRowLands();
+    aLayerDroppedOnAnotherRowRestacksTheStack();
+    aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }

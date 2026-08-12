@@ -682,6 +682,64 @@ void trackPropertiesAreOneUndoStep() {
     CHECK_EQ(f.tl().name, std::string("main"));
 }
 
+// Restacking, which is what dragging a row's name in the timeline does.
+//
+// The three things worth pinning are that it is the drawings that stay put --
+// a track's time is its own and has nothing to do with what it is stacked
+// against -- that undo puts the order back, and that the inverse is exact for a
+// move in either direction. The last is the one that would break silently: `to`
+// is counted with the track already taken out, so moveTrack(to, from) is the
+// undo only if both ends agree about that, and a move up and a move down
+// disagree by one if they do not.
+void restackingATrackMovesNoDrawing() {
+    TEST("restacking a track reorders the stack and moves no drawing");
+    Fixture f;
+    f.doc.insertImage(f.track, 0);
+    const TrackId second = f.doc.addTrack("second");
+    const TrackId third = f.doc.addTrack("third");
+    f.doc.insertImage(third, 0);
+    f.doc.extendExposure(third, 0, 3);
+
+    const auto order = [&] {
+        std::vector<TrackId> ids;
+        for (const Track& track : f.doc.scene().tracks) ids.push_back(track.id);
+        return ids;
+    };
+    CHECK((order() == std::vector<TrackId>{f.track, second, third}));
+
+    // The bottom one to the top, which is what putting a background behind a
+    // character is.
+    f.doc.moveTrack(2, 0);
+    CHECK((order() == std::vector<TrackId>{third, f.track, second}));
+
+    // Nothing about the track itself moved with it.
+    const Track* moved = f.doc.scene().findTrack(third);
+    CHECK_EQ(moved->frameCount(), std::size_t{4});
+    CHECK_EQ(moved->images.size(), std::size_t{1});
+
+    CHECK(f.doc.undo());
+    CHECK((order() == std::vector<TrackId>{f.track, second, third}));
+    CHECK(f.doc.redo());
+    CHECK((order() == std::vector<TrackId>{third, f.track, second}));
+
+    // And the other way round, which is the direction that catches an inverse
+    // off by one.
+    f.doc.undo();
+    f.doc.moveTrack(0, 2);
+    CHECK((order() == std::vector<TrackId>{second, third, f.track}));
+    CHECK(f.doc.undo());
+    CHECK((order() == std::vector<TrackId>{f.track, second, third}));
+
+    // A move to where it already is, and one off the end, are both nothing at
+    // all -- not an undo step that does nothing, which is worse: it eats a
+    // Ctrl+Z that was meant for the stroke before it.
+    const std::size_t depth = f.doc.undoDepth();
+    f.doc.moveTrack(1, 1);
+    f.doc.moveTrack(0, 9);
+    CHECK_EQ(f.doc.undoDepth(), depth);
+    CHECK((order() == std::vector<TrackId>{f.track, second, third}));
+}
+
 // --- what a track shows past its last drawing ------------------------------
 //
 // Issue #20. Tracks share one timeline and are not obliged to be the same
@@ -840,6 +898,7 @@ int main() {
     movingOverToWhereItAlreadyIsDoesNothing();
     overwritingNeverLosesADrawing();
     trackPropertiesAreOneUndoStep();
+    restackingATrackMovesNoDrawing();
     anewDrawingTakesTheLowestFreeNumber();
     undoingADeletionPutsItsNumberBackInUse();
     whatATrackShowsPastItsEnd();

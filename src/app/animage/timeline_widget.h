@@ -100,6 +100,14 @@ private:
     Qt::CursorShape cursorAt(int x, int y) const;
     void refreshCursor(int x, int y) { setCursor(cursorAt(x, y)); }
 
+    // What the row under the pointer is, asked for rather than written on it.
+    // The gutter is a hundred pixels wide and a track has a name in it; a second
+    // line of text there was clutter on every row of every scene.
+    void refreshTooltip(int x, int y);
+
+    // The boundary between rows a drop at `y` would land on, in [0, rowCount()].
+    int trackDropRowFor(int y) const;
+
     // What a drawing's colour layers are doing, in what the card can show.
     struct ColourState {
         bool any = false;      // a colour layer has marks to show here
@@ -145,4 +153,18 @@ private:
     std::size_t drop_first_ = 0;
     std::size_t drop_last_ = 0;
     bool drop_overwrites_ = false;
+
+    // Dragging a row by its name restacks the track: index 0 is the top of the
+    // timeline and the top group of the composite, so this is how a background
+    // is put behind a character.
+    //
+    // A drag of its own rather than the same one the cards use, because the two
+    // answer different questions -- which frames, against which rows -- and
+    // there is nowhere they can be confused: one starts in the gutter and the
+    // other cannot.
+    bool may_drag_track_ = false;
+    bool dragging_track_ = false;
+    std::size_t track_drag_row_ = 0;
+    int press_y_ = 0;
+    int track_drop_row_ = -1;  // the boundary it would land on, in rows
 };

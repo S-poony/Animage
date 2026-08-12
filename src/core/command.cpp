@@ -118,6 +118,18 @@ void TrackOp::collectCelIds(std::vector<CelId>& out) const {
     }
 }
 
+// No cel refcount moves either way: nothing enters or leaves the scene, the
+// same tracks are in it in another order.
+void TrackOrderOp::applySwap(Document& doc) {
+    std::vector<Track>& tracks = doc.mutableScene().tracks;
+    if (from_ >= tracks.size() || to_ >= tracks.size() || from_ == to_) return;
+
+    Track moved = std::move(tracks[from_]);
+    tracks.erase(tracks.begin() + static_cast<std::ptrdiff_t>(from_));
+    tracks.insert(tracks.begin() + static_cast<std::ptrdiff_t>(to_), std::move(moved));
+    std::swap(from_, to_);
+}
+
 void SceneFramerateOp::applySwap(Document& doc) {
     std::swap(doc.mutableScene().framerate, framerate_);
 }

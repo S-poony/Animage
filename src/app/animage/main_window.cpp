@@ -44,6 +44,7 @@
 
 #include "canvas_widget.h"
 #include "ctg_solver.h"
+#include "layer_list.h"
 #include "export_sequence.h"
 #include "project_io.h"
 #include "color.h"
@@ -762,7 +763,7 @@ void MainWindow::buildLayerPanel() {
     // one: an index widget counts as a persistent editor, so the view routes
     // the press into it instead of to the delegate and the row's own tick stops
     // responding. A colour layer could not be hidden at all.
-    layer_list_ = new QTreeWidget(panel);
+    layer_list_ = new LayerList(panel);
     layer_list_->setColumnCount(2);
     layer_list_->setHeaderLabels({QStringLiteral("Layer"), QStringLiteral("Marks")});
     layer_list_->setRootIsDecorated(false);
@@ -778,6 +779,10 @@ void MainWindow::buildLayerPanel() {
     connect(layer_list_, &QTreeWidget::currentItemChanged, this,
             [this](QTreeWidgetItem*, QTreeWidgetItem*) { onLayerSelected(); });
     connect(layer_list_, &QTreeWidget::itemChanged, this, &MainWindow::onLayerItemChanged);
+    // Restacking is a drag, and the list is told to change nothing by it: it
+    // says where the row landed, the document moves the layer, and the panel is
+    // rebuilt from the document. See LayerList.
+    layer_list_->reordered = [this](int from, int to) { moveLayerTo(from, to); };
 
     // Everything a colour layer has that an ordinary one does not, in one box
     // that is simply absent the rest of the time. A group of controls greyed
@@ -896,9 +901,10 @@ void MainWindow::buildLayerPanel() {
                        "Scrawl roughly inside a region with the ordinary brush and the\n"
                        "whole region takes that colour, gaps in the line art included."));
 
+    // No Move up and Move down. The stack is restacked by dragging a row, which
+    // is one gesture for any distance where the buttons were one click per
+    // position -- and it is the gesture the timeline's rows now take too.
     panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
-    panelButton(QStringLiteral("Move up"), [this] { moveCurrentLayer(-1); });
-    panelButton(QStringLiteral("Move down"), [this] { moveCurrentLayer(1); });
 
     dock->setWidget(panel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
@@ -2108,7 +2114,12 @@ void MainWindow::rebuildLayerList() {
     for (const Layer& layer : track->layers) {
         auto* item = new QTreeWidgetItem(layer_list_);
         item->setText(0, layerLabel(layer, here));
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        // Draggable, and never a place to drop another layer *onto*: a stack is
+        // flat, so the only two answers a drop has are above this row and below
+        // it. With the row itself drop-enabled there is a third, and Qt draws it
+        // as a box round the row that means something this panel cannot do.
+        item->setFlags((item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled) &
+                       ~Qt::ItemIsDropEnabled);
         item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
 
         // A colour layer gets a second tick: show the scribbles rather than the
@@ -2251,6 +2262,7 @@ void MainWindow::addLayer() {
                                           static_cast<std::size_t>(row));
     canvas_->setActiveLayer(created);
     rebuildLayerList();
+    showCurrentLayer();
     canvas_->refreshAll();
 }
 
@@ -2294,6 +2306,11 @@ void MainWindow::addColourLayer() {
 
     canvas_->setActiveLayer(created);
     rebuildLayerList();
+    // A colour layer goes to the bottom of the stack, which in a track of any
+    // size is off the end of the panel -- so this is the one that has to be
+    // scrolled to, and issue #12 is what happens when it is not. See
+    // showCurrentLayer.
+    showCurrentLayer();
     timeline_widget_->refresh();  // as above: the cards say what the colour is doing
     canvas_->refreshAll();
 }
@@ -2332,18 +2349,44 @@ void MainWindow::removeCurrentLayer() {
     canvas_->refreshAll();
 }
 
-void MainWindow::moveCurrentLayer(int delta) {
+// A row dropped somewhere else in the list.
+//
+// The selection is not put back by index afterwards, which is what the buttons
+// did: the rebuild picks the row by `canvas_->activeLayer()`, so the panel
+// follows the layer you were holding rather than the position it went to. The
+// two agree here and stop agreeing the moment anything else moves a layer.
+void MainWindow::moveLayerTo(int from, int to) {
     const Track* track = doc_.scene().findTrack(track_);
-    if (!track || !layer_list_) return;
-
-    const int from = layer_list_->indexOfTopLevelItem(layer_list_->currentItem());
-    const int to = from + delta;
-    if (from < 0 || to < 0 || static_cast<std::size_t>(to) >= track->layers.size()) return;
+    if (!track) return;
+    const int layers = static_cast<int>(track->layers.size());
+    if (from < 0 || to < 0 || from >= layers || to >= layers || from == to) return;
 
     doc_.moveLayer(track_, static_cast<std::size_t>(from), static_cast<std::size_t>(to));
     rebuildLayerList();
-    layer_list_->setCurrentItem(layer_list_->topLevelItem(to));
+    showCurrentLayer();
     canvas_->refreshAll();
+}
+
+// Where issue #12 was: the list scrolls itself when the current row changes, and
+// it scrolls against the panel as it stands at that moment.
+//
+// Selecting a colour layer *changes* that panel. The Colour layer box appears
+// under the list and takes about half its height with it, so a scroll worked out
+// for a list of 32 rows was applied to one of 17 -- and the layer you had just
+// made, which on a colour layer is the bottom one, was left below the fold in
+// any track with enough layers to need scrolling at all.
+//
+// activate() is what makes this one step: it lays the panel out now, so the
+// scroll below is measured against the height the list actually ends up with
+// rather than the one it is about to stop having.
+void MainWindow::showCurrentLayer() {
+    if (!layer_list_) return;
+    if (QWidget* panel = layer_list_->parentWidget()) {
+        if (QLayout* laid_out = panel->layout()) laid_out->activate();
+    }
+    if (QTreeWidgetItem* item = layer_list_->currentItem()) {
+        layer_list_->scrollToItem(item, QAbstractItemView::EnsureVisible);
+    }
 }
 
 void MainWindow::chooseColour() {

@@ -24,6 +24,8 @@ add_library(animage_ui STATIC
   animage/canvas_widget.h
   animage/timeline_widget.cpp
   animage/timeline_widget.h
+  animage/layer_list.cpp
+  animage/layer_list.h
   animage/scene_settings_dialog.cpp
   animage/scene_settings_dialog.h
   animage/shortcuts.cpp

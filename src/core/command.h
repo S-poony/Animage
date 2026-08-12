@@ -117,6 +117,24 @@ private:
     std::optional<Track> state_;
 };
 
+// Moves a track from one place in the stack to another. Its own inverse like
+// everything else here: applying it performs the move it holds, then holds the
+// move back.
+//
+// Deliberately not a pair of TrackOps and deliberately not "swap the whole track
+// list". Both would copy every Image record in the scene to record an edit that
+// touches no drawing at all -- restacking is the one structural change whose
+// entire content is two numbers.
+class TrackOrderOp final : public Op {
+public:
+    TrackOrderOp(std::size_t from, std::size_t to) : from_(from), to_(to) {}
+    void applySwap(Document& doc) override;
+
+private:
+    std::size_t from_;
+    std::size_t to_;
+};
+
 class SceneFramerateOp final : public Op {
 public:
     explicit SceneFramerateOp(int framerate) : framerate_(framerate) {}

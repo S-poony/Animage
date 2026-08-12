@@ -53,6 +53,21 @@ void Document::updateTrack(TrackId track_id, const TrackProperties& properties) 
     track->setProperties(properties);
 }
 
+void Document::moveTrack(std::size_t from, std::size_t to) {
+    if (from >= scene_.tracks.size() || to >= scene_.tracks.size() || from == to) return;
+
+    ScopedCommand command(*this, "Move track");
+    // The move that undoes this one, recorded before it happens as every other
+    // op is. Two numbers rather than a copy of the track list: restacking moves
+    // no drawing, and a track carries every Image record it has.
+    recordOp(std::make_unique<TrackOrderOp>(to, from));
+
+    Track moved = std::move(scene_.tracks[from]);
+    scene_.tracks.erase(scene_.tracks.begin() + static_cast<std::ptrdiff_t>(from));
+    scene_.tracks.insert(scene_.tracks.begin() + static_cast<std::ptrdiff_t>(to),
+                         std::move(moved));
+}
+
 void Document::setFramerate(int framerate) {
     if (framerate <= 0 || framerate == scene_.framerate) return;
     ScopedCommand command(*this, "Set framerate");

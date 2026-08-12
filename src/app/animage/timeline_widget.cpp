@@ -19,7 +19,9 @@ constexpr int kDragThreshold = 5;
 
 // The strip of track names down the left. It is what makes a row say which
 // track it is without a control on it -- see the handover on why a widget on a
-// row is a trap -- and it is where the current track is shown as current.
+// row is a trap -- and it is where the current track is shown as current. It is
+// also the handle a row is restacked by, which is the other thing a strip with
+// no controls on it is free to be.
 constexpr int kGutterWidth = 104;
 
 // Taken from the widget's palette rather than hardcoded, so the timeline
@@ -281,13 +283,6 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         painter.setPen(is_current ? colours.current_text : colours.text);
         painter.drawText(gutter.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
                          QString::fromStdString(line.name));
-        if (line.overwrite_drawings) {
-            // A drawing put down here spends the hold rather than lengthening the
-            // shot, which changes what every button in the panel above does to
-            // this row. It has to be visible from the row itself.
-            painter.drawText(gutter.adjusted(6, 0, -4, -4),
-                             Qt::AlignBottom | Qt::AlignLeft, QStringLiteral("overwrite"));
-        }
 
         // Nothing at all past the track's last drawing, whatever its end
         // behaviour is. Faint dotted cells were tried there and read worse than
@@ -374,6 +369,17 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         }
     }
 
+    // Where a row being carried would land: a line across the whole width and
+    // not only across the gutter, because the whole row goes -- the name is the
+    // handle, the row is the thing being moved.
+    if (dragging_track_ && track_drop_row_ >= 0) {
+        // Pulled inside the bottom edge, or the caret for "below the last row"
+        // is the one row of pixels the widget does not have.
+        const int y = std::min(rowTop(static_cast<std::size_t>(track_drop_row_)), height() - 2);
+        painter.setPen(QPen(colours.current, 3));
+        painter.drawLine(0, y, width(), y);
+    }
+
     if (current_slot_ < frames) {
         const int x = kGutterWidth + static_cast<int>(current_slot_) * kCellWidth;
         painter.fillRect(QRect(x, 0, kCellWidth - 1, kRulerHeight), colours.current);
@@ -433,8 +439,15 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     // rest of the row a place where clicking edits a track you are not on.
     setTrack(line->id);
 
-    // The name strip selects and nothing else: there is no frame under it.
-    if (x < kGutterWidth) return;
+    // The name strip selects, and it is the handle a row is restacked by. There
+    // is no frame under it, so nothing else here is competing for the press --
+    // which is exactly why the handle is here and not on the row itself.
+    if (x < kGutterWidth) {
+        may_drag_track_ = true;
+        track_drag_row_ = row;
+        press_y_ = y;
+        return;
+    }
 
     std::size_t run_start = 0;
     if (isOnRunEdge(row, x, &run_start)) {
@@ -499,6 +512,22 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    // A row is picked up by moving *down or up* the strip, where a drawing is
+    // picked up by moving along it. Neither can start the other: they begin on
+    // different sides of the gutter.
+    if (may_drag_track_ && !dragging_track_ && std::abs(y - press_y_) >= kDragThreshold) {
+        dragging_track_ = true;
+        refreshCursor(x, y);
+    }
+    if (dragging_track_) {
+        const int at = trackDropRowFor(y);
+        if (at != track_drop_row_) {
+            track_drop_row_ = at;
+            update();
+        }
+        return;
+    }
+
     if (may_drag_ && !dragging_ && std::abs(x - press_x_) >= kDragThreshold) {
         dragging_ = true;
         refreshCursor(x, y);
@@ -547,7 +576,43 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    refreshTooltip(x, y);
     refreshCursor(x, y);
+}
+
+// The boundary between rows nearest y: 0 is above the first row, rowCount() is
+// below the last. A boundary and not a row, because a drop lands *between* two
+// rows and there is one more of those than there are rows.
+int TimelineWidget::trackDropRowFor(int y) const {
+    if (rowCount() == 0) return 0;
+    const int at = static_cast<int>(
+        std::lround(static_cast<double>(y - kRulerHeight) / kRowHeight));
+    return std::clamp(at, 0, static_cast<int>(rowCount()));
+}
+
+// What the row is, and what it does with a drawing put down on it.
+//
+// The gutter used to carry the word "overwrite" under the name, and it was
+// reported as clutter: it is on nearly every row nearly all the time -- the
+// setting is on by default -- so it reads as decoration and stops being seen at
+// all. It is here instead, where it is asked for rather than read past, and the
+// status bar still says it about the track being edited.
+void TimelineWidget::refreshTooltip(int x, int y) {
+    std::size_t row = 0;
+    const Track* line = (x < kGutterWidth && rowAtY(y, &row)) ? trackAt(row) : nullptr;
+    if (!line) {
+        setToolTip(QString());
+        return;
+    }
+
+    QString tip = QString::fromStdString(line->name);
+    tip += QStringLiteral("\nDrag the name up or down to restack the tracks.");
+    if (line->overwrite_drawings) {
+        tip += QStringLiteral(
+            "\n\nOverwrite drawings: a drawing put down here spends the rest\n"
+            "of the hold rather than lengthening the shot.");
+    }
+    setToolTip(tip);
 }
 
 // One question, asked of everything that is true at once. The same shape as the
@@ -556,7 +621,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 // path happened to run rather than by what is under the pointer.
 Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // A gesture under way outranks what is beneath the pointer.
-    if (dragging_) return Qt::ClosedHandCursor;
+    if (dragging_ || dragging_track_) return Qt::ClosedHandCursor;
     if (dragging_end_ || stretching_) return Qt::SplitHCursor;
 
     // The ruler. It scrubs, and it used to say so with a pointing hand -- which
@@ -566,7 +631,12 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     if (y < kRulerHeight) return isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::ArrowCursor;
 
     std::size_t row = 0;
-    if (!rowAtY(y, &row) || x < kGutterWidth) return Qt::ArrowCursor;
+    if (!rowAtY(y, &row)) return Qt::ArrowCursor;
+
+    // The name strip, which the row is restacked by. The hand still means one
+    // thing -- this can be picked up and moved -- and now there are two things
+    // it is true of: a drawing along its track, and a track up its stack.
+    if (x < kGutterWidth) return Qt::OpenHandCursor;
 
     // The boundary between two runs, which stretches the exposure.
     if (isOnRunEdge(row, x, nullptr)) return Qt::SplitHCursor;
@@ -580,6 +650,32 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
 void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
+
+    if (dragging_track_) {
+        const int from = static_cast<int>(track_drag_row_);
+        const int boundary = track_drop_row_;
+
+        dragging_track_ = false;
+        may_drag_track_ = false;
+        track_drop_row_ = -1;
+        refreshCursor(x, y);
+
+        // The caret is a boundary counted in the rows as they stand; moveTrack
+        // counts the destination with the row already taken out. Dropping a row
+        // on either of its own edges is a move to where it already is, and both
+        // land on `from` here rather than needing a case of their own.
+        const int rows = static_cast<int>(rowCount());
+        if (boundary >= 0 && rows > 1) {
+            const int to = std::clamp(boundary > from ? boundary - 1 : boundary, 0, rows - 1);
+            if (to != from) {
+                doc_.moveTrack(static_cast<std::size_t>(from), static_cast<std::size_t>(to));
+                refresh();
+                Q_EMIT documentChanged();
+            }
+        }
+        return;
+    }
+    may_drag_track_ = false;
 
     if (dragging_) {
         const Track* line = trackAt(drag_row_);
