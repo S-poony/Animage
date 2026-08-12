@@ -100,6 +100,16 @@ The core library `animage_core` has no Qt dependency and no external
 dependencies at all. If Qt 6 is not found, the GUI targets are skipped and the
 core library and its tests still build.
 
+Beside the tests are the benchmarks and `shots`, which are built and never run
+by `ctest`. `shots` drives the real window through a list of named situations
+and writes a picture of each, because every interface bug this project has
+recorded was caught by looking and none by a green build. It is meant to be
+added to — see [docs/handover.md](docs/handover.md).
+
+```bash
+cmake --build build --target shots && ./build/tests/shots --list
+```
+
 ### On Windows with MSYS2
 
 ```bash
@@ -116,7 +126,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/animage/` | The application. |
 | `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
-| `tests/` | Unit tests, for the core and for the application's save and load. |
+| `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, and `shots.cpp` — pictures of the interface, one per named situation. |
 | `third_party/` | tinyexr (BSD-3) and miniz (MIT), vendored and compiled only into `exr_writer.cpp`. |
 | `docs/fr/` | Original design documents. |
 

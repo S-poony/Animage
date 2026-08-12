@@ -26,6 +26,7 @@ the shape of the program. Those five maps are.
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
+| [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
 | [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
@@ -1408,6 +1409,66 @@ because there is always a frame you are standing on — but "what is under the
 pointer" has to be able to answer *nothing*, and a function that cannot say so
 will invent something plausible instead.
 
+## Looking at the interface
+
+Issue #28, and the shortest section here that is worth anything: `tests/shots.cpp`
+drives the real `MainWindow` through a list of named situations and writes one
+PNG each.
+
+```bash
+./build/tests/shots            every situation, into build/shots/
+./build/tests/shots --list     their names and what each is for
+./build/tests/shots transform  only the ones whose name says transform
+```
+
+**Every interface bug in this file was caught by looking, and none by a green
+build** — the mis-encoded character, the "Add colour layer" button an edit
+silently failed to add, the two identical red swatches, the transform box drawn
+128 pixels clear of the drawing because it was made from tile-aligned bounds,
+the blue rim on every timeline row. What was missing was never the will to look
+but the scaffolding: building lasso and transform meant writing a throwaway
+screenshot function into `test_canvas.cpp`, building, looking and deleting it
+again, four times. A cycle that costs a build and leaves debris in a test file
+is a cycle nobody runs when they are nearly finished, which is exactly when it
+is worth running.
+
+**It is not a test and must not become one.** Nothing asserts. Golden-image
+comparison is the tempting mistake: font rendering differs across platforms and
+Qt versions, so it would go red on CI for reasons that are not bugs, and a red
+CI that means nothing is worse than none. It belongs with the benchmarks and
+carries their instruction — run it before and after anything that touches the
+canvas.
+
+**It is meant to be edited, including by whoever is only passing through.** Add
+the situation you need, bend one that is nearly right, delete one that is in the
+way. Nothing depends on any of them: no test reads them, there are no reference
+images to keep in step, and `ctest` never runs the target. A situation added to
+chase one bug and deleted afterwards costs a recompile of one file and leaves no
+debris, which is the whole difference from the throwaway function it replaces.
+The three-line shape is the part worth protecting — a situation nobody can add
+in three lines is one nobody adds at the end of an afternoon, and the end of an
+afternoon is when looking pays.
+
+**The cursors are the exception, and they are why the file is not just
+`grab()`.** `QWidget::grab()` renders the widget and never the pointer, so the
+rubber, the pipette and the rotation arrow appear in no screenshot of the canvas
+at all — see [what the pointer says](#what-the-pointer-says). They are read off
+the widget with `QCursor::pixmap()` after hovering what raises them, which
+checks the half a glyph cannot: that the right one comes up in the right place.
+Each is shown on paper and on ink, because the rule they follow is light under
+dark and a cursor crosses both by definition.
+
+**Writing it found one thing, and it was in the harness rather than in the
+program** — worth recording because anyone driving this widget with synthetic
+events will hit it. The canvas deliberately does not ask
+`QGuiApplication::keyboardModifiers()`, which would answer about whichever keys
+the person running the tests is leaning on; it reads Alt from the key event
+*and* re-reads it from every mouse event afterwards, because a real window
+system stamps the live modifier state on all of them. So a hover sent with
+`Qt::NoModifier` silently un-holds Alt, and the eyedropper cursor was reported
+absent when it was the harness that had let go. `Stage` holds the modifiers and
+stamps them on, the way the window system does.
+
 ## What is not what the plan asked for
 
 Places where the built thing deliberately differs. Each was a judgement, and
@@ -1914,7 +1975,16 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
 ./build/tests/bench_transform     # what moving a drawing costs, and where
+./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ```
+
+`shots` is the one that is not a number. It drives the real window through a
+list of named situations and writes a PNG each, into `build/shots/` unless told
+otherwise; `--list` says what they are and a bare word runs only the ones whose
+name matches, so looking at one thing costs one picture rather than eleven. It
+runs offscreen without being asked to. **Add situations to it freely** — nothing
+depends on any of them being there, which is the point. See
+[looking at the interface](#looking-at-the-interface).
 
 `bench_carry` is a measurement rather than a stopwatch, and it is the one to run
 before changing anything about carrying marks. It moves a shape a known amount
@@ -1962,6 +2032,7 @@ come off it since the first build, with where the reasoning went:
 | Lasso and transform, all four phases | "moving a drawing" through "what a transform costs" |
 | The shortcut table, and the bug half of #14 | "what the keyboard does, and when" |
 | One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
+| A screenshot target (#28) | "looking at the interface" |
 
 1. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the
@@ -2011,33 +2082,7 @@ come off it since the first build, with where the reasoning went:
    what `CtgSolver`'s second priority is still there for.
 4. **GPU compositing**, if `bench_composite` says it is worth it at real
    drawing sizes rather than at the sizes tested here.
-5. **A screenshot target**
-   ([#28](https://github.com/S-poony/Animage/issues/28)), `tests/shots.cpp`,
-   shaped like `bench_zoom`: built, never run by `ctest`, takes a directory and
-   drives the real window through a list of named situations writing one PNG
-   each.
-
-   Every interface bug this file records — the mis-encoded character, the absent
-   button, the two identical red swatches, the transform box drawn round whole
-   tiles — was caught by looking, and none of them by a green build. What is
-   missing is not the will to look but the scaffolding: building lasso and
-   transform meant writing and deleting a throwaway screenshot function four
-   times, and a cycle that costs a build and leaves debris in a test file is a
-   cycle nobody runs when they are nearly finished.
-
-   Two things to be honest about. **It is not a test** — nothing asserts, and
-   golden-image comparison would go red on CI for font rendering rather than for
-   bugs, so it belongs with the benchmarks and should carry their instruction:
-   run it before and after anything that touches the canvas. And it is a file
-   that will rot unless it is cheap to run and named somewhere people read.
-
-   One situation it should carry that is not a view of the window: the drawn
-   cursors, saved with `QCursor::pixmap()` after hovering the thing that raises
-   them. They cannot appear in a `grab()` of the canvas and both of them were
-   wrong the first time in a way only looking would catch. See
-   [what the pointer says](#what-the-pointer-says).
-
-6. **The rest of the open issues.** Three came out of designing lasso and
+5. **The rest of the open issues.** Three came out of designing lasso and
    transform and are each one small piece with the groundwork already under it:
    capping the undo history
    ([#23](https://github.com/S-poony/Animage/issues/23)), which the feature makes

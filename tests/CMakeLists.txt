@@ -70,4 +70,12 @@ if(TARGET animage_ui)
 
   add_executable(bench_zoom bench_zoom.cpp)
   target_link_libraries(bench_zoom PRIVATE animage_ui)
+
+  # Pictures of the interface rather than measurements of it, and the same
+  # deal: built, never run by ctest, run by hand before and after anything
+  # that touches the canvas. Nothing in it asserts and nothing depends on it,
+  # so a situation added to chase one bug can be deleted again freely --
+  # which is the point. See the comment at the top of shots.cpp.
+  add_executable(shots shots.cpp)
+  target_link_libraries(shots PRIVATE animage_ui)
 endif()
