@@ -30,7 +30,7 @@ the shape of the program. Those five maps are.
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
 | [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
 | [What I would do next](#what-i-would-do-next) | the queue |
-| [Two things to be careful of](#two-things-to-be-careful-of) | the two bets everything rests on |
+| [Three things to be careful of](#three-things-to-be-careful-of) | the two bets everything rests on, and one word |
 
 ## Where it got to
 
@@ -1119,8 +1119,9 @@ art is the whole of the line.
 goes through paths that do not settle it; `applyTransform` re-checks that the cel
 is still there and silently drops the transform if it is not, rather than
 enumerating call sites — a list of those to remember would be the same bug with
-more steps. Phases 3 and 4 — copy and paste, and `bench_transform` — are not
-built.
+more steps. Phases 3 and 4 were not built when this was written and are now:
+[copy, cut and paste](#copy-cut-and-paste) and
+[what a transform costs](#what-a-transform-costs).
 
 ## The lasso
 
@@ -2037,7 +2038,7 @@ come off it since the first build, with where the reasoning went:
    colour panel (the parked half of #8), and this file being hard to navigate
    ([#29](https://github.com/S-poony/Animage/issues/29)).
 
-## Two things to be careful of
+## Three things to be careful of
 
 **The undo model rests on cel ids never being reused.** Deleting a drawing and
 then undoing a stroke made on a drawing that shared its cel only works because
