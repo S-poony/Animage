@@ -1160,8 +1160,10 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         drawSelection(painter);
     }
 
-    // Over everything, because it is where the hand is rather than part of the
-    // picture.
+    // Over everything, because both are where the hand is rather than part of
+    // the picture. The line is under the ring only because the two cannot be on
+    // screen at once -- one needs the pen down and the other the right button.
+    drawLinePreview(painter);
     drawToolRing(painter);
 }
 
@@ -2077,6 +2079,66 @@ void CanvasWidget::drawToolRing(QPainter& painter) {
     painter.restore();
 }
 
+// --- the straight line ---------------------------------------------------
+
+// What the band covers on screen, or an empty rectangle when no line is being
+// aimed.
+QRect CanvasWidget::linePreviewRect() const {
+    if (!drawing_line_) return {};
+    const QRectF between(widgetFromImage(line_from_), widgetFromImage(line_to_));
+    // The outline has a width of its own and is drawn antialiased.
+    return between.normalized().adjusted(-4.0, -4.0, 4.0, 4.0).toAlignedRect();
+}
+
+void CanvasWidget::updateLinePreview() {
+    const QRect wanted = linePreviewRect();
+    if (wanted == line_drawn_) return;
+
+    // Both rectangles, because the band has to come off where it was as well as
+    // go on where it is. See updateToolRing, which is the same problem.
+    if (!line_drawn_.isNull()) update(line_drawn_);
+    if (!wanted.isNull()) update(wanted);
+    line_drawn_ = wanted;
+}
+
+// A thin line down the middle of where the mark will go, and deliberately not a
+// band at the brush's width.
+//
+// What is being aimed is an axis, and the width is not part of what this gesture
+// is deciding -- it is the tool's, it is the same before and after, and it is
+// exactly as unannounced here as it is for a free stroke, where the cursor is a
+// crosshair and you learn the radius by drawing. What the band has to say is the
+// thing the gesture *is* choosing, which is where the line goes.
+//
+// A filled band would also be worst exactly where it is needed most: a brush
+// here goes up to 400 pixels across, and something that wide covers the drawing
+// you are lining the mark up against.
+//
+// The preview and the mark do not agree exactly, for the same reason a
+// transform's float does not agree with its commit: this is a centre line and
+// what lands is dabs whose weight follows the pressure across the segment.
+void CanvasWidget::drawLinePreview(QPainter& painter) {
+    // Recorded by the paint that drew it rather than by whatever asked for that
+    // paint: a zoom moves the band on screen without the pen moving at all.
+    line_drawn_ = linePreviewRect();
+    if (!drawing_line_) return;
+
+    const QPointF from = widgetFromImage(line_from_);
+    const QPointF to = widgetFromImage(line_to_);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    // Light under dark, the rule every overlay here follows: a line aimed across
+    // a drawing crosses paper and ink by definition. Solid rather than the
+    // lasso's dashes, which mean a selection boundary and would be saying that.
+    painter.setPen(QPen(QColor(255, 255, 255, 200), 3.0));
+    painter.drawLine(from, to);
+    painter.setPen(QPen(QColor(30, 30, 34), 1.0));
+    painter.drawLine(from, to);
+    painter.restore();
+}
+
 // --- picking -------------------------------------------------------------
 
 // Samples the flattened drawing under the pointer, in the space it is stored
@@ -2123,7 +2185,7 @@ bool CanvasWidget::pickColourAt(const QPointF& image_point) {
 
 // --- strokes -------------------------------------------------------------
 
-void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
+void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool straight) {
     if (track_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
 
     const Track* track = doc_.scene().findTrack(track_);
@@ -2156,9 +2218,28 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
     doc_.beginCommand(settings.erase ? "Erase" : "Stroke");
     stroking_ = true;
 
-    brush_.begin(doc_, track_, image_, active_layer_,
-                 {static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
-                  pressure});
+    // Shift, read here and nowhere else. It is a property of the gesture from
+    // the moment the pen lands, not a key the stroke keeps consulting: taking
+    // the constraint up half way would mean unstamping the dabs already laid
+    // down, and letting go of it half way would mean a mark whose first half
+    // was never drawn. Neither is something the brush can do.
+    drawing_line_ = straight;
+    line_from_ = image_point;
+    line_to_ = image_point;
+    line_from_pressure_ = pressure;
+    line_to_pressure_ = pressure;
+
+    // A straight line writes nothing at all until the pen lifts -- the same rule
+    // a transform follows, and for the same reason: the far end moves for as
+    // long as the gesture lasts, so anything written before it settles would
+    // have to be taken back off. That also decides what a frame change does to
+    // one: the line lands on whichever drawing is current when it is let go,
+    // rather than leaving a dab on the one it was aimed from.
+    if (!straight) {
+        brush_.begin(doc_, track_, image_, active_layer_,
+                     {static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
+                      pressure});
+    }
 
     last_image_point_ = image_point;
     last_pressure_ = pressure;
@@ -2175,6 +2256,9 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
         return;
     }
 
+    // Nothing has been laid down to repaint, and the band is a point.
+    if (straight) return;
+
     const int radius = static_cast<int>(std::ceil(settings.radius)) + 2;
     markDirty({static_cast<int>(std::floor(image_point.x())) - radius,
                static_cast<int>(std::floor(image_point.y())) - radius, 2 * radius, 2 * radius});
@@ -2185,6 +2269,18 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure) {
 
 void CanvasWidget::extendStroke(const QPointF& image_point, float pressure) {
     if (!stroking_) return;
+
+    // Aiming rather than drawing: the pen moving moves the far end of the line
+    // and nothing else. The path the hand actually travelled is thrown away,
+    // which is the whole of what the constraint means -- what is kept off it is
+    // the pressure, because a line whose weight ignored the hand would be the
+    // one thing about the stroke that Shift silently also changed.
+    if (drawing_line_) {
+        line_to_ = image_point;
+        line_to_pressure_ = pressure;
+        updateLinePreview();
+        return;
+    }
 
     brush_.extend({static_cast<float>(image_point.x()), static_cast<float>(image_point.y()),
                    pressure});
@@ -2213,6 +2309,21 @@ void CanvasWidget::extendStroke(const QPointF& image_point, float pressure) {
 // and reopen it on the new one at the same place, inside the same command, so
 // the whole gesture is still a single undo step.
 void CanvasWidget::rebindStrokeToCurrentImage() {
+    // A line has no brush to move: nothing is stamped until the pen lifts, so it
+    // simply lands on whichever drawing is current then. That is the honest
+    // reading of a mark that does not exist yet, and it is deliberately not what
+    // a free stroke does -- a free stroke leaves a piece of itself on every
+    // frame it passed over, which is how you sketch a moving point, and a line
+    // sliced into as many pieces as playback showed frames is nobody's gesture.
+    if (drawing_line_) {
+        if (image_ != kNoId && active_layer_ != kNoId) return;
+        drawing_line_ = false;
+        updateLinePreview();
+        stroking_ = false;
+        doc_.endCommand();
+        return;
+    }
+
     brush_.end();
     if (image_ == kNoId || active_layer_ == kNoId) {
         stroking_ = false;
@@ -2226,6 +2337,22 @@ void CanvasWidget::rebindStrokeToCurrentImage() {
 
 void CanvasWidget::endStroke() {
     if (!stroking_) return;
+
+    // The line is stamped here and nowhere else, in one segment, which is what
+    // makes it a straight line at all: Brush::extend walks from one end to the
+    // other at the tool's own spacing and interpolates the pressure across it,
+    // so the mark is exactly what the same two endpoints would have produced
+    // freehand had the hand travelled in a straight line between them.
+    if (drawing_line_) {
+        drawing_line_ = false;
+        updateLinePreview();
+        brush_.begin(doc_, track_, image_, active_layer_,
+                     {static_cast<float>(line_from_.x()), static_cast<float>(line_from_.y()),
+                      line_from_pressure_});
+        brush_.extend({static_cast<float>(line_to_.x()), static_cast<float>(line_to_.y()),
+                       line_to_pressure_});
+    }
+
     brush_.end();
     doc_.endCommand();
     stroking_ = false;
@@ -2453,7 +2580,13 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     const float pressure = static_cast<float>(event->pressure());
 
     switch (event->type()) {
-        case QEvent::TabletPress: beginStroke(image_point, pressure); break;
+        // Shift from the event and not from the machine, the same rule
+        // beginNavigation follows: QGuiApplication::keyboardModifiers() answers
+        // for whoever is at the keyboard, which is nobody when a test is
+        // driving this.
+        case QEvent::TabletPress:
+            beginStroke(image_point, pressure, (event->modifiers() & Qt::ShiftModifier) != 0);
+            break;
         case QEvent::TabletMove:
             if (stroking_) extendStroke(image_point, pressure);
             break;
@@ -2504,7 +2637,8 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
         beginLasso(event->position());
         return;
     }
-    beginStroke(imageFromWidget(event->position()), 1.0f);
+    beginStroke(imageFromWidget(event->position()), 1.0f,
+                (event->modifiers() & Qt::ShiftModifier) != 0);
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {

@@ -168,15 +168,27 @@ void theTransformModeGivesUpTheRightKeys() {
     // silently. Alt consumes nothing and could not collide with anything -- it
     // is listed because the panel is where somebody finds out what the keyboard
     // does, and an answer with the eyedropper missing is the wrong answer.
-    for (const Id id : {Id::PanView, Id::ZoomView, Id::PickColour}) {
+    // Shift is here for Alt's reason and not Space's: it is the straight line,
+    // it consumes nothing, and it is listed because the panel is the answer to
+    // "what does the keyboard do".
+    for (const Id id : {Id::PanView, Id::ZoomView, Id::PickColour, Id::StraightLine}) {
         CHECK(shortcuts::entryFor(id).kind == Kind::Held);
     }
     const Bindings defaults;
     CHECK(defaults.clashesFor(Id::Brush, chord("Space")).size() == 1);
     CHECK(defaults.clashesFor(Id::Brush, chord("Space")).front() == Id::PanView);
     // And a bare modifier is a row nothing can be put on top of: no chord the
-    // panel can record is Alt by itself.
+    // panel can record is Alt or Shift by itself.
     CHECK(defaults.clashesFor(Id::Brush, chord("Alt+B")).empty());
+    CHECK(defaults.clashesFor(Id::Brush, chord("Shift+B")).empty());
+    // Which is the claim worth pinning about the straight line's row rather
+    // than the one about it colliding: Shift is a modifier on every other row in
+    // the table, so a rule that read this one as a chord would report the whole
+    // of Ctrl+Shift+Z, Save As and the ten-pixel nudge as hitting it.
+    CHECK(defaults.clashesFor(Id::StraightLine, chord("Shift")).empty());
+    // Named, because a row nobody can name is a row nobody can find.
+    CHECK(!defaults.sequenceFor(Id::StraightLine).isEmpty());
+    CHECK(defaults.sequenceFor(Id::StraightLine).toString() == QStringLiteral("Shift"));
 }
 
 void whatWouldCollideIsAskedBeforeItIsDone() {

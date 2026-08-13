@@ -96,6 +96,12 @@ public:
     void setPlaying(bool playing);
     bool isStroking() const { return stroking_; }
 
+    // Shift was down when the pen landed, so this stroke is a straight line
+    // being aimed rather than a mark being made. Nothing is written until the
+    // pen lifts; what is on screen meanwhile is the band drawn by
+    // drawLinePreview and no pixel of the drawing has moved.
+    bool isAimingALine() const { return drawing_line_; }
+
     double zoom() const { return zoom_; }
     // The image coordinate at the widget's top-left corner. Always on a whole
     // screen pixel -- see onWholeScreenPixels -- which is what lets the cache
@@ -395,7 +401,10 @@ private:
 
     bool pickColourAt(const QPointF& image_point);
 
-    void beginStroke(const QPointF& image_point, float pressure);
+    // `straight` is Shift, read off the press and held for the whole gesture.
+    // Deliberately no default: there are two call sites, one per device, and a
+    // device that quietly forgot to ask is exactly the bug that would ship.
+    void beginStroke(const QPointF& image_point, float pressure, bool straight);
     void extendStroke(const QPointF& image_point, float pressure);
     void endStroke();
     void rebindStrokeToCurrentImage();
@@ -431,6 +440,14 @@ private:
     void updateToolRing();
     void drawToolRing(QPainter& painter);
     QRect toolRingRect() const;
+
+    // The band showing where a straight line will land, on the same take-it-off
+    // and put-it-on-again plan as the ring: the far end moves on every pen move,
+    // and repainting the whole widget for each one would recomposite the
+    // viewport at the rate the hand is travelling.
+    void updateLinePreview();
+    void drawLinePreview(QPainter& painter);
+    QRect linePreviewRect() const;
 
     // Everything the brush checks before it draws, plus the layer kind. Shared
     // by the transform tool and by all three clipboard operations, because
@@ -557,6 +574,24 @@ private:
     bool scribble_preview_was_showing_ = false;
     QPointF last_image_point_;
     float last_pressure_ = 1.0f;
+
+    // A straight line, while one is being aimed. Shift decides it when the pen
+    // lands and the whole gesture keeps that answer -- the constraint cannot be
+    // taken up part way through, because by then there are dabs on the drawing
+    // and the brush has no way to lift one off again.
+    //
+    // Both ends are in image coordinates so that zooming mid-gesture moves the
+    // band with the drawing rather than with the window, and both pressures are
+    // kept because the release carries none: a pen lifting reports zero, and the
+    // weight of the far end is what the last move said.
+    bool drawing_line_ = false;
+    QPointF line_from_;
+    QPointF line_to_;
+    float line_from_pressure_ = 1.0f;
+    float line_to_pressure_ = 1.0f;
+    // What the last paint put on screen for the band, so the next one can take
+    // it off. Empty means there is nothing there. See ring_drawn_.
+    QRect line_drawn_;
 
     bool panning_ = false;
     bool space_held_ = false;

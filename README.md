@@ -141,6 +141,7 @@ cmake --build build --target animage && ./build/src/app/animage
 | | |
 |---|---|
 | Draw | pen, or left mouse |
+| `Shift`-drag | a straight line, at any angle: where the pen lands to where it lifts |
 | `B` / `E` | brush / eraser (turning the stylus over also erases) |
 | `L` | lasso: loop round part of the drawing |
 | `T` | transform: move, turn or resize the selection, or the whole drawing |
@@ -156,6 +157,25 @@ cmake --build build --target animage && ./build/src/app/animage
 | `Alt`+right-drag | brush size |
 | `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
 | Hold `Z` and drag | scrubby zoom |
+
+**A straight line is any straight line.** Hold `Shift` when the pen goes down and
+the stroke runs from where it landed to where it lifts, at whatever angle the
+hand chose — it is not snapped to the horizontal, the vertical or a diagonal,
+because a drawing has edges at every angle and a constraint that only knows three
+of them is a constraint you have to work around. The path in between is thrown
+away: wander wherever you like and the mark is the line.
+
+Nothing is written until the pen lifts, so what you see meanwhile is a thin band
+where the mark will go, and letting go of it is what puts ink on the drawing.
+That means the line is one undo step, a straight line held through a frame change
+lands whole on the drawing you end up on, and nothing is left behind on the one
+you aimed from. Shift is read when the pen lands and the whole gesture keeps that
+answer: reaching for it half way through cannot straighten a stroke that is
+already on the paper.
+
+The eraser is the same gesture. During a transform `Shift` means the
+fifteen-degree constraint instead, which is the same key doing the analogous job
+for the tool that has the pen.
 
 **The lasso does not clip the brush.** You can draw anywhere whether or not
 something is selected, and drawing outside a selection is not blocked, masked or
@@ -203,13 +223,13 @@ default improved in a later version still reaches you everywhere you left one
 alone. Every tooltip in the program says
 which key its control is on, and says the one it is on now.
 
-Three things in that panel cannot be changed and are listed anyway. `Space`, `Z`
-and `Alt` are *held* while you click or drag rather than pressed, which a
+Four things in that panel cannot be changed and are listed anyway. `Space`, `Z`,
+`Alt` and `Shift` are *held* while you click or drag rather than pressed, which a
 shortcut cannot express. Two of them still take their key, so an action rebound
-onto `Space` would take panning away with nothing to say it had; `Alt` takes
-nothing from anybody and is listed because the panel is where you go to find out
-what the keyboard does, and an answer without the eyedropper in it is the wrong
-answer.
+onto `Space` would take panning away with nothing to say it had; `Alt` and
+`Shift` take nothing from anybody and are listed because the panel is where you
+go to find out what the keyboard does, and an answer without the eyedropper or
+the straight line in it is the wrong answer.
 
 Fitting the drawing is `F` and not the `Shift+0` it used to be. On a keyboard
 whose digit row is the shifted face of another row — AZERTY, for one — typing

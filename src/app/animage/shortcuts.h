@@ -135,6 +135,7 @@ enum class Id {
     PanView,
     ZoomView,
     PickColour,
+    StraightLine,
 };
 
 struct Entry {

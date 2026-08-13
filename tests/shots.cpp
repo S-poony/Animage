@@ -658,6 +658,26 @@ const std::vector<Situation>& situations() {
          "be the rim it was, and was stair-steps until the filter was one filter",
          [](Stage& s) { turnedArc(s, Turned::Committed); }},
 
+        {"a-straight-line-being-aimed",
+         "Shift, mid-gesture: the band runs from where the pen landed to where it is now "
+         "and ignores the loop the hand made in between -- and no ink has been laid down "
+         "yet, because a straight line writes nothing until the pen lifts",
+         [](Stage& s) {
+             // Something to line the mark up against, which is what the band is
+             // for: a picture of it over bare paper says nothing about whether
+             // it can be seen where it matters.
+             s.circle(s.centre(), 170.0);
+             s.hold(Qt::Key_Shift);
+             s.pressOn(s.canvas, s.centre() + QPointF(-230.0, -150.0));
+             // Well off the line, so the picture shows a path being discarded
+             // rather than a hand that happened to be steady.
+             s.dragTo(s.canvas, s.centre() + QPointF(-260.0, 190.0));
+             // An oblique angle on purpose: the constraint is to a line and not
+             // to an axis, and a horizontal one would be a picture of either.
+             s.dragTo(s.canvas, s.centre() + QPointF(250.0, 120.0));
+             s.picture = s.canvas->grab().toImage();
+         }},
+
         {"a-lasso-round-part-of-a-drawing",
          "the loop, and what it says about what is caught: a selection here clips "
          "nothing, so the outline is the whole of what it looks like",

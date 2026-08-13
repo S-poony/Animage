@@ -188,6 +188,16 @@ const std::vector<Entry>& built() {
         // Alt+click on the drawing: the eyedropper.
         {Id::PickColour, "pick-colour", "Pick up a colour", kSpelledOut,
          QKeyCombination(Qt::Key_Alt).toCombined(), kAlways, Group::Held, Kind::Held},
+        // Shift held while the pen goes down: the stroke is a straight line from
+        // where it landed to where it lifts, at whatever angle the hand chose.
+        //
+        // Listed for the same reason Alt is -- it consumes nothing and so can
+        // never be in a collision -- and it is kNormal rather than kAlways
+        // because during a transform the same key means the fifteen-degree
+        // constraint instead. One key, two modes, two meanings, and this row is
+        // about the one the brush is under.
+        {Id::StraightLine, "straight-line", "Draw a straight line", kSpelledOut,
+         QKeyCombination(Qt::Key_Shift).toCombined(), kNormal, Group::Held, Kind::Held},
     };
     return rows;
 }

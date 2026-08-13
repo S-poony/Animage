@@ -22,6 +22,7 @@ the shape of the program. Those five maps are.
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
 | [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, the first mode, and changing a key |
+| [A straight line](#a-straight-line) | one key, and a stroke that writes nothing until it is let go |
 | [Moving a drawing](#moving-a-drawing) | the transform tool |
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
@@ -1203,6 +1204,94 @@ binding is reading a field mid-edit and will report that the row was unbound. It
 also means an edit abandoned after a bare modifier leaves the row unbound, which
 is Qt's behaviour rather than ours: the field is empty and so is the binding, and
 Reset is beside it.
+
+## A straight line
+
+Shift held when the pen lands makes the stroke a line from there to wherever it
+lifts, at whatever angle. **Not snapped to the horizontal, the vertical or a
+diagonal**, which was the ask and is the whole of it: a drawing has edges at
+every angle, and a constraint that knows three of them is one you work around.
+
+The interesting part is not the geometry, which is one call to `Brush::extend`.
+It is that **a straight line writes nothing until the pen lifts**, and everything
+else about the feature falls out of that.
+
+The reason it has to is mechanical. The far end moves for as long as the gesture
+lasts, so anything stamped before it settles would have to be taken back off —
+and the brush has no way to lift a dab off a tile. It only lays them down. So
+`beginStroke` opens the command and records the anchor and does *not* call
+`brush_.begin`; `extendStroke` moves the far end and returns; `endStroke` is
+where `begin` and one `extend` finally run, over the segment, in that order. The
+command is open across all of it, so it is one undo step exactly as a free stroke
+is.
+
+Four things follow, and three of them are the answers to questions that would
+otherwise have needed deciding one at a time:
+
+- **Shift is read at the press and the gesture keeps that answer.** Not a key the
+  stroke keeps consulting. Taking the constraint up half way would mean
+  unstamping the squiggle already on the drawing, and letting go of it half way
+  would mean a mark whose first half was never drawn. Neither is available, so
+  the latch is not a simplification — it is the only thing the model can mean.
+- **A frame change under a live line carries the whole line to the new drawing.**
+  There is no brush to rebind, so `rebindStrokeToCurrentImage` returns early and
+  the mark lands on whichever drawing is current when the pen lifts. That is
+  deliberately *not* what a free stroke does — a free stroke leaves a piece of
+  itself on every frame it passed over, which is how you sketch a moving point,
+  and a line sliced into as many pieces as playback showed frames is nobody's
+  gesture. It is also why deferring `brush_.begin` mattered rather than merely
+  being tidy: stamping the anchor dab at the press would have left a dot on the
+  drawing the line was aimed from, silently.
+- **The far end's pressure is the last move's and not the release's.** A pen
+  lifting reports pressure 0, so a line stamped from the release is a hairline
+  that fades to nothing. Both ends are stored for exactly this.
+- And the whole of what Shift changes is **where the dabs go**. Same spacing,
+  same pressure interpolation, same everything: the mark a line leaves is bit for
+  bit the mark those two endpoints leave freehand, and there is a test that says
+  so by drawing both and comparing every pixel. It runs on the *pen* at two
+  different pressures, because the mouse path reports 1.0 throughout and would
+  have agreed with a wrong far-end pressure by accident — which is the defect
+  above, and it was put back to watch the test go red.
+
+**The band is a thin centre line and not the brush's width**, which was a choice
+and not an omission. What is being aimed is an axis, and the width is not part of
+what the gesture is deciding: it is the tool's, it is the same before and after,
+and it is exactly as unannounced here as it is for a free stroke — the brush
+cursor is a crosshair and you learn the radius by drawing. A filled band would
+also be worst exactly where it is needed most, since a brush here goes to 400
+pixels across and something that wide covers the drawing you are lining the mark
+up against. It is light under dark like every other overlay here, and solid
+rather than the lasso's dashes, which mean a selection boundary.
+
+If that turns out to be wrong it will be reported as "the line landed fatter than
+I expected", and the answer is a radius on the cursor for *every* stroke rather
+than a band on this one — the complaint would not be about the constraint.
+
+It is drawn on the same take-it-off-and-put-it-on-again plan as the tool ring
+(`updateLinePreview` against `updateToolRing`) for the same reason: the far end
+moves on every pen move, and repainting the whole widget for each one would
+recomposite the viewport at the rate the hand is travelling. Both ends are held
+in image coordinates, so a zoom mid-gesture moves the band with the drawing.
+
+Unlike almost everything in [what the pointer says](#what-the-pointer-says),
+**this one a picture can catch** — the canvas draws it, so `grab()` renders it,
+where a cursor is never in the frame. `shots` has
+`a-straight-line-being-aimed`: the band mid-gesture, over a circle rather than
+over bare paper, with the detour the hand made leaving no trace.
+
+**One thing deliberately left alone.** The pointer says nothing about Shift being
+held — `pointingAt` answers from the held keys and this is not one of the keys it
+asks about. Doing it properly means a drawn cursor, since Qt has no glyph for it,
+and the two things that already say so are the band once the pen is down and the
+shortcut panel before it. Worth revisiting if it is reported; not worth inventing
+a glyph for speculatively.
+
+Shift is a `Kind::Held` row in the shortcut table, `kNormal`, listed for Alt's
+reason rather than Space's: it consumes nothing, so it can be in no collision at
+all, and the panel is where somebody goes to find out what the keyboard does. It
+is `kNormal` and not `kAlways` because during a transform the same key means the
+fifteen-degree constraint — one key, two modes, two meanings, and the row is
+about the one the brush is under.
 
 ## Moving a drawing
 

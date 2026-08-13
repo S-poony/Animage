@@ -5325,6 +5325,238 @@ void theHandDoesNotGetStuckClosed() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
 }
 
+// --- straight lines -------------------------------------------------------
+//
+// Shift held when the pen lands makes the stroke a straight line from there to
+// wherever it lifts, at whatever angle -- which is the whole point, and is why
+// every one of these drags at an oblique angle rather than along an axis.
+//
+// The canvas is at zoom 1 and pan 0, so a widget point is an image point.
+
+// The detour is the assertion. A gesture that goes a long way somewhere the line
+// does not, and comes back, is the only shape that can tell "straight" from
+// "the hand happened to be steady".
+void shiftDrawsAStraightLineAtAnyAngle() {
+    TEST("Shift draws a straight line at whatever angle, ignoring the path taken");
+    Fixture f;
+
+    const QPointF anchor(200.0, 200.0);
+    const QPointF detour(200.0, 600.0);
+    const QPointF end(600.0, 500.0);  // slope 3/4: neither an axis nor a diagonal
+    const std::size_t before = f.doc.undoDepth();  // the fixture's own setup steps
+
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, anchor, Qt::LeftButton, Qt::LeftButton,
+                  Qt::ShiftModifier);
+    CHECK(f.canvas.isStroking());
+    CHECK(f.canvas.isAimingALine());
+
+    sendMouseWith(&f.canvas, QEvent::MouseMove, detour, Qt::NoButton, Qt::LeftButton,
+                  Qt::ShiftModifier);
+    // Nothing at all is written while the line is being aimed -- not even the
+    // dab under the anchor, which is what stops a frame change mid-gesture
+    // leaving a dot on the drawing the line was aimed from.
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 200) <= 0.0f);
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 600) <= 0.0f);
+
+    sendMouseWith(&f.canvas, QEvent::MouseMove, end, Qt::NoButton, Qt::LeftButton,
+                  Qt::ShiftModifier);
+    sendMouseWith(&f.canvas, QEvent::MouseButtonRelease, end, Qt::LeftButton, Qt::NoButton,
+                  Qt::ShiftModifier);
+    CHECK(!f.canvas.isStroking());
+    CHECK(!f.canvas.isAimingALine());
+
+    // On the line, at both ends and across the middle.
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 200) > 0.0f);
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) > 0.0f);
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 560, 470) > 0.0f);
+
+    // And nowhere the hand actually went. 160 and 320 pixels off the line
+    // respectively, which no brush radius could account for.
+    CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 200, 400), 0.0f);
+    CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 200, 600), 0.0f);
+
+    // One gesture, one undo step, and undoing takes the whole line off.
+    CHECK_EQ(f.doc.undoDepth(), before + 1);
+    CHECK(f.doc.undo());
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) <= 0.0f);
+}
+
+// The control, and it is worth having explicitly: without Shift the same three
+// points leave the path the hand took, which is what the constraint is being
+// measured against.
+void withoutShiftTheSameGestureFollowsTheHand() {
+    TEST("without Shift the same gesture leaves the path the hand took");
+    Fixture f;
+
+    sendMouse(&f.canvas, QEvent::MouseButtonPress, QPointF(200.0, 200.0), Qt::LeftButton,
+              Qt::LeftButton);
+    CHECK(!f.canvas.isAimingALine());
+    sendMouse(&f.canvas, QEvent::MouseMove, QPointF(200.0, 600.0), Qt::NoButton, Qt::LeftButton);
+    sendMouse(&f.canvas, QEvent::MouseMove, QPointF(600.0, 500.0), Qt::NoButton, Qt::LeftButton);
+    sendMouse(&f.canvas, QEvent::MouseButtonRelease, QPointF(600.0, 500.0), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+
+    // Down the detour, which the constrained version leaves bare...
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 400) > 0.0f);
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 600) > 0.0f);
+    // ...and not across the middle, which is where the line would have been.
+    CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350), 0.0f);
+}
+
+// Shift is a property of the gesture from the moment the pen lands, and it has
+// to be: taking the constraint up half way would mean unstamping dabs that are
+// already on the drawing, and the brush cannot lift one off.
+void shiftIsDecidedWhenThePenLands() {
+    TEST("Shift decides at the press and the gesture keeps that answer");
+    Fixture f;
+
+    // Let go of Shift half way: still a line, because the press said so.
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, QPointF(200.0, 200.0), Qt::LeftButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    sendMouse(&f.canvas, QEvent::MouseMove, QPointF(200.0, 600.0), Qt::NoButton, Qt::LeftButton);
+    CHECK(f.canvas.isAimingALine());
+    sendMouse(&f.canvas, QEvent::MouseMove, QPointF(600.0, 500.0), Qt::NoButton, Qt::LeftButton);
+    sendMouse(&f.canvas, QEvent::MouseButtonRelease, QPointF(600.0, 500.0), Qt::LeftButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) > 0.0f);
+    CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 200, 400), 0.0f);
+
+    // And reaching for it half way through a free stroke does not retro-fit one:
+    // the detour is already on the drawing by then.
+    Fixture g;
+    sendMouse(&g.canvas, QEvent::MouseButtonPress, QPointF(200.0, 200.0), Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouseWith(&g.canvas, QEvent::MouseMove, QPointF(200.0, 600.0), Qt::NoButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    CHECK(!g.canvas.isAimingALine());
+    sendMouseWith(&g.canvas, QEvent::MouseButtonRelease, QPointF(200.0, 600.0), Qt::LeftButton,
+                  Qt::NoButton, Qt::ShiftModifier);
+    QCoreApplication::processEvents();
+    CHECK(alphaAt(g.doc, g.track, g.image, g.layer, 200, 400) > 0.0f);
+}
+
+// The claim the whole design rests on: Shift changes where the dabs go and
+// nothing else whatever about the stroke. Asserted as bit equality against the
+// same two endpoints drawn freehand, because "looks the same" is exactly what a
+// pressure or a spacing that quietly changed would also do.
+//
+// Driven with the pen and at two different pressures, which the mouse path
+// cannot pin at all -- a mouse reports 1.0 throughout, so a line that took its
+// far-end weight from the wrong sample would agree with this by accident. The
+// wrong sample is a real one and it is right there: a pen lifting reports
+// pressure 0, so a line stamped from the *release* is a hairline that fades to
+// nothing, and it is the last move this has to read instead.
+void aStraightLineIsTheSameMarkAsTheFreehandOne() {
+    TEST("a straight line is the same mark the same two endpoints leave freehand");
+    Fixture f;
+    const ImageId second = f.doc.insertImage(f.track, 1);
+
+    const QPointF anchor(180.0, 260.0);
+    const QPointF end(620.0, 430.0);
+    const float landed = 0.3f;  // the nib touching down
+    const float leaned = 0.9f;  // and the weight on it by the far end
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+    const auto pen = [&](QEvent::Type type, const QPointF& at, double pressure,
+                         Qt::KeyboardModifiers modifiers, Qt::MouseButton button,
+                         Qt::MouseButtons buttons) {
+        QTabletEvent event(type, &stylus, at, f.canvas.mapToGlobal(at), pressure, 0, 0, 0, 0, 0,
+                           modifiers, button, buttons);
+        QCoreApplication::sendEvent(&f.canvas, &event);
+        QCoreApplication::processEvents();
+    };
+
+    // Shift, by way of a detour that must leave no trace.
+    pen(QEvent::TabletPress, anchor, landed, Qt::ShiftModifier, Qt::LeftButton, Qt::LeftButton);
+    pen(QEvent::TabletMove, QPointF(300.0, 700.0), 0.6, Qt::ShiftModifier, Qt::NoButton,
+        Qt::LeftButton);
+    pen(QEvent::TabletMove, end, leaned, Qt::ShiftModifier, Qt::NoButton, Qt::LeftButton);
+    pen(QEvent::TabletRelease, end, 0.0, Qt::ShiftModifier, Qt::LeftButton, Qt::NoButton);
+
+    // The same two points at the same two pressures on the next drawing,
+    // freehand and in one move.
+    f.canvas.setFrame(1);
+    CHECK_EQ(f.canvas.currentImage(), second);
+    pen(QEvent::TabletPress, anchor, landed, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+    pen(QEvent::TabletMove, end, leaned, Qt::NoModifier, Qt::NoButton, Qt::LeftButton);
+    pen(QEvent::TabletRelease, end, 0.0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
+
+    const Cel* constrained = f.doc.celAt(f.track, f.image, f.layer);
+    const Cel* freehand = f.doc.celAt(f.track, second, f.layer);
+    CHECK(constrained != nullptr);
+    CHECK(freehand != nullptr);
+    if (!constrained || !freehand) return;
+
+    const PixelRect box = animage::paintedBounds(constrained->tiles());
+    const PixelRect theirs = animage::paintedBounds(freehand->tiles());
+    CHECK(!box.isEmpty());
+    CHECK(box.x == theirs.x && box.y == theirs.y && box.width == theirs.width &&
+          box.height == theirs.height);
+
+    long long differing = 0;
+    for (int y = box.y; y < box.y + box.height; ++y) {
+        for (int x = box.x; x < box.x + box.width; ++x) {
+            if (constrained->pixel(x, y).a != freehand->pixel(x, y).a) ++differing;
+        }
+    }
+    CHECK_EQ(differing, 0LL);
+}
+
+// A line that has not been let go of does not exist yet, so a frame change
+// under one carries it to the new drawing whole. That is deliberately not what
+// a free stroke does -- a free stroke leaves a piece of itself on every frame it
+// passed over, which is how you sketch a moving point.
+void aLineChangingFrameLandsOnOneDrawing() {
+    TEST("a straight line held across a frame change lands whole on one drawing");
+    Fixture f;
+    const ImageId second = f.doc.insertImage(f.track, 1);
+
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, QPointF(200.0, 200.0), Qt::LeftButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    sendMouseWith(&f.canvas, QEvent::MouseMove, QPointF(600.0, 500.0), Qt::NoButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    f.canvas.setFrame(1);
+    CHECK(f.canvas.isAimingALine());
+    sendMouseWith(&f.canvas, QEvent::MouseButtonRelease, QPointF(600.0, 500.0), Qt::LeftButton,
+                  Qt::NoButton, Qt::ShiftModifier);
+    QCoreApplication::processEvents();
+
+    CHECK(alphaAt(f.doc, f.track, second, f.layer, 400, 350) > 0.0f);
+    // And the drawing it was aimed from is untouched: no anchor dab, nothing.
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 200, 200) <= 0.0f);
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) <= 0.0f);
+}
+
+// The eraser and the brush are one path, so this is a check that the branch was
+// put where both of them go through it rather than beside the brush's settings.
+void shiftErasesInAStraightLineToo() {
+    TEST("Shift constrains the eraser as well as the brush");
+    Fixture f;
+    f.draw(150.0f, 150.0f, 650.0f, 550.0f);  // something to rub out
+    CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) > 0.0f);
+
+    f.canvas.setEraser(true);
+    f.canvas.brushSettings().radius = 30.0f;
+    // Along the ink, by way of a detour well off it.
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, QPointF(200.0, 190.0), Qt::LeftButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    sendMouseWith(&f.canvas, QEvent::MouseMove, QPointF(600.0, 190.0), Qt::NoButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    sendMouseWith(&f.canvas, QEvent::MouseMove, QPointF(600.0, 510.0), Qt::NoButton,
+                  Qt::LeftButton, Qt::ShiftModifier);
+    sendMouseWith(&f.canvas, QEvent::MouseButtonRelease, QPointF(600.0, 510.0), Qt::LeftButton,
+                  Qt::NoButton, Qt::ShiftModifier);
+    QCoreApplication::processEvents();
+
+    // The rubber went down the ink, not along the top of the drawing.
+    CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350), 0.0f);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -5336,6 +5568,12 @@ int main(int argc, char** argv) {
     turningThePenOverShowsTheEraser();
     theResizeGestureShowsWhatItIsSetting();
     theHandDoesNotGetStuckClosed();
+    shiftDrawsAStraightLineAtAnyAngle();
+    withoutShiftTheSameGestureFollowsTheHand();
+    shiftIsDecidedWhenThePenLands();
+    aStraightLineIsTheSameMarkAsTheFreehandOne();
+    aLineChangingFrameLandsOnOneDrawing();
+    shiftErasesInAStraightLineToo();
     theTimelineIsAHandOnlyWhereADrawingCanBePickedUp();
     pastTheEndOfATrackThereIsNoCardToPickUp();
     thePenReachesTheTransformBar();
