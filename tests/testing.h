@@ -61,6 +61,40 @@ inline bool onSharedHardware() {
     return ci && *ci && std::string(ci) != "false";
 }
 
+// Whether a sanitizer is instrumenting this build.
+//
+// The same idea as onSharedHardware and for the same reason: a wall clock is
+// measuring the instrumentation as much as the code under it, and a budget that
+// holds is not the property being asserted. AddressSanitizer puts a check on
+// every load and store, which is a slowdown of five to twenty times -- so a
+// timing check under one does not report that the code got slower, it reports
+// that the sanitizer is on, which was already known.
+//
+// **Only ever guard the clock with this.** A sanitized run is exactly the run
+// whose correctness assertions matter most, and stepping a whole test aside
+// because one check in it is a stopwatch would give up the coverage that the
+// sanitizer was built for. See theSolveStaysBoundedOnALargeDrawing in
+// test_ctg.cpp, which is the one place this is used: the solve is still checked
+// for being valid, large and correctly coloured, and only "under two seconds" is
+// let go of.
+//
+// Address and thread are the two that reach a timing budget. GCC and MSVC both
+// define __SANITIZE_ADDRESS__; Clang answers __has_feature instead. UBSan costs
+// a few percent rather than a multiple and is deliberately not detected here --
+// it is not what breaks a budget, and a build with UBSan alone should still be
+// held to one.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+inline constexpr bool kSanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+inline constexpr bool kSanitized = true;
+#else
+inline constexpr bool kSanitized = false;
+#endif
+#else
+inline constexpr bool kSanitized = false;
+#endif
+
 inline void skip(const char* why) { std::printf("    skipped: %s\n", why); }
 
 inline int summarise(const char* suite) {

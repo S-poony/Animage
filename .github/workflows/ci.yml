@@ -181,6 +181,55 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The same story on Windows, as far as Windows can tell it.
+  #
+  # The job above runs on Linux under GCC, and two compilers do not lay memory
+  # out the same way or find the same bugs -- a read one past the end of a buffer
+  # is a crash or a silent wrong answer depending on what the allocator happened
+  # to put there. The binaries most people download are the Windows ones, and
+  # until this existed nothing had ever run them under a sanitizer at all.
+  #
+  # **The core library only, and that is not a compromise made to save time.**
+  # MSYS2's Qt -- which is what a Windows contributor builds against, per the
+  # README -- cannot link against MSVC, and MSVC is the only Windows compiler
+  # with a sanitizer: GCC's runtimes have never been ported to mingw-w64, so
+  # `-fsanitize=address` there is a compile that cannot link. Installing Qt for
+  # MSVC purely to sanitize it would cover the widgets, which is the half of the
+  # program that reads a palette and draws a rectangle, and leave the cost on
+  # every run. The core is the half that owns raw memory -- tiles, the
+  # compositor, transforms, the max-flow solver -- and it needs no Qt, so
+  # `find_package(Qt6)` failing is what makes this job small and is left to
+  # happen. `-- Qt 6 not found: building the core library and tests only`, in the
+  # configure log, is this working.
+  #
+  # ASan and no UBSan, because MSVC has no UBSan. Undefined behaviour is still
+  # the Linux job's to catch.
+  sanitize-windows:
+    name: sanitizers (windows, core)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      # For cl.exe and Ninja, and for the ASan runtime -- which is the part that
+      # is easy to miss. MSVC links AddressSanitizer dynamically, so every test
+      # binary needs clang_rt.asan_dynamic-x86_64.dll beside the compiler at run
+      # time; without this the build is green and every test dies at start-up
+      # with 0xC0000135, DLL not found, before it prints a line.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # No Qt step, deliberately. See above.
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   # Downloadable without a GitHub account, unlike build artifacts.
   release:
     name: publish

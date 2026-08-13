@@ -100,7 +100,21 @@ The sanitizers are a request and not a guarantee: a toolchain that ships neither
 runtime — MSYS2's UCRT64 GCC is one, so this is the normal case on Windows — is
 warned about once at configure time and then builds without them. Check
 `ANIMAGE_ASAN_UBSAN_OK` in `build/CMakeCache.txt` if you need to know which you
-got. The Linux CI job is where memory errors are actually caught.
+got.
+
+On Windows the core library can still be sanitized, because it needs no Qt and
+MSVC has AddressSanitizer. From a Developer Command Prompt:
+
+```bash
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+`-- Sanitizers: AddressSanitizer` and `-- Qt 6 not found: building the core
+library and tests only` means it worked. The test binaries run only inside that
+shell — MSVC links ASan dynamically, and a test exiting instantly with
+`0xC0000135` is the missing runtime DLL rather than anything you wrote. CI runs
+this on every push, alongside the Linux job that covers the whole program under
+both sanitizers.
 
 The core library `animage_core` has no Qt dependency and no external
 dependencies at all. If Qt 6 is not found, the GUI targets are skipped and the

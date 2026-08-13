@@ -405,8 +405,24 @@ void theSolveStaysBoundedOnALargeDrawing() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     CHECK(fill.valid);
-    CHECK(fill.region.width > 2000);   // the region really is large
-    CHECK(seconds < 2.0);              // generous; an unbounded solve is far worse
+    CHECK(fill.region.width > 2000);  // the region really is large
+
+    // The budget itself, wherever a wall clock still means something. Under
+    // AddressSanitizer this solve takes most of a minute, and none of that is
+    // the solver: it is a check on every load and store over several megapixels.
+    // Letting it fail there would make the Windows sanitizer job permanently red
+    // over a number nobody can act on, and a red build that means nothing is the
+    // thing this project has already decided is worse than none -- see the note
+    // on golden images in docs/handover.md.
+    //
+    // Only the clock steps aside. The three checks around it are the ones a
+    // sanitized run exists to make, and they are the ones most worth having when
+    // the solve is walking several megapixels of scratch buffer.
+    if (testing::kSanitized) {
+        testing::skip("a sanitized build times the instrumentation, not the solve");
+    } else {
+        CHECK(seconds < 2.0);  // generous; an unbounded solve is far worse
+    }
 
     // And it is still correct, only coarser: deep inside the box is the inside
     // colour, and up by the outside scribble is the outside one.

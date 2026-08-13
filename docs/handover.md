@@ -79,10 +79,27 @@ detect memory or UB errors
 
 It scrolls past, and after that nothing distinguishes a sanitized build from an
 unsanitized one — `build/CMakeCache.txt` holds the honest answer in
-`ANIMAGE_ASAN_UBSAN_OK` and `ANIMAGE_UBSAN_OK`, both empty here. So on Windows
-the memory-safety story is the Linux CI job and not your desk, and a green local
-`ctest` says less than this paragraph used to claim it did. Worth knowing before
-trusting a clean run on a change that moves memory about.
+`ANIMAGE_ASAN_UBSAN_OK` and `ANIMAGE_UBSAN_OK`, both empty here. So a green local
+`ctest` on Windows says less than this paragraph used to claim it did. Worth
+knowing before trusting a clean run on a change that moves memory about.
+
+**The core can be sanitized on Windows, and CI now does it on every push.** MSVC
+has AddressSanitizer, and the core library needs no Qt — which is the whole
+reason this is cheap, since MSYS2's Qt cannot link against MSVC and installing a
+second Qt to sanitize the widgets would buy the half of the program that draws
+rectangles. From a Developer Command Prompt:
+
+```bash
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+`-- Sanitizers: AddressSanitizer` and `-- Qt 6 not found: building the core
+library and tests only` is it working. All ten core tests pass under it. Two
+things to know: the binaries only run inside that shell, because MSVC links ASan
+dynamically and `clang_rt.asan_dynamic-x86_64.dll` lives beside the compiler — a
+test dying instantly with `0xC0000135` is a missing DLL and not a bug you just
+wrote. And MSVC has no UBSan, so undefined behaviour is still the Linux job's to
+catch. The `sanitizers (windows, core)` job in `ci.yml` runs exactly this.
 
 **Saving is incremental, and autosave rests on that.** A cel's revision is
 bumped by every write to it, undo included, so a `ProjectIO::SaveState` — a
@@ -1945,7 +1962,7 @@ still differs:
 |---|---|---|
 | compiler | GCC, MSYS2 UCRT64 | MSVC 19, Visual Studio 2022 |
 | Qt | whatever MSYS2 has today — 6.11 at the time of writing | 6.8.\*, pinned in `ci.yml` |
-| sanitizers | none; the probe fails here, see below | off, deliberately |
+| sanitizers | none with MinGW; the probe fails, see [where it got to](#where-it-got-to) | off, deliberately |
 | C runtime | UCRT via MinGW | MSVC's |
 | Qt libraries | MSYS2's DLLs on `PATH` | whatever `windeployqt` copied |
 
