@@ -7,6 +7,7 @@
 #include <QWidget>
 
 #include <array>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <utility>
@@ -135,6 +136,18 @@ public:
     // Whether any colour is being worked out. The interface has no business
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
+
+    // How many times this widget has actually painted.
+    //
+    // The honest way to ask whether a frame was *shown*. Playback sets a slot
+    // and the paint happens afterwards, so counting slot changes counts frames
+    // asked for -- which is the same number only as long as no two slot changes
+    // collapse into one paint, and that is precisely what happens when playback
+    // starts overrunning. Counting here cannot be wrong about it.
+    //
+    // Read by the status bar's playback rate, and by bench_playback, which had
+    // to infer the difference from two columns disagreeing before this existed.
+    std::uint64_t paintCount() const { return paint_count_; }
 
     // Why an edit could not happen. Transform, cut, copy and paste all refuse
     // where the brush refuses -- a locked layer, a hidden layer, past the end of
@@ -518,6 +531,7 @@ private:
     // Accumulated between paints. Empty width means nothing is pending.
     animage::PixelRect pending_dirty_;
     bool dirty_everything_ = false;
+    std::uint64_t paint_count_ = 0;
 
     // The onion skin flattened once, covering the same region. It only changes
     // when the frame, the view or the settings do, so a stroke does not pay to

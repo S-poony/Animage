@@ -2480,6 +2480,12 @@ from the other end, where a 66-tile and a 2425-tile drawing refreshed in the sam
 time. So at 4K between a quarter and two fifths of the frames never reach the
 screen, silently, in the mode where somebody is judging timing.
 
+What to do about it is argued in
+[playback-resolution.md](playback-resolution.md), which is a plan and not a
+description: composite fewer entries while playing, earn the reduction from a
+measurement rather than applying it unconditionally, and decide it at a loop
+boundary so the picture never changes sharpness mid-take.
+
 **And the colour cache cannot hold a shot.** A fill covers the canvas at full
 resolution, so the bound works out at about 2000 tiles: 48 of 48 fills survive an
 HD shot of 24 drawings, 62 of 192 survive four tracks of 48, and **20 of 48**

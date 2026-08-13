@@ -1078,6 +1078,9 @@ void CanvasWidget::resizeEvent(QResizeEvent*) {
 }
 
 void CanvasWidget::paintEvent(QPaintEvent* event) {
+    // Counted here and nowhere else, because this is the moment a frame is
+    // shown. See paintCount.
+    ++paint_count_;
     ensureCacheCoversView();
 
     // All the compositing for this frame happens here, once, however many

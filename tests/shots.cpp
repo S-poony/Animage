@@ -58,7 +58,11 @@
 #include <QCursor>
 #include <QDir>
 #include <QDockWidget>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFont>
+#include <QStatusBar>
+#include <QTimer>
 #include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -183,6 +187,25 @@ struct Stage {
 
     void settle(int rounds = 3) {
         for (int i = 0; i < rounds; ++i) QCoreApplication::processEvents();
+    }
+
+    // Real time passing, with the event loop running through it. `settle` is a
+    // fixed number of rounds and is what almost everything wants; this is for
+    // the situations that photograph something which only exists after a while
+    // -- playback's rate readout says nothing until its window has filled, so a
+    // fixed number of rounds would picture the opening claim and not a reading.
+    //
+    // A real nested loop and *not* `while (elapsed < ms) processEvents()`, which
+    // is what this was first. Polling like that never lets the loop idle, and
+    // widget repaints are flushed on the idle pass -- so a 24 fps playback
+    // photographed through it painted about twenty times a second and the rate
+    // readout quite correctly called it dropping. The program was fine and the
+    // harness was the thing losing frames. bench_playback, which has always used
+    // a nested loop here, paints at 24 and was the measurement that said so.
+    void spin(int milliseconds) {
+        QEventLoop loop;
+        QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+        loop.exec();
     }
 
     // --- doing things ------------------------------------------------------
@@ -543,6 +566,21 @@ QPointF trackName(const Stage& s, int row) {
                    s.timeline->cellCentreForTesting(static_cast<std::size_t>(row), 0).y());
 }
 
+// A shot with something actually drawn on every drawing.
+//
+// Worth its own helper because the first version of the playback situations
+// inserted empty drawings and photographed a status bar reading "tiles 0" --
+// an empty scene composites in no time at all, so the readout said it was
+// keeping up and was quite right. What was wrong was the fixture, which is the
+// same trap the handover records about drawGappedBox.
+void drawnShot(Stage& s, int drawings) {
+    for (int d = 0; d < drawings; ++d) {
+        s.circle(s.centre() + QPointF(d * 6.0, 0.0), 180.0);
+        s.press(Id::InsertDrawing);
+    }
+    s.circle(s.centre(), 180.0);
+}
+
 enum class Turned { Untouched, Live, Committed };
 
 void turnedArc(Stage& s, Turned when) {
@@ -715,6 +753,30 @@ const std::vector<Situation>& situations() {
              s.pressOn(s.timeline, QPointF(s.timeline->cellCentreForTesting(0, 0)));
              s.dragTo(s.timeline, QPointF(s.timeline->cellCentreForTesting(0, 3)));
              s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"the-playback-rate-while-it-keeps-up",
+         "the right-hand end of the status bar while playing: nominal, because a shot "
+         "this size in this window has time to spare -- and pinned there as a permanent "
+         "widget so the main text changing length cannot shuffle it sideways",
+         [](Stage& s) {
+             drawnShot(s, 8);
+             s.press(Id::Play);
+             s.spin(1500);
+             s.picture = Stage::closeUpOf(s.window.statusBar());
+         }},
+
+        {"the-playback-rate-while-it-drops",
+         "the same shot at 240 fps, which no animation is -- it is the only lever this "
+         "window has, since dropping at 24 needs a 4K viewport and shots is 1400 px. "
+         "The state is real: the frame overruns the budget and the readout has to say "
+         "so, rather than letting a dropping playback pass for a badly timed shot",
+         [](Stage& s) {
+             drawnShot(s, 8);
+             s.doc().setFramerate(240);
+             s.press(Id::Play);
+             s.spin(1500);
+             s.picture = Stage::closeUpOf(s.window.statusBar());
          }},
 
         {"a-colour-layer-at-the-bottom-of-a-long-stack",

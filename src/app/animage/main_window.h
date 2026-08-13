@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <unordered_map>
 #include <utility>
@@ -296,6 +297,10 @@ private:
     void togglePlayback();
     void stopPlayback();
     void onPlaybackTick();
+    // The effective frame rate, from paints rather than from ticks. See the
+    // definition for why it is a rolling window and why it is not updated on
+    // every frame.
+    void updatePlaybackRate();
     void onOnionChanged();
     void setFramerate(int fps);
 
@@ -317,6 +322,11 @@ private:
     QSlider* opacity_ = nullptr;
     QDoubleSpinBox* radius_ = nullptr;
     QLabel* status_ = nullptr;
+    // Right-hand end of the status bar, and only while the animation is
+    // playing. A permanent widget rather than part of `status_` so that the
+    // main text changing length cannot shuffle it sideways: what it says has to
+    // be readable out of the corner of an eye that is watching the canvas.
+    QLabel* playback_rate_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
     QPushButton* transparent_swatch_ = nullptr;
 
@@ -372,6 +382,14 @@ private:
     QTimer* autosave_timer_ = nullptr;
     QElapsedTimer playback_clock_;
     std::size_t playback_start_slot_ = 0;
+
+    // Samples of (milliseconds into this playback, canvas paints so far), taken
+    // a few times a second and kept for about a second. The rate is the
+    // difference across the window, which is what makes it a rate and not a
+    // running average of the whole take -- a take that recovers should read as
+    // recovered.
+    std::deque<std::pair<qint64, std::uint64_t>> rate_samples_;
+    qint64 last_rate_sample_ms_ = 0;
 
     // Empty until the project has been saved somewhere. `saved_history_stamp_`
     // is which state of the document was written, taken from

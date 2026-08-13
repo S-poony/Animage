@@ -1564,6 +1564,75 @@ void MainWindow::saveProjectAs() {
 void MainWindow::buildStatusBar() {
     status_ = new QLabel(this);
     statusBar()->addWidget(status_);
+
+    // Permanent, so it sits at the right-hand end and the main text growing or
+    // shrinking cannot move it. Hidden until something is playing: it has
+    // nothing to say otherwise, and appearing at the start of a take and going
+    // again at the end are both moments nobody is judging motion.
+    playback_rate_ = new QLabel(this);
+    playback_rate_->hide();
+    statusBar()->addPermanentWidget(playback_rate_);
+}
+
+// What playback is actually managing, said out loud.
+//
+// Playback works its slot out from a clock, so a frame that takes longer than
+// its share does not slow the take down -- the frames underneath it are never
+// asked for. Nothing on screen said so, which makes a shot that is dropping
+// indistinguishable from a shot that is badly timed, and judging timing is the
+// whole purpose of the mode. bench_playback answers this for the developer on a
+// synthetic shot; this answers it for whoever is watching, on theirs.
+//
+// Three things about how it measures, each of which was a choice:
+//
+// - **From paints, not from ticks.** onPlaybackTick skips slots the clock has
+//   already passed, so counting slot changes very nearly counts frames shown --
+//   and stops doing so exactly when two of them collapse into one paint, which
+//   is what happens once playback overruns. CanvasWidget::paintCount cannot be
+//   wrong about it.
+// - **A rolling window and not a total.** A count of drops since Play means
+//   less the longer you watch, and a take that recovers has to read as
+//   recovered. Roughly the last second.
+// - **Four times a second, not twenty-four.** The label is a widget and setting
+//   its text repaints it, so an instrument updated every frame would be adding
+//   to the thing it is measuring.
+void MainWindow::updatePlaybackRate() {
+    if (!playback_rate_ || !canvas_) return;
+
+    constexpr qint64 kSampleMs = 250;
+    constexpr std::size_t kSamplesKept = 5;  // about a second of window
+    constexpr std::size_t kSamplesNeeded = 3;
+
+    const qint64 now = playback_clock_.elapsed();
+    if (now - last_rate_sample_ms_ < kSampleMs) return;
+    last_rate_sample_ms_ = now;
+
+    rate_samples_.emplace_back(now, canvas_->paintCount());
+    while (rate_samples_.size() > kSamplesKept) rate_samples_.pop_front();
+    // Nothing is claimed off half a window. The first readings of a take are
+    // the ones the caches are cold for, and a rate that opened by accusing the
+    // program of dropping and then corrected itself would teach people to
+    // ignore it.
+    if (rate_samples_.size() < kSamplesNeeded) return;
+
+    const qint64 span = rate_samples_.back().first - rate_samples_.front().first;
+    if (span <= 0) return;
+    const double rate =
+        static_cast<double>(rate_samples_.back().second - rate_samples_.front().second) *
+        1000.0 / static_cast<double>(span);
+
+    const int nominal = std::max(1, doc_.scene().framerate);
+    // A tenth of a frame of slack. The window is a second of wall clock and the
+    // paints inside it do not divide into it exactly, so demanding the whole
+    // rate would leave the warning on permanently -- which is how a warning
+    // stops being read. Same lesson as the "overwrite" label on the gutter.
+    if (rate >= static_cast<double>(nominal) * 0.9) {
+        playback_rate_->setText(QStringLiteral("playing %1 fps").arg(nominal));
+    } else {
+        playback_rate_->setText(QStringLiteral("dropping frames: %1 of %2 fps")
+                                    .arg(rate, 0, 'f', 0)
+                                    .arg(nominal));
+    }
 }
 
 void MainWindow::syncStatus() {
@@ -2013,6 +2082,13 @@ void MainWindow::togglePlayback() {
 
     playback_start_slot_ = timeline_widget_->currentSlot();
     playback_clock_.start();
+    rate_samples_.clear();
+    last_rate_sample_ms_ = 0;
+    // Nominal until there is a window to say otherwise, which is the honest
+    // opening claim: nothing has been dropped yet.
+    playback_rate_->setText(
+        QStringLiteral("playing %1 fps").arg(std::max(1, doc_.scene().framerate)));
+    playback_rate_->show();
     canvas_->setPlaying(true);
     playback_timer_->start(1);
     if (play_action_) play_action_->setText(QStringLiteral("Stop"));
@@ -2023,6 +2099,8 @@ void MainWindow::togglePlayback() {
 void MainWindow::stopPlayback() {
     if (!playback_timer_->isActive()) return;
     playback_timer_->stop();
+    playback_rate_->hide();
+    rate_samples_.clear();
     canvas_->setPlaying(false);
     if (play_action_) play_action_->setText(QStringLiteral("Play"));
     if (play_button_) play_button_->setText(QStringLiteral("Play"));
@@ -2046,6 +2124,12 @@ void MainWindow::onPlaybackTick() {
         stopPlayback();
         return;
     }
+
+    // Before the early return below, not after it. This tick fires every
+    // millisecond and mostly finds the slot unchanged, and the reading has to
+    // keep up during a stall -- which is exactly when the slot is changing
+    // least often.
+    updatePlaybackRate();
 
     const int fps = std::max(1, doc_.scene().framerate);
     const qint64 elapsed = playback_clock_.elapsed();

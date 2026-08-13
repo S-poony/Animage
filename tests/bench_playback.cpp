@@ -460,18 +460,35 @@ Deterministic timeDeterministic(TimelineWidget& timeline, CanvasWidget& canvas,
 }
 
 struct Played {
-    int shown = 0;
+    int shown = 0;    // slot changes: frames the program decided to show
+    int painted = 0;  // canvas paints: frames it actually put up
     int expected = 0;
     bool ran = false;
 };
 
 // The real timer, the real event loop, and the slots that actually changed.
 //
-// Counting currentSlotChanged is the right count and not an approximation of
-// one: onPlaybackTick returns early when the slot it works out is the one
-// already current, so a frame skipped because the paint before it overran never
-// becomes current and never emits. What is counted is what was shown.
-Played playForReal(MainWindow& window, TimelineWidget& timeline, int fps, int for_ms) {
+// Two counts, because they answer different questions and only one of them is
+// about the program.
+//
+// `shown` is slot changes. onPlaybackTick returns early when the slot it works
+// out is already current, so a frame skipped because the paint before it
+// overran never becomes current and never emits -- that count is what playback
+// *decided* to show, and it is the one the deterministic model predicts.
+//
+// `painted` is CanvasWidget::paintCount, which is what reached the screen. The
+// two agree here, including offscreen, and that is worth knowing rather than
+// assuming: a `shots` situation photographing this same readout showed 20 of 24
+// and looked like the offscreen platform capping paints. It was the harness --
+// it spun on `while (elapsed < ms) processEvents()`, which never lets the loop
+// idle, and repaints are flushed on the idle pass. The nested loop below has
+// always been right, which is how the difference was found.
+//
+// So a shortfall between the two is a real one. What it means is that two slot
+// changes collapsed into one paint, which is what happens once playback starts
+// overrunning.
+Played playForReal(MainWindow& window, TimelineWidget& timeline, CanvasWidget& canvas, int fps,
+                   int for_ms) {
     Played played;
     QAction* play = window.actionForTesting(shortcuts::Id::Play);
     if (!play) return played;
@@ -480,6 +497,7 @@ Played playForReal(MainWindow& window, TimelineWidget& timeline, int fps, int fo
     const auto counter = QObject::connect(&timeline, &TimelineWidget::currentSlotChanged,
                                           &timeline, [&shown](std::size_t) { ++shown; });
 
+    const std::uint64_t painted_before = canvas.paintCount();
     QElapsedTimer clock;
     clock.start();
     play->trigger();
@@ -493,6 +511,7 @@ Played playForReal(MainWindow& window, TimelineWidget& timeline, int fps, int fo
     QObject::disconnect(counter);
 
     played.shown = shown;
+    played.painted = static_cast<int>(canvas.paintCount() - painted_before);
     played.expected = static_cast<int>(elapsed * fps / 1000);
     played.ran = true;
     return played;
@@ -563,12 +582,13 @@ void run(const Case& shot, bool coloured, bool print_header) {
     // fills out of forty-eight, which is the third instrument in this file to
     // report zero for a reason that was not the one it was measuring.
     const std::uint64_t solves_before = doc.ctgCache().storeCount();
-    const Played played = playForReal(window, *timeline, kFps, 2000);
+    const Played played = playForReal(window, *timeline, *canvas, kFps, 2000);
     const std::uint64_t solves_after = doc.ctgCache().storeCount();
 
     char real[64];
     if (played.ran && played.expected > 0) {
-        std::snprintf(real, sizeof(real), "%d of %d", played.shown, played.expected);
+        std::snprintf(real, sizeof(real), "%d of %d (%d painted)", played.shown,
+                      played.expected, played.painted);
     } else {
         std::snprintf(real, sizeof(real), "did not run");
     }
@@ -607,10 +627,12 @@ int main(int argc, char** argv) {
         run(shot, true, false);
     }
 
-    std::printf("\nThe two right-hand columns have to agree. The deterministic one is what to\n"
-                "optimise against; the real-timer one is the cross-check. If the real timer\n"
-                "shows no drops where the deterministic model predicts many, the paints are\n"
-                "not reaching the backing store offscreen and that column is timing the timer\n"
-                "rather than the program -- believe the model, not the flattering number.\n");
+    std::printf("\nThe two right-hand columns have to agree on slots. The deterministic one is\n"
+                "what to optimise against; the real timer is the cross-check, and it is the\n"
+                "one that caught this file's own drop model counting 53 frames out of 48.\n"
+                "\n"
+                "The painted count is what reached the screen, and it agrees with the slot\n"
+                "count here. A shortfall between them would mean two slot changes collapsed\n"
+                "into one paint, which is what overrunning looks like from the inside.\n");
     return 0;
 }
