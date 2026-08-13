@@ -2466,23 +2466,32 @@ and fills almost nothing, and that fixture would report that colour is free.
 
 | | frame | shown at 24 fps |
 |---|---|---|
-| HD, 2 tracks, line art | 12.9 ms | 48 of 48 |
-| HD, 4 tracks, 96 frames | 17.8 ms | 96 of 96 |
-| 4K, 2 tracks, line art | 58.5 ms | **34 of 48** |
-| 4K, 2 tracks, coloured | 70.7 ms | **29 of 48** |
+| HD, 2 tracks, line art | 13.2 ms | 48 of 48 |
+| HD, 4 tracks, 96 frames | 15.7 ms | 96 of 96 |
+| 4K, 2 tracks, line art | 53.6 ms | **37 of 48** |
+| 4K, 2 tracks, coloured | 68.7 ms | **30 of 48** |
+
+One run, and the millisecond columns move by a few per cent between runs — the
+4K line-art frame has measured anywhere from 52 to 59 ms. Read the differences
+between rows and not the digits, which is also why the two claims below are
+stated as ranges rather than as the ratios one run happens to give.
 
 **Track count barely registers and output pixels are the whole story.** Two
-tracks and 1612 tiles against four tracks and 6452 moves the canvas half from
-12.2 ms to 15.2, because `compositeScene` is one flat list and an empty tile is
-skipped before a channel is read. The 4K canvas widget is 4.8x the HD one's area
-and costs 4.7x the time — the same per-output-pixel property the traps record
-from the other end, where a 66-tile and a 2425-tile drawing refreshed in the same
-time. So at 4K between a quarter and two fifths of the frames never reach the
-screen, silently, in the mode where somebody is judging timing.
+tracks and 1612 tiles against four tracks and 6452 moves the canvas half by one
+to three milliseconds, because `compositeScene` is one flat list and an empty
+tile is skipped before a channel is read. The 4K canvas widget is 4.8x the HD
+one's area and costs four to five times as much — the same per-output-pixel
+property the traps record from the other end, where a 66-tile and a 2425-tile
+drawing refreshed in the same time. So at 4K between a quarter and two fifths of
+the frames never reach the screen, silently, in the mode where somebody is
+judging timing.
 
-What to do about it is argued in
+What to do about it is issue
+[#30](https://github.com/S-poony/Animage/issues/30), argued in
 [playback-resolution.md](playback-resolution.md), which is a plan and not a
-description: composite fewer entries while playing, earn the reduction from a
+description: stop repainting a held frame first, which on twos removes the
+problem outright and costs no sharpness; and then, for the shots on ones where a
+hold cannot help, composite fewer entries while playing, earn the reduction from a
 measurement rather than applying it unconditionally, and decide it at a loop
 boundary so the picture never changes sharpness mid-take.
 

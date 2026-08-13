@@ -1,5 +1,7 @@
 # Playing at a resolution the machine can keep up with
 
+Issue [#30](https://github.com/S-poony/Animage/issues/30).
+
 A plan, not a description: none of this is built. It is written before the code
 because the expensive half of this is deciding *when* to give up resolution, and
 that argument is cheap on paper and a rewrite afterwards.
@@ -11,12 +13,13 @@ makes it the thing to do before deciding whether the rest is needed.
 ## What is wrong
 
 `bench_playback` measures it. At 4K, on a 4K viewport, a playback frame costs
-58 ms against a 41.7 ms budget and between a quarter and two fifths of the
-frames are never shown. At HD it costs 13 ms and nothing is dropped, at any
-track count.
+somewhere between 52 and 59 ms against a 41.7 ms budget, and between a quarter
+and two fifths of the frames are never shown. At HD it costs 13 ms and nothing is
+dropped, at any track count. The spread is run-to-run noise, which is why every
+number below is a range: what is solid is the gap between the rows.
 
 The cost is **per output pixel** and not per stroke — the 4K viewport is 4.8x
-the HD one's area and costs 4.7x the time. Both halves of a refresh scale that
+the HD one's area and costs four to five times as much. Both halves of a refresh scale that
 way: `Compositor::compositeScene` produces one entry per cache entry, and the
 sRGB conversion loop after it reads one and writes one. Nothing about the
 drawing enters into it, which is why two drawings 36x apart in tile count
