@@ -30,6 +30,7 @@ the shape of the program. Those five maps are.
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
+| [**The same source, two different pictures**](#the-same-source-two-different-pictures) | what a downloaded build does not share with yours, and where to look first |
 | [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
@@ -64,9 +65,24 @@ project that will not open cannot take the open one down with it.
 `scene.json` is read and written with Qt's QJsonDocument — the hand-rolled
 JSON reader is gone — and the readers are pinned by hostile-file tests
 (`tests/test_hostile.cpp`) that replay the crashes and undefined behaviour
-the old reader had, so they cannot come back. The tests themselves run under
-ASan and UBSan by default and the build denies warnings, so a memory error or
-an out-of-range conversion fails the tests instead of shipping.
+the old reader had, so they cannot come back. The build denies warnings, and the
+tests ask for ASan and UBSan by default, so a memory error or an out-of-range
+conversion fails the tests instead of shipping — **where the sanitizers exist**,
+which on Windows they do not. MSYS2's UCRT64 GCC links neither runtime, the
+probe in `CMakeLists.txt` fails, and the build carries on with none while
+`ANIMAGE_SANITIZE` is still reported as `ON`. The configure step says so, once:
+
+```
+ANIMAGE_SANITIZE is ON but no sanitizer runtime links; tests will not
+detect memory or UB errors
+```
+
+It scrolls past, and after that nothing distinguishes a sanitized build from an
+unsanitized one — `build/CMakeCache.txt` holds the honest answer in
+`ANIMAGE_ASAN_UBSAN_OK` and `ANIMAGE_UBSAN_OK`, both empty here. So on Windows
+the memory-safety story is the Linux CI job and not your desk, and a green local
+`ctest` says less than this paragraph used to claim it did. Worth knowing before
+trusting a clean run on a change that moves memory about.
 
 **Saving is incremental, and autosave rests on that.** A cel's revision is
 bumped by every write to it, undo included, so a `ProjectIO::SaveState` — a
@@ -1909,6 +1925,63 @@ system stamps the live modifier state on all of them. So a hover sent with
 absent when it was the harness that had let go. `Stage` holds the modifiers and
 stamps them on, the way the window system does.
 
+## The same source, two different pictures
+
+This section exists because it was missing, and its absence cost most of an
+afternoon. Somebody downloaded the Windows build, found the timeline drawn white
+on white, checked that the release was built from the commit they had, and
+reasonably concluded the difference had to be in the program. It was not. The
+search went through the compositor, the half-float path, the threading in
+`refreshRegion` and the sRGB conversion before reaching a widget that draws
+rectangles — because nothing here said what a downloaded build does not share
+with the one on your desk.
+
+**It shares the source and nothing else.** The `latest` pre-release names its
+commit in the release notes, so confirming that takes ten seconds and is worth
+doing first — but it settles less than it looks like it settles. Everything below
+still differs:
+
+| | yours, per the README | the download |
+|---|---|---|
+| compiler | GCC, MSYS2 UCRT64 | MSVC 19, Visual Studio 2022 |
+| Qt | whatever MSYS2 has today — 6.11 at the time of writing | 6.8.\*, pinned in `ci.yml` |
+| sanitizers | none; the probe fails here, see below | off, deliberately |
+| C runtime | UCRT via MinGW | MSVC's |
+| Qt libraries | MSYS2's DLLs on `PATH` | whatever `windeployqt` copied |
+
+**The Qt version is the one that changes what you see**, and it is the one nobody
+suspects, because a version gap in a toolkit reads as a risk of crashes rather
+than of colours. It is the opposite. Qt is where the system palette, the style
+and the platform theme come from, so a widget that reads a palette role is
+reading a value that this repository does not contain and cannot pin. Two Qt
+versions on the *same machine under the same Windows theme* hand over different
+palettes — that is not a bug in either of them, and it is the whole of the
+white-on-white timeline. See the first entry under [the traps](#the-traps).
+
+**So the question to ask first is: what does this widget read that is not in the
+source?** A palette role, a style metric, a standard icon, a font. That set is
+small, and it is where a difference between two builds of one commit almost has
+to live. Ordinary program state is not a candidate — it came from the same code.
+
+**And the way to answer it is to print, not to photograph.** `shots` runs the real
+window and a situation may print whatever it likes; `the-timeline-palette` prints
+every role the timeline reads with its alpha and then what the derivation makes
+of each one. Five numbers ended a search that four hours of reading the
+compositor had not. This is the same lesson as ["guessing cost more than
+instrumenting"](#the-traps), one layer further out, and it earns its own entry
+because the instrument that was missing was not a crash log — it was a way to see
+a value that arrives from outside the program.
+
+**What is still not pinned.** Nothing checks that the shipped build and the local
+one agree about anything. There are no reference images — deliberately, and for
+good reasons set out in [looking at the
+interface](#looking-at-the-interface) — and CI never runs `shots` at all, so no
+picture of the released build exists anywhere. It would not take much to make CI
+run `shots` and upload the PNGs beside the binaries: no assertions, no golden
+images, nothing to keep in step, just the same pictures taken on the machine that
+built the thing people download. That is the cheapest available answer to "does
+it look like this for them too", and it is not done.
+
 ## What the history is allowed to cost
 
 Issue #23. `undo_stack_` only ever grew — `clearHistory` and loading a project
@@ -2060,6 +2133,42 @@ Do not propose it.
 ## The traps
 
 These are the things that cost hours, in the order they hurt.
+
+**A palette role arrived with alpha on it, and the timeline vanished.** The
+downloaded Windows build drew the timeline white on white — no cell outlines, no
+tick marking a held frame — while the same commit built here drew it correctly.
+`TimelineWidget::paletteFor` bends one palette role into another, lighter for a
+dark theme and darker for a light one, and **`QColor::lighter` and `darker` work
+in HSV and carry the alpha through untouched**. So `QPalette::Window` arriving
+with any transparency in it did not make the row faint: it made the background,
+the ruler, the gutter and every outline invisible at once, while the drawing
+numbers and the playhead went on drawing, because those are roles used as they
+come rather than bent. The colours are made opaque before anything is derived
+from them now.
+
+Three things about it are worth more than the fix.
+
+**The symptom pointed away from the cause.** A row with no outlines reads as a
+missing `drawRect`, and the things that still drew — numbers, playhead, gutter —
+read as proof that the paint event was fine. They were the clue: *everything that
+survived was a palette role used raw, and everything that vanished was one that
+had been bent.* That split is the whole diagnosis, and it is visible in the
+screenshot before any code is opened.
+
+**It is not a dark theme's problem and not a rare one.** This machine's Windows 11
+theme hands over `WindowText` at `#e4000000` — alpha 228. The palette the
+timeline reads is *already* one with transparency in it; which roles carry it is
+Qt's business and moves between Qt versions. Local is Qt 6.11 from MSYS2 and CI
+builds against 6.8, which is the entire difference between the two pictures.
+
+**The suite is green either way, and always was.** All fifteen tests pass with the
+bug present — they pin arithmetic, and this is a colour arriving from outside the
+program. `tests/shots.cpp` grew two situations that do catch it:
+`the-timeline-palette` prints every role with its alpha and then what is made of
+it, and `a-timeline-whose-window-colour-has-alpha` sets `Window` to alpha 0 and
+must look identical to the first. That second one is the only way to see this
+failure without a build made against another Qt, and it is three lines. If the
+derivation is ever touched, run them.
 
 **Two crashes, one cause, and I caused it.** Space and Z are held modifiers, not
 shortcuts, so they are forwarded to the canvas by an application-wide event

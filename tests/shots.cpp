@@ -55,7 +55,11 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QColor>
 #include <QCursor>
+#include <QGuiApplication>
+#include <QPalette>
+#include <QStyle>
 #include <QDir>
 #include <QDockWidget>
 #include <QElapsedTimer>
@@ -548,6 +552,68 @@ struct Situation {
     std::function<void(Stage&)> set_up;
 };
 
+// What the timeline reads out of the palette, printed, alpha first.
+//
+// The timeline takes every colour it draws from the widget's palette and then
+// bends it -- lighter for a dark theme, darker for a light one. That derivation
+// is the one thing in the program whose result depends on the Qt underneath
+// rather than on this source, so a picture of it is not enough: two builds can
+// differ and the picture only ever says which one looks wrong, never why. This
+// prints what it starts from.
+//
+// **Alpha first because alpha is the trap.** QColor::lighter and darker carry it
+// through untouched, so a role arriving with any transparency in it took the
+// whole structure of the row out -- background, ruler, gutter, every outline --
+// while the numbers and the playhead went on drawing, which is a picture that
+// looks like a missing outline rather than like a palette. TimelineWidget makes
+// them opaque before it bends them now; this is the reading that says whether it
+// still has to. WindowText arrives here at alpha 228 and is left alone, so the
+// palette this reads is a live example rather than a worry.
+QColor opaqueCopy(QColor c) {
+    c.setAlpha(255);
+    return c;
+}
+
+QString hexOf(const QColor& c) {
+    return QStringLiteral("#%1%2%3%4")
+        .arg(c.alpha(), 2, 16, QLatin1Char('0'))
+        .arg(c.red(), 2, 16, QLatin1Char('0'))
+        .arg(c.green(), 2, 16, QLatin1Char('0'))
+        .arg(c.blue(), 2, 16, QLatin1Char('0'));
+}
+
+void printTimelinePalette(const QWidget& widget) {
+    const QPalette& source = widget.palette();
+    const QColor window = source.color(QPalette::Window);
+    const QColor base = source.color(QPalette::Base);
+    const bool dark = window.lightness() < 128;
+
+    std::printf("      Qt %s, style %s, platform %s\n", qVersion(),
+                qPrintable(QApplication::style()->objectName()),
+                qPrintable(QGuiApplication::platformName()));
+    std::printf("      Window %s  WindowText %s  Base %s  Highlight %s\n",
+                qPrintable(hexOf(window)), qPrintable(hexOf(source.color(QPalette::WindowText))),
+                qPrintable(hexOf(base)), qPrintable(hexOf(source.color(QPalette::Highlight))));
+    std::printf("      lightness(Window) = %d, so dark = %s\n", window.lightness(),
+                dark ? "true" : "false");
+
+    // What paletteFor makes of them, run on the opaque colours as it does. A
+    // copy of five lines from another file, which is a thing that goes stale --
+    // it already did once, in the hour between finding the bug and fixing it --
+    // so what it is for is worth being exact about: it is not a second
+    // implementation to trust, it is the arithmetic written out where the
+    // numbers can be read. The picture beside it is what says whether the widget
+    // agrees.
+    const QColor solid_window = opaqueCopy(window);
+    const QColor solid_base = opaqueCopy(base);
+    std::printf("      background %s  ruler %s  outline %s  cell %s  cell_held %s\n",
+                qPrintable(hexOf(dark ? solid_window.lighter(115) : solid_window.darker(108))),
+                qPrintable(hexOf(dark ? solid_window.lighter(135) : solid_window.darker(118))),
+                qPrintable(hexOf(dark ? solid_window.lighter(180) : solid_window.darker(140))),
+                qPrintable(hexOf(solid_base)),
+                qPrintable(hexOf(dark ? solid_base.lighter(115) : solid_base.darker(106))));
+}
+
 // The same seven degrees at three moments -- before, live, and committed -- so
 // that what the preview shows and what the commit bakes can be put side by side.
 //
@@ -747,6 +813,35 @@ const std::vector<Situation>& situations() {
                  if (t < 2) s.choose("Add track");
              }
              s.press(Id::PreviousFrame);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"the-timeline-palette",
+         "the cells against the background, with the numbers behind the picture printed. "
+         "Every colour here is bent out of a palette role, which makes this the one part "
+         "of the interface whose result depends on the Qt it was built against",
+         [](Stage& s) {
+             for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
+             s.press(Id::InsertDrawing);
+             printTimelinePalette(*s.timeline);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-timeline-whose-window-colour-has-alpha",
+         "the same row with QPalette::Window given an alpha of 0 and nothing else touched, "
+         "and it must look exactly like the one above. This is the downloaded-build bug "
+         "held still: lighter and darker carry alpha, so the whole row went white on white "
+         "while the numbers and the playhead kept drawing. Nothing else can show it -- the "
+         "suite is green either way and the local Qt hands over an opaque Window",
+         [](Stage& s) {
+             QPalette bent = s.timeline->palette();
+             QColor window = bent.color(QPalette::Window);
+             window.setAlpha(0);
+             bent.setColor(QPalette::Window, window);
+             s.timeline->setPalette(bent);
+             for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
+             s.press(Id::InsertDrawing);
+             printTimelinePalette(*s.timeline);
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 

@@ -32,24 +32,51 @@ struct Palette {
     QColor carried, gutter, gutter_current, outside, boundary;
 };
 
+// A palette role with its alpha taken off.
+//
+// Every structural colour below is bent out of another one -- lighter for a dark
+// theme, darker for a light one -- and QColor::lighter and darker work in HSV
+// and carry the alpha straight through. So a theme that hands over a Window with
+// any transparency in it does not make the timeline slightly faint: it makes the
+// background, the ruler, the gutter and every cell outline invisible at once,
+// while the drawing numbers and the playhead carry on, because those are roles
+// used as they come rather than bent. The row is then white cells on whatever is
+// behind the widget, with nothing to say where a frame ends or which ones are
+// held.
+//
+// That is not hypothetical and it is not a dark theme's problem. This machine's
+// Windows 11 theme already hands over WindowText at #e4000000, alpha 228 -- the
+// palette this reads is *already* one with transparency in it, and which roles
+// carry it is Qt's business and changes between Qt versions. It cost a
+// downloaded build to find, because the derivation is the one thing here whose
+// result depends on the Qt underneath rather than on this file: the same source
+// built against a different Qt drew the same widget white on white, under a
+// green CI, with every test passing. See `the-timeline-palette` and
+// `a-timeline-whose-window-colour-has-alpha` in tests/shots.cpp: the first
+// prints these, the second sets Window to alpha 0 and must look identical to it.
+QColor opaque(QColor colour) {
+    colour.setAlpha(255);
+    return colour;
+}
+
 Palette paletteFor(const QWidget& widget) {
     const QPalette& source = widget.palette();
-    const QColor window = source.color(QPalette::Window);
+    const QColor window = opaque(source.color(QPalette::Window));
     const QColor text = source.color(QPalette::WindowText);
     const bool dark = window.lightness() < 128;
 
     Palette p;
     p.background = dark ? window.lighter(115) : window.darker(108);
     p.ruler = dark ? window.lighter(135) : window.darker(118);
-    p.cell = source.color(QPalette::Base);
+    p.cell = opaque(source.color(QPalette::Base));
     p.cell_held = dark ? p.cell.lighter(115) : p.cell.darker(106);
     p.outline = dark ? window.lighter(180) : window.darker(140);
     p.tick = text;
     p.text = text;
-    p.current = source.color(QPalette::Highlight);
+    p.current = opaque(source.color(QPalette::Highlight));
     p.current_text = source.color(QPalette::HighlightedText);
     p.gutter = dark ? window.lighter(125) : window.darker(112);
-    p.gutter_current = source.color(QPalette::Highlight);
+    p.gutter_current = p.current;
     // Not from the palette: this has to mean the same thing in every theme, and
     // "carried" is not a role a system palette has.
     p.carried = QColor(0x5b, 0x9c, 0xd6);
