@@ -390,6 +390,9 @@ private:
     // recovered.
     std::deque<std::pair<qint64, std::uint64_t>> rate_samples_;
     qint64 last_rate_sample_ms_ = 0;
+    // Whether the readout is currently red, so the palette is set on the
+    // transition rather than four times a second for the length of a take.
+    bool rate_dropping_ = false;
 
     // Empty until the project has been saved somewhere. `saved_history_stamp_`
     // is which state of the document was written, taken from

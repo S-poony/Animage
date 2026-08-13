@@ -3,9 +3,12 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QColor>
 #include <QColorDialog>
+#include <QPalette>
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QComboBox>
@@ -1626,12 +1629,30 @@ void MainWindow::updatePlaybackRate() {
     // paints inside it do not divide into it exactly, so demanding the whole
     // rate would leave the warning on permanently -- which is how a warning
     // stops being read. Same lesson as the "overwrite" label on the gutter.
-    if (rate >= static_cast<double>(nominal) * 0.9) {
-        playback_rate_->setText(QStringLiteral("playing %1 fps").arg(nominal));
-    } else {
+    const bool dropping = rate < static_cast<double>(nominal) * 0.9;
+
+    if (dropping) {
         playback_rate_->setText(QStringLiteral("dropping frames: %1 of %2 fps")
                                     .arg(rate, 0, 'f', 0)
                                     .arg(nominal));
+    } else {
+        playback_rate_->setText(QStringLiteral("playing %1 fps").arg(nominal));
+    }
+
+    // Red when it is dropping, and the same red the shortcuts dialog marks a
+    // colliding key with -- there is one colour in this program for "this is
+    // wrong" and a second one would only invite a third.
+    //
+    // Set on the transition and not on every reading. A palette change
+    // re-polishes the widget, and this runs four times a second for as long as
+    // somebody watches a take.
+    if (dropping != rate_dropping_) {
+        rate_dropping_ = dropping;
+        QPalette palette = playback_rate_->palette();
+        palette.setColor(QPalette::WindowText,
+                         dropping ? QColor(190, 40, 40)
+                                  : QApplication::palette().color(QPalette::WindowText));
+        playback_rate_->setPalette(palette);
     }
 }
 
@@ -2084,6 +2105,13 @@ void MainWindow::togglePlayback() {
     playback_clock_.start();
     rate_samples_.clear();
     last_rate_sample_ms_ = 0;
+    // Not red, and said out loud rather than left over from the last take: a
+    // readout that opens red because the previous shot was heavy is accusing
+    // this one of something it has not done yet.
+    rate_dropping_ = false;
+    QPalette opening = playback_rate_->palette();
+    opening.setColor(QPalette::WindowText, QApplication::palette().color(QPalette::WindowText));
+    playback_rate_->setPalette(opening);
     // Nominal until there is a window to say otherwise, which is the honest
     // opening claim: nothing has been dropped yet.
     playback_rate_->setText(

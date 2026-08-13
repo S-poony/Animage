@@ -4,6 +4,10 @@ A plan, not a description: none of this is built. It is written before the code
 because the expensive half of this is deciding *when* to give up resolution, and
 that argument is cheap on paper and a rewrite afterwards.
 
+**Read the next section first.** Not repainting a hold is cheaper than any of
+this, costs no sharpness, and on twos it removes the problem outright — which
+makes it the thing to do before deciding whether the rest is needed.
+
 ## What is wrong
 
 `bench_playback` measures it. At 4K, on a 4K viewport, a playback frame costs
@@ -20,7 +24,55 @@ refresh in the same time.
 
 So the lever is the number of entries, and the program already has it.
 
-## The idea
+## Do the cheaper thing first: stop repainting a hold
+
+**Every playback frame is currently a full recomposite, including the frames
+that show exactly the picture the frame before them did.** `CanvasWidget::
+setFrame` ends in `onion_dirty_ = true; refreshAll();` unconditionally, and
+`refreshAll` sets `dirty_everything_`, so a shot on twos flattens and converts
+the same viewport twice for every drawing. The benchmark says so without being
+asked: on 48 frames the median frame is 13.17 ms and the p95 is 13.93, and a
+run where half the frames were free would be nowhere near that flat.
+
+The arithmetic is better than the reduction's, and it costs no sharpness at all.
+Take the 4K line-art row — 53.6 ms a frame against a 41.7 ms budget, 37 of 48
+shown. On twos, with a held frame costing only the slot change and the playhead:
+
+```
+slot 0  53.6 ms   clock 53.6   over budget, so slot 1 is next
+slot 1   0.7 ms   clock 54.3   under 83.4, so it waits for the boundary
+slot 2  53.6 ms   clock 137    over, so slot 3 is next
+slot 3   0.7 ms   clock 137.7  waits again
+```
+
+**Nothing drops.** A pair costs 54.3 ms against a two-frame budget of 83.4, so
+the cheap frame absorbs the expensive one's overrun and the take runs at rate.
+48 of 48, at full resolution. Animation is overwhelmingly on twos, so this is
+the common case and not a lucky one — and on ones it buys nothing, which is
+where the reduction below is still the answer.
+
+**The comparison has to be the whole picture, not the current track's drawing.**
+What gets composited is every track's shown drawing, so the test is the tuple of
+`Track::imageShownAt(slot)` across every track — `imageShownAt` and not
+`imageAtSlot`, because a track past its end contributes whatever its end
+behaviour says. A character on ones over a background held for the whole shot
+must still repaint every frame; two tracks both on twos but offset by one frame
+have no held frames in common at all and must also repaint every frame. Anything
+that compares one track's drawing gets both of those wrong.
+
+Two things that have to come with it:
+
+- **The rate readout counts paints**, so a canvas that legitimately skips a held
+  frame would make it report half rate and cry wolf. The canvas has to say how
+  many frames it skipped as unchanged, and the readout has to count those as
+  shown -- which they are: the picture on screen is the right one for that frame.
+- **Skip only while playing**, at least at first. `setFrame` is called from
+  scrubbing, from `afterProjectLoaded` and from undo, and a caller that changed
+  pixels without marking anything dirty is relying on that unconditional
+  `refreshAll`. Confining it to playback is the version that cannot be wrong
+  about a case nobody enumerated; widening it is a second change, measured.
+
+## The idea, when a hold cannot save you
 
 `SampleStep` says how many image pixels one composited entry stands for. It is
 `max(1, 1/zoom)` today — one entry per screen pixel, which is what issue #11
