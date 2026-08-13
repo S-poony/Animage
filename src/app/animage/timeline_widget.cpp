@@ -33,56 +33,86 @@ struct Palette {
 };
 
 // A palette role with its alpha taken off.
-//
-// Every structural colour below is bent out of another one -- lighter for a dark
-// theme, darker for a light one -- and QColor::lighter and darker work in HSV
-// and carry the alpha straight through. So a theme that hands over a Window with
-// any transparency in it does not make the timeline slightly faint: it makes the
-// background, the ruler, the gutter and every cell outline invisible at once,
-// while the drawing numbers and the playhead carry on, because those are roles
-// used as they come rather than bent. The row is then white cells on whatever is
-// behind the widget, with nothing to say where a frame ends or which ones are
-// held.
-//
-// That is not hypothetical and it is not a dark theme's problem. This machine's
-// Windows 11 theme already hands over WindowText at #e4000000, alpha 228 -- the
-// palette this reads is *already* one with transparency in it, and which roles
-// carry it is Qt's business and changes between Qt versions. It cost a
-// downloaded build to find, because the derivation is the one thing here whose
-// result depends on the Qt underneath rather than on this file: the same source
-// built against a different Qt drew the same widget white on white, under a
-// green CI, with every test passing. See `the-timeline-palette` and
-// `a-timeline-whose-window-colour-has-alpha` in tests/shots.cpp: the first
-// prints these, the second sets Window to alpha 0 and must look identical to it.
 QColor opaque(QColor colour) {
     colour.setAlpha(255);
     return colour;
 }
 
+// `amount` hundredths of the way from `from` towards the far end: white when the
+// theme is dark, black when it is light.
+//
+// This is what QColor::lighter and darker were doing here, and it replaces them
+// because they cannot do it at the ends. They scale the HSV *value*, so the step
+// they take is proportional to the colour they start from -- and at zero there is
+// nothing to scale. `lighter(180)` on black returns black. Every colour derived
+// from a black one lands on the same black, and the row draws as a slab.
+//
+// Stepping a fixed fraction of the distance to the end instead means the
+// separation is the same wherever it starts, which is the property actually
+// wanted: these numbers exist to say "a bit darker than the cells" and "enough
+// darker to read as a line", and neither of those is a multiple of anything.
+QColor stepped(const QColor& from, bool dark, int amount) {
+    const int target = dark ? 255 : 0;
+    const auto mix = [&](int channel) { return channel + (target - channel) * amount / 100; };
+    return QColor(mix(from.red()), mix(from.green()), mix(from.blue()));
+}
+
+// Everything structural is derived from Base -- the colour of a cell -- and not
+// from Window.
+//
+// Window is the role this used to build on, and twice now it has not been a
+// colour at all. The shipped Windows build's Qt hands it over as #00000000:
+// transparent, and black underneath. Both of the ways that went wrong are worth
+// keeping, because they look like different bugs and are one.
+//
+// Transparent first. lighter and darker carry alpha through untouched, so every
+// derived colour came out invisible at once -- background, ruler, gutter, every
+// outline -- while the drawing numbers and the playhead kept drawing, those being
+// roles used as they come rather than bent. The row was white cells on whatever
+// was behind the widget. Making the colours opaque fixed that and uncovered the
+// second: opaque #00000000 is pure black, `lightness()` reads 0, the theme is
+// taken for a dark one, and lighter() cannot lift a black. Same widget, same
+// commit, black slab instead of a white one.
+//
+// So the lesson is not "force the alpha" -- that was half of it, and shipping it
+// alone made the picture worse. It is that Window is a role this widget cannot
+// substantiate. Base can be: it is what a cell is painted with, it is what every
+// text field in the application stands on, and a theme that gets it wrong is
+// broken in a way somebody has already reported. It arrives as #ffffff in the
+// build that draws this correctly and in the build that does not.
+//
+// See `the-timeline-palette` in tests/shots.cpp, which prints these, and the two
+// situations beside it that hold each failure still. Nothing else can see either:
+// the suite is green through both, and the Qt on this desk hands over a Window
+// that is opaque and mid-grey, so neither reproduces here by accident.
 Palette paletteFor(const QWidget& widget) {
     const QPalette& source = widget.palette();
-    const QColor window = opaque(source.color(QPalette::Window));
+    const QColor base = opaque(source.color(QPalette::Base));
     const QColor text = source.color(QPalette::WindowText);
-    const bool dark = window.lightness() < 128;
+    const bool dark = base.lightness() < 128;
 
+    // Hundredths towards the far end, chosen to land on what the derivation from
+    // Window used to give on an ordinary light theme -- #e1e1e1 background,
+    // #cecece ruler, #aeaeae outline -- so this is the same row, arrived at by a
+    // route that cannot collapse.
     Palette p;
-    p.background = dark ? window.lighter(115) : window.darker(108);
-    p.ruler = dark ? window.lighter(135) : window.darker(118);
-    p.cell = opaque(source.color(QPalette::Base));
-    p.cell_held = dark ? p.cell.lighter(115) : p.cell.darker(106);
-    p.outline = dark ? window.lighter(180) : window.darker(140);
+    p.cell = base;
+    p.background = stepped(base, dark, 12);
+    p.ruler = stepped(base, dark, 19);
+    p.outline = stepped(base, dark, 32);
+    p.gutter = stepped(base, dark, 15);
+    p.cell_held = stepped(base, dark, 6);
     p.tick = text;
     p.text = text;
     p.current = opaque(source.color(QPalette::Highlight));
     p.current_text = source.color(QPalette::HighlightedText);
-    p.gutter = dark ? window.lighter(125) : window.darker(112);
     p.gutter_current = p.current;
     // Not from the palette: this has to mean the same thing in every theme, and
     // "carried" is not a role a system palette has.
     p.carried = QColor(0x5b, 0x9c, 0xd6);
     // A wash over cells outside the shot rather than a different cell colour, so
     // whatever the cell was still reads through it -- held, carried, numbered.
-    p.outside = QColor(window.red(), window.green(), window.blue(), 150);
+    p.outside = QColor(p.background.red(), p.background.green(), p.background.blue(), 150);
     // "The shot ends here" has to mean the same in every theme, and it is not a
     // role a system palette has.
     p.boundary = QColor(0xd0, 0x45, 0x3c);

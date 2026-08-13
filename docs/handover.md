@@ -2157,10 +2157,36 @@ in HSV and carry the alpha through untouched**. So `QPalette::Window` arriving
 with any transparency in it did not make the row faint: it made the background,
 the ruler, the gutter and every outline invisible at once, while the drawing
 numbers and the playhead went on drawing, because those are roles used as they
-come rather than bent. The colours are made opaque before anything is derived
-from them now.
+come rather than bent.
 
-Three things about it are worth more than the fix.
+**Forcing the alpha fixed it and shipped a worse bug**, which is the part of this
+worth reading twice. The Qt the Windows build ships against hands `Window` over as
+`#00000000` — transparent, and *black underneath*. Made opaque that is pure black,
+`lightness()` reads 0, the theme is taken for a dark one, and `lighter()` scales
+the HSV value, so it cannot lift a black: `lighter(180)` on black is black. Same
+widget, same commit, one release later, a black slab instead of a white one. The
+second bug was already known when the first was fixed — it had an issue open with
+the measurements in it — and it was filed as a hypothetical about accessibility
+themes rather than recognised as the other half of the value in hand.
+
+So the lesson is not "force the alpha". It is that **`Window` was a role this
+widget could not substantiate**, and the fix is that nothing structural is derived
+from it any more. `Base` can be substantiated: it is what a cell is painted with,
+it is what every text field in the application stands on, and a theme that gets it
+wrong is broken in a way somebody has already reported. It arrives as `#ffffff` in
+the build that draws this correctly and in the build that did not. `lighter` and
+`darker` are gone with it, replaced by a step of a fixed fraction of the distance
+to white or black — the separation is then the same wherever it starts, which is
+what these numbers were always for.
+
+Four things about it are worth more than the fix.
+
+**A degenerate value is not a wrong value, and it fails twice.** `#00000000` is not
+a colour that is slightly off; it is a role nobody set. Read for its alpha it
+erased the row, and read for its brightness it inverted the theme. Anything
+derived from a palette role should be asked whether the role can be *shown to be
+meaningful*, not whether it happens to be in range — and "this is what the cells
+are painted with" is that argument, where "this is the window colour" was not.
 
 **The symptom pointed away from the cause.** A row with no outlines reads as a
 missing `drawRect`, and the things that still drew — numbers, playhead, gutter —
@@ -2175,21 +2201,26 @@ timeline reads is *already* one with transparency in it; which roles carry it is
 Qt's business and moves between Qt versions. Local is Qt 6.11 from MSYS2 and CI
 builds against 6.8, which is the entire difference between the two pictures.
 
-**The suite is green either way, and always was.** All fifteen tests pass with the
-bug present — they pin arithmetic, and this is a colour arriving from outside the
-program. `tests/shots.cpp` grew two situations that do catch it:
+**The suite is green through all of it, and always was.** All fifteen tests pass
+with either bug present — they pin arithmetic, and this is a colour arriving from
+outside the program. `tests/shots.cpp` carries the four situations that do see it:
 `the-timeline-palette` prints every role with its alpha and then what is made of
-it, and `a-timeline-whose-window-colour-has-alpha` sets `Window` to alpha 0 and
-must look identical to the first. That second one is the only way to see this
-failure without a build made against another Qt, and it is three lines. If the
-derivation is ever touched, run them.
+it, and three beside it hold a palette still —
+`a-timeline-whose-window-colour-has-alpha`,
+`a-timeline-whose-window-colour-is-transparent-black` (the one that actually
+ships) and `a-timeline-on-a-pure-black-theme`
+([#32](https://github.com/S-poony/Animage/issues/32), Windows' High Contrast
+Black). All three must look like the first. They are three lines each, and they
+are the only way to see any of this without a build made against another Qt. If
+the derivation is ever touched, run them.
 
-The same derivation has a second way of collapsing, still open:
-`QColor::lighter` scales the HSV value, so it cannot lighten a black one, and a
-`Window` of pure black — Windows' High Contrast Black is one — puts the
-background, the ruler and every outline on the same black.
-[#32](https://github.com/S-poony/Animage/issues/32) has the measurements and the
-three lines that reproduce it.
+**A picture would have been quicker than a release.** Each of these was found by
+someone downloading a build, and each was then reproduced here in about a minute
+by setting one palette role and taking a screenshot. The gap between "cannot
+reproduce locally" and "reproduced locally in a minute" was entirely the idea of
+*forging the input* rather than trying to obtain the environment. That is what
+these situations are, and it is worth reaching for before the next release goes
+out to find something.
 
 **Two crashes, one cause, and I caused it.** Space and Z are held modifiers, not
 shortcuts, so they are forwarded to the canvas by an application-wide event

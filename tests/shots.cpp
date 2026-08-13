@@ -586,7 +586,7 @@ void printTimelinePalette(const QWidget& widget) {
     const QPalette& source = widget.palette();
     const QColor window = source.color(QPalette::Window);
     const QColor base = source.color(QPalette::Base);
-    const bool dark = window.lightness() < 128;
+    const bool dark = opaqueCopy(base).lightness() < 128;
 
     std::printf("      Qt %s, style %s, platform %s\n", qVersion(),
                 qPrintable(QApplication::style()->objectName()),
@@ -594,24 +594,28 @@ void printTimelinePalette(const QWidget& widget) {
     std::printf("      Window %s  WindowText %s  Base %s  Highlight %s\n",
                 qPrintable(hexOf(window)), qPrintable(hexOf(source.color(QPalette::WindowText))),
                 qPrintable(hexOf(base)), qPrintable(hexOf(source.color(QPalette::Highlight))));
-    std::printf("      lightness(Window) = %d, so dark = %s\n", window.lightness(),
+    // Window is printed and then not used. It is the role this used to build on,
+    // and it is the one the shipped build hands over as #00000000 -- so it is
+    // worth seeing, precisely because nothing depends on it any more.
+    std::printf("      lightness(Base) = %d, so dark = %s\n", opaqueCopy(base).lightness(),
                 dark ? "true" : "false");
 
-    // What paletteFor makes of them, run on the opaque colours as it does. A
-    // copy of five lines from another file, which is a thing that goes stale --
-    // it already did once, in the hour between finding the bug and fixing it --
-    // so what it is for is worth being exact about: it is not a second
-    // implementation to trust, it is the arithmetic written out where the
-    // numbers can be read. The picture beside it is what says whether the widget
-    // agrees.
-    const QColor solid_window = opaqueCopy(window);
-    const QColor solid_base = opaqueCopy(base);
+    // What paletteFor makes of them. A copy of five lines from another file,
+    // which is a thing that goes stale -- it has already done so twice, once in
+    // the hour between finding a bug and fixing it -- so what it is for is worth
+    // being exact about: it is not a second implementation to trust, it is the
+    // arithmetic written out where the numbers can be read. The picture beside it
+    // is what says whether the widget agrees.
+    const QColor solid = opaqueCopy(base);
+    const auto stepped = [&](int amount) {
+        const int target = dark ? 255 : 0;
+        const auto mix = [&](int channel) { return channel + (target - channel) * amount / 100; };
+        return QColor(mix(solid.red()), mix(solid.green()), mix(solid.blue()));
+    };
     std::printf("      background %s  ruler %s  outline %s  cell %s  cell_held %s\n",
-                qPrintable(hexOf(dark ? solid_window.lighter(115) : solid_window.darker(108))),
-                qPrintable(hexOf(dark ? solid_window.lighter(135) : solid_window.darker(118))),
-                qPrintable(hexOf(dark ? solid_window.lighter(180) : solid_window.darker(140))),
-                qPrintable(hexOf(solid_base)),
-                qPrintable(hexOf(dark ? solid_base.lighter(115) : solid_base.darker(106))));
+                qPrintable(hexOf(stepped(12))), qPrintable(hexOf(stepped(19))),
+                qPrintable(hexOf(stepped(32))), qPrintable(hexOf(solid)),
+                qPrintable(hexOf(stepped(6))));
 }
 
 // The same seven degrees at three moments -- before, live, and committed -- so
@@ -838,6 +842,38 @@ const std::vector<Situation>& situations() {
              QColor window = bent.color(QPalette::Window);
              window.setAlpha(0);
              bent.setColor(QPalette::Window, window);
+             s.timeline->setPalette(bent);
+             for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
+             s.press(Id::InsertDrawing);
+             printTimelinePalette(*s.timeline);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-timeline-whose-window-colour-is-transparent-black",
+         "Window set to #00000000, which is not a hypothetical: it is what the Qt the "
+         "Windows build ships against hands over, and it broke this row twice. Read as "
+         "transparent it drew white on white; forced opaque it drew a black slab, because "
+         "black is what was under the transparency. Must look like the two above",
+         [](Stage& s) {
+             QPalette bent = s.timeline->palette();
+             bent.setColor(QPalette::Window, QColor(0, 0, 0, 0));
+             s.timeline->setPalette(bent);
+             for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
+             s.press(Id::InsertDrawing);
+             printTimelinePalette(*s.timeline);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-timeline-on-a-pure-black-theme",
+         "issue #32: Windows' High Contrast Black is a real theme and an accessibility one, "
+         "so the people who meet it can least afford a row they cannot read. The cells stay "
+         "black -- a high-contrast theme is entitled to be obeyed -- and the background, "
+         "ruler and outlines must still separate from them",
+         [](Stage& s) {
+             QPalette bent = s.timeline->palette();
+             bent.setColor(QPalette::Window, QColor(0, 0, 0));
+             bent.setColor(QPalette::Base, QColor(0, 0, 0));
+             bent.setColor(QPalette::WindowText, QColor(255, 255, 255));
              s.timeline->setPalette(bent);
              for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
              s.press(Id::InsertDrawing);
