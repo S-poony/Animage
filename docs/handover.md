@@ -1989,15 +1989,12 @@ instrumenting"](#the-traps), one layer further out, and it earns its own entry
 because the instrument that was missing was not a crash log — it was a way to see
 a value that arrives from outside the program.
 
-**What is still not pinned.** Nothing checks that the shipped build and the local
-one agree about anything. There are no reference images — deliberately, and for
-good reasons set out in [looking at the
-interface](#looking-at-the-interface) — and CI never runs `shots` at all, so no
-picture of the released build exists anywhere. It would not take much to make CI
-run `shots` and upload the PNGs beside the binaries: no assertions, no golden
-images, nothing to keep in step, just the same pictures taken on the machine that
-built the thing people download. That is the cheapest available answer to "does
-it look like this for them too", and it is not done.
+**What is still not pinned.** Nothing checks that the shipped build and a local
+one agree about how anything looks. There are no reference images —
+deliberately, and for the reasons set out in [looking at the
+interface](#looking-at-the-interface) — and CI builds `shots` without ever
+running it, so no picture of a released build exists anywhere.
+[#33](https://github.com/S-poony/Animage/issues/33).
 
 ## What the history is allowed to cost
 
@@ -2186,6 +2183,13 @@ it, and `a-timeline-whose-window-colour-has-alpha` sets `Window` to alpha 0 and
 must look identical to the first. That second one is the only way to see this
 failure without a build made against another Qt, and it is three lines. If the
 derivation is ever touched, run them.
+
+The same derivation has a second way of collapsing, still open:
+`QColor::lighter` scales the HSV value, so it cannot lighten a black one, and a
+`Window` of pure black — Windows' High Contrast Black is one — puts the
+background, the ruler and every outline on the same black.
+[#32](https://github.com/S-poony/Animage/issues/32) has the measurements and the
+three lines that reproduce it.
 
 **Two crashes, one cause, and I caused it.** Space and Z are held modifiers, not
 shortcuts, so they are forwarded to the canvas by an application-wide event
