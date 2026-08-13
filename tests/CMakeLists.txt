@@ -71,6 +71,13 @@ if(TARGET animage_ui)
   add_executable(bench_zoom bench_zoom.cpp)
   target_link_libraries(bench_zoom PRIVATE animage_ui)
 
+  # What playback costs and what it drops. Drives the whole window rather than
+  # the canvas alone, because a frame change is a slot change, a layer-flag
+  # refresh, a full-cache repaint and a playhead -- and timing only the canvas
+  # is the bench_composite mistake one function further out.
+  add_executable(bench_playback bench_playback.cpp)
+  target_link_libraries(bench_playback PRIVATE animage_ui)
+
   # Pictures of the interface rather than measurements of it, and the same
   # deal: built, never run by ctest, run by hand before and after anything
   # that touches the canvas. Nothing in it asserts and nothing depends on it,

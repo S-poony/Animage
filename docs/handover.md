@@ -2416,6 +2416,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
+./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ```
 
@@ -2439,6 +2440,56 @@ nothing changed and one with a single drawing touched. The last is what autosave
 actually costs and is the number to watch: if it starts tracking the size of the
 shot rather than the size of the change, something has stopped carrying files
 forward.
+
+`bench_playback` is the one that reports a **count rather than a time**, and the
+reason is the whole of why it exists. Playback works its slot out from a clock
+(`onPlaybackTick`), so a paint that overruns does not make the take run slow — it
+makes the frames underneath it never appear. A pan that stutters reports itself;
+a playback dropping every third frame looks like the *drawing* is wrong, and the
+animator goes and fixes a breakdown that was fine. Judging timing is the whole
+purpose of playback, so the one thing that can quietly corrupt that judgement
+should not be the one thing with no instrument on it.
+
+Two things about it before changing it. It drives the whole `MainWindow` and not
+the canvas — a playback frame is a slot change, `refreshLayerFlags` and
+`syncStatus`, a *full-cache* repaint (`setFrame` calls `refreshAll`, so playback
+never gets a partial one) and the playhead, and timing only the canvas would be
+the `bench_composite` mistake one function further out. And it runs every case
+twice, line art and coloured, because the timing is decided before the shot is
+coloured: the uncoloured pass is the one that has to be fast, and the coloured
+one is a shot being reviewed rather than judged. The coloured row prints its fill
+coverage beside it, because what playback composites there is the fill — a
+scribble with no closed region to win is cut close around itself by the hard rim
+and fills almost nothing, and that fixture would report that colour is free.
+
+**What it says today**, which is one finding and not the one the queue expected:
+
+| | frame | shown at 24 fps |
+|---|---|---|
+| HD, 2 tracks, line art | 12.9 ms | 48 of 48 |
+| HD, 4 tracks, 96 frames | 17.8 ms | 96 of 96 |
+| 4K, 2 tracks, line art | 58.5 ms | **34 of 48** |
+| 4K, 2 tracks, coloured | 70.7 ms | **29 of 48** |
+
+**Track count barely registers and output pixels are the whole story.** Two
+tracks and 1612 tiles against four tracks and 6452 moves the canvas half from
+12.2 ms to 15.2, because `compositeScene` is one flat list and an empty tile is
+skipped before a channel is read. The 4K canvas widget is 4.8x the HD one's area
+and costs 4.7x the time — the same per-output-pixel property the traps record
+from the other end, where a 66-tile and a 2425-tile drawing refreshed in the same
+time. So at 4K between a quarter and two fifths of the frames never reach the
+screen, silently, in the mode where somebody is judging timing.
+
+**And the colour cache cannot hold a shot.** A fill covers the canvas at full
+resolution, so the bound works out at about 2000 tiles: 48 of 48 fills survive an
+HD shot of 24 drawings, 62 of 192 survive four tracks of 48, and **20 of 48**
+survive at 4K. What playback then shows is whichever fills are still there. The
+solves it provokes are counted rather than timed, and the count is 6 in two
+seconds at HD against **0 at 4K** — where the same mechanism demonstrably works,
+so a 4K fill either never finishes or is superseded before it can. Either way the
+colour does not arrive. That is worth knowing before item 4 is read as the answer
+to it: the max-flow is staying on the CPU, so a GPU compositor does not touch
+this.
 
 `bench_zoom` drives the real `CanvasWidget` across the zoom range and reports,
 per zoom, the step and margin it chose, what a full refresh costs against the
@@ -2522,8 +2573,12 @@ come off it since the first build, with where the reasoning went:
    carrying is most likely to be wrong *and* most likely to be right. And it has
    to be computed for drawings nobody has opened, which is what the audit did and
    what `CtgSolver`'s second priority is still there for.
-4. **GPU compositing**, if `bench_composite` says it is worth it at real
-   drawing sizes rather than at the sizes tested here.
+4. **GPU compositing**, if `bench_playback` says it is worth it — not
+   `bench_composite`, which watches the half that is not the problem. What it
+   says today is that HD is comfortable at any track count and 4K drops between
+   a quarter and two fifths of its frames, so this is a 4K deliverable and not a
+   general one. It does not answer the coloured case at all: the max-flow stays
+   on the CPU, and what breaks there is the fill cache, not the compositing.
 5. **The rest of the open issues.** One came out of designing lasso and
    transform and is one small piece with the groundwork already under it:
    transforming a layer across time
