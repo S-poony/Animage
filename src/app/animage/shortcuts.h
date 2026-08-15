@@ -48,7 +48,13 @@ enum Modes : unsigned {
     kAlways = kNormal | kTransform,
 };
 
-enum class Mode { Normal, Transform };
+// Typing has no flag of its own and never will. A mode is a set of rows that
+// stay live, and while a name is being typed into the answer for every row is
+// the same one: none of them. Giving it a bit would mean a decision per row that
+// is not a decision -- and the row that mattered is Play, which owns Return,
+// which is the key that finishes a rename. Exactly the collision a live
+// transform has with the same key, answered the same way.
+enum class Mode { Normal, Transform, Typing };
 
 // How the key reaches the thing it does.
 //
@@ -175,7 +181,15 @@ bool idForName(const QString& name, Id* found);
 std::vector<QKeySequence> sequencesFor(const Entry& entry);
 
 inline bool liveIn(unsigned modes, Mode mode) {
-    return (modes & (mode == Mode::Transform ? kTransform : kNormal)) != 0;
+    switch (mode) {
+        // The keyboard belongs to the field. A disabled QAction does not consume
+        // its shortcut, which is the whole mechanism: with Play disabled, Return
+        // falls through to whatever has the keyboard.
+        case Mode::Typing: return false;
+        case Mode::Transform: return (modes & kTransform) != 0;
+        case Mode::Normal: break;
+    }
+    return (modes & kNormal) != 0;
 }
 
 // Two rows that are ever live at the same time. Two that are not cannot collide,

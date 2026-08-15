@@ -3,6 +3,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QImage>
 #include <QRegularExpression>
 #include <algorithm>
@@ -28,11 +29,23 @@ namespace {
 // track from the layer from the frame number. If a layer called "layer 1" came
 // out as `layer_1` there would be two underscores in `main_layer_1_0007` and
 // nothing to say which of the three numbers was the frame.
+//
+// **Over characters and not over bytes**, which is the whole of one reported
+// bug. A std::string here is UTF-8, so walking it with `for (const char c :
+// name)` hands `isLetterOrNumber` half a character at a time: "é" is two bytes,
+// the first of which is a letter on its own (Ã) and the second of which is not,
+// so "décor" exported as "dÃ-cor" and Cyrillic came out worse. It did not fail,
+// which is why nothing caught it -- the export succeeded and the folder was
+// gibberish.
+//
+// Accented and non-Latin letters are kept rather than reduced to ASCII. They are
+// what somebody typed, all three platforms take them in a path, and the
+// alternative is a transliteration table with no end to it: é to e is easy and
+// then Cyrillic and CJK are not.
 QString sanitise(const std::string& name) {
     QString out;
     out.reserve(static_cast<qsizetype>(name.size()));
-    for (const char c : name) {
-        const QChar ch(c);
+    for (const QChar ch : QString::fromStdString(name)) {
         if (ch.isLetterOrNumber()) {
             out += ch;
         } else if (!out.endsWith(QLatin1Char('-'))) {
@@ -101,6 +114,42 @@ struct Sequence {
     LayerId layer;
     QString name;
 };
+
+// Every layer sequence the export will write, or the first pair of them that
+// would land in the same folder. False means it refused, and `error` says which
+// two -- see namesCollide for why that refusal exists and why it is public.
+//
+// Only within one track can it happen. The underscore separates the track from
+// the layer, so "a b"/"c" and "a"/"b c" give `a-b_c` and `a_b-c` -- the
+// separator is in a different place and the names differ. `composite` cannot be
+// collided with at all, having no underscore in it.
+bool resolveSequences(const Document& doc, std::vector<Sequence>* out, QString* error) {
+    QHash<QString, QString> claimed;  // folder name -> the layer that took it
+    for (const Track& track : doc.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            // A hidden layer is not written, so it cannot collide with anything.
+            if (!layer.visible) continue;
+            const QString name = sequenceName(track.name, layer.name);
+            const QString which =
+                QStringLiteral("\"%1\" on \"%2\"")
+                    .arg(QString::fromStdString(layer.name), QString::fromStdString(track.name));
+            const auto found = claimed.constFind(name);
+            if (found != claimed.constEnd()) {
+                if (error) {
+                    *error = QStringLiteral(
+                                 "%1 and %2 would both be exported to a folder called \"%3\", "
+                                 "and the second would overwrite the first frame by frame. "
+                                 "Rename one of them and export again.")
+                                 .arg(*found, which, name);
+                }
+                return false;
+            }
+            claimed.insert(name, which);
+            if (out) out->push_back({track.id, layer.id, name});
+        }
+    }
+    return true;
+}
 
 // Which layers the compositor will need a fill for. A CTG layer showing its
 // scribbles is drawing the marks rather than the fill, so solving one would be
@@ -193,6 +242,10 @@ QString sequenceName(const std::string& track, const std::string& layer) {
     return sanitise(track) + QLatin1Char('_') + sanitise(layer);
 }
 
+bool namesCollide(const Document& doc, QString* message) {
+    return !resolveSequences(doc, nullptr, message);
+}
+
 int fileCount(const Document& doc, const Options& options) {
     const std::size_t frames = frameCount(doc);
     std::size_t files = 0;
@@ -230,25 +283,22 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
         return false;
     }
 
+    // What is going to be written, resolved before anything solves or writes:
+    // building a fill writes to the document, and a reference into the scene
+    // does not survive that. Ids only, from here down.
+    //
+    // And refused, here, if two of them would land in the same folder -- before
+    // anything is created, so a refusal leaves the disk exactly as it was. See
+    // namesCollide, which the caller asks earlier still.
+    std::vector<Sequence> sequences;
+    if (options.layers && !resolveSequences(doc, &sequences, error)) return false;
+    const QString composite = QStringLiteral("composite");
+
     QDir root;
     if (!root.mkpath(options.folder)) {
         if (error) *error = QStringLiteral("cannot create %1").arg(options.folder);
         return false;
     }
-
-    // What is going to be written, resolved before anything solves or writes:
-    // building a fill writes to the document, and a reference into the scene
-    // does not survive that. Ids only, from here down.
-    std::vector<Sequence> sequences;
-    if (options.layers) {
-        for (const Track& track : doc.scene().tracks) {
-            for (const Layer& layer : track.layers) {
-                if (!layer.visible) continue;
-                sequences.push_back({track.id, layer.id, sequenceName(track.name, layer.name)});
-            }
-        }
-    }
-    const QString composite = QStringLiteral("composite");
 
     // Bottom track upwards for the flattened pass, because index 0 composites
     // on top.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "main_window.h"
 
+#include <QAbstractSpinBox>
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -42,6 +43,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QWindowStateChangeEvent>
 #include <algorithm>
 #include <cmath>
 
@@ -68,6 +70,36 @@ constexpr int kAutosaveIntervalMs = 2 * 60 * 1000;
 // A stroke and a playback pass are both short. Rather than skip this autosave
 // and wait the whole interval again, look back in a moment.
 constexpr int kAutosaveRetryMs = 5 * 1000;
+
+// How long after a maximise or a restore a canvas resize is still part of it.
+// Long enough for the platform to deliver both events in either order and for a
+// window manager to animate, short enough that no later resize is caught by it.
+constexpr int kReframeWindowMs = 500;
+
+// Whether the keyboard currently belongs to something a character can be typed
+// into. Both are asked for: a spin box holds a line edit but keeps the focus
+// itself, through a focus proxy, so the line edit is never the answer.
+bool isTypingInto(const QWidget* widget) {
+    return qobject_cast<const QLineEdit*>(widget) != nullptr ||
+           qobject_cast<const QAbstractSpinBox*>(widget) != nullptr;
+}
+
+// What a track does past its last drawing, in one word, for the menu item and
+// for the sentence the status bar makes of it.
+//
+// Deliberately not project_io's endName, which returns the same three words:
+// those are the file format. Sharing one function would mean that improving the
+// wording here silently changed what scene.json means, and the two are free to
+// disagree -- the format's words are pinned by the round-trip tests and these
+// are pinned by nothing but taste.
+QString endWord(TrackEnd end) {
+    switch (end) {
+        case TrackEnd::HoldLast: return QStringLiteral("hold");
+        case TrackEnd::Cycle: return QStringLiteral("cycle");
+        case TrackEnd::Nothing: break;
+    }
+    return QStringLiteral("nothing");
+}
 
 }  // namespace
 
@@ -181,13 +213,76 @@ void MainWindow::showEvent(QShowEvent* event) {
     });
 }
 
+// Maximising the window frames the canvas in it, and restoring frames it again.
+//
+// The canvas keeps its zoom and its pan across a resize, and the pan is the
+// image point at the widget's *top left* -- so a window made twice as big shows
+// the same drawing at the same size in the same corner with new emptiness beside
+// it. Maximising is the moment that is most obviously wrong, and it is the one
+// the program acts on.
+//
+// Deliberately not every resize. The drawing surface has no edges, so working
+// outside the canvas is ordinary here rather than exceptional, and a view that
+// snapped back to the canvas whenever a dock moved would take you off what you
+// were drawing. Maximising is a deliberate act with an obvious intent; dragging
+// an edge is not.
+//
+// Restoring reframes for the same reason and not for symmetry's sake: a canvas
+// fitted to a full screen is too big for the window that comes back, so leaving
+// it would trade the original complaint for its mirror image.
+//
+// **Two events decide this and their order is not fixed**, which is the whole of
+// what was hard about it, and both of the first two versions got it wrong in a
+// different direction.
+//
+// The state change and the canvas's resize both have to have happened before a
+// fit means anything: fitting on the state change alone fits to the window that
+// is going away, and a zero-delay timer does not fix that because the platform's
+// resize is not guaranteed to have arrived by the time the timer runs. Then
+// asking `isMaximized()` on the resize instead fails the other way round -- the
+// widget can be resized before the window state is updated, so the question
+// answers "no change" and nothing ever fits. That is what was reported.
+//
+// So neither event decides on its own. The state change *arms* it, and then a
+// fit happens on every canvas resize for a short moment afterwards, plus once
+// straight away for the case where the canvas does not change size at all. A fit
+// is idempotent and costs nothing, so fitting two or three times through a
+// maximise is not a problem -- what matters is that the last one runs after the
+// last resize, and this is true whichever way round they arrive.
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::WindowStateChange || !canvas_) return;
+
+    const auto* state = static_cast<QWindowStateChangeEvent*>(event);
+    // Maximised-ness only. Minimising and coming back is not a reframe: the
+    // window comes back the size it went away.
+    if (((state->oldState() ^ windowState()) & Qt::WindowMaximized) == 0) return;
+
+    reframing_ = true;
+    reframe_since_.start();
+    QTimer::singleShot(0, this, [this] { reframeIfArmed(); });
+}
+
+void MainWindow::reframeIfArmed() {
+    if (!reframing_ || !canvas_) return;
+    // Disarmed lazily, by the first resize that arrives too late to be part of
+    // this one -- dragging a dock an hour later must not reframe anything.
+    if (reframe_since_.elapsed() > kReframeWindowMs) {
+        reframing_ = false;
+        return;
+    }
+    canvas_->fitToCanvas();
+}
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     // The transform bar is a child of the canvas and so belongs to no layout.
     // Nothing else is going to move it when the canvas changes size, and a
     // window dragged narrower would otherwise leave it hanging off the edge.
-    if (event->type() == QEvent::Resize && watched == canvas_ && transform_bar_ &&
-        transform_bar_->isVisible()) {
-        placeTransformBar();
+    if (event->type() == QEvent::Resize && watched == canvas_) {
+        if (transform_bar_ && transform_bar_->isVisible()) placeTransformBar();
+        // The only resizes the view is reframed for are the ones a maximise or a
+        // restore armed. See changeEvent.
+        reframeIfArmed();
     }
 
     const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;
@@ -205,6 +300,18 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
     auto* key = static_cast<QKeyEvent*>(event);
     if (key->key() != Qt::Key_Space && key->key() != Qt::Key_Z) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    // Not while something is being typed into. Space and Z are pan and zoom
+    // only when the keyboard belongs to the canvas; in a name being renamed, in
+    // a spin box on the transform bar, or in any dialog's field, they are
+    // characters -- and this filter was eating them, so a track renamed "rough
+    // pass" arrived called "roughpass" and nothing said why.
+    //
+    // The focus widget and not `watched`: a key event goes to whatever has the
+    // keyboard, and this filter sees it again at each parent it propagates to.
+    if (isTypingInto(QApplication::focusWidget())) {
         return QMainWindow::eventFilter(watched, event);
     }
     // Ctrl+Z and friends are shortcuts and must be left alone.
@@ -331,6 +438,33 @@ void MainWindow::setShortcutMode(shortcuts::Mode mode) {
     if (play_button_) play_button_->setEnabled(mode == shortcuts::Mode::Normal);
 }
 
+// A name is being typed into somewhere, so the keyboard belongs to the field.
+//
+// This is the transform's own mechanism and it is here for the same collision:
+// Return is Play, and Return is also how a rename is finished. A disabled
+// QAction does not consume its shortcut, so turning Play off is exactly what
+// lets Return reach the editor -- which is what "the fact lives in the table and
+// one function acts on it" is for. Doing it with a setEnabled call from the
+// rename code would be the thing shortcuts.h exists to stop.
+//
+// Coming back, the mode is asked for rather than assumed: a transform can be
+// live while a layer is renamed, and going back to Normal there would leave the
+// nudge keys stepping frames instead.
+//
+// A count and not a flag, because two editors can overlap for a moment: opening
+// a rename in the layer panel is what takes the focus off an open one in the
+// timeline, so the second is created *before* the first is told it has finished.
+// A flag would hand the keyboard back with an editor still on screen.
+void MainWindow::setTyping(bool typing) {
+    typing_editors_ = std::max(0, typing_editors_ + (typing ? 1 : -1));
+    if (typing_editors_ > 0) {
+        setShortcutMode(shortcuts::Mode::Typing);
+        return;
+    }
+    setShortcutMode(canvas_ && canvas_->transformIsLive() ? shortcuts::Mode::Transform
+                                                          : shortcuts::Mode::Normal);
+}
+
 void MainWindow::buildActions() {
     using shortcuts::Id;
 
@@ -407,16 +541,22 @@ void MainWindow::buildActions() {
     // share one timeline and are not obliged to be the same length, so this is
     // an ordinary question: a background drawn once under a character animated
     // over forty frames, or a four-drawing cycle for a walk.
+    //
+    // One word each, because the submenu's own title is the rest of the
+    // sentence: "Past the last drawing > Hold" says the whole thing once. The
+    // items used to repeat it -- "Hold the last drawing" under "Past the last
+    // drawing" -- which is the same words twice and reads as though the two
+    // might mean different things.
     QMenu* end_menu = track_menu->addMenu(QStringLiteral("Past the last drawing"));
     auto* ends = new QActionGroup(this);
     ends->setExclusive(true);
-    const std::pair<const char*, TrackEnd> choices[] = {
-        {"Show nothing", TrackEnd::Nothing},
-        {"Hold the last drawing", TrackEnd::HoldLast},
-        {"Cycle", TrackEnd::Cycle},
-    };
-    for (const auto& [label, behaviour] : choices) {
-        QAction* action = end_menu->addAction(QString::fromLatin1(label));
+    const TrackEnd choices[] = {TrackEnd::Nothing, TrackEnd::HoldLast, TrackEnd::Cycle};
+    for (const TrackEnd behaviour : choices) {
+        // The same word the status bar says, with a capital because it begins a
+        // menu item rather than a sentence about the track.
+        QString word = endWord(behaviour);
+        word[0] = word[0].toUpper();
+        QAction* action = end_menu->addAction(word);
         action->setCheckable(true);
         ends->addAction(action);
         end_actions_.push_back({action, behaviour});
@@ -920,6 +1060,17 @@ void MainWindow::buildLayerPanel() {
     // says where the row landed, the document moves the layer, and the panel is
     // rebuilt from the document. See LayerList.
     layer_list_->reordered = [this](int from, int to) { moveLayerTo(from, to); };
+    // And renaming is the same shape: a double click opens an editor on the
+    // layer's own name, and what is typed goes to the document.
+    layer_list_->nameOf = [this](int row) -> QString {
+        const Track* track = doc_.scene().findTrack(track_);
+        if (!track || row < 0 || static_cast<std::size_t>(row) >= track->layers.size()) {
+            return QString();
+        }
+        return QString::fromStdString(track->layers[static_cast<std::size_t>(row)].name);
+    };
+    layer_list_->renamed = [this](int row, const QString& name) { renameLayer(row, name); };
+    layer_list_->renaming = [this](bool typing) { setTyping(typing); };
 
     // Everything a colour layer has that an ordinary one does not, in one box
     // that is simply absent the rest of the time. A group of controls greyed
@@ -1124,6 +1275,7 @@ void MainWindow::buildTimelinePanel() {
     // reach the canvas and the layer panel exactly as the menu does.
     connect(timeline_widget_, &TimelineWidget::trackChanged, this,
             &MainWindow::setCurrentTrack);
+    connect(timeline_widget_, &TimelineWidget::renamingChanged, this, &MainWindow::setTyping);
 
     timeline_scroll_ = new QScrollArea(panel);
     timeline_scroll_->setWidget(timeline_widget_);
@@ -1402,6 +1554,16 @@ void MainWindow::exportSequences() {
 
     const QString called = name->text().trimmed();
     const QString folder = QDir(parent).filePath(called);
+
+    // Before the folder is emptied, and that is the whole point of asking here
+    // rather than leaving it to `write`. An export replaces what was in the
+    // folder, so clearing comes first -- and a refusal after clearing would have
+    // thrown away the previous export to produce nothing.
+    QString clash;
+    if (per_layer->isChecked() && exporting::namesCollide(doc_, &clash)) {
+        QMessageBox::warning(this, QStringLiteral("Cannot export"), clash);
+        return;
+    }
     if (!clearTheWayFor(folder, called)) return;
 
     const auto chosen = static_cast<exporting::Format>(format->currentData().toInt());
@@ -1705,17 +1867,34 @@ void MainWindow::syncStatus() {
             .arg(doc_.undoDepth())
             .arg(static_cast<double>(doc_.historyBytes()) / (1024.0 * 1024.0), 0, 'f', 0);
 
+    // What this track does out past its own end, said whether or not the
+    // playhead is anywhere near it: tracks are not the same length, so which of
+    // the three a track is doing decides what the shot looks like at frames the
+    // track has no drawings for, and there is nowhere else it is written down.
+    //
+    // The whole phrase and not the bare word. "hold" alone, a few characters
+    // from "held 5", would be two unrelated meanings of one root on one line --
+    // and the word only means anything at all next to what it is about.
+    //
+    // "overwrite" keeps its old rule of appearing only when it is true, rather
+    // than growing an "insert" to say the other thing: it is on by default and
+    // is not expected to be changed, so a word for the ordinary case would be a
+    // word on every row of every scene saying nothing.
+    const QString settings =
+        (track->overwrite_drawings ? QStringLiteral("overwrite, ") : QString()) +
+        QStringLiteral("%1 past the last drawing").arg(endWord(track->end));
+
     // The frame count is the scene's and the rest is the current track's, which
     // is the distinction the whole panel now rests on: one timeline, several
     // tracks along it. Saying "frame 3 / 12" from a track of 12 while the shot
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
-        QStringLiteral("frame %1 / %2   %3%4   held %5   drawings %6   layers %7   zoom %8%   "
+        QStringLiteral("frame %1 / %2   %3 (%4)   held %5   drawings %6   layers %7   zoom %8%   "
                        "tiles %9   %10   %11 fps%12%13%14%15")
             .arg(slot + 1)
             .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
-            .arg(track->overwrite_drawings ? QStringLiteral(" (overwrite)") : QString())
+            .arg(settings)
             .arg(track->exposureOf(image))
             .arg(track->images.size())
             .arg(track->layers.size())
@@ -2376,7 +2555,8 @@ void MainWindow::rebuildLayerList() {
         // flat, so the only two answers a drop has are above this row and below
         // it. With the row itself drop-enabled there is a third, and Qt draws it
         // as a box round the row that means something this panel cannot do.
-        item->setFlags((item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled) &
+        item->setFlags((item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled |
+                        Qt::ItemIsEditable) &
                        ~Qt::ItemIsDropEnabled);
         item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
 
@@ -2427,6 +2607,30 @@ void MainWindow::onLayerSelected() {
         syncColourControls();
     }
     syncColourLayerPanel();
+}
+
+// What the panel's rename editor typed, applied to the document.
+//
+// refreshLayerFlags and not rebuildLayerList: the editor is still closing when
+// this runs, and clearing the tree out from under it deletes the very row the
+// delegate is about to finish with. The label is all that changed, which is
+// exactly what refreshLayerFlags is for.
+void MainWindow::renameLayer(int row, const QString& name) {
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track || row < 0 || static_cast<std::size_t>(row) >= track->layers.size()) return;
+
+    const Layer& layer = track->layers[static_cast<std::size_t>(row)];
+    const QString trimmed = name.trimmed();
+    // A layer with no name has no row label and no folder of its own in an
+    // export, so the old one is kept -- the same answer renaming a track gives.
+    if (trimmed.isEmpty() || trimmed.toStdString() == layer.name) return;
+
+    Layer updated = layer;
+    updated.name = trimmed.toStdString();
+    doc_.updateLayer(track_, updated.id, updated);
+
+    refreshLayerFlags();
+    syncStatus();
 }
 
 void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {

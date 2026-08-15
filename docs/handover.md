@@ -18,6 +18,7 @@ the shape of the program. Those five maps are.
 | [**How the program fits together**](#how-the-program-fits-together) | five paths traced end to end, each across several files |
 | [Several tracks, and a track that overwrites](#several-tracks-and-a-track-that-overwrites) | what a second track changed, and what it broke |
 | [Restacking by dragging](#restacking-by-dragging) | layers and tracks, one gesture, and where the panel had been scrolling to |
+| [Naming a track or a layer](#naming-a-track-or-a-layer) | renaming a row where it is, and what a name is allowed to be |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
@@ -321,6 +322,54 @@ is always the frame. It also decided the default track's name, which was `main`
 and is now `track 1`: the model and the timeline both take several tracks
 already and only the interface does not, so the first one may as well say which
 number it is rather than being the one that never does.
+
+**A name is only ever a folder name here**, and that bounds how much damage a
+strange one can do. Cel files are `cel-000123.acel` — ids and never names — and a
+name lives in `scene.json` as a JSON string, which `QJsonDocument` escapes and
+the hostile-file tests pin. So nothing anybody types can hurt a project; the
+whole question is what the export makes of it. Two things it made of it were
+wrong, and both were reported after renaming got easy enough to do:
+
+- **`sanitise` walked bytes and not characters.** A `std::string` here is UTF-8,
+  so `isLetterOrNumber` was handed half a letter at a time: the first byte of `é`
+  is a letter on its own and the second is not, and `décor` exported as
+  `dÃ-cor`. Nothing failed — the export succeeded and the folder was gibberish —
+  which is why it survived a green suite and a French specification. Accented and
+  non-Latin letters are **kept** rather than reduced to ASCII: they are what
+  somebody typed, all three platforms take them in a path, and the alternative is
+  a transliteration table with no end to it.
+- **Two names can be one folder, and that silently lost a layer.** Sanitising is
+  many-to-one, so `rough 1` and `rough-1` are two names and one folder; identical
+  names are not prevented anywhere either. Both wrote the same filenames into the
+  same folder frame by frame, so the export succeeded, looked complete, and held
+  one layer where two were asked for. It is refused now, naming both layers —
+  `occupantOf`'s stance rather than a quiet `-2` suffix, and for the same reason:
+  nobody works out that clash from a folder listing afterwards.
+
+**The refusal is asked for twice, and the second place is the one that matters.**
+`write` checks before it creates anything, which is enough to make the *export*
+safe and is not enough to make the operation safe: an export replaces what was in
+the folder, so `MainWindow::exportSequences` **empties it first**. A refusal that
+lived only inside `write` would therefore have thrown the previous export away in
+order to produce nothing — the right answer arriving after the damage. So
+`namesCollide` is on the header and is asked before the clearing, and `write`
+asks again because it cannot assume its caller did. That ordering is the whole
+reason the check is public; if the clearing ever moves, this moves with it.
+
+Two more things about the collision, before changing the naming. **It can only
+happen within one track**, because the underscore separates the fields: `a b`/`c`
+and `a`/`b c` give `a-b_c` and `a_b-c`, and the separator being in a different
+place is what keeps them apart. And **nothing can collide with `composite`**,
+which has no underscore in it at all. Hidden layers are skipped, because they are
+not written — a check over every layer rather than every *written* layer would
+refuse exports that were never in danger.
+
+What is *not* handled is a name Windows reserves for a device — `CON`, `NUL`,
+`AUX`, `PRN`, `COM1` and friends. Those are letters, so they survive sanitising,
+and the export then fails at `mkpath` with "cannot create CON". That is loud and
+loses nothing — no frame is written and the message names the folder — so what is
+wrong with it is only the explanation, and it is
+[issue #34](https://github.com/S-poony/Animage/issues/34) rather than a fix here.
 
 One thing about export is worth reading before touching it. **A CTG layer's
 fill is a cache, and the canvas only builds it for the frame on screen**,
@@ -859,6 +908,90 @@ The multi-second crawl in the report was never reproduced offscreen; the scroll
 lands in one step either way now, and a `scrollTo` on a row that is already
 visible does nothing, so whatever was nudging it has nothing left to nudge.
 
+## Naming a track or a layer
+
+Double-clicking a name edits it where it is — in the timeline's gutter and in the
+layer panel — and Track ▸ Rename track still opens the dialog it always did. The
+same rows this happens on are the ones you drag; see
+[restacking by dragging](#restacking-by-dragging).
+
+**Neither panel edits itself**, which is the rule `LayerList` already followed for
+the drop and it matters here for the same reason: a row showing a name the
+document has never heard of is undone by the next rebuild, silently. The editor
+reports what was typed, the document is changed, and the panel is rebuilt from
+it.
+
+**The editor opens on the name, which is not the row's text.** A colour layer
+showing marks made on another drawing has `← ` in front of its name — see
+`MainWindow::layerLabel` — so an editor seeded from the row saves the arrow into
+the name, and the next rename puts a second arrow in front of the first. It
+cannot be fixed by keeping the plain name in `Qt::EditRole` either, because
+`QTreeWidgetItem` maps `EditRole` and `DisplayRole` onto the same slot. The
+delegate asks the panel through `LayerList::nameOf` instead.
+
+Three smaller things about the layer panel's editor, each of which was wrong
+first:
+
+- **The delegate refuses column 1.** A `QTreeWidgetItem`'s flags belong to the
+  item and not to the column, so `ItemIsEditable` makes the Marks column editable
+  too — and that column holds a tick and no text at all. `createEditor` returns
+  null there.
+- **`editTriggers` is `DoubleClicked` and nothing else.** Qt's default set
+  includes `SelectedClicked`, which starts an edit on a plain click on the row
+  you are already on, and the row you are already on is the layer you are drawing
+  on.
+- **That an edit has begun is reported from the delegate's `createEditor`.**
+  Something has to know, because the keyboard shortcuts are turned off while a
+  name is being typed into — and the obvious place, `QAbstractItemView::edit`,
+  does not mean what its name suggests: it returns true when the *delegate* has
+  merely consumed the event, so ticking a visibility box counted as starting a
+  rename and left the keyboard switched off with no editor to show for it. An
+  editor being made is the honest moment; `closeEditor` is the other end, and is
+  Qt's own, so a rename closed by anything at all says so.
+
+**An empty name is refused and the old one kept**, in both panels and in the
+dialog. A nameless track has no label on its row, and a nameless layer has no
+folder of its own in an export.
+
+**What the keyboard does while a name is being typed into** is
+[its own question](#what-the-keyboard-does-and-when), and it had a real bug in
+it: Return is Play. **How a pen opens one of these** is
+[a trap](#the-traps) rather than a feature — Qt does not turn two taps into a
+double click.
+
+**What a name is allowed to be: anything.** Nothing anybody types can hurt a
+project — cel files are ids, and a name lives in `scene.json` as a JSON string
+that `QJsonDocument` escapes. The whole question is what the *export* makes of
+it, where a name becomes a folder name; that is under "the underscore in an
+exported name means one thing" in [where it got to](#where-it-got-to), and the
+short version is that accents survive, two different names can be one folder,
+and the export refuses rather than quietly losing a layer.
+
+**There are `shots` for both editors.** The layer one is worth having looked at
+before believing anything about it: Qt's item editor is frameless and white on a
+white list, so the field is invisible and the *selected name* is the only thing
+saying one is open. That was checked before concluding the field was too narrow —
+measuring said 234 px, which is the whole row.
+
+### What a test of a rename can reach
+
+Both gestures are driven end to end from the press — `MouseButtonPress`,
+`Release`, `DblClick` for a mouse, and two timed presses with no double click
+between them for a pen — because that is what a hand does and both widgets are
+hit tested by hand.
+
+What is driven at the seam is the *commit* of the layer editor. Qt answers
+`Return` in an item view by posting a queued call inside the delegate, and a
+synthetic key event never gets that call delivered offscreen. `Escape` is emitted
+straight out of the same event filter and does work, which is what proved the
+filter was installed at all and that the trouble was the hop rather than the
+wiring. `finishRenameForTesting` calls the pair that hop would have made. The
+timeline's editor needs none of it: an ordinary `QLineEdit` with an ordinary
+`editingFinished`.
+
+Neither seam is why Return failed in the real program. That was the `Play`
+shortcut, and no test here would have caught it.
+
 ## Colour through time
 
 **Part 1 of [scribbles-through-time.md](scribbles-through-time.md) is built, and
@@ -1064,6 +1197,33 @@ out there wants saying once rather than repeated along the row, and how is
 shape of it is not decided. Whatever it turns out to be, it must not be a widget
 placed on the row: see "a widget on a list row disables that row's own tick".
 
+**The status bar says it for the track being edited**, which answers the half of
+#22 that is about the current track and none of the half that is about seeing
+all of them at once. It reads `track 1 (overwrite, hold past the last drawing)`.
+
+Three decisions in that one phrase, all of them reported as wanting to be
+different from how they were first built:
+
+- **The whole sentence and not the bare word.** `hold` alone would sit four words
+  from `held 5`, which is the current drawing's exposure — two unrelated meanings
+  of one root on one line — and the word means nothing without what it is about.
+- **On every track at every frame, including the default `nothing`.** Tracks are
+  not the same length, so which of the three a track is doing decides what the
+  shot looks like wherever that track runs out, and there is nowhere else it is
+  written down. `overwrite` keeps the opposite rule — shown only when true —
+  because it is on by default and is not expected to be changed, which is the
+  same argument that took the word off the timeline gutter.
+- **One word each in the menu.** `Past the last drawing ▸ Hold`, where the items
+  used to repeat the submenu's own title back at it — "Hold the last drawing"
+  under "Past the last drawing" is the same words twice and reads as though the
+  two halves might mean different things.
+
+**And the three words exist twice on purpose.** `project_io::endName` returns
+`nothing`/`hold`/`cycle` too, and those three are the *file format*. Sharing one
+function would mean that improving the wording here silently changed what
+`scene.json` means. The format's three are pinned by the round-trip tests; the
+interface's three are pinned by nothing but taste, and that is the point.
+
 **A shot can now be told how long it is, and the length is a cap rather than a
 floor.** That is the second design; the first one is worth recording because the
 difference is instructive.
@@ -1134,6 +1294,40 @@ off is what frees Return for a transform to validate with and turning the frame
 steps off is what frees the arrows to nudge with. Modality written as
 `setEnabled` calls spread through the code that changes mode is how an action
 ends up stuck disabled after some cancel path nobody tested.
+
+**There is a third mode, `Typing`, and it exists for the same collision.** Return
+is Play, and Return is also how a rename is finished, so pressing Enter to accept
+a new layer name started playback instead. Reported. The answer was already
+built: turning Play off is what frees the key, exactly as it does for a
+transform.
+
+It has no flag of its own in the table — `liveIn` answers false for every row in
+it — because the answer for every row *is* the same one, and a bit per row would
+be a decision that is not a decision. Two things about it are less obvious:
+
+- **Coming out of it, the mode is asked for rather than assumed.** A transform
+  can be live while a layer is renamed, and going back to `Normal` there would
+  take the nudge keys away.
+- **It is a count and not a flag.** Two editors overlap for a moment: opening a
+  rename in the layer panel is what takes the focus off an open one in the
+  timeline, so the second is created *before* the first is told it has finished,
+  and a flag would hand the keyboard back with an editor still on screen.
+
+**And the filter that forwards Space and Z was eating every space anybody
+typed.** It has been wrong since it was written, and nothing noticed while the
+only places to type were dialogs nobody put a space into. Renaming in place is
+typing into the main window, and a track renamed "rough pass" arrived called
+"roughpass". It asks `isTypingInto(QApplication::focusWidget())` now — the focus
+widget and not `watched`, because a key goes to whatever holds the keyboard and
+this filter sees it again at every parent it propagates to. It was already wrong
+for the Rename track dialog and for every spin box on the transform bar.
+
+Neither of those is reachable by a test here, and that is worth saying plainly: a
+synthetic key event does not go through Qt's shortcut map, so no assertion in
+`test_canvas` can see Play swallow a Return. What is pinned is one step in — that
+`Play` is disabled while an editor is open and enabled again after every way of
+closing one, and that a space reaches a focused field while still panning when
+the canvas has the keyboard.
 
 **And now the other half of #14: the keys can be changed.** `Bindings` is what
 the keyboard is bound to *now* — the table's defaults with the user's changes
@@ -1407,6 +1601,17 @@ than stretching it. Rotation used to be available only from an invisible band
 just outside a corner — the band stays, because it is where a hand reaches
 without being told, but a gesture nobody can see is a gesture nobody uses, and
 the numeric field was the only discoverable way to turn a drawing. Reported.
+
+**A drag that starts anywhere moves it**, and not only one that starts inside the
+box. `boxTargetAt` used to fall through to "nothing at all", so the drawing could
+be picked up only from inside the rectangle drawn round it — which is exactly
+where you cannot press when the thing being moved is a thin line, or when the
+middle of the box is the drawing underneath that you are registering against.
+Reported, and nothing was given up by it: the knob, the eight handles and the
+rotate band round each corner are all tested before the fallback, so a corner
+still scales and just outside one still rotates. The consequence is that a
+transform now claims the whole canvas, which is what
+[the pointer says](#what-the-pointer-says).
 
 **Two scale fields, not one.** The note says "dx / dy / rotation / scale" and
 also that edge handles scale one axis; those cannot both be true. Two fields was
@@ -1739,6 +1944,16 @@ arithmetic. While they were two pieces of code there was nothing keeping the
 promise and the press in step, and the case that made this worth doing is
 exactly the one where they disagree by design: dragging *at* a corner scales,
 dragging *just outside* one rotates.
+
+**And there is no fourth outcome any more.** A press off the box used to do
+nothing, which was the one of the four worth saying with a cursor from another
+family, and `Pointing::Nothing` was it. Since a drag that starts anywhere
+[moves the drawing](#moving-a-drawing), a transform claims the whole canvas and
+the move cursor is shown across all of it. That looks like a loss of information
+and is the rule being obeyed: **the pointer answers the same question as the
+press under it**, and the press changed. The enumerator is kept rather than
+deleted, unreachable while a transform is live, because it is still the right
+answer for anywhere else that acquires one.
 
 **The invisible band survives, and now says so.** That was the open design
 question in #27 — a band nobody can see is a second unlabelled way to do
@@ -2477,6 +2692,70 @@ add the "Add colour layer" button matched nothing, silently. The build passed,
 all tests passed, and the button was simply absent. Screenshots caught it, and
 caught a mis-encoded character and a fresh document with three undoable setup
 steps. Look at the thing.
+
+**A pen produces no double click.** Qt turns a mouse's second press into
+`QEvent::MouseButtonDblClick` and never delivers it as a press, so a widget that
+wants a double click watches for that event and is done — with a mouse. A tablet
+event nobody accepts is promoted to a plain press and a plain release, by Windows
+Ink or by Qt where the platform does not, and two taps arrive as two ordinary
+presses with nothing marking them as a pair. So `QAbstractItemView`'s
+`DoubleClicked` trigger never fires for a pen, and neither does any
+`mouseDoubleClickEvent`. Double-clicking a name to rename it did nothing at all,
+and worked perfectly with a mouse on the same machine.
+
+`DoubleTap` counts them instead. Anything else in this program that wants a
+double click needs one too, and the two routes are exclusive by construction,
+which is what makes having both safe: a mouse arrives as `MouseButtonDblClick`
+and never as a second press, a pen arrives as a second press and never as a
+double click. Two consequences worth carrying: a `QMouseEvent` built by hand
+carries **timestamp 0**, so every synthetic press in a test is the second of a
+double tap at the same place unless the test says otherwise (`sendTap`); and a
+tap counted this way should be matched to a *smaller* target than a mouse's
+double click, since the second press is an ordinary press and everything else on
+the row is still listening — the layer panel takes it on the name only, because
+the visibility tick is in the same column and flicking a layer off and on is the
+commonest gesture in the panel.
+
+**A window state change and a widget resize arrive in either order.** Maximising
+the window frames the canvas in it, and restoring frames it again — the canvas
+keeps its zoom and pan across a resize and the pan is the image point at the
+widget's *top left*, so a window made much bigger used to show the same drawing
+at the same size in the same corner with new emptiness beside it. Deliberately
+only those two and not every resize: the drawing surface has no edges, working
+outside the canvas is ordinary here, and a view that snapped back whenever a dock
+moved would take you off what you were drawing. Restoring is not symmetry for its
+own sake either — a canvas fitted to a full screen is too big for the window that
+comes back.
+
+Four lines of code, and it took three attempts. The middle one is the
+instructive one. Fitting on `QEvent::WindowStateChange` fits to the window
+that is going away, because the widget has not been resized yet; a zero-delay
+timer does not fix it, because the platform's resize is not guaranteed to have
+arrived by the time the timer runs. So the next version asked `isMaximized()` on
+the canvas's *resize* instead — and that does nothing at all in a real window,
+where the widget is resized **before** the window state is updated, so the
+question answers "no change" and no further resize ever comes.
+
+Neither event can decide alone. The state change arms a reframe, every canvas
+resize within `kReframeWindowMs` fits, and a queued call covers a maximise that
+does not change the canvas's size. Fitting is idempotent, so fitting two or three
+times through one maximise costs nothing; what has to hold is that the last fit
+runs after the last resize, and it does whichever way round they arrive.
+
+**And the offscreen platform picks one of those orders, so the test was green
+for the whole of it.** Offscreen delivers the resize after the state change,
+which is the order the broken version assumed. The test now also sends a resize
+*after* the state change, and the check that actually settled it was
+`shots -platform windows` against a real maximised window, reading the zoom back:
+0.6575, against 0.6575 for a fit at that size. Anything about window state wants
+verifying that way before it is believed.
+
+**A closed editor is still a child of the view.** An item view releases its
+editor with `deleteLater`, so `findChild<QLineEdit*>` hands back the dead one
+until the deferred deletes run. A rename test typed into a closed editor and
+passed — a rename that goes nowhere leaves the name alone exactly as a refused
+rename does, so the assertion was true and meant nothing. `settleEditors` sends
+the pending `DeferredDelete` events before anything looks for an editor.
 
 **A before-and-after test is only a test if "before" is before.** The layer dock
 grew by eighteen pixels when a colour layer was selected, shoving the canvas

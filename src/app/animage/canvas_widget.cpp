@@ -1823,7 +1823,19 @@ CanvasWidget::BoxTarget CanvasWidget::boxTargetAt(const QPointF& widget_point) c
                        QLineF(handles[0], handles[6]).length() > kTransformSmallestInterior;
     if (roomy && box.containsPoint(widget_point, Qt::OddEvenFill)) return {Grab::Move, -1};
 
-    return {};
+    // And everywhere else moves it too. A press off the box used to do nothing
+    // at all, which made the interior the only place the drawing could be picked
+    // up from -- and the interior is exactly where you cannot press when what
+    // you are moving is a thin line, a box drawn round almost nothing, or a
+    // shape whose middle is the drawing underneath that you are registering it
+    // against. Nothing is given up by it: the four answers above are all tested
+    // first, so a corner still scales and the band round one still rotates.
+    //
+    // The interior test above is now only load-bearing through `roomy`, which
+    // keeps a box collapsed to a line from claiming a middle it has not got --
+    // and out here that costs nothing, because the answer is the same either
+    // way.
+    return {Grab::Move, -1};
 }
 
 // And the pivot the gesture wants, which is the half that writes something down.
@@ -1991,9 +2003,12 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
             case Grab::Handle: return scalePointingFor(target.handle, transform_->values.rotation);
             case Grab::None: break;
         }
-        // Off the box, where a press does nothing at all. That is the fourth
-        // outcome the crosshair used to be shown for, and the only one of the
-        // four that is worth saying with a cursor from another family.
+        // Unreachable while a transform is live, and kept rather than asserted
+        // away: boxTargetAt answers Move everywhere it has no better answer, so
+        // there is no longer anywhere on the canvas where a press does nothing.
+        // That is why the move cursor is now shown over the whole canvas and not
+        // only over the box -- the rule here is that the pointer answers the
+        // same question as the press under it, and the press moved.
         return Pointing::Nothing;
     }
 

@@ -189,4 +189,19 @@ bool removeExport(const QString& folder, QString* error);
 // visibly part of the layer's name and not a count of anything.
 QString sequenceName(const std::string& track, const std::string& layer);
 
+// Whether two visible layers of one track would be exported into the same
+// folder, and which two. False means the export can go ahead.
+//
+// `sequenceName` is many-to-one -- "rough 1" and "rough-1" are two names and one
+// folder -- and nothing prevents two layers being called the same thing either.
+// Both would then write the same file names into the same folder, so the export
+// would succeed, look complete, and hold one layer where two were asked for.
+//
+// `write` asks this before it creates anything, and that is enough to make the
+// export safe. It is on the header as well because the export folder is
+// *emptied* before `write` is called, by whoever is replacing an export that is
+// already there -- so a refusal that happened only inside `write` would refuse
+// having already taken the previous export with it. Ask before emptying.
+bool namesCollide(const animage::Document& doc, QString* message);
+
 }  // namespace exporting

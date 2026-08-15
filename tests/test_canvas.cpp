@@ -33,6 +33,7 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QHeaderView>
 #include <QMenu>
@@ -704,6 +705,51 @@ void heldKeysDoNotRecurse() {
     CHECK(true);  // reaching here at all is the assertion
 }
 
+// The other half of that forwarding, and it was wrong from the day it was
+// written: a space is a character wherever one is being typed, and the filter
+// was taking every one of them to pan with. Nothing noticed while the only
+// places to type were dialogs nobody put a space in; renaming a layer or a
+// track in place is typing into the main window, and "rough pass" came out as
+// "roughpass".
+void spaceReachesWhateverIsBeingTypedInto() {
+    TEST("Space is a character in a field and pan everywhere else");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* field = new QLineEdit(&window);
+    field->show();
+    field->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(QApplication::focusWidget() == field);
+    if (QApplication::focusWidget() != field) return;
+
+    // Sent to the field the way the platform sends it, and the filter has to
+    // leave it there rather than handing it to the canvas.
+    QKeyEvent space(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier, QStringLiteral(" "));
+    QCoreApplication::sendEvent(field, &space);
+    QCoreApplication::processEvents();
+    CHECK_EQ(field->text().toStdString(), std::string(" "));
+
+    // And with the keyboard back on the canvas it is pan again, which is the
+    // half that must not be lost to the fix.
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    canvas->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    auto* panel = window.findChild<QTreeWidget*>();
+    CHECK(panel != nullptr);
+    if (!panel) return;
+    QKeyEvent elsewhere(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(panel, &elsewhere);
+    QCoreApplication::processEvents();
+    // Held Space is an open hand: the canvas says what a press would do now,
+    // which is the one thing visible from outside that the key reached it.
+    CHECK(canvas->cursor().shape() == Qt::OpenHandCursor);
+}
+
 // The cache is padded and, when zoomed out, sampled. Both have to stay tied to
 // the size of the window: sized from the visible image area instead, a
 // maximised window at 51% zoom asks for a quarter of a gigabyte.
@@ -744,6 +790,36 @@ void sendMouse(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseB
                Qt::MouseButtons buttons) {
     QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, Qt::NoModifier);
     QCoreApplication::sendEvent(widget, &event);
+}
+
+// A tap: press and release, at a stated moment.
+//
+// The moment is the point of it. What a pen produces is two ordinary presses
+// with nothing marking them as a pair, so the only thing separating a double tap
+// from two clicks is how far apart in time they are -- and a QMouseEvent built by
+// hand carries timestamp 0, which would make every press in a test the second of
+// a double tap at the same place.
+void sendTap(QWidget* widget, const QPointF& at, quint64 when) {
+    QMouseEvent press(QEvent::MouseButtonPress, at, widget->mapToGlobal(at), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    press.setTimestamp(when);
+    QCoreApplication::sendEvent(widget, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, at, widget->mapToGlobal(at), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    release.setTimestamp(when + 10);
+    QCoreApplication::sendEvent(widget, &release);
+    QCoreApplication::processEvents();
+}
+
+// An item view releases its editor with deleteLater, so a closed one is still a
+// child of the viewport until the deferred deletes run -- and findChild would
+// hand back the dead one instead of the editor that is actually open. That is
+// not a hypothetical: an earlier version of the rename test typed into a closed
+// editor and passed, because a rename that goes nowhere leaves the name alone
+// exactly as a refused rename does.
+void settleEditors() {
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
 void clickCheck(QTreeWidget* list, QTreeWidgetItem* item, int column) {
@@ -2855,6 +2931,89 @@ void exportNamesSurviveAwkwardLayerNames() {
     CHECK_EQ(exporting::sequenceName("main", " rough // clean ").toStdString(),
              std::string("main_rough-clean"));
     CHECK_EQ(exporting::sequenceName("", "").toStdString(), std::string("unnamed_unnamed"));
+
+    // Characters, not bytes. A std::string here is UTF-8, and walking it a byte
+    // at a time hands isLetterOrNumber half of an accented letter -- the first
+    // byte of "é" is a letter on its own and the second is not, so "décor" came
+    // out "dÃ-cor" and nothing failed. Reported by somebody who names layers in
+    // French, which is the specification's own language.
+    CHECK_EQ(exporting::sequenceName("décor", "arrière").toStdString(),
+             std::string("décor_arrière"));
+    // Non-Latin too, where the byte-at-a-time version produced nothing readable
+    // at all rather than merely the wrong letter.
+    CHECK_EQ(exporting::sequenceName("фон", "b").toStdString(), std::string("фон_b"));
+    // And the punctuation rule is unchanged by any of it.
+    CHECK_EQ(exporting::sequenceName("décor / lointain", "a").toStdString(),
+             std::string("décor-lointain_a"));
+
+    // Two names, one folder. Sanitising is many-to-one, so this is what the
+    // export has to refuse rather than what it can assume away.
+    CHECK_EQ(exporting::sequenceName("t", "rough 1").toStdString(),
+             exporting::sequenceName("t", "rough-1").toStdString());
+    // But never across the two fields: the separator moves, so the names differ.
+    CHECK(exporting::sequenceName("a b", "c") != exporting::sequenceName("a", "b c"));
+    // And nothing can collide with the flattened pass, which has no underscore.
+    CHECK(exporting::sequenceName("composite", "composite") != QStringLiteral("composite"));
+}
+
+// What happens when two layers of one track want the same folder.
+//
+// The failure this prevents is the quiet kind: both wrote the same filenames
+// into the same folder, so the export succeeded, looked complete, and held one
+// layer where two were asked for.
+void anExportRefusesTwoLayersInOneFolder() {
+    TEST("two layers that would share a folder stop the export before it starts");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    animage::Document doc = buildDrawnScene();
+    Track& track = doc.mutableScene().tracks.front();
+    CHECK(track.layers.size() >= 2);
+    if (track.layers.size() < 2) return;
+    // Different names, one folder: the space and the hyphen both sanitise to a
+    // hyphen. Identical names would do it too, and nothing prevents those.
+    track.layers[0].name = "rough 1";
+    track.layers[1].name = "rough-1";
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    options.flattened = false;
+
+    QString error;
+    CHECK(!exporting::write(doc, options, nullptr, nullptr, &error));
+    // Both of them by name, because "rough 1" clashing with "rough-1" is not
+    // something anybody works out from a folder listing afterwards.
+    CHECK(error.contains(QStringLiteral("rough 1")));
+    CHECK(error.contains(QStringLiteral("rough-1")));
+
+    // And nothing was written at all -- not even the folder. Refusing halfway
+    // through would leave an export that is a mixture of two runs.
+    CHECK(!QDir(out).exists());
+
+    // The same answer without the export, which is what the window asks before
+    // it empties the folder. A refusal that happened only inside write() would
+    // come after the clearing and would have thrown the previous export away to
+    // produce nothing.
+    QString clash;
+    CHECK(exporting::namesCollide(doc, &clash));
+    CHECK_EQ(clash.toStdString(), error.toStdString());
+
+    // Renaming one of them is all it takes.
+    track.layers[1].name = "clean";
+    error.clear();
+    CHECK(!exporting::namesCollide(doc, nullptr));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK(error.isEmpty());
+    CHECK(QDir(out).exists());
+
+    // A hidden layer is not written, so it cannot collide with anything. This
+    // is the case a check over every layer rather than every *written* layer
+    // would refuse for no reason at all.
+    track.layers[1].name = "rough 1";
+    track.layers[1].visible = false;
+    CHECK(!exporting::namesCollide(doc, nullptr));
 }
 
 // Through the window, which is where the progress dialog and the document are.
@@ -4797,11 +4956,15 @@ void thePointerSaysWhatAPressOnTheBoxWillDo() {
     hover(&canvas, handles[0] + outward * 16.0);
     CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Rotate));
 
-    // Well outside it a press does nothing at all, which is the fourth outcome
-    // and the one the crosshair was least honest about.
+    // And well outside it a press moves the drawing, exactly as a press in the
+    // middle does. There used to be a fourth outcome here -- a press that did
+    // nothing, shown as an arrow -- and it went when the box stopped being the
+    // only place the drawing could be picked up from. The pointer says so,
+    // which is the rule this whole function exists for: it answers the same
+    // question as the press underneath it.
     hover(&canvas, QPointF(60.0, 60.0));
-    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Nothing));
-    CHECK_EQ(shapeOf(&canvas), shape(Qt::ArrowCursor));
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::Move));
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeAllCursor));
 
     // Leaving the tool puts the pointer back without the pointer moving. This is
     // the shape of bug the one decision point exists to make impossible: a
@@ -4810,6 +4973,43 @@ void thePointerSaysWhatAPressOnTheBoxWillDo() {
     CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeAllCursor));
     canvas.cancelTransform();
     CHECK_EQ(shapeOf(&canvas), shape(Qt::CrossCursor));
+}
+
+// Reported: a drag that started outside the box did nothing, so the only way to
+// move the drawing was to press inside a rectangle drawn round it -- which is
+// the one place you cannot press when what you are moving is a thin line, or
+// when the middle of the box is the drawing underneath that you are lining it
+// up against.
+void aDragOutsideTheBoxMovesIt() {
+    TEST("a transform is moved by a drag that starts nowhere near it");
+    BoxFixture box;
+    CanvasWidget& canvas = box.f.canvas;
+    CHECK(canvas.transformIsLive());
+    CHECK_NEAR(canvas.transformValues().dx, 0.0, 1e-9);
+
+    // A corner of the widget, as far from the box as it goes. The handles and
+    // the rotate band round them are all tested before the fallback, so a point
+    // this far out can only be the fallback's own answer.
+    const QPointF outside(8.0, 8.0);
+    const QPointF moved = outside + QPointF(40.0, 25.0);
+    CHECK(QLineF(outside, canvas.transformCentreForTesting()).length() > 100.0);
+
+    sendMouse(&canvas, QEvent::MouseButtonPress, outside, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(&canvas, QEvent::MouseMove, moved, Qt::NoButton, Qt::LeftButton);
+    sendMouse(&canvas, QEvent::MouseButtonRelease, moved, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+
+    // The fixture is at one to one, so what the pointer moved on the widget is
+    // the translation. And only the translation: a fallback that had landed on
+    // a handle instead would have scaled from the far corner and still moved
+    // the box, which is the way this could pass while being wrong.
+    CHECK_NEAR(canvas.transformValues().dx, 40.0, 1.0);
+    CHECK_NEAR(canvas.transformValues().dy, 25.0, 1.0);
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.0, 1e-6);
+    CHECK_NEAR(canvas.transformValues().scale_y, 1.0, 1e-6);
+    CHECK_NEAR(canvas.transformValues().rotation, 0.0, 1e-9);
+
+    canvas.cancelTransform();
 }
 
 void theBoxCursorsTurnWithTheBox() {
@@ -5249,6 +5449,384 @@ void aLayerDroppedOnAnotherRowRestacksTheStack() {
     CHECK_EQ(doc.undoDepth(), depth);
 }
 
+// Maximising the window frames the canvas in it.
+//
+// The canvas keeps its zoom and its pan across a resize, and the pan is the
+// image point at the *top left* of the widget -- so a window made much bigger
+// used to show the same drawing at the same size in the same corner, with new
+// emptiness beside it.
+void maximisingFramesTheCanvas() {
+    TEST("maximising the window frames the canvas, and restoring frames it again");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    // The fit the window opens with is queued behind the layout, so it has to be
+    // let happen before anything here can be a change from it.
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // What the state change is asked to produce, checked against a fit taken at
+    // the size the canvas ends up with -- and not against the fit it had before,
+    // which is a different window and so a different number.
+    const auto framedNow = [&] {
+        const double was = canvas->zoom();
+        canvas->fitToCanvas();
+        const double fitted = canvas->zoom();
+        canvas->setZoom(was, QPointF(0.0, 0.0));
+        return fitted;
+    };
+
+    CHECK(std::abs(canvas->zoom() - 1.0) > 1e-6);  // opened framed, not at one to one
+
+    canvas->resetView();
+    CHECK_NEAR(canvas->zoom(), 1.0, 1e-9);
+    window.setWindowState(Qt::WindowMaximized);
+    QCoreApplication::processEvents();  // the fit is queued, for the reason the
+    QCoreApplication::processEvents();  // opening one is: the resize comes first
+    CHECK(std::abs(canvas->zoom() - 1.0) > 1e-6);
+    CHECK_NEAR(canvas->zoom(), framedNow(), 1e-9);
+
+    // A resize that arrives *after* the state change reframes too, and this is
+    // the half that a passing test used to say nothing about. The platform is
+    // free to deliver the two in either order; offscreen it happens to send the
+    // resize first, so a version that only asked `isMaximized()` on the resize
+    // passed here and did nothing at all in the real window, where the widget is
+    // resized before the window state is updated.
+    canvas->resetView();
+    CHECK_NEAR(canvas->zoom(), 1.0, 1e-9);
+    QResizeEvent later(canvas->size(), canvas->size());
+    QCoreApplication::sendEvent(canvas, &later);
+    QCoreApplication::processEvents();
+    CHECK_NEAR(canvas->zoom(), framedNow(), 1e-9);
+
+    // Restoring frames it again rather than leaving the canvas fitted to a
+    // window that has gone.
+    canvas->resetView();
+    CHECK_NEAR(canvas->zoom(), 1.0, 1e-9);
+    window.setWindowState(Qt::WindowNoState);
+    QCoreApplication::processEvents();
+    QCoreApplication::processEvents();
+    CHECK(std::abs(canvas->zoom() - 1.0) > 1e-6);
+    CHECK_NEAR(canvas->zoom(), framedNow(), 1e-9);
+
+    // And a resize long after one is an ordinary resize: dragging a dock about
+    // must not put the view back on the canvas you had left.
+    canvas->resetView();
+    waitMs(600);  // past the moment a state change keeps the canvas following
+    QResizeEvent unrelated(canvas->size(), canvas->size());
+    QCoreApplication::sendEvent(canvas, &unrelated);
+    QCoreApplication::processEvents();
+    CHECK_NEAR(canvas->zoom(), 1.0, 1e-9);
+}
+
+// Renaming a layer by double-clicking its name.
+//
+// The gesture is opened by hand rather than by a double click, for the reason
+// the drop above is driven at the seam: Qt's own double click is not the part
+// that would be wrong. What would be wrong is what the editor opens on and what
+// it does with what is typed, and both are here.
+void doubleClickingALayerRenamesIt() {
+    TEST("a layer is renamed in place, and the panel never edits itself");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    CHECK(layers != nullptr);
+    if (!layers) return;
+    // A double click and nothing else. SelectedClicked -- which is in Qt's own
+    // default set -- would start a rename on a plain click on the row you are
+    // already drawing on.
+    CHECK_EQ(static_cast<int>(layers->editTriggers()),
+             static_cast<int>(QAbstractItemView::DoubleClicked));
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId layer = doc.scene().findTrack(track)->layers.front().id;
+    const std::size_t depth = doc.undoDepth();
+
+    // The gesture, through the viewport where a real click arrives.
+    const QPointF row(layers->visualItemRect(layers->topLevelItem(0)).center());
+    sendMouse(layers->viewport(), QEvent::MouseButtonPress, row, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(layers->viewport(), QEvent::MouseButtonRelease, row, Qt::LeftButton, Qt::NoButton);
+    sendMouse(layers->viewport(), QEvent::MouseButtonDblClick, row, Qt::LeftButton,
+              Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    auto* editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    CHECK_EQ(editor->text().toStdString(), std::string("layer 1"));
+
+    // Return is Play. While a name is being typed into, every shortcut lets go
+    // of the keyboard -- a disabled QAction does not consume its key, which is
+    // the whole mechanism a live transform borrows Return with. Without this,
+    // pressing Enter to finish a rename started playback instead, which is what
+    // was reported.
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(play != nullptr);
+    if (!play) return;
+    CHECK(!play->isEnabled());
+
+    editor->setText(QStringLiteral("  rough  "));
+    layers->finishRenameForTesting(true);
+    settleEditors();
+
+    // And it has them back afterwards. An editor closed by anything at all --
+    // Return, Escape, a click elsewhere, the panel being rebuilt -- goes through
+    // Qt's own closeEditor, so there is no path that leaves them switched off.
+    CHECK(play->isEnabled());
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+
+    // Trimmed, in the document, on the row, and undoable like anything else.
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->name, std::string("rough"));
+    CHECK_EQ(layers->topLevelItem(0)->text(0).toStdString(), std::string("rough"));
+    CHECK(doc.undoDepth() > depth);
+    doc.undo();
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->name, std::string("layer 1"));
+
+    // Escape leaves the name alone. This one is Qt's own -- the delegate emits
+    // it straight out of its event filter rather than posting it -- so it is
+    // driven with the key a hand would press.
+    layers->renameRowForTesting(0);
+    QCoreApplication::processEvents();
+    editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    editor->setText(QStringLiteral("nonsense"));
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(editor, &escape);
+    settleEditors();
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->name, std::string("layer 1"));
+    CHECK(play->isEnabled());
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+
+    // And the pen's way in: two taps close together, with no
+    // MouseButtonDblClick anywhere, which is what a tablet event nobody accepts
+    // is promoted to. Qt's DoubleClicked trigger never fires for these, so
+    // double-tapping a name with a pen renamed nothing at all.
+    //
+    // Two taps a second apart first, because the property that matters is not
+    // "two presses rename" -- that would make every second click on a layer a
+    // rename -- but "two presses in quick succession" do.
+    sendTap(layers->viewport(), row, 1000);
+    sendTap(layers->viewport(), row, 2000);
+    settleEditors();
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+
+    sendTap(layers->viewport(), row, 3000);
+    sendTap(layers->viewport(), row, 3080);
+    CHECK(layers->findChild<QLineEdit*>() != nullptr);
+    CHECK(!play->isEnabled());  // and it is a rename, with the keyboard to match
+    layers->finishRenameForTesting(false);
+    settleEditors();
+    CHECK(play->isEnabled());
+
+    // But two taps on the visibility tick are two taps on the visibility tick.
+    // Flicking a layer off and on to compare is the most ordinary gesture in
+    // this panel, and with the whole row live it would open a rename instead.
+    const QRect item = layers->visualItemRect(layers->topLevelItem(0));
+    const QPointF tick(layers->style()->pixelMetric(QStyle::PM_IndicatorWidth) / 2 + 3,
+                       item.center().y());
+    const bool visible_before = doc.scene().findTrack(track)->layers.front().visible;
+    sendTap(layers->viewport(), tick, 5000);
+    sendTap(layers->viewport(), tick, 5080);
+    settleEditors();
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+    CHECK(play->isEnabled());
+    // Two toggles, so it is back where it started -- and it moved, which is what
+    // says the taps reached the tick rather than being swallowed.
+    CHECK_EQ(doc.scene().findTrack(track)->layers.front().visible, visible_before);
+    CHECK(doc.undoDepth() > depth);
+}
+
+// The same editor, on a colour layer that is showing somebody else's marks.
+//
+// Its row does not say what the layer is called: it says "<- name", because the
+// marks were made on another drawing. An editor seeded from the row would put
+// that arrow into the name, and the next rename would put a second one in front
+// of the first.
+void renamingACarriedColourLayerLeavesTheArrowOutOfIt() {
+    TEST("renaming a carried colour layer does not rename it after the arrow");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString folder = scratch.filePath(QStringLiteral("stranded.animage"));
+    animage::Document built = buildStrandedShot();
+    CHECK(ProjectIO::save(built, folder, nullptr));
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    CHECK(timeline != nullptr);
+    CHECK(layers != nullptr);
+    if (!timeline || !layers) return;
+
+    // Slot 1 carries its colour from the drawing before it, which is what puts
+    // the arrow on the row. The solve is on a worker, so the paint that asks for
+    // it and the report that follows both have to happen first.
+    timeline->setCurrentSlot(1);
+    QCoreApplication::processEvents();
+    window.grab();
+    CHECK(window.waitForColour());
+    QCoreApplication::processEvents();
+
+    int row = -1;
+    for (int i = 0; i < layers->topLevelItemCount(); ++i) {
+        if (layers->topLevelItem(i)->text(0).contains(QStringLiteral("colour"))) row = i;
+    }
+    CHECK(row >= 0);
+    if (row < 0) return;
+    CHECK(layers->topLevelItem(row)->text(0).startsWith(QStringLiteral("←")));
+
+    layers->renameRowForTesting(row);
+    QCoreApplication::processEvents();
+    auto* editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    // What the layer is called, and not what the row says.
+    CHECK(!editor->text().startsWith(QStringLiteral("←")));
+
+    editor->setText(QStringLiteral("skin"));
+    layers->finishRenameForTesting(true);
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    const Track* track = &doc.scene().tracks.front();
+    bool found = false;
+    for (const Layer& l : track->layers) {
+        if (l.name == "skin") found = true;
+    }
+    CHECK(found);
+    // And the arrow is still on the row, because it is not part of the name and
+    // never was: the marks are still carried.
+    CHECK_EQ(layers->topLevelItem(row)->text(0).toStdString(), std::string("← skin"));
+
+    // An empty name is refused rather than accepted: a nameless layer has no row
+    // label and no folder of its own in an export.
+    layers->renameRowForTesting(row);
+    QCoreApplication::processEvents();
+    editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    editor->setText(QStringLiteral("   "));
+    layers->finishRenameForTesting(true);
+    QCoreApplication::processEvents();
+    CHECK_EQ(layers->topLevelItem(row)->text(0).toStdString(), std::string("← skin"));
+}
+
+// Renaming a track by double-clicking its name in the gutter.
+void doubleClickingATrackRenamesIt() {
+    TEST("a track is renamed in place, and Escape leaves the name alone");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    CHECK_EQ(doc.scene().findTrack(track)->name, std::string("track 1"));
+
+    // The gesture itself, on the name strip: press, release, double click, which
+    // is the order the platform sends them in. Nothing here is Qt's own -- the
+    // widget is painted and hit-tested by hand -- so this half is testable and
+    // is what a hand actually does.
+    const QPointF name(timeline->gutterPointForTesting(0));
+    sendMouse(timeline, QEvent::MouseButtonPress, name, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, name, Qt::LeftButton, Qt::NoButton);
+    sendMouse(timeline, QEvent::MouseButtonDblClick, name, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    QLineEdit* editor = timeline->renameEditorForTesting();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    CHECK(editor->isVisible());
+    CHECK_EQ(editor->text().toStdString(), std::string("track 1"));
+
+    // Return is Play, so every shortcut lets go of the keyboard while a name is
+    // being typed into. Enter otherwise starts playback instead of finishing
+    // the rename, which is what was reported.
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(play != nullptr);
+    if (!play) return;
+    CHECK(!play->isEnabled());
+
+
+    // editingFinished, which is what Enter and losing the editor both produce.
+    editor->setText(QStringLiteral("  background  "));
+    Q_EMIT editor->editingFinished();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(track)->name, std::string("background"));
+    CHECK(!editor->isVisible());
+
+    // Escape puts the editor away and leaves the name where it was. It arrives
+    // as a key and not as a signal, which is the whole reason the widget filters
+    // the editor at all.
+    timeline->renameTrackForTesting(0);
+    QCoreApplication::processEvents();
+    editor->setText(QStringLiteral("nonsense"));
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(editor, &escape);
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(track)->name, std::string("background"));
+    CHECK(!editor->isVisible());
+
+    // And an empty name is refused, the same way the Rename track dialog
+    // refuses one.
+    timeline->renameTrackForTesting(0);
+    QCoreApplication::processEvents();
+    editor->setText(QStringLiteral("   "));
+    Q_EMIT editor->editingFinished();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(track)->name, std::string("background"));
+    CHECK(!editor->isVisible());
+    CHECK(play->isEnabled());
+
+    // And a double click out on the frames is not a rename. Out there a click
+    // means "stand on this frame", and two of them mean it twice.
+    sendMouse(timeline, QEvent::MouseButtonDblClick,
+              QPointF(timeline->cellCentreForTesting(0, 0)), Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+    CHECK(!editor->isVisible());
+
+    // The pen: two taps on the name, arriving as two ordinary presses with no
+    // double click between them. Spaced out first, because two clicks a second
+    // apart are two clicks.
+    sendTap(timeline, name, 1000);
+    sendTap(timeline, name, 2000);
+    CHECK(!editor->isVisible());
+
+    sendTap(timeline, name, 3000);
+    sendTap(timeline, name, 3080);
+    CHECK(editor->isVisible());
+    CHECK_EQ(editor->text().toStdString(), std::string("background"));
+    CHECK(!play->isEnabled());
+
+    // A tap out on the frames is not one either, however quickly it follows.
+    QKeyEvent leave(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(editor, &leave);
+    QCoreApplication::processEvents();
+    const QPointF frame(timeline->cellCentreForTesting(0, 0));
+    sendTap(timeline, frame, 4000);
+    sendTap(timeline, frame, 4080);
+    CHECK(!editor->isVisible());
+    CHECK(play->isEnabled());
+}
+
 // Issue #12. A colour layer goes to the bottom of the stack, so in a track with
 // enough layers to need a scrollbar the layer you have just made is off the end
 // of the panel -- and the list scrolled itself against the panel as it stood
@@ -5563,6 +6141,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
     thePointerSaysWhatAPressOnTheBoxWillDo();
+    aDragOutsideTheBoxMovesIt();
     theBoxCursorsTurnWithTheBox();
     theEraserSaysSoBeforeYouDraw();
     turningThePenOverShowsTheEraser();
@@ -5637,6 +6216,7 @@ int main(int argc, char** argv) {
     exportLeavesOutHiddenLayers();
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
+    anExportRefusesTwoLayersInOneFolder();
     exrExportsThePixelsUnconverted();
     exrAndPngAreTheSamePicture();
     theFileMenuExports();
@@ -5647,6 +6227,7 @@ int main(int argc, char** argv) {
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
+    spaceReachesWhateverIsBeingTypedInto();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();
     wheelZoomGestureSurvives();
@@ -5669,6 +6250,10 @@ int main(int argc, char** argv) {
     draggingATracksNameRestacksIt();
     whereADroppedRowLands();
     aLayerDroppedOnAnotherRowRestacksTheStack();
+    maximisingFramesTheCanvas();
+    doubleClickingALayerRenamesIt();
+    renamingACarriedColourLayerLeavesTheArrowOutOfIt();
+    doubleClickingATrackRenamesIt();
     aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }

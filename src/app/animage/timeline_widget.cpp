@@ -2,6 +2,8 @@
 #include "timeline_widget.h"
 
 #include <QFontMetrics>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QPalette>
 #include <QMouseEvent>
 #include <QPainter>
@@ -155,6 +157,10 @@ QPoint TimelineWidget::cellCentreForTesting(std::size_t row, std::size_t slot) c
             rowTop(row) + kRowHeight / 2};
 }
 
+QPoint TimelineWidget::gutterPointForTesting(std::size_t row) const {
+    return {kGutterWidth / 2, rowTop(row) + kRowHeight / 2};
+}
+
 QPoint TimelineWidget::rulerPointForTesting(std::size_t slot) const {
     return {kGutterWidth + static_cast<int>(slot) * kCellWidth + kCellWidth / 2, kRulerHeight / 2};
 }
@@ -186,6 +192,17 @@ void TimelineWidget::setCurrentSlot(std::size_t slot) {
 }
 
 void TimelineWidget::refresh() {
+    // A rename outlives an undo, a restack or a track being deleted underneath
+    // it, none of which the editor would otherwise notice. Its track is held by
+    // id, so the only unanswerable case is the track going away.
+    if (renaming_ != kNoId) {
+        if (!doc_.scene().findTrack(renaming_)) {
+            finishRenaming(false);
+        } else {
+            rename_edit_->setGeometry(gutterRectFor(rowOf(renaming_)));
+        }
+    }
+
     const std::size_t frames = doc_.scene().timelineFrames();
     if (frames > 0 && current_slot_ >= frames) {
         current_slot_ = frames - 1;
@@ -468,6 +485,14 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
+
+    // A pen's two taps arrive here as two presses and never as a double click.
+    // See DoubleTap: this is the pen's way into the same rename the mouse
+    // reaches through mouseDoubleClickEvent, and the two cannot both fire.
+    if (taps_.isSecond(event->globalPosition().toPoint(), event->timestamp()) &&
+        renameAt(x, y)) {
+        return;
+    }
 
     // The ruler is a scrub band, apart from the end-of-shot grip in it. Exposure
     // edges live below it, so dragging along time can never resize a hold by
@@ -788,6 +813,103 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     refreshCursor(x, y);
     doc_.endCommand();
     Q_EMIT documentChanged();
+}
+
+// A double click on the name renames the track.
+//
+// Only on the name, and not anywhere else in the row: the rest of the row is
+// frames, and a double click there is two presses that each mean something --
+// selecting a frame -- rather than a gesture of its own. The gutter has nothing
+// under it competing for the press, which is the same reason it is the drag
+// handle.
+//
+// The press that opens this has already selected the track and armed a restack
+// drag; the release before the double click disarms it, so nothing has to be
+// undone here.
+bool TimelineWidget::renameAt(int x, int y) {
+    if (x >= kGutterWidth) return false;
+    std::size_t row = 0;
+    if (!rowAtY(y, &row)) return false;
+    beginRenaming(row);
+    return true;
+}
+
+void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) return;
+    renameAt(static_cast<int>(event->position().x()), static_cast<int>(event->position().y()));
+}
+
+QRect TimelineWidget::gutterRectFor(std::size_t row) const {
+    return QRect(0, rowTop(row), kGutterWidth - 2, kRowHeight - 2);
+}
+
+void TimelineWidget::beginRenaming(std::size_t row) {
+    // Opening one on another row keeps what was typed into the first rather
+    // than dropping it, which is what re-seeding the editor would do. Before
+    // the track is looked up, because renaming one is a document change.
+    if (renaming_ != kNoId) finishRenaming(true);
+
+    const Track* line = trackAt(row);
+    if (!line) return;
+
+    if (!rename_edit_) {
+        rename_edit_ = new QLineEdit(this);
+        rename_edit_->setFrame(true);
+        // Enter, and losing the editor to a click somewhere else, both mean the
+        // name is what it now says. Escape is the only way to leave it alone,
+        // and it arrives as a key rather than as a signal -- hence the filter.
+        rename_edit_->installEventFilter(this);
+        connect(rename_edit_, &QLineEdit::editingFinished, this,
+                [this] { finishRenaming(true); });
+    }
+
+    renaming_ = line->id;
+    rename_edit_->setGeometry(gutterRectFor(row));
+    rename_edit_->setText(QString::fromStdString(line->name));
+    rename_edit_->selectAll();
+    rename_edit_->show();
+    // Explicitly, because the timeline itself takes no keyboard focus: without
+    // this the editor appears and the keys keep going to the canvas.
+    rename_edit_->setFocus(Qt::OtherFocusReason);
+    Q_EMIT renamingChanged(true);
+}
+
+void TimelineWidget::finishRenaming(bool keep) {
+    if (!rename_edit_ || renaming_ == kNoId || finishing_rename_) return;
+
+    // Hiding the editor takes the focus away from it, which emits
+    // editingFinished a second time. This is the flag that stops the second one
+    // being a second rename.
+    finishing_rename_ = true;
+    const TrackId renamed = renaming_;
+    const QString typed = rename_edit_->text().trimmed();
+    renaming_ = kNoId;
+    rename_edit_->hide();
+    finishing_rename_ = false;
+    Q_EMIT renamingChanged(false);
+
+    if (!keep) return;
+    const Track* line = doc_.scene().findTrack(renamed);
+    // An empty name leaves the track with no label on its row and no prefix on
+    // its exported files, so the old one is kept rather than the emptiness
+    // accepted -- the same answer the Rename track dialog gives.
+    if (!line || typed.isEmpty() || typed.toStdString() == line->name) return;
+
+    TrackProperties props = line->properties();
+    props.name = typed.toStdString();
+    doc_.updateTrack(renamed, props);
+    refresh();
+    Q_EMIT documentChanged();
+}
+
+bool TimelineWidget::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == rename_edit_ && event->type() == QEvent::KeyPress) {
+        if (static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+            finishRenaming(false);
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void TimelineWidget::applyStretch(int pointer_x) {

@@ -87,6 +87,7 @@
 
 #include "canvas_widget.h"
 #include "document.h"
+#include "layer_list.h"
 #include "main_window.h"
 #include "shortcuts.h"
 #include "shortcuts_dialog.h"
@@ -892,6 +893,27 @@ const std::vector<Situation>& situations() {
              s.pressOn(s.timeline, trackName(s, 2));
              s.dragTo(s.timeline, trackName(s, 0) - QPointF(0.0, 8.0));
              s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-track-being-renamed",
+         "the editor sits exactly over the name it is replacing, in the gutter, with the "
+         "old name selected so typing replaces it",
+         [](Stage& s) {
+             s.choose("Add track");
+             s.timeline->renameTrackForTesting(1);
+             s.settle();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-layer-being-renamed",
+         "and the same on a layer row -- the field is the row and is frameless, so the "
+         "selected name is the only thing that says it is one; what the editor opens on "
+         "is the layer's own name, which on a colour layer carrying its marks is not "
+         "what the row says",
+         [](Stage& s) {
+             static_cast<LayerList*>(s.layer_list)->renameRowForTesting(0);
+             s.settle();
+             s.picture = Stage::closeUpOf(s.layerPanel());
          }},
 
         {"a-drawing-being-dropped-on-a-hold",

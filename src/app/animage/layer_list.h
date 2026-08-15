@@ -4,6 +4,8 @@
 #include <QTreeWidget>
 #include <functional>
 
+#include "double_tap.h"
+
 // The layer panel's list, which is a list that refuses to reorder itself.
 //
 // Dragging a row is how the stack is restacked. The Move up and Move down
@@ -32,6 +34,22 @@ public:
     // Document::moveLayer means by `to`.
     std::function<void(int from, int to)> reordered;
 
+    // Renaming, and it refuses to do that itself for the same reason it refuses
+    // to reorder itself: the document is edited and the list is rebuilt from it.
+    //
+    // `nameOf` is what the editor opens on, and it is not the row's text. A
+    // colour layer whose marks come from another drawing has an arrow in front
+    // of its name -- see MainWindow::layerLabel -- and a rename seeded from what
+    // the row says would put that arrow in the name, then a second arrow in
+    // front of that. So the panel is asked what the layer is actually called.
+    std::function<QString(int row)> nameOf;
+    std::function<void(int row, const QString& name)> renamed;
+
+    // A name is being typed into, or has stopped being. The window turns the
+    // keyboard shortcuts off while it is true: Return is Play, and Return is
+    // also how a rename is finished. See shortcuts::Mode::Typing.
+    std::function<void(bool renaming)> renaming;
+
     // Where a row picked up at `from` lands when it is dropped at `boundary` --
     // a gap between rows, 0 above the first and `rows` below the last.
     //
@@ -51,6 +69,38 @@ public:
     // The drop itself is the platform's and cannot be driven from here.
     bool dragHasBegunForTesting() const { return state() == DraggingState; }
 
+    // Open the rename editor on a row, as a double click does. Qt's own double
+    // click is not the part that would be wrong; what the editor is seeded with
+    // and what it does with what is typed are, and those a test can reach.
+    void renameRowForTesting(int row) {
+        if (QTreeWidgetItem* item = topLevelItem(row)) {
+            editItem(item, 0);
+        }
+    }
+
+    // Finish an open rename: `keep` true is what Return means, false is Escape.
+    //
+    // Driven at the seam, like the drop above and for the same kind of reason.
+    // Qt answers Return by posting a queued call inside the delegate, and a
+    // synthetic key event never gets it delivered offscreen -- Escape, which is
+    // emitted straight from the filter, does work and is what proved the filter
+    // is installed at all. This is the pair of calls that queued hop makes, so
+    // everything downstream of it is ours and is tested.
+    void finishRenameForTesting(bool keep);
+
 protected:
     void dropEvent(QDropEvent* event) override;
+    // The far end of an open editor, which with the delegate's createEditor is
+    // what `renaming` reports. Qt's own entry point rather than somewhere we
+    // call ourselves, so a rename closed by anything at all -- Return, Escape, a
+    // click elsewhere, the panel being rebuilt -- says so, and the keyboard
+    // cannot be left switched off with no editor to show for it.
+    void closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) override;
+    // Where the pen's second tap is turned into the edit that a mouse's double
+    // click starts through the DoubleClicked trigger. See DoubleTap: the pen
+    // produces two presses and no double click, so the trigger never fires.
+    void mousePressEvent(QMouseEvent* event) override;
+
+private:
+    DoubleTap taps_;
 };

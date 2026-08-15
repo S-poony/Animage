@@ -96,6 +96,10 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    // Maximising and restoring frame the canvas in the window. See the comment
+    // on it: this arms the reframe rather than doing it, because the resize that
+    // makes it meaningful has not necessarily arrived yet.
+    void changeEvent(QEvent* event) override;
     // Autosave means the disk is meant to be current, so closing flushes rather
     // than warning: there is no unsaved state to ask about, only state that has
     // not been written yet.
@@ -113,6 +117,9 @@ private:
     // consume its shortcut, which is the whole mechanism: what goes quiet here
     // is what the canvas gets to hear.
     void setShortcutMode(shortcuts::Mode mode);
+    // A rename editor has opened or closed somewhere. See the comment on it:
+    // Return is Play, so the shortcuts have to let go of the keyboard.
+    void setTyping(bool typing);
 
     // A tooltip that has to say which key it is on.
     //
@@ -166,8 +173,15 @@ private:
     // the panel as it stands at that moment rather than the one it is about to
     // become.
     void showCurrentLayer();
+    // Frames the canvas if a maximise or a restore has just armed one. Asked
+    // from the canvas's resize and from a queued call after the state change,
+    // because neither event on its own is enough; see the comment on it.
+    void reframeIfArmed();
     void onLayerSelected();
     void onLayerItemChanged(QTreeWidgetItem* item, int column);
+    // What a double click on a layer's name typed. The panel does not edit
+    // itself: it says what was typed, and the list is rebuilt from the document.
+    void renameLayer(int row, const QString& name);
     void onOpacityChanged(int percent);
     void beginOpacityDrag();
     void endOpacityDrag();
@@ -411,6 +425,14 @@ private:
     bool updating_list_ = false;
     bool forwarding_key_ = false;
     bool framed_once_ = false;
+    // A maximise or a restore that has not settled yet: every canvas resize
+    // within kReframeWindowMs of it frames the canvas again. See changeEvent.
+    bool reframing_ = false;
+    QElapsedTimer reframe_since_;
+
+    // How many rename editors are open. See setTyping: two can overlap for a
+    // moment, so this is a count rather than a flag.
+    int typing_editors_ = 0;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;
 
     // The last colour that was a colour, so leaving a colour layer while

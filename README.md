@@ -174,6 +174,7 @@ cmake --build build --target animage && ./build/src/app/animage
 | Space-drag, middle-drag | pan |
 | `1` / `0` | actual size / fit the canvas |
 | `F` | fit the drawing, including whatever ran off the edge |
+| Maximise / restore | fits the canvas, since the window it was framed for has gone |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
 | `Alt`+right-drag | brush size |
 | `Alt`+click | pick the colour under the pointer (follows the pointer, taken where you let go) |
@@ -211,7 +212,10 @@ another drawing is how you transform the wrong thing.
 **Transform** takes the selection, or the whole drawing on the layer you are on
 if there is none. Corner handles resize both ways and edge handles one way, the
 round knob above the box turns it (so does dragging just outside a corner),
-`Shift` constrains a rotation to fifteen degrees and a move to an axis, and the
+dragging anywhere else moves it — inside the box or well away from it, which is
+what you need when the thing being moved is a thin line or is being lined up
+against the drawing underneath. `Shift` constrains a rotation to fifteen degrees
+and a move to an axis, and the
 numeric fields on the bar are the way to place something exactly, or to move a
 box whose handles have gone off screen. Nothing is written until you apply, so
 cancelling leaves no undo step; moving by a whole number of pixels does not
@@ -288,11 +292,13 @@ drawing so there is something to draw on.
 Drag a track's name up or down the strip on the left to restack it — the top row
 is the front of the picture, so that is how a background gets behind a character.
 Hovering a name says what the track is and what it does with a drawing put down
-on it.
+on it. Double-click a name to rename it there, and a layer's name in the panel
+the same way; Enter keeps the new name and Escape leaves the old one.
 
 Tracks need not be the same length. What a track shows once the playhead is past
-its last drawing is set under Track ▸ Past the last drawing: show nothing (the
-default), keep showing its last drawing, or cycle. That is about the picture, so
+its last drawing is set under Track ▸ Past the last drawing: nothing (the
+default), hold the last drawing, or cycle — and the status bar says which, for
+the track you are on. That is about the picture, so
 it applies to the flattened `composite/` export and not to the per-layer
 sequences: **a layer's folder is as long as its own track.** A background drawn
 once exports one frame, and downstream you import the still rather than a
@@ -416,6 +422,14 @@ The underscore separates the track from the layer from the frame number and
 nothing else in a name is allowed to be one, so a layer called "layer 1" is
 `layer-1` and the last number is always the frame. Hidden layers are not
 written at all.
+
+Name a layer whatever you like: punctuation and spaces become hyphens, and
+accented and non-Latin letters are kept as they are. The one thing to know is
+that this makes two names into one folder — `rough 1` and `rough-1` both give
+`rough-1` — so if two layers of a track would collide, the export stops before
+writing anything and tells you which two to rename. It refuses rather than
+inventing a name, because a folder quietly called `rough-1-2` is not one you
+would go looking for.
 
 **16-bit PNG or EXR, and they are not the same picture.** PNG converts on
 purpose — sRGB, unpremultiplied — and throws away about a third of what a

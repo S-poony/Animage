@@ -5,6 +5,9 @@
 #include <vector>
 
 #include "document.h"
+#include "double_tap.h"
+
+class QLineEdit;
 
 // The timeline: the scene's shared time axis, with one row per track.
 //
@@ -16,9 +19,10 @@
 // One ruler and one playhead across all of them, because the timeline belongs to
 // the scene and not to any track in it. Frame N means slot N in every track, and
 // tracks are not obliged to be the same length: past its last slot a track's row
-// is simply empty. What a track *should* show out there -- nothing, its last
-// drawing, or a cycle -- is issue #20 and is deliberately not decided here; it
-// is Track::imageAtSlot's to answer when it is.
+// is simply empty. What a track *shows* out there -- nothing, its last drawing,
+// or a cycle -- is Track::end, and this widget deliberately draws none of it:
+// the row stops at the last drawing and what happens beyond is said once, in the
+// status bar, rather than repeated along the row. See issue #22.
 //
 // A drawing held over several frames is one block with a tail, not several
 // identical cells, because that is what it is: the same ImageId repeated.
@@ -44,12 +48,27 @@ Q_SIGNALS:
     void currentSlotChanged(std::size_t slot);
     void trackChanged(animage::TrackId track);
     void documentChanged();
+    // A name is being typed into, or has stopped being. The window turns the
+    // keyboard shortcuts off while it is true: Return is Play, and Return is
+    // also how a rename is finished. See shortcuts::Mode::Typing.
+    void renamingChanged(bool renaming);
+
+public:
+    // Rename the track in `row` in place, as a double click on its name does.
+    // Public so a test can open the editor without a double click: what is worth
+    // pinning is what the editor does with what is typed into it, and Qt's own
+    // double click is not the part that would be wrong.
+    void renameTrackForTesting(std::size_t row) { beginRenaming(row); }
+    QLineEdit* renameEditorForTesting() const { return rename_edit_; }
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    // Watches the rename editor for Escape, which QLineEdit has no signal for.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     const animage::Track* trackAt(std::size_t row) const;
@@ -69,6 +88,9 @@ public:
     // with a card drawn where no hand could reach it.
     QPoint cellCentreForTesting(std::size_t row, std::size_t slot) const;
     QPoint rulerPointForTesting(std::size_t slot) const;
+    // The name strip of a row: what selects the track, what a restack is
+    // dragged by, and what a double click renames.
+    QPoint gutterPointForTesting(std::size_t row) const;
 
 private:
 
@@ -107,6 +129,21 @@ private:
 
     // The boundary between rows a drop at `y` would land on, in [0, rowCount()].
     int trackDropRowFor(int y) const;
+
+    // Renaming a track in place: a line edit laid over the name in the gutter.
+    //
+    // A widget on a row disables that row's own hit testing -- the trap the
+    // layer panel already records -- and this is the one shape that does not
+    // mind, because it exists only while it is being typed into and the row
+    // underneath is exactly what it has taken over.
+    // Renames whatever is at (x, y), if that is a name at all. True if it was:
+    // the mouse's double click and the pen's second tap both come through here.
+    bool renameAt(int x, int y);
+    void beginRenaming(std::size_t row);
+    // `keep` false is Escape: the editor goes away and the name does not move.
+    void finishRenaming(bool keep);
+    // Where the editor sits, which is the name's own rectangle in the gutter.
+    QRect gutterRectFor(std::size_t row) const;
 
     // What a drawing's colour layers are doing, in what the card can show.
     struct ColourState {
@@ -167,4 +204,15 @@ private:
     std::size_t track_drag_row_ = 0;
     int press_y_ = 0;
     int track_drop_row_ = -1;  // the boundary it would land on, in rows
+
+    // The rename editor, made once and reused. Which track it is editing is
+    // held as an id and not as a row, so a restack while it is open cannot
+    // rename the track that took the row's place.
+    QLineEdit* rename_edit_ = nullptr;
+    animage::TrackId renaming_ = animage::kNoId;
+    // A pen's double tap, which Qt does not turn into a double click for us.
+    DoubleTap taps_;
+    // editingFinished also fires when the editor loses focus, which is what
+    // hiding it does. Without this, applying a name applies it twice.
+    bool finishing_rename_ = false;
 };
