@@ -1,1 +1,9 @@
 * text=auto eol=lf
+
+# The mark in packaging/ and everything exported from it. `text=auto` guesses,
+# and a guess that goes wrong on a binary is a file that no longer opens; these
+# say so outright.
+*.af binary
+*.png binary
+*.ico binary
+*.icns binary

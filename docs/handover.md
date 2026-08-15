@@ -34,7 +34,7 @@ the shape of the program. Those five maps are.
 | [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
 | [**The traps**](#the-traps) | the things that cost hours, worst first |
-| [How to work on it](#how-to-work-on-it) | build, test, and what each benchmark is for |
+| [How to work on it](#how-to-work-on-it) | build, test, what each benchmark is for, and where the icon comes from |
 | [What I would do next](#what-i-would-do-next) | the queue |
 | [Three things to be careful of](#three-things-to-be-careful-of) | the two bets everything rests on, and one word |
 
@@ -2772,6 +2772,67 @@ addr2line -e build/src/app/animage.exe -f -C 0x14000a130
 ```
 
 Add the PE image base (`0x140000000`) to the offsets in the report.
+
+### The icon, and why the build does not draw it
+
+The mark is drawn in `packaging/animage.af` and everything else in `packaging/`
+comes out of it, in two steps, both by hand and both **committed rather than
+generated during the build**:
+
+```bash
+# Only when the drawing changes. Otherwise the tree already has all of this.
+#   1. open animage.af in Affinity Designer, export the artboard as animage.svg
+#   2. then, and commit what it writes:
+python packaging/make-icons.py
+```
+
+Nothing reads the `.af` — not the build, not `make-icons.py`, not the program.
+The SVG is where the automated part starts and is sufficient on its own.
+
+The `.af` is there because it is the file somebody would actually change the
+logo in, and a project that ships only the export has lost the drawing. It is
+closed and binary, so nothing reads it automatically, git cannot diff it, and
+two people cannot edit it at once — which is the price of keeping the real
+master rather than a flattened one. Anyone without Affinity edits the SVG and
+says so in the commit, at which point the `.af` is behind and the next person to
+open it needs to know that.
+
+**The artwork runs past the artboard on every side, and that is the drawing and
+not an accident.** The paths span roughly −923 to 5110 across a 3544-wide
+square, so what the icon shows is a crop. The construction puts its vanishing
+points outside the frame, which is what keeps the perspective sound and the
+thing editable later; pulling the shapes inside to suit the smallest icon would
+give that up. The price is paid at 16 pixels, in the title bar and nowhere else
+that matters — the taskbar takes 24 or 32, and everything from 48 up reads
+plainly. Judged legible enough at 16 and not worth a second export. Don't
+"fix" the crop without knowing that it was looked at.
+
+Step two is Inkscape, a deliberate dependency on a program a build machine is
+not promised to have — which is precisely why it runs by hand and its output is
+in the tree. Qt would have been the obvious renderer and cannot be used: `QtSvg`
+implements SVG Tiny 1.2, which has no `<mask>`, and the mark has one. Rendered
+through Qt the masked stroke silently disappears, so a build-time rasterisation
+would have shipped a subtly wrong icon on the platforms nobody was looking at.
+
+The icon then has to arrive in four unrelated places, and getting three of them
+right leaves the fourth generically iconed:
+
+| | reads | set by |
+|---|---|---|
+| The window, the dialogs, Alt-Tab | `:/icons/animage-*.png`, compiled in | `QApplication::setWindowIcon` in `main.cpp` |
+| Explorer and the taskbar | `animage.exe` itself | `packaging/animage.rc`, an `RC` source on the target |
+| Finder and the Dock | `Contents/Resources/animage.icns` | `MACOSX_BUNDLE_ICON_FILE`, plus the `.icns` as a bundle source |
+| The Linux desktop | the icon theme, by the name in `animage.desktop` | the AppImage step in `ci.yml`, installing the SVG under `hicolor` |
+
+The first two are separate on purpose and neither substitutes for the other: a
+running window asks Qt what its icon is and never looks at the executable, and
+Explorer reads the file without starting it. The PNG ladder is eight sizes
+rasterised at the size each is used at, rather than one large image Qt scales
+down, because 512 pixels squeezed into a title bar is a smear.
+
+`enable_language(RC)` is in the top-level `CMakeLists.txt` and has to be: Visual
+Studio generators enable it themselves, Ninja and MinGW do not, and without it
+the `.rc` is handed to the C compiler.
 
 ## What I would do next
 

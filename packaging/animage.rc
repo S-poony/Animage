@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// What Explorer, the taskbar and Alt-Tab read off animage.exe itself. The
+// window icon is set separately, from the PNGs in icons/, because a running
+// window asks Qt for its icon and never looks at the executable.
+//
+// The name has to sort first among the icon resources for the shell to treat
+// it as the application's: it takes the lowest-numbered one. There is only one
+// here, and 1 keeps it that way if another is ever added.
+1 ICON "animage.ico"

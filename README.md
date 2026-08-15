@@ -148,6 +148,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, and `shots.cpp` — pictures of the interface, one per named situation. |
 | `third_party/` | tinyexr (BSD-3) and miniz (MIT), vendored and compiled only into `exr_writer.cpp`. |
+| `packaging/` | The desktop entry, and the icon. `animage.af` is the mark as drawn, `animage.svg` is exported from it by hand, and `make-icons.py` renders the PNG, `.ico` and `.icns` beside them. |
 | `docs/fr/` | Original design documents. |
 
 ## Running it

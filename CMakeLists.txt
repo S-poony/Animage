@@ -5,6 +5,14 @@ cmake_minimum_required(VERSION 3.21)
 # build to establish.
 project(Animage VERSION 0.1.0 LANGUAGES C CXX)
 
+# The resource script that gives animage.exe its icon. Visual Studio generators
+# enable RC of their own accord; MinGW ones do not, and the file would be
+# handed to the C compiler instead. Asked for here rather than in
+# src/app/CMakeLists.txt so that it is enabled before any target is defined.
+if(WIN32)
+  enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

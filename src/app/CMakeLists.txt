@@ -100,6 +100,55 @@ set_target_properties(animage PROPERTIES
   MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
 )
 
+# ------------------------------------------------------------------ the icon
+#
+# The mark lives in packaging/animage.svg and is rasterised by
+# packaging/make-icons.py, not by the build: rendering an SVG needs a renderer,
+# and Qt's own reads SVG Tiny, which has no <mask> and so drops part of the
+# drawing. The three places it has to arrive are unrelated to each other.
+#
+# One: the window. Qt asks the application for the icon of every window it
+# opens, and gets it from the PNG ladder compiled in here -- see main.cpp. This
+# is the only one of the three that a plain `cmake --build` run can show you.
+qt_add_resources(animage "icons"
+  PREFIX "/icons"
+  BASE ${PROJECT_SOURCE_DIR}/packaging/icons
+  FILES
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-16.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-24.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-32.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-48.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-64.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-128.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-256.png
+    ${PROJECT_SOURCE_DIR}/packaging/icons/animage-512.png
+)
+
+# Two: the executable, for Explorer and the taskbar, which read the file rather
+# than ask the process.
+if(WIN32)
+  target_sources(animage PRIVATE ${PROJECT_SOURCE_DIR}/packaging/animage.rc)
+  # The .rc names animage.ico beside it. windres looks next to the script and
+  # would find it anyway; Microsoft's rc.exe searches the working directory and
+  # its include path instead, and the working directory under a Visual Studio
+  # generator is the build tree. So the directory is named.
+  target_include_directories(animage PRIVATE ${PROJECT_SOURCE_DIR}/packaging)
+endif()
+
+# Three: the bundle, for Finder and the Dock. The property names the file, and
+# the source entry is what actually copies it into Contents/Resources.
+if(APPLE)
+  set_target_properties(animage PROPERTIES MACOSX_BUNDLE_ICON_FILE animage.icns)
+  target_sources(animage PRIVATE ${PROJECT_SOURCE_DIR}/packaging/animage.icns)
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/packaging/animage.icns
+    PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+endif()
+
+# Linux has a fourth place, and it is not the build's: the desktop file names
+# an icon that the desktop looks up by name in the icon theme, so it is the
+# install that has to put the SVG there. See the AppImage step in the CI
+# workflow, which installs packaging/animage.svg under hicolor.
+
 # Enough of an install for the packaging step to have something to gather up.
 include(GNUInstallDirs)
 install(TARGETS animage
