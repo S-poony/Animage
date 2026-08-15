@@ -346,6 +346,12 @@ wrong, and both were reported after renaming got easy enough to do:
   `occupantOf`'s stance rather than a quiet `-2` suffix, and for the same reason:
   nobody works out that clash from a folder listing afterwards.
 
+- **And a name can be too long to write, which also failed partway.** The
+  measurements are in `name_limits.h`, and the short version is that a name goes
+  into a path twice — folder and file stem — so the folder can be legal while the
+  file inside it is not. Refused with the collision, for the same reason and in
+  the same place.
+
 **The refusal is asked for twice, and the second place is the one that matters.**
 `write` checks before it creates anything, which is enough to make the *export*
 safe and is not enough to make the operation safe: an export replaces what was in
@@ -952,6 +958,16 @@ first:
 **An empty name is refused and the old one kept**, in both panels and in the
 dialog. A nameless track has no label on its row, and a nameless layer has no
 folder of its own in an export.
+
+**And a long one is stopped at sixty characters, by the field**, in all three
+places — which is why Track ▸ Rename track builds its own `QInputDialog` instead
+of calling `QInputDialog::getText`: the static helper offers no way to reach its
+line edit, and a dialog that accepts a name the row beside it would refuse is two
+rules for one thing. Sixty is far past anything a hundred-pixel gutter can show,
+so it is a cap nobody meets, which is the only kind worth enforcing by refusing
+the keystroke rather than explaining afterwards. Both numbers and the arithmetic
+tying them together are in `name_limits.h`; the reason there is a *second* number
+is in [the traps](#the-traps).
 
 **What the keyboard does while a name is being typed into** is
 [its own question](#what-the-keyboard-does-and-when), and it had a real bug in
@@ -2749,6 +2765,35 @@ which is the order the broken version assumed. The test now also sends a resize
 `shots -platform windows` against a real maximised window, reading the zoom back:
 0.6575, against 0.6575 for a fit at that size. Anything about window state wants
 verifying that way before it is believed.
+
+**A path limit is per component, and a name that breaks it breaks it halfway.**
+Windows allows 255 characters per path *component*, not per path — the old
+260-character total does not bite, because Qt prefixes long paths internally, and
+a 533-character path writes fine here. So the question for an exported name is
+only ever how long one component is, and an exported name is a component twice
+over: the folder, and the stem of every file in it,
+`{track}_{layer}/{track}_{layer}_0007.png`.
+
+That doubling is what makes it fail badly rather than cleanly. Measured, by
+exporting at increasing lengths:
+
+| sequence name | what happens |
+|---|---|
+| up to 246 | exports |
+| **247 to 255** | **folder created, no frame in it can be written** |
+| 256 and up | folder cannot be created either; fails cleanly |
+
+The middle band is nine characters wide and nine is `_0001.png`. It is the worst
+of the three outcomes: the sequences with shorter names are written and the long
+one is not, so the export is *partial* — and since an export empties its folder
+first, the previous one has gone as well. Both ends of the table are fine; only
+the band matters, and it is invisible from either side of it.
+
+The lesson generalises past this program: **a limit that a name can straddle
+needs checking, not just handling.** A name that is far too long fails at the
+first thing that touches the disk and is obvious. A name that is *just* too long
+gets through the first thing and fails at the second, which is always later and
+usually partway through the work.
 
 **A closed editor is still a child of the view.** An item view releases its
 editor with `deleteLater`, so `findChild<QLineEdit*>` hands back the dead one

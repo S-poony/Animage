@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "color.h"
+#include "name_limits.h"
 #include "compositor.h"
 #include "ctg.h"
 #include "exr_writer.h"
@@ -115,6 +116,16 @@ struct Sequence {
     QString name;
 };
 
+// A name as it appears in a message about it. Elided, because the two things
+// that can be wrong with a name are that it clashes with another and that it is
+// too long, and quoting a 250-character name back in a dialog to say it is too
+// long would be its own kind of unhelpful.
+QString shortly(const std::string& name) {
+    constexpr int kQuoted = 32;
+    const QString full = QString::fromStdString(name);
+    return full.size() <= kQuoted ? full : full.left(kQuoted) + QStringLiteral("…");
+}
+
 // Every layer sequence the export will write, or the first pair of them that
 // would land in the same folder. False means it refused, and `error` says which
 // two -- see namesCollide for why that refusal exists and why it is public.
@@ -131,8 +142,31 @@ bool resolveSequences(const Document& doc, std::vector<Sequence>* out, QString* 
             if (!layer.visible) continue;
             const QString name = sequenceName(track.name, layer.name);
             const QString which =
-                QStringLiteral("\"%1\" on \"%2\"")
-                    .arg(QString::fromStdString(layer.name), QString::fromStdString(track.name));
+                QStringLiteral("\"%1\" on \"%2\"").arg(shortly(layer.name), shortly(track.name));
+
+            // Too long to write, and refused here for the same reason as a
+            // collision: it fails *partway* otherwise. Between 247 and 255
+            // characters the folder is created and no frame in it can be, so
+            // the sequences with shorter names are written and this one is not.
+            // See names::kExported for the arithmetic.
+            //
+            // Nothing typed into the interface can reach this -- the fields cap
+            // at names::kTyped -- so what it catches is a project from another
+            // build or a hand-edited scene.json. The length is quoted rather
+            // than the name, which by definition will not fit in a sentence.
+            if (static_cast<std::size_t>(name.size()) > names::kExported) {
+                if (error) {
+                    *error = QStringLiteral(
+                                 "The name of %1 is too long to export: the folder it needs "
+                                 "would be %2 characters and a filesystem allows %3. Shorten "
+                                 "the track's name or the layer's.")
+                                 .arg(which)
+                                 .arg(name.size())
+                                 .arg(names::kExported);
+                }
+                return false;
+            }
+
             const auto found = claimed.constFind(name);
             if (found != claimed.constEnd()) {
                 if (error) {

@@ -9,6 +9,8 @@
 
 #include <algorithm>
 
+#include "name_limits.h"
+
 namespace {
 
 // The rename editor for a layer row.
@@ -36,6 +38,8 @@ public:
                           const QModelIndex& index) const override {
         if (index.column() != 0) return nullptr;
         QWidget* editor = QStyledItemDelegate::createEditor(parent, option, index);
+        // The same cap the timeline's editor has. See names::kTyped.
+        if (auto* line = qobject_cast<QLineEdit*>(editor)) line->setMaxLength(names::kTyped);
         // The moment a rename starts, and the only honest one. It was hung off
         // QAbstractItemView::edit at first, which does not mean what its name
         // suggests: it returns true when the *delegate* merely consumed the

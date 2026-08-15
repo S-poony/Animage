@@ -9,6 +9,8 @@
 #include <QPainter>
 #include <algorithm>
 
+#include "name_limits.h"
+
 using namespace animage;
 
 namespace {
@@ -855,6 +857,9 @@ void TimelineWidget::beginRenaming(std::size_t row) {
     if (!rename_edit_) {
         rename_edit_ = new QLineEdit(this);
         rename_edit_->setFrame(true);
+        // A hard cap rather than a complaint afterwards, and far past anything a
+        // gutter this wide can show. See names::kTyped.
+        rename_edit_->setMaxLength(names::kTyped);
         // Enter, and losing the editor to a click somewhere else, both mean the
         // name is what it now says. Escape is the only way to leave it alone,
         // and it arrives as a key rather than as a signal -- hence the filter.

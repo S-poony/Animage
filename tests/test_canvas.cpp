@@ -47,6 +47,7 @@
 #include "brush.h"
 #include "canvas_widget.h"
 #include "layer_list.h"
+#include "name_limits.h"
 #include "export_sequence.h"
 #include "color.h"
 #include "half.h"
@@ -3014,6 +3015,108 @@ void anExportRefusesTwoLayersInOneFolder() {
     track.layers[1].name = "rough 1";
     track.layers[1].visible = false;
     CHECK(!exporting::namesCollide(doc, nullptr));
+}
+
+// A name too long to be a folder, which fails *partway* if nobody looks.
+//
+// Measured rather than assumed, and the measurement is the whole point of the
+// number: up to 246 characters an export works; from 247 to 255 the folder is
+// created and no frame in it can be written; from 256 the folder cannot be
+// created either. That middle band is a partial export -- and the export folder
+// is emptied first, so the previous one has gone as well.
+void anExportRefusesANameTooLongToWrite() {
+    TEST("a name too long to be a folder stops the export instead of half-writing it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    const QString out = scratch.filePath(QStringLiteral("out"));
+
+    animage::Document doc = buildDrawnScene();
+    Track& track = doc.mutableScene().tracks.front();
+    track.name = "t";
+    track.layers[1].visible = false;  // one sequence, so the arithmetic is plain
+
+    exporting::Options options;
+    options.folder = out;
+    options.layers = true;
+    options.flattened = false;
+
+    // "t_" and the layer's name, so the sequence is two characters longer.
+    const auto nameOfLength = [&](std::size_t total) {
+        track.layers[0].name = std::string(total - 2, 'a');
+        CHECK_EQ(static_cast<std::size_t>(
+                     exporting::sequenceName(track.name, track.layers[0].name).size()),
+                 total);
+    };
+
+    // Exactly at the limit still exports, which is what stops the number being
+    // quietly lowered to something safe-looking and never noticed.
+    nameOfLength(names::kExported);
+    QString error;
+    CHECK(!exporting::namesCollide(doc, &error));
+    CHECK(exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK_EQ(QDir(out).entryList(QDir::Dirs | QDir::NoDotAndDotDot).size(), 1);
+
+    // One past it is refused, before anything is created. This is the first
+    // length in the band that used to make the folder and then fail on every
+    // frame in it.
+    QDir(out).removeRecursively();
+    nameOfLength(names::kExported + 1);
+    error.clear();
+    CHECK(exporting::namesCollide(doc, &error));
+    CHECK(error.contains(QStringLiteral("too long")));
+    CHECK(!exporting::write(doc, options, nullptr, nullptr, &error));
+    CHECK(!QDir(out).exists());
+
+    // And it says the length rather than repeating the name, which by definition
+    // will not fit in a sentence: the name is elided, so the message stays a
+    // sentence and still says which layer.
+    CHECK(error.contains(QString::number(names::kExported + 1)));
+    CHECK(error.contains(QStringLiteral("…")));
+    CHECK(!error.contains(QString(40, QLatin1Char('a'))));
+    CHECK(error.size() < 250);
+}
+
+// Nothing typed into the interface can reach that limit, because the fields stop
+// far short of it. A hard cap and not a complaint afterwards -- which is worth
+// doing only because it is far past any name anybody would want.
+void aNameFieldStopsLongBeforeTheExportWould() {
+    TEST("every field that names a track or a layer caps its length");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(layers != nullptr);
+    CHECK(timeline != nullptr);
+    if (!layers || !timeline) return;
+
+    layers->renameRowForTesting(0);
+    QCoreApplication::processEvents();
+    auto* layer_editor = layers->findChild<QLineEdit*>();
+    CHECK(layer_editor != nullptr);
+    if (!layer_editor) return;
+    CHECK_EQ(layer_editor->maxLength(), names::kTyped);
+
+    // Typed rather than assigned: setText is capped by the same rule, and what
+    // is being pinned is that a hand cannot get past it.
+    layer_editor->setText(QString(names::kTyped + 20, QLatin1Char('x')));
+    CHECK_EQ(layer_editor->text().size(), names::kTyped);
+    layers->finishRenameForTesting(false);
+    settleEditors();
+
+    timeline->renameTrackForTesting(0);
+    QCoreApplication::processEvents();
+    QLineEdit* track_editor = timeline->renameEditorForTesting();
+    CHECK(track_editor != nullptr);
+    if (!track_editor) return;
+    CHECK_EQ(track_editor->maxLength(), names::kTyped);
+
+    // Two of them and a separator have to fit in what the export can write, or
+    // the cap would be decoration. The header asserts it too; this is the same
+    // sum from the other side.
+    CHECK(2 * static_cast<std::size_t>(names::kTyped) + 1 < names::kExported);
 }
 
 // Through the window, which is where the progress dialog and the document are.
@@ -6217,6 +6320,8 @@ int main(int argc, char** argv) {
     exportCanBeCancelled();
     exportNamesSurviveAwkwardLayerNames();
     anExportRefusesTwoLayersInOneFolder();
+    anExportRefusesANameTooLongToWrite();
+    aNameFieldStopsLongBeforeTheExportWould();
     exrExportsThePixelsUnconverted();
     exrAndPngAreTheSamePicture();
     theFileMenuExports();

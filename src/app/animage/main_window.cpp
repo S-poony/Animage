@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "main_window.h"
 
+#include "name_limits.h"
+
 #include <QAbstractSpinBox>
 #include <QAction>
 #include <QActionGroup>
@@ -2018,17 +2020,25 @@ void MainWindow::addTrack() {
     refreshEverything();
 }
 
+// The menu's way in. Double-clicking the name in the gutter is the other, and
+// this one stays because a menu item is discoverable and a double click is not.
+//
+// Built rather than QInputDialog::getText, only so that the field can be given
+// the same cap the in-place editors have: the static helper offers no way to
+// reach its line edit, and a dialog that accepts a name the row next to it would
+// refuse is two different rules for one thing.
 void MainWindow::renameTrack() {
     const Track* track = doc_.scene().findTrack(track_);
     if (!track) return;
 
-    bool accepted = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("Rename track"), QStringLiteral("Name"), QLineEdit::Normal,
-        QString::fromStdString(track->name), &accepted);
-    if (!accepted) return;
+    QInputDialog ask(this);
+    ask.setWindowTitle(QStringLiteral("Rename track"));
+    ask.setLabelText(QStringLiteral("Name"));
+    ask.setTextValue(QString::fromStdString(track->name));
+    if (auto* field = ask.findChild<QLineEdit*>()) field->setMaxLength(names::kTyped);
+    if (ask.exec() != QDialog::Accepted) return;
 
-    const QString trimmed = name.trimmed();
+    const QString trimmed = ask.textValue().trimmed();
     // A track with no name has no row label and no prefix on its exported
     // files, so the old one is kept rather than accepting the emptiness.
     if (trimmed.isEmpty()) return;

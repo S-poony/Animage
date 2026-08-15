@@ -423,13 +423,13 @@ nothing else in a name is allowed to be one, so a layer called "layer 1" is
 `layer-1` and the last number is always the frame. Hidden layers are not
 written at all.
 
-Name a layer whatever you like: punctuation and spaces become hyphens, and
-accented and non-Latin letters are kept as they are. The one thing to know is
-that this makes two names into one folder — `rough 1` and `rough-1` both give
-`rough-1` — so if two layers of a track would collide, the export stops before
-writing anything and tells you which two to rename. It refuses rather than
-inventing a name, because a folder quietly called `rough-1-2` is not one you
-would go looking for.
+Name a layer whatever you like, up to sixty characters: punctuation and spaces
+become hyphens, and accented and non-Latin letters are kept as they are. The one
+thing to know is that this makes two names into one folder — `rough 1` and
+`rough-1` both give `rough-1` — so if two layers of a track would collide, the
+export stops before writing anything and tells you which two to rename. It
+refuses rather than inventing a name, because a folder quietly called
+`rough-1-2` is not one you would go looking for.
 
 **16-bit PNG or EXR, and they are not the same picture.** PNG converts on
 purpose — sRGB, unpremultiplied — and throws away about a third of what a
