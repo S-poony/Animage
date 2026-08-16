@@ -1756,6 +1756,82 @@ void anUnboundedSolveIsFinerThanABoundedOne() {
 // take the barrier away with it -- and only at the next re-solve, since a
 // layer's visibility is not part of what a fill is keyed on, so the fill went
 // wrong at some later moment with nothing connecting the two.
+// A layer drawn away from where its pixels are stored, reduced onto a coarse
+// sample grid. Both halves were tested and neither is unusual -- a colour layer
+// showing carried marks is the first, and any zoom below 100% is the second --
+// but nothing put them together, and where they meet the compositor sized its
+// buffers from one rectangle and indexed them from another.
+//
+// The assertion is the one thing that cannot be wrong whatever the arithmetic
+// does: a pixel inside the region has to appear somewhere in the picture. It
+// used to vanish, because the column it was written to was one past the end of
+// two heap buffers -- which is a write, so on a build with a sanitizer this
+// aborts, and on one without it silently corrupts whatever was next.
+void aMovedLayerLosesNoColumnOffItsEnd() {
+    TEST("a moved layer reduced onto a coarse grid loses no column off its end");
+
+    Compositor compositor;
+    Layer layer;
+    layer.visible = true;
+    layer.opacity = 1.0f;
+
+    const Rgba ink{1.0f, 1.0f, 1.0f, 1.0f};
+    int checked = 0;
+
+    for (const double ratio : {2.0, 2.5, 3.0}) {
+        const SampleStep step = SampleStep::fromRatio(ratio);
+        // Only where the box reads every image pixel. Coarser than that it is
+        // sampled on a lattice and a one-pixel mark falling between two lattice
+        // points is dropped on purpose -- which happens with no offset at all,
+        // so it is the reduction working and not this bug. Asked rather than
+        // assumed, so that changing the sample budget makes this skip instead
+        // of quietly asserting something that is no longer true.
+        if (boxSampleStride(step) != 1) continue;
+        const PixelRect region = snapToSampleGrid(step, PixelRect{0, 0, 24, 8});
+
+        for (int offset = 0; offset < 8; ++offset) {
+            for (int x = 0; x < 24; ++x) {
+                // Where this pixel is drawn, which is where it is stored plus
+                // the layer's shift. Outside the region it is nobody's business.
+                const int drawn_at = x + offset;
+                if (drawn_at < region.x || drawn_at >= region.x + region.width) continue;
+
+                auto tile = std::make_shared<Tile>();
+                tile->setPixel(tileLocal(x), tileLocal(2), ink);
+                TileGrid grid;
+                grid.set(tileCoordFor(x, 2), tile);
+
+                LayerPass pass;
+                pass.tiles = &grid;
+                pass.layer = &layer;
+                pass.offset = CtgShift{offset, 0};
+
+                Framebuffer out;
+                compositor.compositeGrids({pass}, region, out, step);
+
+                bool anywhere = false;
+                for (int y = 0; y < out.height() && !anywhere; ++y) {
+                    for (int cx = 0; cx < out.width(); ++cx) {
+                        if (out.pixel(cx, y).a > 0.0f) {
+                            anywhere = true;
+                            break;
+                        }
+                    }
+                }
+                if (!anywhere) {
+                    // Which configuration, so a failure names the case rather
+                    // than only the line.
+                    std::printf("    lost: ratio %.2f offset %d stored x %d\n", ratio, offset, x);
+                }
+                CHECK(anywhere);
+                ++checked;
+            }
+        }
+    }
+    // The sweep is the test; an empty one would pass by doing nothing.
+    CHECK(checked > 200);
+}
+
 void ahiddenSourceIsStillABarrier() {
     TEST("hiding a source layer does not take the barrier away with it");
     Fixture f;
@@ -1837,5 +1913,6 @@ int main() {
     anAbandonedSolveReturnsNothing();
     anUnboundedSolveIsFinerThanABoundedOne();
     ahiddenSourceIsStillABarrier();
+    aMovedLayerLosesNoColumnOffItsEnd();
     return testing::summarise("ctg");
 }

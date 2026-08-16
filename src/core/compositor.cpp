@@ -127,14 +127,28 @@ struct ColumnPlan {
     std::vector<float> column_weight;   // total weight arriving in each column
 };
 
-ColumnPlan planColumns(const SampleStep& step, const PixelRect& region, int stride,
-                       int columns) {
+// `region` is where the samples are *read* from and `shift` is how far the layer
+// is drawn from there, so `read + shift` is where a sample lands. The columns
+// are worked out in that drawn space and not in the read space.
+//
+// They used to be worked out in the read space, and the two are not the same
+// grid: the sample lattice is anchored at the image origin, so a rectangle of
+// the same width at a different phase can span one more entry than the output
+// has columns. entryAt floors, so `entryAt(p) - entryAt(region.x - shift)` and
+// `entryAt(p + shift) - entryAt(region.x)` differ by one at some phases -- and
+// the first was being used to index buffers sized by the second. That is a write
+// one past the end of both the accumulator and the weights, on every row of
+// every repaint, for a colour layer showing carried marks at any zoom below
+// 100%. Computing it here in the drawn space bounds `column` to [0, columns) by
+// construction rather than by a check that can be forgotten.
+ColumnPlan planColumns(const SampleStep& step, const PixelRect& region, int stride, int columns,
+                       int shift) {
     ColumnPlan plan;
     plan.origin = firstLatticePointAtOrAfter(region.x, stride);
     plan.column_weight.assign(static_cast<std::size_t>(columns), 0.0f);
 
     const int x_end = region.x + region.width;
-    const long long first_column = step.entryAt(region.x);
+    const long long first_column = step.entryAt(region.x + shift);
     const int count =
         (x_end > plan.origin) ? (x_end - plan.origin + stride - 1) / stride : 0;
     plan.column.resize(static_cast<std::size_t>(count));
@@ -148,9 +162,10 @@ ColumnPlan planColumns(const SampleStep& step, const PixelRect& region, int stri
         const int from = (j == 0) ? region.x : at;
         const int to = std::min(x_end, at + stride);
 
-        long long lower = static_cast<long long>(from) << SampleStep::kFractionBits;
-        const long long upper = static_cast<long long>(to) << SampleStep::kFractionBits;
-        const int column = static_cast<int>(step.entryAt(from) - first_column);
+        // In drawn coordinates, which is what the columns are counted in.
+        long long lower = static_cast<long long>(from + shift) << SampleStep::kFractionBits;
+        const long long upper = static_cast<long long>(to + shift) << SampleStep::kFractionBits;
+        const int column = static_cast<int>(step.entryAt(from + shift) - first_column);
         plan.column[static_cast<std::size_t>(j)] = column;
 
         for (int k = 0; k < 2 && lower < upper; ++k) {
@@ -506,7 +521,7 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
     const int stride = reducing ? boxSampleStride(step) : 1;
     const long long first_row = step.entryAt(region.y);
     const ColumnPlan plan =
-        reducing ? planColumns(step, region, stride, out.width()) : ColumnPlan{};
+        reducing ? planColumns(step, region, stride, out.width(), 0) : ColumnPlan{};
 
     // A layer drawn away from where its pixels are stored is read from a region
     // moved the other way and written to the same columns, which is the whole
@@ -523,8 +538,11 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
                                          : region;
             if (reducing) {
                 const long long rows_from = moved ? step.entryAt(from.y) : first_row;
+                // Read from `from`, drawn `pass.offset.x` away from it -- which
+                // is back onto `region`, and that is the grid the columns count.
                 const ColumnPlan moved_plan =
-                    moved ? planColumns(step, from, stride, out.width()) : ColumnPlan{};
+                    moved ? planColumns(step, from, stride, out.width(), pass.offset.x)
+                          : ColumnPlan{};
                 blendLayerRowsBoxed(*pass.tiles, *pass.layer, from, step, rows_from, stride,
                                     moved ? moved_plan : plan, y_begin, y_end, out,
                                     accumulator);

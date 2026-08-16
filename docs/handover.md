@@ -2395,6 +2395,36 @@ Do not propose it.
 
 These are the things that cost hours, in the order they hurt.
 
+**Two rectangles of the same width can span a different number of entries, and
+sizing a buffer from one while indexing it from the other is a heap overflow.**
+This one shipped too, and it is a *write*, so on a build with a sanitizer it
+aborts and on one without it corrupts whatever the allocator put next.
+
+`compositeGrids` sizes its framebuffer and its accumulator from the region being
+drawn, then — for a layer drawn away from where its pixels are stored, which is a
+colour layer showing carried marks — built the column plan from the region being
+*read*, which is the same rectangle moved by the shift. The sample grid is
+anchored at the image origin, so those two have different phases, and
+`SampleStep::entryAt` floors: `entryAt(p) - entryAt(region.x - shift)` and
+`entryAt(p + shift) - entryAt(region.x)` are not the same number. The first was
+being used to index buffers sized by the second, and at some phases it is one
+larger — one past the end, on every row of every repaint, at any zoom below 100%.
+
+**The fix is to compute the columns in the space the buffers are counted in**,
+which bounds the index by construction rather than by a check somebody has to
+remember. Worth noting how it hid: the *spill* write a few lines below was
+already guarded against exactly this, `column + 1 >= columns`, so the code looked
+like it had been thought about. The unguarded write was the primary one.
+
+It hid from the tests for a plainer reason. Both halves were covered — the offset
+path has tests, and so does the reduction — but nothing put them together, so no
+test ever ran a reducing `SampleStep` against a non-zero `LayerPass::offset`. The
+new one sweeps ratios and offsets and asserts the one thing that cannot be wrong:
+a pixel inside the region has to appear somewhere in the picture. It is confined
+to the ratios where the box reads every image pixel, because above those the
+lattice legitimately drops a one-pixel mark — with no offset at all, so that is
+the reduction working rather than this bug.
+
 **A gesture that opens a command on the press and closes it on the release will
 one day not get the release, and the undo history dies silently for the rest of
 the session.** This one shipped, and it is first because of how quiet it was.
