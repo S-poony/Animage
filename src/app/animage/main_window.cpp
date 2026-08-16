@@ -431,7 +431,6 @@ void MainWindow::chooseShortcuts() {
 // Undo and Redo are absent from the list on purpose -- they are live in both
 // modes and *redefined* in one, which the handlers ask about.
 void MainWindow::setShortcutMode(shortcuts::Mode mode) {
-    mode_ = mode;
     for (const auto& [id, action] : keyed_actions_) {
         action->setEnabled(shortcuts::liveIn(shortcuts::entryFor(id).modes, mode));
     }
@@ -604,24 +603,19 @@ void MainWindow::buildActions() {
     // One exclusive group: these compete for the pen, which is what a tool is.
     // Picking any of them while a transform is live commits it -- reaching for
     // the brush means you have finished placing the drawing, and it is the same
-    // rule as changing frame.
+    // rule as changing frame. That is setTool's job now, and not spelled out
+    // three times here: this group and the canvas's Tool are the same fact.
     auto* mode = new QActionGroup(this);
     brush_action_ = makeAction(Id::Brush, [this] {
-        canvas_->applyTransform();
-        canvas_->setLassoing(false);
-        canvas_->setEraser(false);
+        canvas_->setTool(CanvasWidget::Tool::Brush);
         syncToolSettings();
     });
     eraser_action_ = makeAction(Id::Eraser, [this] {
-        canvas_->applyTransform();
-        canvas_->setLassoing(false);
-        canvas_->setEraser(true);
+        canvas_->setTool(CanvasWidget::Tool::Eraser);
         syncToolSettings();
     });
     lasso_action_ = makeAction(Id::Lasso, [this] {
-        canvas_->applyTransform();
-        canvas_->setEraser(false);
-        canvas_->setLassoing(true);
+        canvas_->setTool(CanvasWidget::Tool::Lasso);
         syncToolSettings();
     });
     transform_action_ = makeAction(Id::Transform, [this] { chooseTransformTool(); });
@@ -897,8 +891,7 @@ void MainWindow::chooseTransformTool() {
     statusBar()->showMessage(
         QStringLiteral("Cannot transform: %1").arg(CanvasWidget::explain(refusal)), 6000);
     brush_action_->setChecked(true);
-    canvas_->setLassoing(false);
-    canvas_->setEraser(false);
+    canvas_->setTool(CanvasWidget::Tool::Brush);
     syncToolSettings();
 }
 
@@ -937,9 +930,11 @@ void MainWindow::clipboard(Clipboard what) {
 void MainWindow::onTransformBegan() {
     // A paste arrives here without anybody having pressed the tool, and the
     // float it lands in is a transform like any other -- so the tool says so.
+    // Only the button: the canvas set its own Tool when it took the float, and
+    // this handler putting the other tools down by hand is what used to leave
+    // the eraser up behind a checked Transform button.
     if (transform_action_ && !transform_action_->isChecked()) {
         transform_action_->setChecked(true);
-        canvas_->setLassoing(false);
     }
     if (transform_bar_) {
         // Placed before it is shown: the fields have just been given their
@@ -961,8 +956,6 @@ void MainWindow::onTransformEnded() {
     // handler that commits a transform.
     if (transform_action_ && transform_action_->isChecked()) {
         brush_action_->setChecked(true);
-        canvas_->setLassoing(false);
-        canvas_->setEraser(false);
         syncToolSettings();
     }
     refreshEverything();
@@ -1210,7 +1203,6 @@ void MainWindow::buildTimelinePanel() {
     layout->setContentsMargins(4, 4, 4, 4);
 
     auto* controls = new QWidget(panel);
-    timeline_controls_ = controls;
     auto* row = new QHBoxLayout(controls);
     row->setContentsMargins(0, 0, 0, 0);
 
@@ -2223,15 +2215,6 @@ void MainWindow::shortenExposure() {
     if (track->exposureOf(image) <= 1) return;  // that would delete the drawing
     doc_.removeSlot(track_, slot);
     refreshEverything();
-}
-
-void MainWindow::setFramerate(int fps) {
-    doc_.setFramerate(fps);
-    if (playback_timer_->isActive()) {
-        playback_clock_.restart();
-        playback_start_slot_ = timeline_widget_->currentSlot();
-    }
-    syncStatus();
 }
 
 // One command for the pair, so changing both and then changing your mind is one

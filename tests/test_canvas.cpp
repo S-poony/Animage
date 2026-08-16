@@ -4372,6 +4372,38 @@ void theTransformToolTakesTheWholeDrawing() {
     CHECK(fixture.action(shortcuts::Id::Play)->isEnabled());
 }
 
+void enteringATransformPutsTheOtherToolsDown() {
+    TEST("entering a transform puts the eraser down rather than leaving it up");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+
+    fixture.action(shortcuts::Id::Eraser)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->isErasing());
+
+    // Which tool has the pen is one value, so entering a transform cannot leave
+    // a second one up behind it. It used to: the handler cleared the lasso and
+    // said nothing about the eraser, so Alt+right-drag went on resizing the
+    // eraser, the ring drew at its radius, and the toolbar's size box showed its
+    // number under a checked Transform button until the transform ended.
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK(fixture.canvas->transformIsLive());
+    CHECK(fixture.canvas->tool() == CanvasWidget::Tool::Transform);
+    CHECK(!fixture.canvas->isErasing());
+    CHECK(!fixture.canvas->isLassoing());
+
+    // And leaving it comes back to the brush, not to the tool that was up when
+    // it started.
+    fixture.canvas->cancelTransform();
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK(fixture.canvas->tool() == CanvasWidget::Tool::Brush);
+    CHECK(!fixture.canvas->isErasing());
+}
+
 void nudgingMovesTheDrawingExactly() {
     TEST("a nudge moves the drawing by whole pixels and does not soften it");
     WindowWithInk fixture;
@@ -5153,7 +5185,7 @@ void theEraserSaysSoBeforeYouDraw() {
 
     // Picking the tool is enough: the pointer does not have to move for the
     // canvas to say which tool is now under it.
-    f.canvas.setEraser(true);
+    f.canvas.setTool(CanvasWidget::Tool::Eraser);
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Erase));
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
@@ -5163,7 +5195,7 @@ void theEraserSaysSoBeforeYouDraw() {
     // has moved, and two marks under one hand read as two pointers.
     CHECK(!f.canvas.toolRing().has_value());
 
-    f.canvas.setEraser(false);
+    f.canvas.setTool(CanvasWidget::Tool::Brush);
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
 }
 
@@ -6221,7 +6253,7 @@ void shiftErasesInAStraightLineToo() {
     f.draw(150.0f, 150.0f, 650.0f, 550.0f);  // something to rub out
     CHECK(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350) > 0.0f);
 
-    f.canvas.setEraser(true);
+    f.canvas.setTool(CanvasWidget::Tool::Eraser);
     f.canvas.brushSettings().radius = 30.0f;
     // Along the ink, by way of a detour well off it.
     sendMouseWith(&f.canvas, QEvent::MouseButtonPress, QPointF(200.0, 190.0), Qt::LeftButton,
@@ -6276,6 +6308,7 @@ int main(int argc, char** argv) {
     theFlipButtonsMirrorTheDrawing();
     aFlippedBoxStillScalesTheRightWay();
     theTransformToolTakesTheWholeDrawing();
+    enteringATransformPutsTheOtherToolsDown();
     nudgingMovesTheDrawingExactly();
     cancellingLeavesTheUndoDepthWhereItWas();
     aTransformAppliesToTheWholeHold();

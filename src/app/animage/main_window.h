@@ -316,7 +316,6 @@ private:
     // every frame.
     void updatePlaybackRate();
     void onOnionChanged();
-    void setFramerate(int fps);
 
     animage::Layer* currentLayer();
 
@@ -327,7 +326,6 @@ private:
     TimelineWidget* timeline_widget_ = nullptr;
     QScrollArea* timeline_scroll_ = nullptr;
     QDockWidget* timeline_dock_ = nullptr;
-    QWidget* timeline_controls_ = nullptr;
     // How many rows the dock was last sized for. Without it every refresh --
     // and there is one per frame change -- would shove the dock back to the
     // height the track count implies, undoing a drag the moment you scrubbed.
@@ -373,7 +371,6 @@ private:
 
     // Every action the shortcut table names, by id. See setShortcutMode.
     std::unordered_map<shortcuts::Id, QAction*> keyed_actions_;
-    shortcuts::Mode mode_ = shortcuts::Mode::Normal;
 
     // Every tooltip that has to name a key, so that changing one is a loop
     // rather than a hunt through the file for parentheses.

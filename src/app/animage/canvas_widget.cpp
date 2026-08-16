@@ -522,11 +522,24 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
     active_layer_ = layer;
 }
 
-void CanvasWidget::setEraser(bool erasing) {
-    erasing_ = erasing;
+// Picking any tool while a transform is live commits it -- reaching for the
+// brush means you have finished placing the drawing, and it is the same rule as
+// changing frame. That used to be each caller's job, spelled out beside a pair
+// of setters it also had to remember to call in the right order.
+//
+// applyTransform puts the tool back to Brush itself, so it runs before the
+// assignment rather than after it, and the re-entrant setTool that arrives
+// through transformEnded finds the tool already where it wants it and returns.
+void CanvasWidget::setTool(Tool tool) {
+    if (tool_ == Tool::Transform && tool != Tool::Transform) applyTransform();
+    if (tool_ == tool) return;
+    tool_ = tool;
+    // The pen cannot still be drawing a loop with the lasso put down.
+    drawing_lasso_ = false;
     // Which tool is up is half of what the pointer answers, so picking one is a
     // reason to ask again. This is where the eraser stopped being invisible.
     refreshPointer();
+    update();
 }
 
 void CanvasWidget::setBrushColour(float r, float g, float b) {
@@ -1209,14 +1222,6 @@ void CanvasWidget::drawCanvasFrame(QPainter& painter) {
 
 // --- selection -----------------------------------------------------------
 
-void CanvasWidget::setLassoing(bool lassoing) {
-    if (lassoing_ == lassoing) return;
-    lassoing_ = lassoing;
-    drawing_lasso_ = false;
-    refreshPointer();
-    update();
-}
-
 void CanvasWidget::clearSelection() {
     if (selection_.isEmpty()) return;
     selection_ = Selection{};
@@ -1441,6 +1446,7 @@ CanvasWidget::Refusal CanvasWidget::paste() {
     live.values.pivot_x = bounds.x + bounds.width / 2.0;
     live.values.pivot_y = bounds.y + bounds.height / 2.0;
     transform_ = std::move(live);
+    tool_ = Tool::Transform;
 
     buildTransformPicture();
     refreshAll();
@@ -1508,6 +1514,7 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
     live.values.pivot_x = bounds.x + bounds.width / 2.0;
     live.values.pivot_y = bounds.y + bounds.height / 2.0;
     transform_ = std::move(live);
+    tool_ = Tool::Transform;
 
     buildTransformPicture();
     refreshAll();
@@ -1620,6 +1627,7 @@ void CanvasWidget::applyTransform() {
     // would draw the float over the pixels it had just become.
     const LiveTransform live = *transform_;
     transform_.reset();
+    tool_ = Tool::Brush;
     grab_ = Grab::None;
 
     // An identity writes nothing at all. Picking a drawing up, looking at it and
@@ -1653,6 +1661,7 @@ void CanvasWidget::applyTransform() {
 void CanvasWidget::cancelTransform() {
     if (!transform_) return;
     transform_.reset();
+    tool_ = Tool::Brush;
     grab_ = Grab::None;
     refreshAll();
     refreshPointer();
@@ -1979,9 +1988,12 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
     // that was getting lost: the cursor was put back by hand at the end of each
     // gesture, from a chain of held-key tests repeated at three call sites, and
     // a path that forgot one left the closed hand on screen.
-    if (panning_) return Pointing::Panning;
-    if (zooming_) return Pointing::Zoom;
-    if (sizing_) return Pointing::SizeBrush;
+    switch (navigating_) {
+        case Navigating::Panning: return Pointing::Panning;
+        case Navigating::Zooming: return Pointing::Zoom;
+        case Navigating::Sizing: return Pointing::SizeBrush;
+        case Navigating::None: break;
+    }
     if (picking_) return Pointing::Pick;
 
     // Then the held keys, which say what a press will do wherever it lands --
@@ -2012,10 +2024,10 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
         return Pointing::Nothing;
     }
 
-    if (lassoing_) return Pointing::Lasso;
+    if (tool_ == Tool::Lasso) return Pointing::Lasso;
     // The pen turned over is the eraser as much as the button is, and it is the
     // case with nothing else on screen to announce it.
-    return (erasing_ || hover_eraser_) ? Pointing::Erase : Pointing::Draw;
+    return (isErasing() || hover_eraser_) ? Pointing::Erase : Pointing::Draw;
 }
 
 void CanvasWidget::updatePointerAt(const QPointF& widget_point) {
@@ -2047,8 +2059,8 @@ std::optional<CanvasWidget::ToolRing> CanvasWidget::toolRing() const {
     // measuring a distance out from that point and the circle is what the
     // distance means. A ring that travelled with it would also be the one thing
     // on screen not holding still to be compared against.
-    if (!sizing_) return std::nullopt;
-    const BrushSettings& tool = erasing_ ? eraser_settings_ : brush_settings_;
+    if (navigating_ != Navigating::Sizing) return std::nullopt;
+    const BrushSettings& tool = isErasing() ? eraser_settings_ : brush_settings_;
     return ToolRing{size_anchor_widget_, tool.radius * zoom_};
 }
 
@@ -2207,8 +2219,8 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool 
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
     if (!layer || layer->locked || !layer->visible) return;
 
-    BrushSettings settings = (stylus_eraser_ || erasing_) ? eraser_settings_ : brush_settings_;
-    settings.erase = stylus_eraser_ || erasing_;
+    BrushSettings settings = (stylus_eraser_ || isErasing()) ? eraser_settings_ : brush_settings_;
+    settings.erase = stylus_eraser_ || isErasing();
 
     // On a CTG layer the stroke is a label, not paint. Pressure must not thin
     // the mark into a half-vote for a colour, and a soft rim would be read as
@@ -2398,21 +2410,21 @@ bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton 
     // leaving the drawing -- the gesture Photoshop and Krita already taught
     // everyone's hands.
     if (button == Qt::RightButton && (modifiers & Qt::AltModifier)) {
-        sizing_ = true;
+        navigating_ = Navigating::Sizing;
         size_anchor_widget_ = widget_point;
         radius_at_press_ = brushSettings().radius;
         refreshPointer();
         return true;
     }
     if (zoom_key_held_) {
-        zooming_ = true;
+        navigating_ = Navigating::Zooming;
         zoom_anchor_widget_ = widget_point;
         zoom_at_press_ = zoom_;
         refreshPointer();
         return true;
     }
     if (button == Qt::MiddleButton || (space_held_ && button == Qt::LeftButton)) {
-        panning_ = true;
+        navigating_ = Navigating::Panning;
         pan_anchor_widget_ = widget_point;
         pan_anchor_image_ = pan_;
         refreshPointer();
@@ -2422,45 +2434,50 @@ bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton 
 }
 
 bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
-    if (sizing_) {
-        const double dx = widget_point.x() - size_anchor_widget_.x();
-        const float radius = static_cast<float>(
-            std::clamp(radius_at_press_ * std::exp(dx * kSizeDragPerPixel), 0.5, 400.0));
-        brushSettings().radius = radius;
-        // The ring is the whole of what this gesture shows, so it is put back on
-        // screen here rather than waiting for the next thing to repaint.
-        updateToolRing();
-        Q_EMIT brushSizeChanged(radius);
-        return true;
-    }
-    if (zooming_) {
-        // Scrubby zoom: drag right to come in, left to go out, about the point
-        // the drag started from.
-        const double dx = widget_point.x() - zoom_anchor_widget_.x();
-        setZoom(zoom_at_press_ * std::exp(dx * kScrubbyZoomPerPixel), zoom_anchor_widget_);
-        return true;
-    }
-    if (panning_) {
-        // Absolute from where the drag began, so this one never accumulated --
-        // but it stores an exact pan now like everything else, and lets pan()
-        // do the aligning. One rule about where rounding happens is easier to
-        // keep than three call sites that each remember to.
-        const QPointF moved = widget_point - pan_anchor_widget_;
-        pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
-                pan_anchor_image_.y() - moved.y() / zoom_};
-        ensureCacheCoversView();
-        update();
-        Q_EMIT viewChanged();
-        return true;
+    switch (navigating_) {
+        case Navigating::None:
+            return false;
+
+        case Navigating::Sizing: {
+            const double dx = widget_point.x() - size_anchor_widget_.x();
+            const float radius = static_cast<float>(
+                std::clamp(radius_at_press_ * std::exp(dx * kSizeDragPerPixel), 0.5, 400.0));
+            brushSettings().radius = radius;
+            // The ring is the whole of what this gesture shows, so it is put
+            // back on screen here rather than waiting for the next repaint.
+            updateToolRing();
+            Q_EMIT brushSizeChanged(radius);
+            return true;
+        }
+
+        case Navigating::Zooming: {
+            // Scrubby zoom: drag right to come in, left to go out, about the
+            // point the drag started from.
+            const double dx = widget_point.x() - zoom_anchor_widget_.x();
+            setZoom(zoom_at_press_ * std::exp(dx * kScrubbyZoomPerPixel), zoom_anchor_widget_);
+            return true;
+        }
+
+        case Navigating::Panning: {
+            // Absolute from where the drag began, so this one never accumulated
+            // -- but it stores an exact pan now like everything else, and lets
+            // pan() do the aligning. One rule about where rounding happens is
+            // easier to keep than three call sites that each remember to.
+            const QPointF moved = widget_point - pan_anchor_widget_;
+            pan_ = {pan_anchor_image_.x() - moved.x() / zoom_,
+                    pan_anchor_image_.y() - moved.y() / zoom_};
+            ensureCacheCoversView();
+            update();
+            Q_EMIT viewChanged();
+            return true;
+        }
     }
     return false;
 }
 
 void CanvasWidget::endNavigation() {
-    if (!panning_ && !zooming_ && !sizing_) return;
-    panning_ = false;
-    zooming_ = false;
-    sizing_ = false;
+    if (!isNavigating()) return;
+    navigating_ = Navigating::None;
     // This used to be the held-key chain written out by hand, and two others
     // like it were elsewhere. Whatever is true now is what the pointer says now.
     refreshPointer();
@@ -2523,11 +2540,13 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         beginNavigation(widget_point, Qt::LeftButton, event->modifiers())) {
         return;
     }
-    if ((panning_ || zooming_ || sizing_) && event->type() == QEvent::TabletMove) {
-        continueNavigation(widget_point);
+    // The same shape as the mouse path below: continueNavigation answers "was
+    // there one to continue", so the tablet path no longer re-derives that from
+    // the flags by hand.
+    if (event->type() == QEvent::TabletMove && continueNavigation(widget_point)) {
         return;
     }
-    if ((panning_ || zooming_ || sizing_) && event->type() == QEvent::TabletRelease) {
+    if (isNavigating() && event->type() == QEvent::TabletRelease) {
         endNavigation();
         return;
     }
@@ -2576,7 +2595,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
         }
         return;
     }
-    if (lassoing_) {
+    if (tool_ == Tool::Lasso) {
         switch (event->type()) {
             case QEvent::TabletPress: beginLasso(widget_point); break;
             case QEvent::TabletMove: extendLasso(widget_point); break;
@@ -2648,7 +2667,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
         beginTransformDrag(event->position());
         return;
     }
-    if (lassoing_) {
+    if (tool_ == Tool::Lasso) {
         beginLasso(event->position());
         return;
     }
@@ -2677,7 +2696,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
         continueTransformDrag(event->position());
         return;
     }
-    if (lassoing_) {
+    if (tool_ == Tool::Lasso) {
         extendLasso(event->position());
         return;
     }
@@ -2687,7 +2706,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
     updatePointerAt(event->position());
-    if (panning_ || zooming_ || sizing_) {
+    if (isNavigating()) {
         endNavigation();
         return;
     }
@@ -2701,7 +2720,7 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
         endTransformDrag();
         return;
     }
-    if (lassoing_) {
+    if (tool_ == Tool::Lasso) {
         endLasso();
         return;
     }

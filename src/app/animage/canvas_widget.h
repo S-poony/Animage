@@ -63,12 +63,25 @@ public:
     void setActiveLayer(animage::LayerId layer);
     animage::LayerId activeLayer() const { return active_layer_; }
 
+    // Which tool has the pen. One value and not a flag each, because they
+    // compete for it: any two of them being true at once is a state the dispatch
+    // below has no answer for, and it used to be reachable -- entering a
+    // transform cleared the lasso and left the eraser up, so the size box, the
+    // brush ring and Alt+right-drag all went on answering for a tool that was no
+    // longer selected. Transform is one of them rather than a flag beside them
+    // for the same reason; transform_ is its payload, and the two are kept in
+    // step wherever that payload is set or reset.
+    enum class Tool { Brush, Eraser, Lasso, Transform };
+    void setTool(Tool tool);
+    Tool tool() const { return tool_; }
+
     // Brush and eraser keep their own settings, as separate tools do
     // everywhere else: a size and a pressure response that suit inking do not
     // suit rubbing out.
-    animage::BrushSettings& brushSettings() { return erasing_ ? eraser_settings_ : brush_settings_; }
-    void setEraser(bool erasing);
-    bool isErasing() const { return erasing_; }
+    animage::BrushSettings& brushSettings() {
+        return isErasing() ? eraser_settings_ : brush_settings_;
+    }
+    bool isErasing() const { return tool_ == Tool::Eraser; }
 
     // Always the brush's colour, never the eraser's. brushSettings() hands back
     // whichever tool is selected, so setting a colour through it while the
@@ -179,8 +192,7 @@ public:
     // cannot clip the brush -- you can draw anywhere whether or not something is
     // selected -- so it is an argument to transform, copy and erase and nothing
     // else, and an ordinary click clears it.
-    void setLassoing(bool lassoing);
-    bool isLassoing() const { return lassoing_; }
+    bool isLassoing() const { return tool_ == Tool::Lasso; }
 
     bool hasSelection() const { return !selection_.isEmpty(); }
     const animage::Selection& selection() const { return selection_; }
@@ -510,7 +522,7 @@ private:
 
     animage::BrushSettings brush_settings_;
     animage::BrushSettings eraser_settings_;
-    bool erasing_ = false;
+    Tool tool_ = Tool::Brush;
     bool stylus_eraser_ = false;  // the pen was turned over for this stroke
     // And is turned over *now*, which is a different question and the one the
     // pointer answers. Read from hover rather than from the press, because the
@@ -593,16 +605,25 @@ private:
     // it off. Empty means there is nothing there. See ring_drawn_.
     QRect line_drawn_;
 
-    bool panning_ = false;
+    // What the pen is doing to the view rather than to the drawing. One value
+    // and not a flag each: beginNavigation sets exactly one of them through a
+    // strict chain and endNavigation clears them together, so they were already
+    // one value -- the type just did not say so, and "is one of them running"
+    // was a three-term disjunction written out at four call sites, two of which
+    // were re-deriving by hand what continueNavigation already returns.
+    enum class Navigating { None, Panning, Zooming, Sizing };
+    Navigating navigating_ = Navigating::None;
+    bool isNavigating() const { return navigating_ != Navigating::None; }
+
+    // Each gesture's anchor. Only the live one means anything; the others hold
+    // whatever the last gesture of that kind left behind.
     bool space_held_ = false;
     QPointF pan_anchor_widget_;
     QPointF pan_anchor_image_;
 
-    bool sizing_ = false;
     QPointF size_anchor_widget_;
     float radius_at_press_ = 1.0f;
 
-    bool zooming_ = false;
     bool zoom_key_held_ = false;
     QPointF zoom_anchor_widget_;
     double zoom_at_press_ = 1.0;
@@ -678,8 +699,7 @@ private:
     animage::LayerKind clipboard_kind_ = animage::LayerKind::Raster;
 
     animage::Selection selection_;
-    bool lassoing_ = false;      // the tool is selected
-    bool drawing_lasso_ = false; // and the pen is down
+    bool drawing_lasso_ = false; // the lasso tool is up and the pen is down
     QPointF lasso_press_widget_;
     bool lasso_passed_threshold_ = false;
 
