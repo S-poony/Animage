@@ -58,6 +58,25 @@ the decision. It also records the hand-written JSON reader that used to sit
 beside it, why the argument for that one looked identical and was not, and why
 removing it was right.
 
+Everything under [docs/](docs/), and whether it describes something that exists:
+
+| | |
+|---|---|
+| [handover.md](docs/handover.md) | how the program fits together, what was built and what it cost, and the traps. Start at its own table of contents. **Built** |
+| [why-our-own-formats.md](docs/why-our-own-formats.md) | why the project file and the cel format are its own, measured against the alternatives. **Built** |
+| [scribbles-through-time.md](docs/scribbles-through-time.md) | a scribble staying from one drawing to the next, and moving to follow the animation. **Built** as far as one translation per drawing; the rungs past that are research |
+| [lasso-and-transform.md](docs/lasso-and-transform.md) | selecting part of a drawing, moving, rotating and scaling it, and the clipboard. **Built** |
+| [m0-latency.md](docs/m0-latency.md) | the pen-to-pixel latency gate, and how it is measured. **Built** |
+| [importing.md](docs/importing.md) | bringing in image sequences and audio. Two decisions still open: which audio library, and how an imported sequence is stored. **Not built** |
+| [playback-resolution.md](docs/playback-resolution.md) | giving up resolution to hold the frame rate, and when. **Not built** |
+
+As the paragraph above says of one of them: a design note written before the
+thing was built is kept afterwards, with the original text left alone and the
+correction marked underneath. So a document that opens "nothing here is built"
+may well be describing something that now is, and the corrections are the
+interesting part. The column above says which is which, so that finding out does
+not mean reading the whole note first.
+
 ## Download
 
 Every push to `main` is built and tested on Linux, Windows and macOS, and the
