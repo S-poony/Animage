@@ -67,6 +67,44 @@ struct PixelRect {
     bool isEmpty() const { return width <= 0 || height <= 0; }
 };
 
+// The two things everybody does with a pair of these, and the test that goes
+// with them. They were private to three translation units -- the canvas, the
+// colour job and the selection, the last two character for character identical
+// -- which made the empty-rectangle conventions three decisions that happened
+// to agree rather than one decision. They agree because it is written here:
+//
+//   intersect -- no overlap is the empty rectangle, never a negative one, so
+//                the result is always safe to loop over.
+//   unite     -- empty is the identity, so folding over a list of regions can
+//                start from {} and a region nobody wrote to costs nothing.
+inline PixelRect intersect(const PixelRect& a, const PixelRect& b) {
+    const int x0 = std::max(a.x, b.x);
+    const int y0 = std::max(a.y, b.y);
+    const int x1 = std::min(a.x + a.width, b.x + b.width);
+    const int y1 = std::min(a.y + a.height, b.y + b.height);
+    if (x1 <= x0 || y1 <= y0) return {};
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
+inline PixelRect unite(const PixelRect& a, const PixelRect& b) {
+    if (a.isEmpty()) return b;
+    if (b.isEmpty()) return a;
+    const int x0 = std::min(a.x, b.x);
+    const int y0 = std::min(a.y, b.y);
+    const int x1 = std::max(a.x + a.width, b.x + b.width);
+    const int y1 = std::max(a.y + a.height, b.y + b.height);
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
+// Whether `inner` is wholly inside `outer`. An empty `inner` is contained
+// wherever it sits, which is what the cache check wants: nothing to cover is
+// covered.
+inline bool contains(const PixelRect& outer, const PixelRect& inner) {
+    return inner.x >= outer.x && inner.y >= outer.y &&
+           inner.x + inner.width <= outer.x + outer.width &&
+           inner.y + inner.height <= outer.y + outer.height;
+}
+
 struct TileCoord {
     int x = 0;
     int y = 0;

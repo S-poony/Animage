@@ -374,20 +374,7 @@ int chooseWorkerCount(int rows, int columns) {
     return std::clamp(std::min(available, rows / 32), 1, 8);
 }
 
-PixelRect intersect(const PixelRect& a, const PixelRect& b) {
-    const int x0 = std::max(a.x, b.x);
-    const int y0 = std::max(a.y, b.y);
-    const int x1 = std::min(a.x + a.width, b.x + b.width);
-    const int y1 = std::min(a.y + a.height, b.y + b.height);
-    if (x1 <= x0 || y1 <= y0) return {};
-    return {x0, y0, x1 - x0, y1 - y0};
-}
 
-bool contains(const PixelRect& outer, const PixelRect& inner) {
-    return inner.x >= outer.x && inner.y >= outer.y &&
-           inner.x + inner.width <= outer.x + outer.width &&
-           inner.y + inner.height <= outer.y + outer.height;
-}
 
 // The view, moved to a whole number of screen pixels.
 //
@@ -405,15 +392,6 @@ QPointF onWholeScreenPixels(const QPointF& pan, double zoom) {
     return {std::round(pan.x() * zoom) / zoom, std::round(pan.y() * zoom) / zoom};
 }
 
-PixelRect unite(const PixelRect& a, const PixelRect& b) {
-    if (a.isEmpty()) return b;
-    if (b.isEmpty()) return a;
-    const int x0 = std::min(a.x, b.x);
-    const int y0 = std::min(a.y, b.y);
-    const int x1 = std::max(a.x + a.width, b.x + b.width);
-    const int y1 = std::max(a.y + a.height, b.y + b.height);
-    return {x0, y0, x1 - x0, y1 - y0};
-}
 
 }  // namespace
 

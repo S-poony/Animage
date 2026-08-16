@@ -10,24 +10,7 @@
 namespace animage {
 namespace {
 
-PixelRect uniteRects(const PixelRect& a, const PixelRect& b) {
-    if (a.isEmpty()) return b;
-    if (b.isEmpty()) return a;
-    const int x0 = std::min(a.x, b.x);
-    const int y0 = std::min(a.y, b.y);
-    const int x1 = std::max(a.x + a.width, b.x + b.width);
-    const int y1 = std::max(a.y + a.height, b.y + b.height);
-    return {x0, y0, x1 - x0, y1 - y0};
-}
 
-PixelRect intersectRects(const PixelRect& a, const PixelRect& b) {
-    const int x0 = std::max(a.x, b.x);
-    const int y0 = std::max(a.y, b.y);
-    const int x1 = std::min(a.x + a.width, b.x + b.width);
-    const int y1 = std::min(a.y + a.height, b.y + b.height);
-    if (x1 <= x0 || y1 <= y0) return {};
-    return {x0, y0, x1 - x0, y1 - y0};
-}
 
 bool abandoned(const std::atomic<bool>* abandon) {
     return abandon != nullptr && abandon->load(std::memory_order_relaxed);
@@ -345,14 +328,14 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     // drawing's own, or the layer is set to leave them where they were put.
     CtgShift shift;
     if (!job.origin_sources.empty()) {
-        PixelRect ink = intersectRects(
+        PixelRect ink = intersect(
             [&] {
                 PixelRect all;
                 for (const TileGrid& source : job.sources) {
-                    all = uniteRects(all, drawnBounds(source));
+                    all = unite(all, drawnBounds(source));
                 }
                 for (const TileGrid& source : job.origin_sources) {
-                    all = uniteRects(all, drawnBounds(source));
+                    all = unite(all, drawnBounds(source));
                 }
                 return all;
             }(),
@@ -366,11 +349,11 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     PixelRect region = drawnBounds(job.scribbles);
     region = {region.x + shift.x, region.y + shift.y, region.width, region.height};
     for (const TileGrid& source : job.sources) {
-        region = uniteRects(region, drawnBounds(source));
+        region = unite(region, drawnBounds(source));
     }
     region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
               region.height + 2 * kTileSize};
-    region = intersectRects(region, filled);
+    region = intersect(region, filled);
     if (region.isEmpty()) {
         CtgFill empty;
         empty.inputs = job.inputs;
@@ -593,7 +576,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     for (const auto& [coord, tile] : job.scribbles.tiles()) {
         const PixelRect whole{coord.x * kTileSize + shift.x, coord.y * kTileSize + shift.y,
                               kTileSize, kTileSize};
-        const PixelRect part = intersectRects(whole, filled);
+        const PixelRect part = intersect(whole, filled);
         if (part.isEmpty()) continue;
 
         for (int py = part.y; py < part.y + part.height; ++py) {

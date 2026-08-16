@@ -15,14 +15,6 @@ namespace {
 // near-horizontal edge and sixteen bought nothing that could be seen.
 constexpr int kSubRows = 8;
 
-PixelRect intersectRects(const PixelRect& a, const PixelRect& b) {
-    const int x0 = std::max(a.x, b.x);
-    const int y0 = std::max(a.y, b.y);
-    const int x1 = std::min(a.x + a.width, b.x + b.width);
-    const int y1 = std::min(a.y + a.height, b.y + b.height);
-    if (x1 <= x0 || y1 <= y0) return {};
-    return {x0, y0, x1 - x0, y1 - y0};
-}
 
 }  // namespace
 
@@ -46,7 +38,7 @@ PixelRect Selection::bounds() const {
 }
 
 CoverageMask rasterise(const Selection& selection, const PixelRect& clip) {
-    const PixelRect region = intersectRects(selection.bounds(), clip);
+    const PixelRect region = intersect(selection.bounds(), clip);
     if (region.isEmpty()) return {};
 
     std::vector<float> coverage(static_cast<std::size_t>(region.width) * region.height, 0.0f);
@@ -131,7 +123,7 @@ Lift liftThrough(const TileGrid& source, const CoverageMask& mask) {
         if (!tile) continue;
 
         const PixelRect square{coord.x * kTileSize, coord.y * kTileSize, kTileSize, kTileSize};
-        if (intersectRects(square, region).isEmpty()) {
+        if (intersect(square, region).isEmpty()) {
             // The mask does not reach this tile, so nothing is picked up and the
             // handle is shared rather than copied. Lassoing a corner of a
             // drawing costs the tiles under the loop and nothing else.
