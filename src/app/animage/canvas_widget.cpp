@@ -2664,6 +2664,18 @@ void CanvasWidget::abandonGesture() {
     // Re-derived from the pen on the next press, but not until then, and a stale
     // one makes the *mouse* erase.
     stylus_eraser_ = false;
+
+    // Held keys whose release is going to be delivered somewhere else, or
+    // nowhere. Alt would come back on its own -- it is a modifier, so every
+    // tablet and mouse event carries it and re-derives this -- but Space and Z
+    // are not modifiers and appear in no event's modifiers(), so nothing
+    // re-derives them. Left set, the pen pans or zooms for ever instead of
+    // drawing, with no message and no way out but tapping the key again over the
+    // canvas, which nothing tells you.
+    space_held_ = false;
+    zoom_key_held_ = false;
+    alt_held_ = false;
+
     refreshPointer();
     update();
 }

@@ -306,6 +306,28 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         return QMainWindow::eventFilter(watched, event);
     }
 
+    // A key whose press we forwarded has its release forwarded too, whatever is
+    // true by the time that release arrives.
+    //
+    // Both guards below ask about the state *now*, and the state changes while a
+    // key is held down. Alt+Tab is Alt going down: a Space release on the way
+    // back therefore carries Alt, hit the modifier guard, and was dropped -- with
+    // its press already delivered. The canvas went on believing Space was held
+    // and every pen press panned instead of drawing, for the rest of the
+    // session, with nothing on screen saying why. Opening a rename editor
+    // between the press and the release does the same thing through the guard
+    // above it.
+    //
+    // A press that was never forwarded falls through to the guards as before, so
+    // a bare release with no press of its own is unchanged -- which is a case
+    // that already existed and is already tested.
+    if (event->type() == QEvent::KeyRelease && forwarded_keys_.erase(key->key()) > 0) {
+        forwarding_key_ = true;
+        QCoreApplication::sendEvent(canvas_, key);
+        forwarding_key_ = false;
+        return true;
+    }
+
     // Not while something is being typed into. Space and Z are pan and zoom
     // only when the keyboard belongs to the canvas; in a name being renamed, in
     // a spin box on the transform bar, or in any dialog's field, they are
@@ -321,6 +343,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
         return QMainWindow::eventFilter(watched, event);
     }
+
+    // Remembered before it goes, so that the release above can find it however
+    // the keyboard has changed in the meantime. Auto-repeat re-inserts the same
+    // key, which a set makes free.
+    if (event->type() == QEvent::KeyPress) forwarded_keys_.insert(key->key());
 
     forwarding_key_ = true;
     QCoreApplication::sendEvent(canvas_, key);

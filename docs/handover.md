@@ -1343,6 +1343,17 @@ widget and not `watched`, because a key goes to whatever holds the keyboard and
 this filter sees it again at every parent it propagates to. It was already wrong
 for the Rename track dialog and for every spin box on the transform bar.
 
+**And both of its guards were being asked again on the way out.** They answer
+about the state *now*, and the state changes while a key is held down: Alt+Tab is
+Alt going down, so the Space release on the way back carried Alt, hit the guard
+that exists for Ctrl+Z, and was dropped — with its press already delivered. The
+canvas went on believing Space was held, so every pen press panned instead of
+drawing, for the rest of the session, with nothing saying why. Opening a rename
+editor between a press and its release did the same through the other guard. The
+filter remembers which keys it forwarded a press for and forwards their release
+unconditionally; a release whose press it never sent still takes the old path, so
+the bare-release case that was already tested is unchanged.
+
 Neither of those is reachable by a test here, and that is worth saying plainly: a
 synthetic key event does not go through Qt's shortcut map, so no assertion in
 `test_canvas` can see Play swallow a Return. What is pinned is one step in — that

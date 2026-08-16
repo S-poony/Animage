@@ -706,6 +706,80 @@ void heldKeysDoNotRecurse() {
     CHECK(true);  // reaching here at all is the assertion
 }
 
+// A held key is remembered by the canvas and cleared by its release, so any
+// route that delivers the press and drops the release leaves the pen panning or
+// zooming for ever instead of drawing. Alt is not at risk -- it is a modifier,
+// so every pointer event carries it and re-derives the flag -- but Space and Z
+// appear in no event's modifiers() and nothing re-derives them.
+void aHeldKeyDoesNotSurviveItsRelease() {
+    TEST("Space and Z do not stay held when their release goes astray");
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // The timeline and not just any child: the keys have to travel through the
+    // window's filter to reach the canvas, and an event sent to the canvas
+    // itself is handled directly and never tests the filter at all. The timeline
+    // takes click focus, so this is the everyday way the keyboard ends up off
+    // the canvas while the pointer is still over it.
+    auto* elsewhere = window.findChild<TimelineWidget*>();
+    CHECK(elsewhere != nullptr);
+    if (!elsewhere) return;
+    elsewhere->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(!canvas->hasFocus());
+
+    // What a press would do. A held key is answered before anything under the
+    // pointer, so this reads the flag without the pointer having to move.
+    const auto pointing = [&] { return canvas->pointing(); };
+
+    // Route one: the release carries a modifier the press did not. Alt+Tab is
+    // Alt going down, so the Space release on the way back arrives with Alt on
+    // it -- and the filter's modifier guard, which exists for Ctrl+Z, dropped it
+    // while its press had already gone through. Reachable without leaving the
+    // application at all: hold Space, then press Alt, then let Space go.
+    QKeyEvent space_down(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(elsewhere, &space_down);
+    QCoreApplication::processEvents();
+    CHECK(pointing() == CanvasWidget::Pointing::PanReady);
+
+    QKeyEvent space_up_with_alt(QEvent::KeyRelease, Qt::Key_Space, Qt::AltModifier);
+    QCoreApplication::sendEvent(elsewhere, &space_up_with_alt);
+    QCoreApplication::processEvents();
+    const bool space_let_go_through_the_filter = pointing() != CanvasWidget::Pointing::PanReady;
+    CHECK(space_let_go_through_the_filter);
+
+    // The same for Z, whose guard is the one Ctrl+Z is actually about.
+    QKeyEvent zoom_down(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier);
+    QCoreApplication::sendEvent(elsewhere, &zoom_down);
+    QCoreApplication::processEvents();
+    CHECK(pointing() == CanvasWidget::Pointing::Zoom);
+
+    QKeyEvent zoom_up_with_ctrl(QEvent::KeyRelease, Qt::Key_Z, Qt::ControlModifier);
+    QCoreApplication::sendEvent(elsewhere, &zoom_up_with_ctrl);
+    QCoreApplication::processEvents();
+    CHECK(pointing() != CanvasWidget::Pointing::Zoom);
+
+    // Route two: the window stops being the one the release will reach at all.
+    // Nothing re-derives the flag, so the canvas has to let go of it itself.
+    QKeyEvent held_again(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(elsewhere, &held_again);
+    QCoreApplication::processEvents();
+    CHECK(pointing() == CanvasWidget::Pointing::PanReady);
+
+    canvas->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    canvas->clearFocus();
+    QCoreApplication::processEvents();
+    const bool space_let_go_on_focus_loss = pointing() != CanvasWidget::Pointing::PanReady;
+    CHECK(space_let_go_on_focus_loss);
+}
+
 // The other half of that forwarding, and it was wrong from the day it was
 // written: a space is a character wherever one is being typed, and the filter
 // was taking every one of them to pan with. Nothing noticed while the only
@@ -6419,6 +6493,7 @@ int main(int argc, char** argv) {
     transparencyIsOfferedOnlyWhereItMeansSomething();
     theFileMenuSavesAndOpens();
     heldKeysDoNotRecurse();
+    aHeldKeyDoesNotSurviveItsRelease();
     spaceReachesWhateverIsBeingTypedInto();
     longPanGestureSurvives();
     scrubbyZoomGestureSurvives();

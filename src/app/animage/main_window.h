@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -424,6 +425,11 @@ private:
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;
+    // Keys whose press this filter sent to the canvas, so that their release
+    // goes the same way however the keyboard has changed since. See eventFilter:
+    // asking the guards again on the way out is what left the canvas panning
+    // for ever after Alt+Tab.
+    std::unordered_set<int> forwarded_keys_;
     bool framed_once_ = false;
     // A maximise or a restore that has not settled yet: every canvas resize
     // within kReframeWindowMs of it frames the canvas again. See changeEvent.
