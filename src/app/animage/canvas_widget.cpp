@@ -1675,21 +1675,17 @@ std::array<QPointF, 8> CanvasWidget::transformHandles() const {
     const PixelRect& bounds = transform_->bounds;
     const Matrix m = matrixOf(transform_->values);
 
-    const double left = bounds.x;
-    const double top = bounds.y;
-    const double right = bounds.x + bounds.width;
-    const double bottom = bounds.y + bounds.height;
-    const double middle_x = (left + right) / 2.0;
-    const double middle_y = (top + bottom) / 2.0;
-
-    // Clockwise from the top left, corners and edge middles alternating, so
-    // that a handle's index says what it does: even is a corner, odd is an edge.
-    const Vec2 in_image[8] = {{left, top},      {middle_x, top},    {right, top},
-                              {right, middle_y}, {right, bottom},   {middle_x, bottom},
-                              {left, bottom},   {left, middle_y}};
-
+    // Clockwise from the top left, corners and edge middles alternating, so that
+    // a handle's index says what it does: even is a corner, odd is an edge.
+    //
+    // From handleInImage and not from a second table of the same eight points.
+    // This end decides where a handle is *drawn* and where a press *hits*;
+    // handleInImage decides what that press *means* -- the opposite corner to
+    // scale about, and the arm the drag is measured against. Two tables that
+    // disagreed by one index would still draw correctly and still register the
+    // press, and the symptom would read as a bug in the scale arithmetic.
     for (std::size_t i = 0; i < 8; ++i) {
-        const Vec2 moved = apply(m, in_image[i]);
+        const Vec2 moved = apply(m, handleInImage(bounds, static_cast<int>(i)));
         handles[i] = widgetFromImage(QPointF(moved.x, moved.y));
     }
 
