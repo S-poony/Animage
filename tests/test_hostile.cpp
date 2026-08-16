@@ -134,6 +134,50 @@ void aCelWithTooManyTilesIsRefused() {
     CHECK(out.empty());  // untouched
 }
 
+// The up-front size check is a total: header, then eight bytes of coordinates
+// and a 512-byte row table for every tile. What it does not account for is the
+// pixels between one tile's row table and the next one's, so the guarantee it
+// gives holds for the first tile and drifts further out with every tile after
+// it. A file cut to exactly that total is therefore long enough to pass the
+// check and too short to read.
+//
+// It compounds: once the cursor is past the end, the guard on the pixel data is
+// an unsigned subtraction, so it wraps to about 1.8e19 and passes whatever it is
+// asked, and the pixel loop then reads up to 128 KB per tile from beyond the
+// allocation.
+//
+// The assertion is the *reason* and not only the refusal. Reading a row table
+// from past the end gives whatever was next in memory, and that usually fails
+// the span validation a few lines later -- so a decoder with this bug also says
+// no, for a reason it invented from somebody else's memory. Only one of the two
+// is the file being described correctly.
+void aTruncatedMultiTileCelIsRefusedAsTruncated() {
+    TEST("a cel cut to its own floor is refused as truncated, not as a bad span");
+
+    // Several tiles, each with one pixel: enough that the drift is unambiguous,
+    // and small enough that the file is a few tens of kilobytes.
+    TileGrid grid;
+    constexpr int kTiles = 64;
+    for (int i = 0; i < kTiles; ++i) {
+        auto tile = std::make_shared<Tile>();
+        tile->setPixel(3, 3, Rgba{1.0f, 0.0f, 0.0f, 1.0f});
+        grid.set({i, 0}, std::move(tile));
+    }
+
+    std::vector<std::uint8_t> bytes = ProjectIO::encodeCel(grid);
+    // Header, coordinates and a row table each -- exactly what the check asks
+    // for, and one pixel per tile short of what it takes to read.
+    const std::size_t floor_size = 24 + static_cast<std::size_t>(kTiles) * (8 + 128 * 4);
+    CHECK(bytes.size() > floor_size);
+    bytes.resize(floor_size);
+
+    TileGrid out;
+    std::string error;
+    CHECK(!ProjectIO::decodeCel(bytes, out, &error));
+    CHECK(out.empty());
+    CHECK(error.find("truncated") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -142,5 +186,6 @@ int main() {
     sceneCanvasOutOfRangeFallsBack();
     sceneIdsOutOfRangeAreRefused();
     aCelWithTooManyTilesIsRefused();
+    aTruncatedMultiTileCelIsRefusedAsTruncated();
     return testing::summarise("hostile");
 }

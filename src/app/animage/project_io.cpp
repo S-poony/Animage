@@ -767,8 +767,18 @@ bool ProjectIO::decodeCel(const std::vector<std::uint8_t>& bytes, TileGrid& out,
         const TileCoord coord{getI32(bytes.data() + coords_at + i * 8),
                               getI32(bytes.data() + coords_at + i * 8 + 4)};
 
-        // The row table. Its size is fixed, and floor_size already guaranteed
-        // it is there.
+        // The row table. floor_size counted one of these per tile -- but it
+        // counted only the fixed parts, and `at` has also advanced by every
+        // tile's pixels, which it did not count. So that guarantee held for the
+        // first tile and drifted further past the end with every tile after it.
+        // A file cut to exactly floor_size passed the check and was then read
+        // beyond, and what came back was a drawing made partly of whatever was
+        // next in memory -- reported as a successful load.
+        if (at > bytes.size() || bytes.size() - at < kRowTableBytes) {
+            return fail(error, "cel file is truncated before the row table of tile " +
+                                   std::to_string(i));
+        }
+
         std::array<RowSpan, kTileSize> spans{};
         std::size_t samples = 0;
         for (int row = 0; row < kTileSize; ++row) {
@@ -785,7 +795,11 @@ bool ProjectIO::decodeCel(const std::vector<std::uint8_t>& bytes, TileGrid& out,
         // Only now is the size of this tile's pixels known, so it is checked
         // here rather than up front.
         const std::size_t pixel_bytes = samples * kChannels * 2;
-        if (bytes.size() - at < pixel_bytes) {
+        // The `at >` half is not redundant with the check above: these are
+        // unsigned, so if `at` is ever past the end the subtraction wraps to
+        // about 1.8e19 and this guard passes whatever it is asked -- which is
+        // what turned a few bytes of over-read into up to 128 KB per tile.
+        if (at > bytes.size() || bytes.size() - at < pixel_bytes) {
             return fail(error, "cel file is truncated inside tile " + std::to_string(i));
         }
 
