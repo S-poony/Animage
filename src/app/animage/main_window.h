@@ -67,8 +67,8 @@ public:
 
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
-    // buildActions reading the table is exactly the thing that would rot
-    // silently, because a stale literal still builds and still works.
+    // the window building its actions from the table is exactly the thing that
+    // would rot silently, because a stale literal still builds and still works.
     QAction* actionForTesting(shortcuts::Id id) const;
 
     // Installs a set of bindings: every action gets its new key, and every
@@ -141,7 +141,10 @@ private:
     // hands back and writes it down.
     void chooseShortcuts();
 
-    void buildActions();
+    // The menu bar, and the toolbar. Two functions and not one because the
+    // seam between them is real -- see the comment on buildToolBar.
+    void buildMenus();
+    void buildToolBar();
     void buildLayerPanel();
     void buildTimelinePanel();
     void buildStatusBar();

@@ -2967,6 +2967,26 @@ the button is a `QPushButton`, so the first two pictures were of nothing at all.
 gives a bottom wall running six hundred pixels past the corner — not a closed
 shape at all. The printed numbers looked perfectly reasonable.
 
+**Four tools spelled as three independent flags, and a handler that kept half of
+a pair.** Which tool had the pen was two booleans and an optional — eight
+combinations for four states — and the window kept them in step by writing the
+same triple at three call sites, in two different orders. One had already
+drifted: entering a transform put the lasso down and said nothing about the
+eraser. Pressing E and then Ctrl+V therefore left a checked Transform button over
+a live eraser, so Alt+right-drag went on resizing the eraser, the ring drew at
+its radius, and the toolbar's size box showed its number until the transform
+ended and the figure jumped.
+
+Nothing worse happened only because all five dispatch sites test the transform
+first — an ordering obligation carried by five call sites and enforced by
+nothing. **State that is mutually exclusive belongs in one value, so that the
+combinations nothing has an answer for cannot be written down at all.** The
+navigation gestures were the same shape and had not yet bitten: three flags set
+one at a time by a strict chain and cleared together, with "is one of them
+running" spelled out at four call sites, two of which were re-deriving by hand
+what `continueNavigation` already returns as a bool. Both are enums now, and the
+test that pins the first one fails on the commit before it.
+
 ## How to work on it
 
 Everything in `src/core/` is free of Qt and can be tested headlessly. Everything

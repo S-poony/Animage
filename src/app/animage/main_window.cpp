@@ -136,7 +136,8 @@ MainWindow::MainWindow() {
     connect(autosave_timer_, &QTimer::timeout, this, &MainWindow::onAutosaveTick);
     autosave_timer_->start(kAutosaveIntervalMs);
 
-    buildActions();
+    buildMenus();
+    buildToolBar();
     buildLayerPanel();
     buildTimelinePanel();
     buildStatusBar();
@@ -466,7 +467,7 @@ void MainWindow::setTyping(bool typing) {
                                                           : shortcuts::Mode::Normal);
 }
 
-void MainWindow::buildActions() {
+void MainWindow::buildMenus() {
     using shortcuts::Id;
 
     QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
@@ -596,6 +597,15 @@ void MainWindow::buildActions() {
     passe_partout->setChecked(canvas_->passePartout());
     connect(passe_partout, &QAction::toggled, this,
             [this](bool shown) { canvas_->setPassePartout(shown); });
+}
+
+// Split from the menus at the seam that was already in the source: nothing
+// crosses it. The menu half touches overwrite_action_ and end_actions_; this
+// half touches the four tool actions and their group, the size box, the
+// pressure box, the two swatches and the transform bar. Both share makeAction
+// and keyedTip, which were already outside either.
+void MainWindow::buildToolBar() {
+    using shortcuts::Id;
 
     QToolBar* tools = addToolBar(QStringLiteral("Tools"));
     tools->setMovable(false);
