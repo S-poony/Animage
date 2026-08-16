@@ -391,8 +391,31 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
+    // The two ways a gesture stops being ours to finish: the keyboard goes
+    // somewhere else in this window, or the window itself stops being active.
+    // Both mean the release will be delivered elsewhere or not at all. See
+    // abandonGesture for what that costs when nothing catches it.
+    void focusOutEvent(QFocusEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
+    // What a press, a move and a release mean, asked by both devices.
+    //
+    // Five branches resolving in one order -- eyedropper, transform, lasso,
+    // stroke, with navigation already handled by the caller. They were written
+    // out twice, once for the pen and once for the mouse, and had begun to
+    // drift; the order is load-bearing, so two copies of it is two chances to
+    // get it wrong. What stays with each device is only what is genuinely its
+    // own: button filtering and pen-synthesis rejection for the mouse, modal and
+    // child-widget deferral for the pen, and where the pressure comes from.
+    void pressAt(const QPointF& widget_point, Qt::KeyboardModifiers modifiers, float pressure);
+    void moveTo(const QPointF& widget_point, float pressure);
+    void releaseAt(const QPointF& widget_point);
+
+    // End whatever is under way as if the release had arrived. Idempotent, and
+    // safe to call when nothing is happening.
+    void abandonGesture();
+
     QPointF imageFromWidget(const QPointF& widget_point) const;
     QPointF widgetFromImage(const QPointF& image_point) const;
     animage::PixelRect visibleImageRect() const;

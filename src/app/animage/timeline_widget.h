@@ -67,10 +67,26 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    // The release is not coming: the keyboard has gone elsewhere, or the window
+    // has stopped being active. See abandonGesture.
+    void focusOutEvent(QFocusEvent* event) override;
+    void changeEvent(QEvent* event) override;
     // Watches the rename editor for Escape, which QLineEdit has no signal for.
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    // Close whatever gesture is open, without completing it.
+    //
+    // Two of them hold a Document command open from press to release, and
+    // Document::beginCommand counts depth: one left open means nothing reaches
+    // the undo stack again for the rest of the session, silently. The same trap
+    // as CanvasWidget::abandonGesture, on the other widget that opens commands.
+    //
+    // A drag is dropped rather than completed. Letting go of a row somewhere
+    // this widget cannot see is not a drop, so the row stays where it was
+    // instead of landing wherever the pointer happened to be.
+    void abandonGesture();
+
     const animage::Track* trackAt(std::size_t row) const;
     const animage::Track* currentTrack() const;
     // Which row a track is in, and how many there are.

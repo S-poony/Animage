@@ -477,6 +477,11 @@ above 3× magnification, and the canvas frame is drawn over it.
 and emits `documentChanged`. The colour solve is asked for by the *next* paint,
 never by the stroke.
 
+The release is not the only way there, and it must not be: `abandonGesture` ends
+the stroke the same way when the window stops being active or the keyboard
+leaves the canvas, and `beginStroke` closes an open one before opening another.
+See [the traps](#the-traps) for what one missed release used to cost.
+
 Worth knowing before touching any of it: **nothing along this path sets the
 cursor**. There is one function that decides what the pointer looks like, from
 what is true rather than from where the code has got to — see
@@ -2378,6 +2383,35 @@ Do not propose it.
 ## The traps
 
 These are the things that cost hours, in the order they hurt.
+
+**A gesture that opens a command on the press and closes it on the release will
+one day not get the release, and the undo history dies silently for the rest of
+the session.** This one shipped, and it is first because of how quiet it was.
+
+`Document::beginCommand` nests by counting depth and `endCommand` only commits at
+zero. So one stroke that never ended left the depth at one for good: every later
+stroke went one, two, one and never reached zero, and **nothing was pushed onto
+the undo stack again**. Ctrl+Z jumped back past everything drawn since. Three
+more things failed with it, all without a word — autosave defers while a stroke
+is in progress, so it deferred for ever; `journal_.take()` never ran, so tile
+snapshots accumulated unbounded; and `requestCtgFills` returns early while
+stroking, so no colour layer ever solved again.
+
+The release goes missing more easily than it sounds. `tabletEvent` ignores every
+event while a modal dialog is up, which is right — the dialog has a better claim
+on the pen — but a release is one of those events, so opening any dialog with the
+pen down was enough. Alt+Tab is the same shape. And because the canvas has both
+`WA_TabletTracking` and mouse tracking, the stuck stroke then *drew on hover*: a
+pointer moving across the canvas with nothing pressed, painting at full pressure.
+
+**A press-to-release gesture needs a third way out, and the widget has to be told
+when it is no longer the one finishing things.** `abandonGesture` ends whatever is
+open the way the release would have, from `focusOutEvent` and from
+`changeEvent` on `ActivationChange`; `beginStroke` closes an open stroke before
+opening another, because the cost of missing one route is the whole session.
+`TimelineWidget` had the identical leak in its two drag gestures and has the same
+guard. The test that pins it fails three ways on the commit before it, and two of
+those three are the history, not the flag.
 
 **A palette role arrived with alpha on it, and the timeline vanished.** The
 downloaded Windows build drew the timeline white on white — no cell outlines, no

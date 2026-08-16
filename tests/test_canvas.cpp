@@ -4372,6 +4372,59 @@ void theTransformToolTakesTheWholeDrawing() {
     CHECK(fixture.action(shortcuts::Id::Play)->isEnabled());
 }
 
+void aLostReleaseDoesNotEndTheUndoHistory() {
+    TEST("a stroke whose release never arrives does not end the undo history");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+    Document& doc = fixture.window.documentForTesting();
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+    const auto press = [&](const QPointF& at) {
+        QTabletEvent e(QEvent::TabletPress, &stylus, at, fixture.canvas->mapToGlobal(at), 1.0, 0, 0,
+                       0, 0, 0, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+        QCoreApplication::sendEvent(fixture.canvas, &e);
+    };
+    const auto release = [&](const QPointF& at) {
+        QTabletEvent e(QEvent::TabletRelease, &stylus, at, fixture.canvas->mapToGlobal(at), 0.0, 0,
+                       0, 0, 0, 0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::sendEvent(fixture.canvas, &e);
+    };
+
+    // The pen goes down and never comes up: the keyboard leaves the canvas,
+    // which is what a modal dialog opening over it does, and what the window
+    // switcher does. Before this was caught, the command opened by the stroke
+    // stayed open and Document::beginCommand counts depth -- so every later
+    // stroke went one, two, one and never reached zero again. Nothing was ever
+    // pushed onto the undo stack for the rest of the session.
+    press(QPointF(400.0, 300.0));
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->isStroking());
+
+    fixture.canvas->clearFocus();
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->isStroking());
+
+    // The real damage was never the flag: it was that the history stopped
+    // recording. So the test is that a later stroke is still undoable.
+    const std::size_t before = doc.undoDepth();
+    press(QPointF(500.0, 320.0));
+    release(QPointF(540.0, 360.0));
+    QCoreApplication::processEvents();
+    CHECK(doc.undoDepth() > before);
+
+    // And once more, because the failure compounded: the depth never came back
+    // down, so it was the second and third strokes that proved it was stuck.
+    const std::size_t after_one = doc.undoDepth();
+    press(QPointF(560.0, 380.0));
+    release(QPointF(600.0, 420.0));
+    QCoreApplication::processEvents();
+    CHECK(doc.undoDepth() > after_one);
+}
+
 void enteringATransformPutsTheOtherToolsDown() {
     TEST("entering a transform puts the eraser down rather than leaving it up");
     WindowWithInk fixture;
@@ -6309,6 +6362,7 @@ int main(int argc, char** argv) {
     aFlippedBoxStillScalesTheRightWay();
     theTransformToolTakesTheWholeDrawing();
     enteringATransformPutsTheOtherToolsDown();
+    aLostReleaseDoesNotEndTheUndoHistory();
     nudgingMovesTheDrawingExactly();
     cancellingLeavesTheUndoDepthWhereItWas();
     aTransformAppliesToTheWholeHold();

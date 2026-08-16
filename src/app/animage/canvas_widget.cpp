@@ -2187,6 +2187,14 @@ bool CanvasWidget::pickColourAt(const QPointF& image_point) {
 // --- strokes -------------------------------------------------------------
 
 void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool straight) {
+    // A stroke still open here means a release went missing on some route this
+    // does not know about. Close it before opening another: beginCommand counts
+    // depth, so two opens against one close leave the depth at one for ever and
+    // the undo stack never receives anything again. Before the early returns
+    // below, because a stroke that cannot start is still a stroke that has to be
+    // finished.
+    if (stroking_) endStroke();
+
     if (track_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
 
     const Track* track = doc_.scene().findTrack(track_);
@@ -2522,6 +2530,11 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     }
     if (isNavigating() && event->type() == QEvent::TabletRelease) {
         endNavigation();
+        // And then the release goes on to whatever else is open. A press that
+        // fell through beginNavigation and opened a stroke, with the navigation
+        // starting only afterwards, used to have its release eaten here -- the
+        // stroke stayed open, and from that point the session had no undo.
+        releaseAt(widget_point);
         return;
     }
 
@@ -2543,64 +2556,129 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
     // An empty pixel leaves the colour alone, here as everywhere: dragging out
     // over bare paper holds the last colour rather than snatching it away, so
     // the release commits what is shown even when it lands on nothing.
-    if (event->type() == QEvent::TabletPress && (event->modifiers() & Qt::AltModifier)) {
-        picking_ = true;
-        pickColourAt(imageFromWidget(widget_point));
-        return;
-    }
-    if (picking_) {
-        if (event->type() == QEvent::TabletMove) {
-            pickColourAt(imageFromWidget(widget_point));
-        } else if (event->type() == QEvent::TabletRelease) {
-            picking_ = false;
-            pickColourAt(imageFromWidget(widget_point));
-        }
-        return;  // no stroke, whatever happened to Alt in the meantime
-    }
-
-    // A live transform, or the lasso, takes the pen: the tools are exclusive, so
-    // while one of them holds it the brush is not competing for it.
-    if (transform_) {
-        switch (event->type()) {
-            case QEvent::TabletPress: beginTransformDrag(widget_point); break;
-            case QEvent::TabletMove: continueTransformDrag(widget_point); break;
-            case QEvent::TabletRelease: endTransformDrag(); break;
-            default: break;
-        }
-        return;
-    }
-    if (tool_ == Tool::Lasso) {
-        switch (event->type()) {
-            case QEvent::TabletPress: beginLasso(widget_point); break;
-            case QEvent::TabletMove: extendLasso(widget_point); break;
-            case QEvent::TabletRelease: endLasso(); break;
-            default: break;
-        }
-        return;
-    }
-
-    const QPointingDevice* device = event->pointingDevice();
-    if (event->type() == QEvent::TabletPress && device) {
-        stylus_eraser_ = device->pointerType() == QPointingDevice::PointerType::Eraser;
-    }
-
-    const QPointF image_point = imageFromWidget(widget_point);
     const float pressure = static_cast<float>(event->pressure());
 
     switch (event->type()) {
-        // Shift from the event and not from the machine, the same rule
-        // beginNavigation follows: QGuiApplication::keyboardModifiers() answers
-        // for whoever is at the keyboard, which is nobody when a test is
-        // driving this.
-        case QEvent::TabletPress:
-            beginStroke(image_point, pressure, (event->modifiers() & Qt::ShiftModifier) != 0);
+        case QEvent::TabletPress: {
+            // Which way up the pen was when it landed, which is what the stroke
+            // is drawn with however it is turned during it.
+            if (const QPointingDevice* device = event->pointingDevice()) {
+                stylus_eraser_ = device->pointerType() == QPointingDevice::PointerType::Eraser;
+            }
+            pressAt(widget_point, event->modifiers(), pressure);
             break;
-        case QEvent::TabletMove:
-            if (stroking_) extendStroke(image_point, pressure);
-            break;
-        case QEvent::TabletRelease: endStroke(); break;
+        }
+        case QEvent::TabletMove: moveTo(widget_point, pressure); break;
+        case QEvent::TabletRelease: releaseAt(widget_point); break;
         default: break;
     }
+}
+
+// --- what a press means, for either device -------------------------------
+
+// The order here is the order pointingAt answers in, and it has to be: the
+// pointer promises what a press will do, so anything that resolves a press
+// earlier than the pointer expects makes that promise false.
+void CanvasWidget::pressAt(const QPointF& widget_point, Qt::KeyboardModifiers modifiers,
+                           float pressure) {
+    // A press begins a gesture, so nothing from the last one is still running.
+    // This used to be a bare return when a press arrived while picking, which
+    // swallowed it: the first tap after coming back from the window switcher did
+    // nothing at all, having changed the colour on its way in.
+    picking_ = (modifiers & Qt::AltModifier) != 0;
+    if (picking_) {
+        pickColourAt(imageFromWidget(widget_point));
+        return;
+    }
+    if (transform_) {
+        beginTransformDrag(widget_point);
+        return;
+    }
+    if (tool_ == Tool::Lasso) {
+        beginLasso(widget_point);
+        return;
+    }
+    // Shift from the event and not from the machine, the same rule
+    // beginNavigation follows: QGuiApplication::keyboardModifiers() answers for
+    // whoever is at the keyboard, which is nobody when a test is driving this.
+    beginStroke(imageFromWidget(widget_point), pressure,
+                (modifiers & Qt::ShiftModifier) != 0);
+}
+
+void CanvasWidget::moveTo(const QPointF& widget_point, float pressure) {
+    if (picking_) {
+        pickColourAt(imageFromWidget(widget_point));
+        return;
+    }
+    if (transform_) {
+        continueTransformDrag(widget_point);
+        return;
+    }
+    if (tool_ == Tool::Lasso) {
+        extendLasso(widget_point);
+        return;
+    }
+    if (stroking_) extendStroke(imageFromWidget(widget_point), pressure);
+}
+
+void CanvasWidget::releaseAt(const QPointF& widget_point) {
+    if (picking_) {
+        picking_ = false;
+        pickColourAt(imageFromWidget(widget_point));
+        return;
+    }
+    if (transform_) {
+        endTransformDrag();
+        return;
+    }
+    if (tool_ == Tool::Lasso) {
+        endLasso();
+        return;
+    }
+    endStroke();
+}
+
+// A gesture that began and will not end here: the keyboard has gone to another
+// widget, or the window has stopped being active. The release that would have
+// finished this is going to be delivered somewhere else, or nowhere.
+//
+// Everything ends the way it would have ended had the release arrived, because
+// what is drawn is drawn -- the dabs of a stroke are in the document before the
+// pen lifts, and a straight line stamped here is one undo away, which is better
+// than a mark that vanishes with nothing to undo it with.
+//
+// The part that matters beyond the tool in your hand is the open command.
+// Document::beginCommand nests by depth and only commits at zero, so a stroke
+// that never ends leaves the depth at one for the rest of the session: nothing
+// reaches the undo stack again, the journal is never taken so tile snapshots
+// pile up, autosave defers for ever because a stroke is still in progress, and
+// no colour layer ever solves again. All of it silent. That is what this is for,
+// and it is why beginStroke closes an open stroke before opening another --
+// belt and braces, because the cost of missing one route is the whole session.
+void CanvasWidget::abandonGesture() {
+    endNavigation();
+    picking_ = false;
+    endTransformDrag();
+    endLasso();
+    endStroke();
+    // Re-derived from the pen on the next press, but not until then, and a stale
+    // one makes the *mouse* erase.
+    stylus_eraser_ = false;
+    refreshPointer();
+    update();
+}
+
+void CanvasWidget::focusOutEvent(QFocusEvent* event) {
+    QWidget::focusOutEvent(event);
+    abandonGesture();
+}
+
+void CanvasWidget::changeEvent(QEvent* event) {
+    QWidget::changeEvent(event);
+    // Alt+Tab does not take the keyboard off this widget -- the window keeps its
+    // focus widget while it is inactive -- so focusOutEvent alone does not see
+    // it. This does.
+    if (event->type() == QEvent::ActivationChange && !isActiveWindow()) abandonGesture();
 }
 
 // Windows Ink promotes every pen event to a mouse event as well. Acting on
@@ -2630,23 +2708,8 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     if (beginNavigation(event->position(), event->button(), event->modifiers())) return;
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
-    if (event->modifiers() & Qt::AltModifier) {
-        // Shown from the moment the button goes down and followed until it comes
-        // up; see tabletEvent for why the live value is the colour itself.
-        picking_ = true;
-        pickColourAt(imageFromWidget(event->position()));
-        return;
-    }
-    if (transform_) {
-        beginTransformDrag(event->position());
-        return;
-    }
-    if (tool_ == Tool::Lasso) {
-        beginLasso(event->position());
-        return;
-    }
-    beginStroke(imageFromWidget(event->position()), 1.0f,
-                (event->modifiers() & Qt::ShiftModifier) != 0);
+    // A mouse has no pressure to report, so it presses at full weight.
+    pressAt(event->position(), event->modifiers(), 1.0f);
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
@@ -2662,19 +2725,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
 
     if (continueNavigation(event->position())) return;
     if (eventIsSynthesisedFromPen(event)) return;
-    if (picking_) {
-        pickColourAt(imageFromWidget(event->position()));
-        return;
-    }
-    if (transform_) {
-        continueTransformDrag(event->position());
-        return;
-    }
-    if (tool_ == Tool::Lasso) {
-        extendLasso(event->position());
-        return;
-    }
-    if (stroking_) extendStroke(imageFromWidget(event->position()), 1.0f);
+    moveTo(event->position(), 1.0f);
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
@@ -2682,23 +2733,13 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     updatePointerAt(event->position());
     if (isNavigating()) {
         endNavigation();
+        // See the tablet path: a stroke opened before the navigation began still
+        // has to be released, or it is never closed at all.
+        releaseAt(event->position());
         return;
     }
     if (eventIsSynthesisedFromPen(event)) return;
-    if (picking_) {
-        picking_ = false;
-        pickColourAt(imageFromWidget(event->position()));
-        return;
-    }
-    if (transform_) {
-        endTransformDrag();
-        return;
-    }
-    if (tool_ == Tool::Lasso) {
-        endLasso();
-        return;
-    }
-    endStroke();
+    releaseAt(event->position());
 }
 
 void CanvasWidget::setZoom(double zoom, const QPointF& widget_anchor) {

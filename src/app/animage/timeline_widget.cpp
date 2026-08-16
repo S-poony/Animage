@@ -817,6 +817,45 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     Q_EMIT documentChanged();
 }
 
+void TimelineWidget::abandonGesture() {
+    // One endCommand for each beginCommand, tested separately rather than
+    // together: they cannot both be open today, and a counter is not the place
+    // to rely on that.
+    if (dragging_end_) {
+        dragging_end_ = false;
+        doc_.endCommand();
+        Q_EMIT documentChanged();
+    }
+    if (stretching_) {
+        stretching_ = false;
+        doc_.endCommand();
+        Q_EMIT documentChanged();
+    }
+
+    // Everything else is dropped where it stood. Nothing here writes to the
+    // document: a drag that never arrived anywhere did not move a row.
+    scrubbing_ = false;
+    may_drag_ = false;
+    dragging_ = false;
+    drag_image_ = animage::kNoId;
+    drop_index_ = -1;
+    drop_overwrites_ = false;
+    may_drag_track_ = false;
+    dragging_track_ = false;
+    track_drop_row_ = -1;
+    update();
+}
+
+void TimelineWidget::focusOutEvent(QFocusEvent* event) {
+    QWidget::focusOutEvent(event);
+    abandonGesture();
+}
+
+void TimelineWidget::changeEvent(QEvent* event) {
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::ActivationChange && !isActiveWindow()) abandonGesture();
+}
+
 // A double click on the name renames the track.
 //
 // Only on the name, and not anywhere else in the row: the rest of the row is
