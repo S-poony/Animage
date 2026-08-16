@@ -11,7 +11,7 @@ if not exist "%MSYS_BIN%\cmake.exe" (
   echo.
   echo Could not find CMake at %MSYS_BIN%.
   echo Install the toolchain from an MSYS2 UCRT64 shell:
-  echo   pacman -S --needed mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-boost
+  echo   pacman -S --needed mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base
   echo.
   pause
   exit /b 1

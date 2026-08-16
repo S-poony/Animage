@@ -395,11 +395,16 @@ Worth building early — with part 2's first rung, not after it.
 > the solver decided, so from the fill every mark is perfectly placed, always.
 >
 > Judging a whole track is what makes it useful, and it is affordable because the
-> verdict is not the fill. `auditCtgFills` solves coarsely and stops after the
+> verdict is not the fill. The audit solved coarsely and stopped after the
 > labelling, keeping a few bytes a drawing: 67 ms for twelve 1080p drawings cold,
 > nothing when none has moved. Flags read from the fill cache instead only
 > appeared on drawings somebody had already visited, which is the feature
 > inverted.
+>
+> The function that did this was called `auditCtgFills` and is **not in the tree**
+> — it went with the flag it fed, and nothing else read it. Named in the past
+> tense here on purpose: the paragraph above describes what was built and
+> measured, not something to go looking for.
 
 ### Scheduling
 

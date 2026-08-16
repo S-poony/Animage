@@ -172,7 +172,9 @@ exactly this. Axis mirrors are the same branch with a sign, which is why #24 is
 cheap later and why it must not be built on the general path.
 
 > **Built, and it was that cheap.** `Transform::isAxisMirror` sits beside
-> `isWholePixelTranslation` and `mirrorTiles` beside `translated`. The one thing
+> `isWholePixelTranslation` in `transform.h`; the mirroring itself is file-local
+> in `transform.cpp`, beside the rest of the resampling, rather than next to
+> `translated` in `tile.h`. The one thing
 > the note did not anticipate: the flip has to be *excluded* from
 > `isWholePixelTranslation`, or a mirror satisfies every other clause in it and
 > the commit hands back a drawing nobody has flipped.

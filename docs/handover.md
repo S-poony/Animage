@@ -587,7 +587,12 @@ into place, and only then is the old one deleted.
 
 `encodeCel` drops fully transparent tiles, sorts the coordinates so an unchanged
 drawing encodes to identical bytes, and writes only the occupied span of each
-row — which is the difference between a 3 MB file and a 457 MB one.
+row — which is the difference between handing the compressor 3.3 MB and handing
+it 457 MB. Those are the compressor's *input*, not file sizes: on disk the same
+shot is 6.1 MB against 12.0 MB, and
+[why our own formats](why-our-own-formats.md) tabulates both columns. Worth
+keeping straight, because quoting the input as a file size makes the format look
+about 150× better than it is.
 
 **In.** `load` reads `scene.json` into a **document of its own**, fills every cel
 it names, and only then assigns over the open document. A project with one bad
@@ -1196,7 +1201,10 @@ than it did, whether or not any track holds or cycles.
 so a cycle fills frames that already exist. One consequence to know: a cycling
 track that *is* the longest cycles over nothing at all, so a four-drawing walk in
 a four-frame scene does nothing until something else is longer. The missing piece
-is an explicit scene length, which does not exist yet.
+was an explicit scene length, and it is what
+[a shot can now be told how long it is](#what-a-track-does-past-its-last-drawing)
+below is about: `Scene::fixed_length` and `Scene::length` exist, so a cycling
+track that is the longest no longer has nothing to cycle over.
 
 **You can see a held or cycled drawing and not draw on it.** Reported as a
 question — "why is the user allowed to draw past the track end? There are no cels
@@ -3075,7 +3083,7 @@ The five paths through it are in
 [how the program fits together](#how-the-program-fits-together), near the top,
 because they are what you want before changing anything rather than after.
 
-```bash
+```powershell
 $env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH   # MSYS2 UCRT64, from PowerShell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
@@ -3092,7 +3100,7 @@ ctest --test-dir build --output-on-failure
 `shots` is the one that is not a number. It drives the real window through a
 list of named situations and writes a PNG each, into `build/shots/` unless told
 otherwise; `--list` says what they are and a bare word runs only the ones whose
-name matches, so looking at one thing costs one picture rather than twenty-one. It
+name matches, so looking at one thing costs one picture rather than thirty. It
 runs offscreen without being asked to. **Add situations to it freely** — nothing
 depends on any of them being there, which is the point. See
 [looking at the interface](#looking-at-the-interface).

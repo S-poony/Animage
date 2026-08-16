@@ -29,7 +29,7 @@
 //     written sorted, which is what keeps a saved scene the same bytes twice
 //     running whatever order the writer used);
 //   - the cel bytes, a little-endian layout of the very half-floats the tiles
-//     hold -- the layout is documented in project_io.cpp so a drawing is
+//     hold -- the layout is the table further down this header, so a drawing is
 //     recoverable with nothing but zlib -- deflated behind eight bytes of
 //     magic in the folder. Uncompressed a tile is 128 KB, so a shot would run
 //     to gigabytes.

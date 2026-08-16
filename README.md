@@ -98,9 +98,12 @@ runtime).
 
 The sanitizers are a request and not a guarantee: a toolchain that ships neither
 runtime — MSYS2's UCRT64 GCC is one, so this is the normal case on Windows — is
-warned about once at configure time and then builds without them. Check
-`ANIMAGE_ASAN_UBSAN_OK` in `build/CMakeCache.txt` if you need to know which you
-got.
+warned about once at configure time and then builds without them. There are three
+outcomes, so it takes two variables in `build/CMakeCache.txt` to tell them apart:
+`ANIMAGE_ASAN_UBSAN_OK` set means both, empty with `ANIMAGE_UBSAN_OK` set means
+UBSan alone, and both empty means neither. (Under MSVC the ASan probe is
+`ANIMAGE_ASAN_OK`.) Reading only the first cannot distinguish "UBSan only" from
+"no sanitizer at all", which is the distinction worth having.
 
 On Windows the core library can still be sanitized, because it needs no Qt and
 MSVC has AddressSanitizer. From a Developer Command Prompt:
@@ -147,7 +150,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
 | `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, and `shots.cpp` — pictures of the interface, one per named situation. |
-| `third_party/` | tinyexr (BSD-3) and miniz (MIT), vendored and compiled only into `exr_writer.cpp`. |
+| `third_party/` | tinyexr (BSD-3), a header included only by `exr_writer.cpp`, and miniz (MIT), its own translation unit in `animage_ui`. Both vendored. |
 | `packaging/` | The desktop entry, and the icon. `animage.af` is the mark as drawn, `animage.svg` is exported from it by hand, and `make-icons.py` renders the PNG, `.ico` and `.icns` beside them. |
 | `docs/fr/` | Original design documents. |
 
