@@ -1393,6 +1393,45 @@ beside removing the event filter, because taking the children apart moves the
 focus and the connection would otherwise deliver into a window that is halfway
 gone. See [the traps](#the-traps).
 
+**And the other half of it: getting the keyboard back out of a field.** The
+canvas (`StrongFocus`) and the timeline (`ClickFocus`) are the only two widgets
+in this window that take focus on a click. Every other one is deliberately
+`Qt::NoFocus` — the layer panel so that Space keeps panning instead of toggling a
+visibility tick, the buttons and swatches so that they cannot take the pen — and
+the unnoticed cost of that decision is the same fact from the other side: **a
+widget that will not take the keyboard cannot take it away either.** So a number
+being typed into kept the keyboard through a click on the opacity slider, on a
+swatch, on the empty part of the layer panel; and a rename kept it through a
+click on another row, leaving an editor open on one layer while a different one
+was selected. Both reported from use, and measured before being believed:
+
+| the click lands on | the keyboard afterwards |
+|---|---|
+| opacity slider | stayed in the field |
+| layer panel, on a row | canvas — by a side effect in the selection path |
+| layer panel, empty space | stayed in the field |
+| canvas | canvas |
+
+It went unnoticed for as long as it did because it cost nothing visible until the
+shortcut mode started following the focus. After that, a field that would not let
+go left **every shortcut switched off**, silently, until something that takes
+focus was clicked. That is the whole of why it was worth fixing rather than
+living with.
+
+`MainWindow::takeTheKeyboardBackFrom`, called from the same application-wide
+filter, is the rule: *a left press on anything but the field itself hands the
+keyboard to the canvas.* No focus policy changed, because changing those is what
+would bring Space back to the tick boxes; the click is what changed, and only
+when there is a field to take the keyboard from.
+
+**Read that function's walk before changing it.** It asks about the *parent
+chain* of what was pressed and not about the widget itself, and that is not
+defensive coding — a spin box holds the focus for the line edit inside it through
+a focus proxy, so the line edit a click actually lands on reports `NoFocus`.
+Asking only about the widget under the pointer took the keyboard off one number
+field and handed it to the canvas on the way to another, which is this same bug
+in the opposite direction. It was written that way first and the test caught it.
+
 **And the filter that forwards Space and Z was eating every space anybody
 typed.** It has been wrong since it was written, and nothing noticed while the
 only places to type were dialogs nobody put a space into. Renaming in place is

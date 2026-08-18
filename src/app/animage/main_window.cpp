@@ -22,6 +22,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QLineEdit>
+#include <QSinglePointEvent>
 #include <QListWidget>
 #include <QProgressDialog>
 #include <QFileInfo>
@@ -346,6 +347,44 @@ void MainWindow::reframeIfArmed() {
     canvas_->fitToCanvas();
 }
 
+// Hand the keyboard to the canvas, if a press on `pressed` should take it off
+// whatever field currently holds it. See eventFilter for why this exists.
+//
+// **The parent chain and not `pressed` itself**, which is the whole subtlety. A
+// press is answered by the nearest widget above it that would take the keyboard,
+// and that is rarely the widget the pointer is over: a spin box holds the focus
+// for the line edit inside it, through a focus proxy, so the line edit a click
+// actually lands on reports Qt::NoFocus. Asking only about `pressed` therefore
+// took the keyboard off one number field and gave it to the canvas on the way to
+// another -- which is the bug this exists to fix, in the opposite direction.
+//
+// The walk stops at this window. What it is looking for on the way up:
+//
+// - The field that holds the keyboard. The press is inside it, so it keeps it.
+// - Anything that takes focus on a click. Qt is about to move the keyboard there
+//   itself and this must not race it.
+//
+// Two more things are left alone before the walk starts. Nothing is being typed
+// into, so there is nothing to take. And a press that is not the left button --
+// the one that opens a context menu -- is not somebody going somewhere else.
+//
+// Finally, `pressed` must be in this window. A menu, a dialog or a floating dock
+// is not "somewhere else in this window" in any sense the person clicking would
+// recognise, and taking the keyboard out of one would be a new bug in place of
+// the old one.
+void MainWindow::takeTheKeyboardBackFrom(QWidget* pressed) {
+    QWidget* holding = QApplication::focusWidget();
+    if (!pressed || !holding || !isTypingInto(holding)) return;
+    if (pressed->window() != this) return;
+
+    for (QWidget* w = pressed; w; w = w->parentWidget()) {
+        if (w == holding) return;
+        if ((w->focusPolicy() & Qt::ClickFocus) != 0) return;
+        if (w == this) break;
+    }
+    canvas_->setFocus(Qt::MouseFocusReason);
+}
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     // The transform bar is a child of the canvas and so belongs to no layout.
     // Nothing else is going to move it when the canvas changes size, and a
@@ -355,6 +394,33 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         // The only resizes the view is reframed for are the ones a maximise or a
         // restore armed. See changeEvent.
         reframeIfArmed();
+    }
+
+    // A press anywhere but the field itself takes the keyboard back from it.
+    //
+    // The canvas and the timeline are the only two widgets in this window that
+    // take focus on a click. Every other one is deliberately Qt::NoFocus, each
+    // for a good reason -- Space toggles a visibility tick rather than panning,
+    // a button that took the keyboard would take the pen with it -- and the
+    // unnoticed cost of that is the other half of the same fact: **a widget that
+    // will not take the keyboard cannot take it away either.** So a number being
+    // typed into kept the keyboard through a click on the opacity slider, on the
+    // empty part of the layer panel, on a swatch; and a rename kept it through a
+    // click on another row, leaving an editor open on one layer while a
+    // different one was selected. Both reported.
+    //
+    // Since the shortcut mode follows the focus -- see setTyping -- a field that
+    // will not let go also leaves every shortcut switched off, silently, until
+    // something that does take focus is clicked. That is what made this worth
+    // fixing rather than living with.
+    //
+    // Deliberately not a change of focus policy on those widgets: that is what
+    // would bring Space back to the tick boxes. The click is what changes, and
+    // only when there is a field to take the keyboard from.
+    const bool press = event->type() == QEvent::MouseButtonPress ||
+                       event->type() == QEvent::TabletPress;
+    if (press && canvas_ && static_cast<QSinglePointEvent*>(event)->button() == Qt::LeftButton) {
+        takeTheKeyboardBackFrom(qobject_cast<QWidget*>(watched));
     }
 
     const bool key_event = event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease;

@@ -6179,6 +6179,164 @@ void theKeyboardBelongsToAnyFieldItIsIn() {
     CHECK(looking->isEnabled());
 }
 
+// The other half of "the keyboard belongs to the field it is in": getting it
+// back out again.
+//
+// The canvas and the timeline are the only two widgets in the window that take
+// focus on a click; everything else is deliberately Qt::NoFocus so that Space
+// keeps panning and a button cannot take the pen. The cost of that was the same
+// fact from the other side -- a widget that will not take the keyboard cannot
+// take it away either -- so a number being typed into kept it through a click on
+// the opacity slider or on the empty part of the layer panel, and a rename kept
+// it through a click on another row. Both reported from use.
+void aClickElsewhereTakesTheKeyboardBackFromAField() {
+    TEST("a click on anything but the field takes the keyboard off it");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    auto* canvas = window.findChild<CanvasWidget*>();
+    auto* opacity = window.findChild<QSlider*>();
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(layers != nullptr);
+    CHECK(canvas != nullptr);
+    CHECK(opacity != nullptr);
+    CHECK(play != nullptr);
+    if (!layers || !canvas || !opacity || !play) return;
+
+    // Two number fields, so that clicking from one to the other can be checked
+    // as well: that one has to land in the second field and not on the canvas.
+    QWidget* bar = window.findChild<QWidget*>(QStringLiteral("transformBar"));
+    QList<QAbstractSpinBox*> fields;
+    for (QAbstractSpinBox* box : window.findChildren<QAbstractSpinBox*>()) {
+        if (box->isVisible() && !(bar && bar->isAncestorOf(box))) fields.append(box);
+    }
+    CHECK(fields.size() >= 2);
+    if (fields.size() < 2) return;
+
+    const auto clickOn = [](QWidget* target, QPointF at) {
+        sendMouse(target, QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        sendMouse(target, QEvent::MouseButtonRelease, at, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+    };
+
+    // The opacity slider takes no focus, and used to leave the field holding the
+    // keyboard -- with every shortcut still switched off, which is how a stuck
+    // field became a window where nothing responded.
+    fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(QApplication::focusWidget() == fields.first());
+    CHECK(!play->isEnabled());
+
+    clickOn(opacity, QPointF(opacity->rect().center()));
+    CHECK(QApplication::focusWidget() == canvas);
+    CHECK(play->isEnabled());
+
+    // And the empty space below the rows of the layer panel, which selects
+    // nothing and so had nothing to hand the keyboard back by accident.
+    fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(!play->isEnabled());
+    clickOn(layers->viewport(),
+            QPointF(layers->viewport()->rect().center().x(), layers->viewport()->height() - 4));
+    CHECK(QApplication::focusWidget() == canvas);
+    CHECK(play->isEnabled());
+
+    // A click on another field must not be answered by handing the keyboard to
+    // the canvas. Qt is what moves it into the second field, and Qt's own
+    // focus-on-click lives in the window's event handling, which a synthetic
+    // press does not reach -- so what a test here can assert is the half this
+    // code is responsible for: that it kept its hands off.
+    //
+    // On the line edit inside the box, which is where a real click lands. The
+    // box holds the focus for it through a proxy, so the line edit itself
+    // reports NoFocus -- and asking only about the widget under the pointer is
+    // exactly how this rule went wrong first.
+    auto* inside = fields.at(1)->findChild<QLineEdit*>();
+    CHECK(inside != nullptr);
+    if (!inside) return;
+    fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    clickOn(inside, QPointF(inside->rect().center()));
+    CHECK(QApplication::focusWidget() != canvas);
+    CHECK(!play->isEnabled());  // still in a field, wherever Qt put it
+
+    // And a click inside the field it is already in leaves it alone.
+    auto* own = fields.first()->findChild<QLineEdit*>();
+    CHECK(own != nullptr);
+    if (!own) return;
+    fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    clickOn(own, QPointF(own->rect().center()));
+    CHECK(QApplication::focusWidget() == fields.first());
+    CHECK(!play->isEnabled());
+
+    // And the pen, which is never assumed here. See issue #53: a widget with no
+    // tabletEvent gets the pen only as a promoted mouse event, and promotion
+    // happens in the platform layer where no test can reach it. So this drives
+    // the tablet press *directly*, which is the half that is ours: whichever of
+    // the two arrives, the rule answers it.
+    fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(!play->isEnabled());
+    {
+        QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                               QPointingDevice::PointerType::Pen,
+                               QInputDevice::Capability::Position |
+                                   QInputDevice::Capability::Pressure,
+                               1, 0);
+        const QPointF at(layers->viewport()->rect().center());
+        QTabletEvent tap(QEvent::TabletPress, &stylus, at, layers->viewport()->mapToGlobal(at),
+                         1.0, 0, 0, 0, 0, 0, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+        QCoreApplication::sendEvent(layers->viewport(), &tap);
+        QCoreApplication::processEvents();
+    }
+    CHECK(QApplication::focusWidget() == canvas);
+    CHECK(play->isEnabled());
+
+    // The rename half of the same report: an editor open on one row, a click on
+    // another. The editor used to stay open on the first row while the second
+    // became the selected layer.
+    canvas->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.addLayer(track, "layer 2");
+    // Through the window, so the panel is rebuilt from the document.
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) button->click();
+    }
+    QCoreApplication::processEvents();
+    CHECK(layers->topLevelItemCount() >= 2);
+    if (layers->topLevelItemCount() < 2) return;
+
+    layers->renameRowForTesting(0);
+    QCoreApplication::processEvents();
+    QLineEdit* editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    editor->setText(QStringLiteral("inked"));
+    CHECK(!play->isEnabled());
+
+    clickOn(layers->viewport(),
+            QPointF(layers->visualItemRect(layers->topLevelItem(1)).center()));
+    settleEditors();
+
+    // Gone, and the name is what it said: losing the editor to a click somewhere
+    // else means the same as Return, which is what it has always meant. Asked of
+    // the track rather than of one layer id, because which layer row 0 shows is
+    // the panel's business and not this test's.
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+    bool renamed = false;
+    for (const Layer& l : doc.scene().findTrack(track)->layers) {
+        if (l.name == "inked") renamed = true;
+    }
+    CHECK(renamed);
+    CHECK(play->isEnabled());
+}
+
 // Giving a rename up rather than finishing it. Escape already does this on both
 // panels; this is the same act asked for by name, because a window on its way
 // out has to be able to do it to an editor that is still open. See issue #51.
@@ -6861,6 +7019,7 @@ int main(int argc, char** argv) {
     renamingACarriedColourLayerLeavesTheArrowOutOfIt();
     doubleClickingATrackRenamesIt();
     theKeyboardBelongsToAnyFieldItIsIn();
+    aClickElsewhereTakesTheKeyboardBackFromAField();
     aRenameGivenUpKeepsTheNameAndTheKeyboard();
     aWindowDestroyedMidRenameGivesItUp();
     aWindowIsDestroyedSafelyFromAnyState();

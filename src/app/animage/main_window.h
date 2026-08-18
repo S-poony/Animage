@@ -121,6 +121,10 @@ private:
     // A rename editor has opened or closed somewhere. See the comment on it:
     // Return is Play, so the shortcuts have to let go of the keyboard.
     void setTyping(bool typing);
+    // A press on something that will not take the keyboard still takes it off a
+    // field that holds one. See the definition for the four cases it leaves
+    // alone.
+    void takeTheKeyboardBackFrom(QWidget* pressed);
 
     // A tooltip that has to say which key it is on.
     //
