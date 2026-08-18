@@ -6089,6 +6089,126 @@ void doubleClickingATrackRenamesIt() {
     CHECK(play->isEnabled());
 }
 
+// Giving a rename up rather than finishing it. Escape already does this on both
+// panels; this is the same act asked for by name, because a window on its way
+// out has to be able to do it to an editor that is still open. See issue #51.
+void aRenameGivenUpKeepsTheNameAndTheKeyboard() {
+    TEST("a rename given up keeps the name and hands the keyboard back");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    auto* timeline = window.findChild<TimelineWidget*>();
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(layers != nullptr);
+    CHECK(timeline != nullptr);
+    CHECK(play != nullptr);
+    if (!layers || !timeline || !play) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId layer = doc.scene().findTrack(track)->layers.front().id;
+    const std::size_t depth = doc.undoDepth();
+
+    layers->renameRowForTesting(0);
+    QCoreApplication::processEvents();
+    QLineEdit* editor = layers->findChild<QLineEdit*>();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    CHECK(!play->isEnabled());
+    editor->setText(QStringLiteral("nonsense"));
+    layers->abandonRename();
+    settleEditors();
+
+    // The name is where it was, the editor is gone, the keyboard is back, and
+    // nothing reached the undo stack -- which is the whole difference between
+    // giving a rename up and finishing it.
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->name, std::string("layer 1"));
+    CHECK(layers->findChild<QLineEdit*>() == nullptr);
+    CHECK(play->isEnabled());
+    CHECK_EQ(doc.undoDepth(), depth);
+
+    // And the other editor, on the other panel, which is a separate mechanism
+    // and needs the same answer.
+    timeline->renameTrackForTesting(0);
+    QCoreApplication::processEvents();
+    QLineEdit* gutter = timeline->renameEditorForTesting();
+    CHECK(gutter != nullptr);
+    if (!gutter) return;
+    CHECK(!play->isEnabled());
+    gutter->setText(QStringLiteral("nonsense"));
+    timeline->abandonRename();
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().findTrack(track)->name, std::string("track 1"));
+    CHECK(!gutter->isVisible());
+    CHECK(play->isEnabled());
+    CHECK_EQ(doc.undoDepth(), depth);
+}
+
+// Issue #51, which was red on three of the five CI jobs for eight runs.
+//
+// A window is destroyed from the top down: ~MainWindow's body runs, then every
+// member of MainWindow is destroyed -- the document among them -- and only then
+// does ~QWidget destroy the children. Destroying a rename editor is what
+// *finishes* a rename, so an editor still open reported itself from down there:
+// renameLayer on a document that had already been destroyed, setTyping on a
+// window that was no longer a window.
+//
+// **What this asserts is the sanitizers'.** Once the window is gone there is
+// nothing left to look at, so the value of the test is that the path runs at
+// all: on an unfixed tree it is a UBSan report under the `sanitizers` job and a
+// segfault on Windows and macOS. The checks before each window dies are there
+// so that a test which has stopped opening an editor cannot pass quietly.
+//
+// One window each, because the two editors cannot be open at once -- opening
+// one takes the focus off the other, which is what finishes it -- and because
+// they are two different routes home: the layer panel calls a std::function
+// that captured the window, the timeline emits a signal connected to it. CI
+// reported one of each, on different runs.
+void aWindowDestroyedMidRenameGivesItUp() {
+    TEST("a window destroyed with a rename still open does not report it");
+    {
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+        CHECK(layers != nullptr);
+        if (!layers) return;
+        layers->renameRowForTesting(0);
+        QCoreApplication::processEvents();
+        QLineEdit* editor = layers->findChild<QLineEdit*>();
+        CHECK(editor != nullptr);
+        if (!editor) return;
+        // Typed into, so there is something to commit if anything still tries.
+        editor->setText(QStringLiteral("nonsense"));
+    }
+    QCoreApplication::processEvents();
+
+    {
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto* timeline = window.findChild<TimelineWidget*>();
+        CHECK(timeline != nullptr);
+        if (!timeline) return;
+        timeline->renameTrackForTesting(0);
+        QCoreApplication::processEvents();
+        QLineEdit* editor = timeline->renameEditorForTesting();
+        CHECK(editor != nullptr);
+        if (!editor) return;
+        CHECK(editor->isVisible());
+        editor->setText(QStringLiteral("nonsense"));
+    }
+    QCoreApplication::processEvents();
+}
+
 // Issue #12. A colour layer goes to the bottom of the stack, so in a track with
 // enough layers to need a scrollbar the layer you have just made is off the end
 // of the panel -- and the list scrolled itself against the panel as it stood
@@ -6521,6 +6641,8 @@ int main(int argc, char** argv) {
     doubleClickingALayerRenamesIt();
     renamingACarriedColourLayerLeavesTheArrowOutOfIt();
     doubleClickingATrackRenamesIt();
+    aRenameGivenUpKeepsTheNameAndTheKeyboard();
+    aWindowDestroyedMidRenameGivesItUp();
     aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }

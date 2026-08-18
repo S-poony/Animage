@@ -42,6 +42,13 @@ public:
 
     void refresh();
 
+    // Give up an open rename without keeping what was typed, as Escape does.
+    //
+    // For a window on its way out: an editor that is still open when the
+    // window is destroyed reports its rename during the destruction, which is
+    // far too late for anything to answer it. See MainWindow's destructor.
+    void abandonRename() { finishRenaming(false); }
+
     QSize sizeHint() const override;
 
 Q_SIGNALS:

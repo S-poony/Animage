@@ -40,12 +40,16 @@ public:
         QWidget* editor = QStyledItemDelegate::createEditor(parent, option, index);
         // The same cap the timeline's editor has. See names::kTyped.
         if (auto* line = qobject_cast<QLineEdit*>(editor)) line->setMaxLength(names::kTyped);
-        // The moment a rename starts, and the only honest one. It was hung off
-        // QAbstractItemView::edit at first, which does not mean what its name
-        // suggests: it returns true when the *delegate* merely consumed the
-        // event, so ticking a layer's visibility box counted as starting a
-        // rename and left the keyboard shortcuts switched off afterwards.
-        if (editor && list_->renaming) list_->renaming(true);
+        if (editor) {
+            // Which widget is the live editor. See LayerList::editorOpened.
+            list_->editorOpened(editor);
+            // The moment a rename starts, and the only honest one. It was hung
+            // off QAbstractItemView::edit at first, which does not mean what its
+            // name suggests: it returns true when the *delegate* merely consumed
+            // the event, so ticking a layer's visibility box counted as starting
+            // a rename and left the keyboard shortcuts switched off afterwards.
+            if (list_->renaming) list_->renaming(true);
+        }
         return editor;
     }
 
@@ -129,16 +133,28 @@ void LayerList::mousePressEvent(QMouseEvent* event) {
 }
 
 void LayerList::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) {
+    if (editor == editor_) editor_ = nullptr;
     QTreeWidget::closeEditor(editor, hint);
     if (renaming) renaming(false);
 }
 
+void LayerList::abandonRename() {
+    if (editor_) closeEditor(editor_, QAbstractItemDelegate::RevertModelCache);
+}
+
 void LayerList::finishRenameForTesting(bool keep) {
-    QWidget* editor = findChild<QLineEdit*>();
+    if (!keep) {
+        // Escape and giving up on the way out are the same act.
+        abandonRename();
+        return;
+    }
+    // Taken before the commit, which renames the layer and rebuilds the panel
+    // underneath the editor -- and a rebuild is one of the things that closes
+    // one.
+    QWidget* editor = editor_;
     if (!editor) return;
-    if (keep) commitData(editor);
-    closeEditor(editor, keep ? QAbstractItemDelegate::SubmitModelCache
-                             : QAbstractItemDelegate::RevertModelCache);
+    commitData(editor);
+    closeEditor(editor, QAbstractItemDelegate::SubmitModelCache);
 }
 
 void LayerList::dropEvent(QDropEvent* event) {

@@ -50,6 +50,27 @@ public:
     // also how a rename is finished. See shortcuts::Mode::Typing.
     std::function<void(bool renaming)> renaming;
 
+    // The editor the delegate has just made, so that this class knows which
+    // widget is the live one. Public because the delegate is a detail of the
+    // .cpp and this is its way back in.
+    //
+    // Held rather than looked for. A closed editor is only `deleteLater`d, so
+    // it stays a child of the viewport until the event loop next runs and
+    // `findChild<QLineEdit*>` goes on answering with it -- so a second rename
+    // opened before the first editor was collected closed the *old* one and
+    // left the live one open. See issue #51: that is how a rename outlived the
+    // window it was going to report to.
+    void editorOpened(QWidget* editor) { editor_ = editor; }
+
+    // Give up an open rename without keeping what was typed, which is what
+    // Escape does.
+    //
+    // For a window on its way out, and MainWindow's destructor is the caller
+    // that matters: an editor still open when the window is destroyed commits
+    // itself on the way down, and `renamed` then reaches a window whose
+    // document has already been destroyed.
+    void abandonRename();
+
     // Where a row picked up at `from` lands when it is dropped at `boundary` --
     // a gap between rows, 0 above the first and `rows` below the last.
     //
@@ -103,4 +124,6 @@ protected:
 
 private:
     DoubleTap taps_;
+    // The rename editor that is being typed into, or nullptr. See editorOpened.
+    QWidget* editor_ = nullptr;
 };

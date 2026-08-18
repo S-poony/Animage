@@ -965,6 +965,14 @@ first:
   editor being made is the honest moment; `closeEditor` is the other end, and is
   Qt's own, so a rename closed by anything at all says so.
 
+**A rename can be given up rather than finished**, which is what Escape does and
+what a window on its way out does: `LayerList::abandonRename` and
+`TimelineWidget::abandonRename` put the editor away and leave the name where it
+was. `~MainWindow` calls both, and has to — an editor still open when the window
+is destroyed finishes itself on the way down, against a document that has already
+been destroyed. That is [a trap](#the-traps) with a section of its own, and it is
+the one thing to read before changing anything about when these editors close.
+
 **An empty name is refused and the old one kept**, in both panels and in the
 dialog. A nameless track has no label on its row, and a nameless layer has no
 folder of its own in an export.
@@ -1014,6 +1022,16 @@ filter was installed at all and that the trouble was the hop rather than the
 wiring. `finishRenameForTesting` calls the pair that hop would have made. The
 timeline's editor needs none of it: an ordinary `QLineEdit` with an ordinary
 `editingFinished`.
+
+**Which editor is the live one is asked of `LayerList`, not of `findChild`.**
+Closing one only `deleteLater`s it, so it stays a child of the viewport until the
+event loop next runs and `findChild<QLineEdit*>` keeps answering with it — so a
+test that opened a second rename without settling the first finished the *old*
+editor and left the new one open. `finishRenameForTesting` uses the pointer the
+delegate reported instead. A test that wants the editor gone rather than merely
+closed still has to settle it; `settleEditors` is `processEvents` followed by
+`sendPostedEvents(nullptr, DeferredDelete)`, because plain `processEvents` does
+not deliver that one.
 
 Neither seam is why Return failed in the real program. That was the `Play`
 shortcut, and no test here would have caught it.
@@ -2461,6 +2479,68 @@ opening another, because the cost of missing one route is the whole session.
 `TimelineWidget` had the identical leak in its two drag gestures and has the same
 guard. The test that pins it fails three ways on the commit before it, and two of
 those three are the history, not the flag.
+
+**A window is destroyed from the top down, and everything it owns is destroyed
+after it — so a child reporting to its parent during teardown is reporting to
+something that has stopped existing.** This one shipped, and it turned the
+`sanitizers`, `windows` and `macos` jobs red from run #61 onwards. Issue #51.
+
+The order is the whole bug. `~MainWindow`'s body runs; then every member of
+`MainWindow` is destroyed — `doc_`, `keyed_actions_`, `typing_editors_` among
+them; and only then does `~QWidget` destroy the children, the layer panel and the
+timeline included. **Destroying a rename editor is what finishes a rename**, so a
+name still being typed into when the window went away committed itself from down
+there. `LayerList::renamed` called `MainWindow::renameLayer`, which renames a
+layer in a `Document` that had already been destroyed; `renaming` and
+`TimelineWidget::renamingChanged` called `MainWindow::setTyping`, which walks a
+`keyed_actions_` whose buckets had already been freed. Linux's UBSan named it —
+*member call on address which does not point to an object of type `MainWindow`* —
+and Windows and macOS called it a segfault. Both routes were instrumented and
+both fire.
+
+**It is also the best candidate yet for [#49](https://github.com/S-poony/Animage/issues/49)**,
+the single unreproduced heap corruption. `renameLayer` does not merely read the
+destroyed document: freed memory still holds the old bytes, so `findTrack`
+answers with a plausible track and the call goes all the way through to
+`Document::updateLayer` — a *write* into a destroyed `Document`, on a path
+`test_canvas` runs every time. Instrumented on the broken destructor it reached
+the write on five runs out of five, and one of those five died at `0xC0000005`
+on a build with no sanitizer at all. That is the shape #49 describes: no output,
+no assertion, a dead process at whatever unrelated allocation came next. Not
+proof — #49's own call site was never captured, and its rate was under one in
+twenty-five where this is far higher — but a freed-heap write on a path that
+binary takes every run is a better candidate than anything proposed there.
+
+**The fix is to give the renames up in `~MainWindow`'s body**, which is the last
+moment the object is still a `MainWindow` and everything it owns is still there.
+`LayerList::abandonRename` and `TimelineWidget::abandonRename` close the editors
+the way Escape does, and after that there is nothing left to report. With them in,
+no call arrives after the body; without them, three do.
+
+**Cutting the wires instead does not work, and it is worse than doing nothing.**
+This is the obvious fix, it was tried first, and it is worth writing down because
+it fails in a way nothing points at. Clearing `layer_list_->renamed` in the
+destructor does stop that one call — but an empty callback is exactly the case
+where the delegate's `setModelData` falls through to Qt's own, and Qt's writes the
+typed name into the model, and the model emits `itemChanged`, which is connected
+to `MainWindow::onLayerItemChanged` — the same destroyed document, reached by a
+third route, and *that* one writes to it. Instrumented over one run of
+`test_canvas`, clearing the two callbacks turns three late calls into nine, six of
+them through `onLayerItemChanged`. Measured on the maintainer's build it was six
+runs out of six dead of `0xC0000374`.
+
+Two smaller things fell out of chasing it, both worth knowing:
+
+- **`layer_list_` is not dangling in `~MainWindow`.** That was the standing
+  suspicion, because the destructor appeared to corrupt the heap by writing to
+  it. It does not: instrumented, `layer_list_` equals `findChild<QTreeWidget*>()`
+  and has a live parent in every window the tests destroy.
+- **A closed editor is only `deleteLater`d, so `findChild<QLineEdit*>` goes on
+  answering with it** until the event loop next runs. A second rename opened
+  before the first editor had been collected therefore closed the *old* one and
+  left the live one open — which is how one of the two tests came to destroy a
+  window mid-rename in the first place. `LayerList` holds the live editor now,
+  told to it by the delegate's `createEditor`.
 
 **A palette role arrived with alpha on it, and the timeline vanished.** The
 downloaded Windows build drew the timeline white on white — no cell outlines, no

@@ -191,6 +191,28 @@ MainWindow::~MainWindow() {
     // Removing it here rather than letting ~QObject do it keeps it from seeing
     // events while the children it forwards to are already being destroyed.
     qApp->removeEventFilter(this);
+
+    // A rename still open is given up here, in the last moment this is still a
+    // MainWindow.
+    //
+    // A window is destroyed from the top down: this body runs, then every
+    // member of this class is destroyed -- `doc_`, `keyed_actions_`,
+    // `typing_editors_` -- and only then does ~QWidget destroy the children.
+    // Destroying an open editor is what *finishes* a rename, so a rename left
+    // open reports itself from there: `renamed` calls renameLayer on a document
+    // that no longer exists, and `renaming` calls setTyping on a window that is
+    // no longer a window. Both were seen; see issue #51.
+    //
+    // So the editors are closed while everything they will reach is still
+    // alive. Cutting the wires instead does not work and is measurably worse
+    // than doing nothing: with `renamed` cleared, the delegate falls back to
+    // Qt's own setModelData, which writes the name into the model, which emits
+    // itemChanged, which is connected to onLayerItemChanged -- the same dead
+    // document, reached by a third route, and that one *writes* to it. Counted
+    // over one run of test_canvas, clearing the two callbacks turns three late
+    // calls into nine.
+    if (layer_list_) layer_list_->abandonRename();
+    if (timeline_widget_) timeline_widget_->abandonRename();
 }
 
 // Opened framed on the canvas rather than at one-to-one in a corner of it: the
