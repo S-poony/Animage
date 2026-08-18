@@ -436,9 +436,6 @@ private:
     bool reframing_ = false;
     QElapsedTimer reframe_since_;
 
-    // How many rename editors are open. See setTyping: two can overlap for a
-    // moment, so this is a count rather than a flag.
-    int typing_editors_ = 0;
     float colour_r_ = 0.0f, colour_g_ = 0.0f, colour_b_ = 0.0f;
 
     // The last colour that was a colour, so leaving a colour layer while

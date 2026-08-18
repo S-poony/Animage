@@ -40,16 +40,8 @@ public:
         QWidget* editor = QStyledItemDelegate::createEditor(parent, option, index);
         // The same cap the timeline's editor has. See names::kTyped.
         if (auto* line = qobject_cast<QLineEdit*>(editor)) line->setMaxLength(names::kTyped);
-        if (editor) {
-            // Which widget is the live editor. See LayerList::editorOpened.
-            list_->editorOpened(editor);
-            // The moment a rename starts, and the only honest one. It was hung
-            // off QAbstractItemView::edit at first, which does not mean what its
-            // name suggests: it returns true when the *delegate* merely consumed
-            // the event, so ticking a layer's visibility box counted as starting
-            // a rename and left the keyboard shortcuts switched off afterwards.
-            if (list_->renaming) list_->renaming(true);
-        }
+        // Which widget is the live editor. See LayerList::editorOpened.
+        if (editor) list_->editorOpened(editor);
         return editor;
     }
 
@@ -135,7 +127,6 @@ void LayerList::mousePressEvent(QMouseEvent* event) {
 void LayerList::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) {
     if (editor == editor_) editor_ = nullptr;
     QTreeWidget::closeEditor(editor, hint);
-    if (renaming) renaming(false);
 }
 
 void LayerList::abandonRename() {

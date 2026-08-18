@@ -183,14 +183,26 @@ MainWindow::MainWindow() {
     // worse, Space then operates whatever widget it landed on.
     qApp->installEventFilter(this);
 
+    // Which mode the shortcuts are in follows the keyboard, and this is where it
+    // is asked. See setTyping: the question is "is the keyboard in a field", and
+    // the only honest answer to that is which widget has the focus.
+    connect(qApp, &QApplication::focusChanged, this,
+            [this](QWidget*, QWidget* now) { setTyping(isTypingInto(now)); });
+
     canvas_->setFocus();
 }
 
 MainWindow::~MainWindow() {
-    // The filter is installed on the application, which outlives this window.
-    // Removing it here rather than letting ~QObject do it keeps it from seeing
-    // events while the children it forwards to are already being destroyed.
+    // This window stops listening to the application before it starts taking
+    // itself apart. Both halves outlive it -- the event filter is installed on
+    // qApp, and so is the focus connection that decides the shortcut mode -- and
+    // letting ~QObject undo them would leave both live for the whole of the
+    // destruction below, delivering to a window whose children are going or
+    // gone. Measured: without the disconnect, taking the children apart moves
+    // the focus twice more and setTyping is called both times, the second with
+    // `canvas_` already deleted.
     qApp->removeEventFilter(this);
+    disconnect(qApp, nullptr, this, nullptr);
 
     // A rename still open is given up here, in the last moment this is still a
     // MainWindow.
@@ -524,26 +536,37 @@ void MainWindow::setShortcutMode(shortcuts::Mode mode) {
     if (play_button_) play_button_->setEnabled(mode == shortcuts::Mode::Normal);
 }
 
-// A name is being typed into somewhere, so the keyboard belongs to the field.
+// The keyboard belongs to a field, so the shortcuts let go of it.
 //
 // This is the transform's own mechanism and it is here for the same collision:
-// Return is Play, and Return is also how a rename is finished. A disabled
-// QAction does not consume its shortcut, so turning Play off is exactly what
-// lets Return reach the editor -- which is what "the fact lives in the table and
-// one function acts on it" is for. Doing it with a setEnabled call from the
-// rename code would be the thing shortcuts.h exists to stop.
+// Return is Play, and Return is also how a field is finished. A disabled QAction
+// does not consume its shortcut, so turning Play off is exactly what lets Return
+// reach whatever is being typed into -- which is what "the fact lives in the
+// table and one function acts on it" is for. Doing it with a setEnabled call
+// from the field's own code would be the thing shortcuts.h exists to stop.
+//
+// **Driven by the focus, and by nothing else.** This used to be reported by the
+// two rename editors, each telling the window when it opened and closed, and
+// that was wrong twice over. It was a count rather than a flag, because two
+// editors can overlap for a moment and a flag would have handed the keyboard
+// back with one still on screen. And it covered renames and nothing else, so
+// Return in the brush size box was still Play: the box never got the key, the
+// value was never applied, and the animation started playing instead. Every
+// other field in the window had it too -- the onion count and the five numbers
+// on the transform bar.
+//
+// The focus answers both. It is single-valued, so the overlap that needed
+// counting cannot arise -- whoever has the keyboard now is the answer -- and it
+// knows nothing about renaming, so a field added tomorrow is covered by having
+// been added. See isTypingInto for what counts as a field, and note that it asks
+// about the spin box as well as the line edit inside it: a spin box keeps the
+// focus itself, through a focus proxy.
 //
 // Coming back, the mode is asked for rather than assumed: a transform can be
-// live while a layer is renamed, and going back to Normal there would leave the
+// live while a name is typed, and going back to Normal there would leave the
 // nudge keys stepping frames instead.
-//
-// A count and not a flag, because two editors can overlap for a moment: opening
-// a rename in the layer panel is what takes the focus off an open one in the
-// timeline, so the second is created *before* the first is told it has finished.
-// A flag would hand the keyboard back with an editor still on screen.
 void MainWindow::setTyping(bool typing) {
-    typing_editors_ = std::max(0, typing_editors_ + (typing ? 1 : -1));
-    if (typing_editors_ > 0) {
+    if (typing) {
         setShortcutMode(shortcuts::Mode::Typing);
         return;
     }
@@ -1159,7 +1182,6 @@ void MainWindow::buildLayerPanel() {
         return QString::fromStdString(track->layers[static_cast<std::size_t>(row)].name);
     };
     layer_list_->renamed = [this](int row, const QString& name) { renameLayer(row, name); };
-    layer_list_->renaming = [this](bool typing) { setTyping(typing); };
 
     // Everything a colour layer has that an ordinary one does not, in one box
     // that is simply absent the rest of the time. A group of controls greyed
@@ -1363,7 +1385,6 @@ void MainWindow::buildTimelinePanel() {
     // reach the canvas and the layer panel exactly as the menu does.
     connect(timeline_widget_, &TimelineWidget::trackChanged, this,
             &MainWindow::setCurrentTrack);
-    connect(timeline_widget_, &TimelineWidget::renamingChanged, this, &MainWindow::setTyping);
 
     timeline_scroll_ = new QScrollArea(panel);
     timeline_scroll_->setWidget(timeline_widget_);

@@ -55,10 +55,6 @@ Q_SIGNALS:
     void currentSlotChanged(std::size_t slot);
     void trackChanged(animage::TrackId track);
     void documentChanged();
-    // A name is being typed into, or has stopped being. The window turns the
-    // keyboard shortcuts off while it is true: Return is Play, and Return is
-    // also how a rename is finished. See shortcuts::Mode::Typing.
-    void renamingChanged(bool renaming);
 
 public:
     // Rename the track in `row` in place, as a double click on its name does.

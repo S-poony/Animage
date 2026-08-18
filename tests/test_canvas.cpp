@@ -6091,6 +6091,94 @@ void doubleClickingATrackRenamesIt() {
     CHECK(play->isEnabled());
 }
 
+// Return is Play, and Return is also how a number is entered into a field. The
+// mechanism that settles that was built for renaming and wired to renaming, so
+// every other field in the window still lost the argument: typing 42 into the
+// brush size box and pressing Return played the animation and left the brush
+// where it was. Reported from use.
+//
+// The window follows the focus now rather than being told by two editors, which
+// is why this test names no editor.
+void theKeyboardBelongsToAnyFieldItIsIn() {
+    TEST("the keyboard belongs to any field it is in, not only to a rename");
+    // With ink on it, because the transform half of this needs something to box.
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+    CanvasWidget* canvas = fixture.canvas;
+
+    // Two actions name the mode between them, because no single one does: Play
+    // is live in Normal alone, Actual size is live in Normal and Transform
+    // (kAlways), and in Typing nothing is live at all.
+    //
+    //   Normal     Play on,  Actual size on
+    //   Transform  Play off, Actual size on
+    //   Typing     Play off, Actual size off
+    QAction* play = fixture.action(shortcuts::Id::Play);
+    QAction* looking = fixture.action(shortcuts::Id::ActualSize);
+    CHECK(play != nullptr);
+    CHECK(looking != nullptr);
+    if (!play || !looking) return;
+
+    QWidget* bar = fixture.window.findChild<QWidget*>(QStringLiteral("transformBar"));
+    CHECK(bar != nullptr);
+    if (!bar) return;
+
+    // The toolbar's fields: the ones outside the transform bar, which is hidden
+    // until a transform is live. Brush size and the onion count, at least.
+    QList<QAbstractSpinBox*> toolbar_fields;
+    for (QAbstractSpinBox* box : fixture.window.findChildren<QAbstractSpinBox*>()) {
+        if (box->isVisible() && !bar->isAncestorOf(box)) toolbar_fields.append(box);
+    }
+    CHECK(toolbar_fields.size() >= 2);
+
+    // The canvas has the keyboard, so Return is Play.
+    canvas->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(play->isEnabled());
+    CHECK(looking->isEnabled());
+
+    for (QAbstractSpinBox* field : toolbar_fields) {
+        field->setFocus(Qt::MouseFocusReason);
+        QCoreApplication::processEvents();
+        // Typing: everything lets go, so Return falls through to the field. A
+        // disabled QAction does not consume its shortcut, which is the whole
+        // mechanism -- and before this, none of these fields ever got it: typing
+        // a brush size and pressing Return played the animation instead.
+        CHECK(!play->isEnabled());
+        CHECK(!looking->isEnabled());
+
+        canvas->setFocus(Qt::OtherFocusReason);
+        QCoreApplication::processEvents();
+        CHECK(play->isEnabled());
+        CHECK(looking->isEnabled());
+    }
+
+    // And coming back is asked for rather than assumed. With a transform live,
+    // leaving one of its own number fields has to land in Transform and not in
+    // Normal, or the nudge keys would go back to stepping frames.
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(canvas->transformIsLive());
+    CHECK(!play->isEnabled());  // Transform
+    CHECK(looking->isEnabled());
+
+    const QList<QAbstractSpinBox*> transform_fields = bar->findChildren<QAbstractSpinBox*>();
+    CHECK(!transform_fields.isEmpty());
+    if (transform_fields.isEmpty()) return;
+
+    transform_fields.first()->setFocus(Qt::MouseFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(!play->isEnabled());  // Typing
+    CHECK(!looking->isEnabled());
+
+    canvas->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    CHECK(canvas->transformIsLive());
+    CHECK(!play->isEnabled());  // Transform again, and not Normal
+    CHECK(looking->isEnabled());
+}
+
 // Giving a rename up rather than finishing it. Escape already does this on both
 // panels; this is the same act asked for by name, because a window on its way
 // out has to be able to do it to an editor that is still open. See issue #51.
@@ -6772,6 +6860,7 @@ int main(int argc, char** argv) {
     doubleClickingALayerRenamesIt();
     renamingACarriedColourLayerLeavesTheArrowOutOfIt();
     doubleClickingATrackRenamesIt();
+    theKeyboardBelongsToAnyFieldItIsIn();
     aRenameGivenUpKeepsTheNameAndTheKeyboard();
     aWindowDestroyedMidRenameGivesItUp();
     aWindowIsDestroyedSafelyFromAnyState();

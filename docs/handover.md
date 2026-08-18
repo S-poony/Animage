@@ -1355,10 +1355,43 @@ be a decision that is not a decision. Two things about it are less obvious:
 - **Coming out of it, the mode is asked for rather than assumed.** A transform
   can be live while a layer is renamed, and going back to `Normal` there would
   take the nudge keys away.
-- **It is a count and not a flag.** Two editors overlap for a moment: opening a
-  rename in the layer panel is what takes the focus off an open one in the
-  timeline, so the second is created *before* the first is told it has finished,
-  and a flag would hand the keyboard back with an editor still on screen.
+- **It follows the focus, and nothing else** — `QApplication::focusChanged`, and
+  `isTypingInto` on whatever now holds the keyboard.
+
+That second point was learned twice, which is the part worth reading. It was
+first reported by the two rename editors, each telling the window when it opened
+and when it closed, and that was wrong in two ways at once.
+
+It needed a *count* rather than a flag, because two editors overlap for a moment
+— opening a rename in the layer panel is what takes the focus off an open one in
+the timeline, so the second is created before the first is told it has finished,
+and a flag would have handed the keyboard back with an editor still on screen.
+
+And it covered renaming and nothing else. **So Return in the brush size box was
+still Play**: the box never got the key, the value was never applied, and the
+animation started playing instead. Reported from use, long after the rename it
+was built for was working. The onion count and the five numbers on the transform
+bar all had it too, and none of them had ever been thought about — because the
+mechanism had been wired to the instance that prompted it rather than to the rule
+it was an instance of.
+
+The focus answers both. It is single-valued, so the overlap that needed counting
+cannot arise: whoever has the keyboard *now* is the answer. And it knows nothing
+about renaming, so a field added tomorrow is covered by having been added. The
+two editors no longer report anything — `LayerList::renaming` and
+`TimelineWidget::renamingChanged` are gone, and the ninety lines of comment
+explaining when each of them fired went with them.
+
+**The question was already answered three paragraphs down.** The Space and Z
+filter asks `isTypingInto(QApplication::focusWidget())`, and has since it was
+fixed — the same question, in the same file, for the other half of the same
+problem. Nobody joined them up, and the cost of not joining them up was a field
+that could not be typed into.
+
+One consequence for teardown: `~MainWindow` now disconnects qApp from itself
+beside removing the event filter, because taking the children apart moves the
+focus and the connection would otherwise deliver into a window that is halfway
+gone. See [the traps](#the-traps).
 
 **And the filter that forwards Space and Z was eating every space anybody
 typed.** It has been wrong since it was written, and nothing noticed while the
@@ -2503,9 +2536,11 @@ them; and only then does `~QWidget` destroy the children, the layer panel and th
 timeline included. **Destroying a rename editor is what finishes a rename**, so a
 name still being typed into when the window went away committed itself from down
 there. `LayerList::renamed` called `MainWindow::renameLayer`, which renames a
-layer in a `Document` that had already been destroyed; `renaming` and
-`TimelineWidget::renamingChanged` called `MainWindow::setTyping`, which walks a
-`keyed_actions_` whose buckets had already been freed. Linux's UBSan named it —
+layer in a `Document` that had already been destroyed; `LayerList::renaming` and
+`TimelineWidget::renamingChanged` — both since removed, see
+[what the keyboard does](#what-the-keyboard-does-and-when) — called
+`MainWindow::setTyping`, which walks a `keyed_actions_` whose buckets had already
+been freed. Linux's UBSan named it —
 *member call on address which does not point to an object of type `MainWindow`* —
 and Windows and macOS called it a segfault. Both routes were instrumented and
 both fire.

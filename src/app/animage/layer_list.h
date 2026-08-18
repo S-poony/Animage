@@ -45,11 +45,6 @@ public:
     std::function<QString(int row)> nameOf;
     std::function<void(int row, const QString& name)> renamed;
 
-    // A name is being typed into, or has stopped being. The window turns the
-    // keyboard shortcuts off while it is true: Return is Play, and Return is
-    // also how a rename is finished. See shortcuts::Mode::Typing.
-    std::function<void(bool renaming)> renaming;
-
     // The editor the delegate has just made, so that this class knows which
     // widget is the live one. Public because the delegate is a detail of the
     // .cpp and this is its way back in.
@@ -111,11 +106,14 @@ public:
 
 protected:
     void dropEvent(QDropEvent* event) override;
-    // The far end of an open editor, which with the delegate's createEditor is
-    // what `renaming` reports. Qt's own entry point rather than somewhere we
-    // call ourselves, so a rename closed by anything at all -- Return, Escape, a
-    // click elsewhere, the panel being rebuilt -- says so, and the keyboard
-    // cannot be left switched off with no editor to show for it.
+    // The far end of an open editor, and where `editor_` is let go of. Qt's own
+    // entry point rather than somewhere we call ourselves, so a rename closed by
+    // anything at all -- Return, Escape, a click elsewhere, the panel being
+    // rebuilt -- comes through here.
+    //
+    // What the keyboard does while a name is being typed into is no longer this
+    // class's business: the window follows the focus instead, which is what
+    // covers every other field in it too. See MainWindow::setTyping.
     void closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint) override;
     // Where the pen's second tap is turned into the edit that a mouse's double
     // click starts through the DoubleClicked trigger. See DoubleTap: the pen

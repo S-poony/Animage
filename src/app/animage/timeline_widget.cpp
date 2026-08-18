@@ -915,7 +915,6 @@ void TimelineWidget::beginRenaming(std::size_t row) {
     // Explicitly, because the timeline itself takes no keyboard focus: without
     // this the editor appears and the keys keep going to the canvas.
     rename_edit_->setFocus(Qt::OtherFocusReason);
-    Q_EMIT renamingChanged(true);
 }
 
 void TimelineWidget::finishRenaming(bool keep) {
@@ -930,7 +929,6 @@ void TimelineWidget::finishRenaming(bool keep) {
     renaming_ = kNoId;
     rename_edit_->hide();
     finishing_rename_ = false;
-    Q_EMIT renamingChanged(false);
 
     if (!keep) return;
     const Track* line = doc_.scene().findTrack(renamed);
