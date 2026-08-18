@@ -2163,6 +2163,18 @@ CI that means nothing is worse than none. It belongs with the benchmarks and
 carries their instruction — run it before and after anything that touches the
 canvas.
 
+**It is also good for questions that are not about pixels, which was not the
+plan and is worth knowing.** A `Stage` is a real `MainWindow`, built, shown,
+settled and then *destroyed* — so it is the cheapest way to put the program into
+a named state and watch what happens on the way out. Chasing the teardown bug in
+[the traps](#the-traps) needed exactly that: a situation four lines long left the
+keyboard in the brush size box, and `shots the-keyboard-left-in-the-brush-size-box`
+built and destroyed that window in about two seconds, against twenty-three for a
+run of `test_canvas`. That measurement is what established the second instance of
+the bug was harmless rather than fatal. The picture it wrote was never opened.
+The honest limit: it asserts nothing, so it tells you what happens and a test
+still has to be the thing that keeps it happening.
+
 **It is meant to be edited, including by whoever is only passing through.** Add
 the situation you need, bend one that is nearly right, delete one that is in the
 way. Nothing depends on any of them: no test reads them, there are no reference
@@ -2511,11 +2523,47 @@ proof — #49's own call site was never captured, and its rate was under one in
 twenty-five where this is far higher — but a freed-heap write on a path that
 binary takes every run is a better candidate than anything proposed there.
 
-**The fix is to give the renames up in `~MainWindow`'s body**, which is the last
+**A rename editor was the first child found doing this, and it was not the only
+one.** A `QAbstractSpinBox` reports through `editingFinished`, which fires on
+losing focus — and a window closed with the keyboard in the brush size box runs
+`[this] { canvas_->setFocus(); }` from inside `~QWidget`, reading a `canvas_`
+that has already been destroyed. Five connections have that shape: `radius_`,
+`onion_`, and three in the transform bar. Measured, it fires. It was *harmless* —
+the canvas happens to still be alive at that moment, and `setFocus` on a live
+widget does no damage — but harmless by luck, in a lambda one edit away from
+touching the document.
+
+**Why nothing said so, which is the part to remember.** `connect(x, sig, this,
+&MainWindow::slot)` makes Qt do a `static_cast<MainWindow*>(receiver)`, and that
+downcast is what UBSan reported at `qobjectdefs_impl.h:570`. `connect(x, sig,
+this, [this] { ... })` stores a functor and never downcasts, so nothing is
+flagged and only the *body* can be caught, and only if it does something ASan can
+see. In `main_window.cpp` that is 28 connections the sanitizer can see and 10 it
+cannot. **A green `sanitizers` job is not evidence of absence for this shape.**
+
+**The fix is to shut the window down in `~MainWindow`'s body**, which is the last
 moment the object is still a `MainWindow` and everything it owns is still there.
-`LayerList::abandonRename` and `TimelineWidget::abandonRename` close the editors
-the way Escape does, and after that there is nothing left to report. With them in,
-no call arrives after the body; without them, three do.
+Three steps, each one the reason the next is safe:
+
+1. `LayerList::abandonRename` and `TimelineWidget::abandonRename` **give an open
+   rename up**. First, because the other two steps close the editor and an editor
+   closed any other way *commits* — so without this, closing a window would
+   silently apply a half-typed name.
+2. `clearFocus()` on whatever holds the keyboard, so **everything that reports on
+   losing focus reports now**, to a window that is entirely intact. A field that
+   has lost focus does not lose it twice.
+3. **Then the children are destroyed**, in reverse order of construction — the
+   same rule C++ uses for members, and for the same reason: the canvas is built
+   first and is what the later widgets refer back to, so it goes last. After
+   this there is nothing left for `~QWidget` to destroy, so the moment in which a
+   child is alive and this window's members are not **no longer exists**.
+
+That third step is what makes the first two belt-and-braces rather than
+load-bearing, and it is why this is written as a rule about teardown and not as
+two bug fixes. Instrumented across a run of `test_canvas`: three calls arrive in
+step 1, two in step 2, and **nothing at all in step 3 or after the body**. The
+member pointers are set to null after the sweep, so the `if (canvas_)` questions
+this class already asks stay truthful for the rest of the destruction.
 
 **Cutting the wires instead does not work, and it is worse than doing nothing.**
 This is the obvious fix, it was tried first, and it is worth writing down because
@@ -2528,6 +2576,16 @@ third route, and *that* one writes to it. Instrumented over one run of
 `test_canvas`, clearing the two callbacks turns three late calls into nine, six of
 them through `onLayerItemChanged`. Measured on the maintainer's build it was six
 runs out of six dead of `0xC0000374`.
+
+`aWindowIsDestroyedSafelyFromAnyState` in `test_canvas.cpp` is what keeps this
+from coming back: one window per interruption — the keyboard in a toolbar field,
+the keyboard in the transform bar with a transform live, a stroke the pen has not
+been lifted from, a colour solve still on its worker — each destroyed on the
+spot. **It asserts almost nothing itself**, and says so: the checks are that each
+state was really reached, so a case that has quietly stopped setting anything up
+cannot pass by doing nothing, and what happens after each window dies is the
+sanitizers' to judge. Adding a case is three lines, which is the only reason
+anybody will add one.
 
 Two smaller things fell out of chasing it, both worth knowing:
 

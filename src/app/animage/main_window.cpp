@@ -211,8 +211,43 @@ MainWindow::~MainWindow() {
     // document, reached by a third route, and that one *writes* to it. Counted
     // over one run of test_canvas, clearing the two callbacks turns three late
     // calls into nine.
+    //
+    // The three steps below are in the order they are for a reason, and each
+    // one is the reason the next is safe.
+
+    // A rename is given up rather than finished. It has to come before the
+    // other two, because both of those close the editor -- and an editor closed
+    // any other way *commits*, so shutting a window down would silently apply a
+    // half-typed name.
     if (layer_list_) layer_list_->abandonRename();
     if (timeline_widget_) timeline_widget_->abandonRename();
+
+    // Whatever holds the keyboard lets go of it now. Every number field on the
+    // toolbar reports through QAbstractSpinBox::editingFinished, which fires on
+    // losing focus -- so a window closed with the keyboard in the brush size box
+    // otherwise ran `[this] { canvas_->setFocus(); }` from inside ~QWidget,
+    // reading a `canvas_` that had already been destroyed. Measured: it fires.
+    // Letting go here means it has already reported by the time anything is
+    // destroyed, and a field that has lost focus does not lose it twice.
+    if (QWidget* holding = focusWidget()) holding->clearFocus();
+
+    // And the children go while every member they might touch is still here,
+    // which is the general form of the two steps above rather than a third
+    // special case: after this there is nothing left for ~QWidget to destroy,
+    // so there is no longer a moment in which a child of this window is alive
+    // and this window's members are not.
+    //
+    // In reverse order of construction, which is the same rule C++ uses for
+    // members and for the same reason: the canvas is built first and is what
+    // the later widgets refer back to, so it is the last thing that should go.
+    const QList<QWidget*> owned = findChildren<QWidget*>(Qt::FindDirectChildrenOnly);
+    for (auto it = owned.crbegin(); it != owned.crend(); ++it) delete *it;
+    // Absent rather than dangling. Most of this class already asks `if
+    // (canvas_)` before using it, and this is what makes those questions
+    // truthful for the rest of the destruction.
+    canvas_ = nullptr;
+    timeline_widget_ = nullptr;
+    layer_list_ = nullptr;
 }
 
 // Opened framed on the canvas rather than at one-to-one in a corner of it: the

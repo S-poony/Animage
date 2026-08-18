@@ -4,6 +4,7 @@
 // clicking around used to reach, which meant their crashes were found by a
 // human clicking around.
 
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QImage>
@@ -23,6 +24,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <cmath>
+#include <functional>
 #include <map>
 
 #include <QDir>
@@ -6209,6 +6211,135 @@ void aWindowDestroyedMidRenameGivesItUp() {
     QCoreApplication::processEvents();
 }
 
+// The same rule as the test above, swept across every state that has something
+// to say when it is interrupted -- because #51 was not really about renaming.
+// It was about a window being destroyed from the top down while its children
+// were still able to talk to it, and a rename editor was only the first child
+// found doing it. A focused spin box was the second, and nothing had been
+// looking for a third.
+//
+// **These assert almost nothing themselves, and that is the point.** The checks
+// here are that each state was really reached, so a case that has quietly
+// stopped setting anything up cannot pass by doing nothing; what happens after
+// each window dies is the sanitizers' to judge, and the `sanitizers` job is what
+// runs them. Adding a case is three lines, which is the only reason anybody will
+// add one.
+void aWindowIsDestroyedSafelyFromAnyState() {
+    TEST("a window destroyed in the middle of something reports none of it");
+
+    // The visible number fields, which is how the toolbar's are told apart from
+    // the transform bar's: the transform bar is hidden until a transform is
+    // live. `transformBar` is the one object name in the window, and it is here
+    // rather than a guess at creation order.
+    const auto visibleBoxesOutsideTheTransformBar = [](MainWindow& window) {
+        QList<QWidget*> found;
+        QWidget* bar = window.findChild<QWidget*>(QStringLiteral("transformBar"));
+        for (QWidget* box : window.findChildren<QAbstractSpinBox*>()) {
+            if (!box->isVisible()) continue;
+            if (bar && bar->isAncestorOf(box)) continue;
+            found.append(box);
+        }
+        return found;
+    };
+
+    struct Interruption {
+        const char* what;
+        // True if the state was really reached. False fails the test by name.
+        std::function<bool(WindowWithInk&)> reach;
+    };
+
+    const std::vector<Interruption> cases = {
+        {"the keyboard in a number field on the toolbar",
+         [&](WindowWithInk& fixture) {
+             const QList<QWidget*> boxes = visibleBoxesOutsideTheTransformBar(fixture.window);
+             if (boxes.isEmpty()) return false;
+             boxes.first()->setFocus(Qt::MouseFocusReason);
+             QCoreApplication::processEvents();
+             return QApplication::focusWidget() == boxes.first();
+         }},
+
+        {"a live transform, with the keyboard in one of its fields",
+         [](WindowWithInk& fixture) {
+             QAction* transform = fixture.action(shortcuts::Id::Transform);
+             if (!transform) return false;
+             transform->trigger();
+             QCoreApplication::processEvents();
+             QWidget* bar = fixture.window.findChild<QWidget*>(QStringLiteral("transformBar"));
+             if (!bar || !fixture.canvas->transformIsLive()) return false;
+             const QList<QAbstractSpinBox*> boxes = bar->findChildren<QAbstractSpinBox*>();
+             if (boxes.isEmpty()) return false;
+             boxes.first()->setFocus(Qt::MouseFocusReason);
+             QCoreApplication::processEvents();
+             return QApplication::focusWidget() == boxes.first();
+         }},
+
+        {"a stroke the pen has not been lifted from",
+         [](WindowWithInk& fixture) {
+             QPointingDevice stylus(QStringLiteral("test stylus"), 1,
+                                    QInputDevice::DeviceType::Stylus,
+                                    QPointingDevice::PointerType::Pen,
+                                    QInputDevice::Capability::Position |
+                                        QInputDevice::Capability::Pressure,
+                                    1, 0);
+             const QPointF at(400.0, 300.0);
+             QTabletEvent press(QEvent::TabletPress, &stylus, at,
+                                fixture.canvas->mapToGlobal(at), 1.0, 0, 0, 0, 0, 0,
+                                Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+             QCoreApplication::sendEvent(fixture.canvas, &press);
+             QCoreApplication::processEvents();
+             // And no release: the window goes with the command still open.
+             return fixture.canvas->isStroking();
+         }},
+
+        {"a colour solve still running on its worker",
+         [](WindowWithInk& fixture) {
+             Document& doc = fixture.doc();
+             const TrackId track = doc.scene().tracks.front().id;
+             const LayerId ink = doc.scene().findTrack(track)->layers.front().id;
+             const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+             Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+             settings.ctg_sources = {ink};
+             doc.updateLayer(track, colour, settings);
+             // A scribble for the solver to spread, on the drawing the canvas is
+             // standing on.
+             {
+                 ScopedCommand command(doc, "Scribble");
+                 BrushSettings brush_settings;
+                 brush_settings.radius = 8.0f;
+                 brush_settings.hardness = 0.95f;
+                 brush_settings.pressure_affects_opacity = false;
+                 brush_settings.r = 1.0f;
+                 brush_settings.a = 1.0f;
+                 Brush brush(brush_settings);
+                 brush.begin(doc, track, fixture.canvas->currentImage(), colour,
+                             {340.0f, 320.0f, 1.0f});
+                 brush.extend({360.0f, 330.0f, 1.0f});
+                 brush.end();
+             }
+             fixture.canvas->refreshAll();
+             // The paint is what asks for the solve; nothing waits for it.
+             fixture.canvas->grab();
+             return fixture.canvas->colourPending();
+         }},
+    };
+
+    for (const Interruption& one : cases) {
+        WindowWithInk fixture;
+        if (!fixture.canvas) {
+            testing::fail(__FILE__, __LINE__, std::string("no canvas for: ") + one.what);
+            continue;
+        }
+        const bool reached = one.reach(fixture);
+        ++testing::g_checks;
+        if (!reached) {
+            testing::fail(__FILE__, __LINE__,
+                          std::string("never reached the state: ") + one.what);
+        }
+        // And here the fixture goes out of scope, taking the window with it.
+    }
+    QCoreApplication::processEvents();
+}
+
 // Issue #12. A colour layer goes to the bottom of the stack, so in a track with
 // enough layers to need a scrollbar the layer you have just made is off the end
 // of the panel -- and the list scrolled itself against the panel as it stood
@@ -6643,6 +6774,7 @@ int main(int argc, char** argv) {
     doubleClickingATrackRenamesIt();
     aRenameGivenUpKeepsTheNameAndTheKeyboard();
     aWindowDestroyedMidRenameGivesItUp();
+    aWindowIsDestroyedSafelyFromAnyState();
     aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }
