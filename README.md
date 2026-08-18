@@ -196,6 +196,7 @@ cmake --build build --target animage && ./build/src/app/animage
 | Space-drag, middle-drag | pan |
 | `1` / `0` | actual size / fit the canvas |
 | `F` | fit the drawing, including whatever ran off the edge |
+| `H` | hide the panels, and bring them back |
 | Maximise / restore | fits the canvas, since the window it was framed for has gone |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | undo, redo |
 | `Alt`+right-drag | brush size |
@@ -287,11 +288,44 @@ of the two things the panel refuses, and it is the one nobody sees coming: they
 are genuinely different sequences, and a check for duplicates passes them both.
 
 The eyedropper is `Alt`+click on the drawing rather than the colour dialog's
-"pick screen colour", which cannot work with a stylus: Qt routes pen input as a
-tablet event and discards the mouse messages Windows promotes from it, so the
-dialog never hears the click. Sampling the document is better regardless — it
-reads the colour that was stored rather than what the monitor was showing after
-sRGB encoding, the zoom filter and the onion skin.
+"pick screen colour", which cannot work with a stylus — see **what the pen can
+and cannot reach** below. Sampling the document is better regardless: it reads
+the colour that was stored rather than what the monitor was showing after sRGB
+encoding, the zoom filter and the onion skin.
+
+**What the pen can and cannot reach** is worth knowing, because three things that
+each look like the pen being broken are one mechanism. Qt's widgets are built for
+a mouse, and a pen reaches them by promotion: Qt turns a tablet event into a
+mouse event, but only when nothing accepted the tablet event, and it sends that
+mouse event to whatever sits under the tip. Almost everything in the window is
+fine — buttons, menus, sliders, the layer panel, dragging a layer to restack it —
+because the widget under the tip is the widget the gesture meant.
+
+What is not fine is anything that works by *grabbing* the mouse, which is a
+widget saying "send me the pointer wherever it goes, until I say stop". A grab is
+a promise about a mouse, and the pen never made it: its events keep going to
+whatever is under the tip. So:
+
+- The colour dialog's **pick screen colour** grabs the pointer to follow it
+  across the screen. With a pen it never hears the click. Hence `Alt`+click.
+- **Dragging a dock** by its title bar grabs the pointer for the length of the
+  drag, so the timeline and layer panels cannot be undocked or re-docked with a
+  pen. The mouse does it. See
+  [#50](https://github.com/S-poony/Animage/issues/50) — this one is a bug and is
+  being worked on, not a limitation being recorded.
+- A **modal dialog** is the same fact from the other side: Qt withholds mouse
+  events from a window a dialog has blocked, but tablet events go by what is
+  under the tip regardless, so the pen used to draw on the canvas behind an open
+  dialog. That one is fixed.
+
+**Whether a pen produces a double click depends on the platform**, which is worth
+knowing if you are reading the code. Where Qt does the promoting it sends one,
+and it is generous about it — two taps pair if they land within 10 px of each
+other rather than the 5 px a mouse gets, because a hand holding a stylus is not a
+hand holding a mouse. Where Windows Ink does it, two taps arrived as two ordinary
+presses and no double click at all. Double-tapping a name in the layer panel or
+the timeline to rename it works either way, because those two count the taps
+themselves.
 
 **The canvas.** The outlined rectangle is what will be exported; everything
 outside it is veiled. You can draw out there and nothing is clipped — roughs run

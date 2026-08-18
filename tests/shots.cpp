@@ -69,6 +69,7 @@
 #include <QTimer>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLayout>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
@@ -1024,6 +1025,121 @@ const std::vector<Situation>& situations() {
              rows.push_back(s.pointerAt("the top-left handle",
                                         s.canvas->transformHandlesForTesting()[0]));
              s.picture = sheetOf(rows);
+         }},
+
+        // Reported from use: float the layer panel, then hide the panels, and
+        // the timeline comes back with a white rectangle over it. Three shots
+        // rather than one because the report does not say which step shows it,
+        // and a picture of the wrong step says nothing.
+        {"panels-1-the-layer-panel-floated",
+         "the layer panel undocked and floating, timeline still where it was: the state the "
+         "glitch is reached from, and nothing should be wrong yet",
+         [](Stage& s) {
+             if (auto* dock = qobject_cast<QDockWidget*>(s.layerPanel())) {
+                 dock->setFloating(true);
+                 dock->resize(260, 420);
+             }
+             s.settle();
+         }},
+
+        {"panels-2-then-hidden",
+         "and both panels hidden from there: the strip the timeline was in should be gone, "
+         "not left behind as a pale rectangle",
+         [](Stage& s) {
+             if (auto* dock = qobject_cast<QDockWidget*>(s.layerPanel())) {
+                 dock->setFloating(true);
+                 dock->resize(260, 420);
+             }
+             s.settle();
+             s.press(Id::TogglePanels);
+         }},
+
+        {"panels-0-what-the-docks-say",
+         "not a picture: the docks' visibility, floating state, area and geometry printed at "
+         "each step, because the reported glitch is a layout state and a screenshot of it only "
+         "says which step looks wrong",
+         [](Stage& s) {
+             const auto report = [&s](const char* when) {
+                 std::printf("      --- %s\n", when);
+                 for (QDockWidget* dock : s.window.findChildren<QDockWidget*>()) {
+                     const QRect g = dock->geometry();
+                     std::printf(
+                         "        %-10s visible=%-5s floating=%-5s area=%d  geom=%d,%d %dx%d\n",
+                         qPrintable(dock->windowTitle()), dock->isVisible() ? "yes" : "no",
+                         dock->isFloating() ? "yes" : "no",
+                         static_cast<int>(s.window.dockWidgetArea(dock)), g.x(), g.y(), g.width(),
+                         g.height());
+                 }
+                 if (QWidget* central = s.window.centralWidget()) {
+                     const QRect g = central->geometry();
+                     std::printf("        canvas     geom=%d,%d %dx%d\n", g.x(), g.y(), g.width(),
+                                 g.height());
+                 }
+             };
+             report("as it opens (one track)");
+             // One track, so syncTimelineHeight has returned early every time
+             // and resizeDocks has never run. Hiding here is the case that was
+             // measured before and looked fine.
+             s.press(Id::TogglePanels);
+             report("hidden, one track");
+             s.press(Id::TogglePanels);
+
+             // Now with three, which is what makes syncTimelineHeight actually
+             // call resizeDocks. That call is the one difference between this
+             // and plain Qt, where the same hide works.
+             for (int t = 0; t < 2; ++t) s.choose("Add track");
+             s.settle();
+             report("three tracks, shown");
+             s.press(Id::TogglePanels);
+             report("hidden, three tracks");
+             s.press(Id::TogglePanels);
+             report("shown again, three tracks");
+             // setFloating and *not* a synthetic drag on the title bar. A
+             // hand-driven drag in plain Qt reclaims the space correctly -- it
+             // was checked -- but a synthetic one leaves Qt's drag state machine
+             // half finished and reports a fault that is not there. That
+             // mistake cost a whole rewrite, so it is written down here rather
+             // than repeated.
+             if (auto* dock = qobject_cast<QDockWidget*>(s.layerPanel())) {
+                 dock->setFloating(true);
+                 dock->resize(260, 420);
+             }
+             s.settle();
+             report("layer panel floated");
+             s.press(Id::TogglePanels);
+             report("panels hidden");
+             s.press(Id::TogglePanels);
+             report("panels shown again");
+
+             // Resizing while a panel is floating, which is where the reported
+             // fault lives. It does *not* reproduce from setFloating: this
+             // reports a correct relayout, and only a hand-driven drag freezes
+             // it. Kept so that the difference stays visible.
+             s.window.resize(kWindowWidth - 60, kWindowHeight + 40);
+             s.settle();
+             report("window resized while floating");
+             // Asked and answered: invalidating and activating the layout does
+             // not recover it either, so this is not a relayout that was merely
+             // never triggered. The space is still spoken for.
+             if (QLayout* layout = s.window.layout()) {
+                 layout->invalidate();
+                 layout->activate();
+             }
+             s.settle();
+             report("and the layout invalidated and activated");
+         }},
+
+        {"panels-3-then-shown-again",
+         "and brought back: the timeline should be drawn in full, with no white rectangle over "
+         "it and its height the one it had",
+         [](Stage& s) {
+             if (auto* dock = qobject_cast<QDockWidget*>(s.layerPanel())) {
+                 dock->setFloating(true);
+                 dock->resize(260, 420);
+             }
+             s.settle();
+             s.press(Id::TogglePanels);
+             s.press(Id::TogglePanels);
          }},
     };
     return list;

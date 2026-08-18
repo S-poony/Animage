@@ -54,6 +54,14 @@ if(TARGET animage_ui)
   target_include_directories(test_shortcuts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_shortcuts COMMAND test_shortcuts -platform offscreen)
 
+  # Issue #53: what Qt does with a pen event nobody accepts. GuiPrivate for the
+  # same reason -- this injects at the platform boundary, which is the only place
+  # promotion can be watched from.
+  add_executable(test_pen_promotion test_pen_promotion.cpp)
+  target_link_libraries(test_pen_promotion PRIVATE animage_ui Qt6::GuiPrivate)
+  target_include_directories(test_pen_promotion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_pen_promotion COMMAND test_pen_promotion -platform offscreen)
+
   add_executable(test_serialise test_serialise.cpp)
   target_link_libraries(test_serialise PRIVATE animage_ui)
   target_include_directories(test_serialise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -126,6 +126,7 @@ enum class Id {
     ActualSize,
     FitCanvas,
     FitDrawing,
+    TogglePanels,
     Brush,
     Eraser,
     Lasso,

@@ -3045,21 +3045,54 @@ all tests passed, and the button was simply absent. Screenshots caught it, and
 caught a mis-encoded character and a fresh document with three undoable setup
 steps. Look at the thing.
 
-**A pen produces no double click.** Qt turns a mouse's second press into
-`QEvent::MouseButtonDblClick` and never delivers it as a press, so a widget that
-wants a double click watches for that event and is done — with a mouse. A tablet
-event nobody accepts is promoted to a plain press and a plain release, by Windows
-Ink or by Qt where the platform does not, and two taps arrive as two ordinary
-presses with nothing marking them as a pair. So `QAbstractItemView`'s
-`DoubleClicked` trigger never fires for a pen, and neither does any
-`mouseDoubleClickEvent`. Double-clicking a name to rename it did nothing at all,
-and worked perfectly with a mouse on the same machine.
+**Whether a pen produces a double click depends on who promotes, and it is not
+Qt's decision.** This entry said flatly that a pen produces no double click. That
+is wrong, and the correction is worth more than the original claim was.
 
-`DoubleTap` counts them instead. Anything else in this program that wants a
-double click needs one too, and the two routes are exclusive by construction,
-which is what makes having both safe: a mouse arrives as `MouseButtonDblClick`
-and never as a second press, a pen arrives as a second press and never as a
-double click. Two consequences worth carrying: a `QMouseEvent` built by hand
+Qt turns a mouse's second press into `QEvent::MouseButtonDblClick` and never
+delivers it as a press, so a widget that wants a double click watches for that
+event and is done — with a mouse. A tablet event nobody accepts is promoted to
+mouse events, but *which code does the promoting* is chosen by
+`QWindowSystemInterfacePrivate::TabletEvent::platformSynthesizesMouse`. When it
+is true — and the Windows plugin sets it true — Qt keeps out entirely and
+whatever the platform sends is what arrives. When false, Qt promotes itself. The
+two differ:
+
+- **Qt's own promotion does produce a double click**, and it replaces the second
+  press rather than following it: press, release, `MouseButtonDblClick`, release.
+  It pairs taps using `touchDoubleTapDistance` (10 px) and not
+  `mouseDoubleClickDistance` (5 px), sharing the one `mouseDoubleClickInterval`
+  (400 ms). Measured — see below.
+- **Windows Ink's promotion did not.** Reported with a real pen: two taps arrived
+  as two ordinary presses, `QAbstractItemView`'s `DoubleClicked` trigger never
+  fired, and double-clicking a name to rename it did nothing at all while the
+  same click with a mouse worked on the same machine.
+
+**How that was measured, because it settles a claim this file also got wrong.**
+The promotion boundary was written up as untestable, on the grounds that it
+happens in the platform layer below anything a test drives. What is untestable is
+the way the tests are written: they construct a `QTabletEvent` and send it
+straight to a widget, which skips promotion entirely.
+`QWindowSystemInterface::handleTabletEvent` injects *at* the boundary instead, so
+Qt's hit-testing, promotion and double-click detection all run above it. That is
+what produced the sequence above. What it still cannot reach is Windows Ink —
+injecting at Qt's boundary means Windows never sees a pen and so cannot promote,
+which is why the Windows half of this rests on a hand report and not a test.
+
+`DoubleTap` counts presses instead. Anything else in this program that wants a
+double click needs the same. The two routes cannot both fire for one gesture, but
+not for the reason this entry used to give: it is not that a pen never produces a
+double click, it is that a pen never produces a double click *and* a second
+press. Where Qt promotes, `DoubleTap` simply never sees a second press and the
+`DoubleClicked` trigger has already done the job.
+
+One edge follows from that and is not handled: on the promoting-by-Qt path the
+first press arms `DoubleTap` and the second never arrives, so it stays armed, and
+a third tap inside the interval and the distance would read as the second of a
+gesture that already finished. It needs three taps in 400 ms within 10 px and it
+costs a spurious rename.
+
+Two consequences worth carrying: a `QMouseEvent` built by hand
 carries **timestamp 0**, so every synthetic press in a test is the second of a
 double tap at the same place unless the test says otherwise (`sendTap`); and a
 tap counted this way should be matched to a *smaller* target than a mouse's

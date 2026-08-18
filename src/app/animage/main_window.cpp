@@ -26,6 +26,7 @@
 #include <QListWidget>
 #include <QProgressDialog>
 #include <QFileInfo>
+#include <QLayout>
 #include <QMessageBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -141,6 +142,8 @@ MainWindow::MainWindow() {
     buildToolBar();
     buildLayerPanel();
     buildTimelinePanel();
+    // After both of them: this is the half of the View menu that names the docks.
+    buildPanelViewActions();
     buildStatusBar();
     rebuildLayerList();
     syncTrackMenu();
@@ -283,6 +286,12 @@ void MainWindow::showEvent(QShowEvent* event) {
         // the strip came up exactly one title bar short.
         timeline_rows_shown_ = 0;
         syncTimelineHeight();
+        // The same reason, one step further: this is the first moment the window
+        // has a laid-out answer to what it looks like, so it is the first moment
+        // worth recording as the view to go back to. Saved from the constructor
+        // it would be the layout these two lines exist to correct.
+        default_layout_ = saveState();
+        default_layout_rows_ = timeline_rows_shown_;
     });
 }
 
@@ -740,6 +749,7 @@ void MainWindow::buildMenus() {
     }
 
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
+    view_menu_ = view;
     view->addAction(makeAction(Id::ActualSize, [this] { canvas_->resetView(); }));
     view->addAction(makeAction(Id::FitCanvas, [this] { canvas_->fitToCanvas(); }));
     // The drawing is not the canvas, and both are worth being able to frame:
@@ -770,6 +780,73 @@ void MainWindow::buildMenus() {
     passe_partout->setChecked(canvas_->passePartout());
     connect(passe_partout, &QAction::toggled, this,
             [this](bool shown) { canvas_->setPassePartout(shown); });
+}
+
+// The rest of the View menu, once there are docks to name.
+//
+// Split from buildMenus because of the order the window is built in and for no
+// other reason: the menus come before either panel, so there is nothing to ask
+// for a toggle action from yet.
+//
+// Why the menu has these at all is issue #50. A dock's title bar has a close
+// button, and a close button is a *click*, so a pen works it perfectly well.
+// Dragging a dock is a drag, and with a pen that does not work -- so a panel
+// shut by accident had no way back that a pen could reach, and nothing in the
+// window even said the panel was a thing that could be shown again. The docks
+// keep their close buttons; what was missing was the way back.
+void MainWindow::buildPanelViewActions() {
+    if (!view_menu_ || !layer_dock_ || !timeline_dock_) return;
+
+    view_menu_->addSeparator();
+
+    // Qt's own action per dock rather than one written here: it takes the dock's
+    // window title for its label, it checks and unchecks itself as the dock is
+    // shown and hidden however that happens, and that "however" is the point --
+    // the close button in the title bar keeps it in step for free.
+    view_menu_->addAction(layer_dock_->toggleViewAction());
+    view_menu_->addAction(timeline_dock_->toggleViewAction());
+
+    // And both at once, on Tab.
+    //
+    // The condition is "either is showing" rather than "both are", which is what
+    // makes the key a toggle instead of something that sometimes does nothing:
+    // with one panel already closed, Tab takes the other away and the next press
+    // brings both back. Answering "are they both up?" would leave the first
+    // press showing a panel the hand was trying to hide.
+    view_menu_->addAction(makeAction(shortcuts::Id::TogglePanels, [this] {
+        const bool anything_shown = layer_dock_->isVisible() || timeline_dock_->isVisible();
+        layer_dock_->setVisible(!anything_shown);
+        timeline_dock_->setVisible(!anything_shown);
+    }));
+
+    view_menu_->addSeparator();
+    // No key, so no row in the table -- the same rule the export entry follows.
+    // This is a thing you go to the menu for once, not a thing a hand reaches
+    // for while drawing.
+    view_menu_->addAction(QStringLiteral("&Restore default view"), this,
+                          &MainWindow::restoreDefaultView);
+}
+
+// Everything about where the panels are, back to how the window opened.
+//
+// One QByteArray does all of it. QMainWindow::saveState records each dock's
+// area, whether it is floating, whether it is shown and how big it is, so there
+// is no separate list of things to put back and no way for one of them to be
+// forgotten -- which is the failure this shape is chosen to avoid.
+void MainWindow::restoreDefaultView() {
+    // Empty until the window has been shown once. Nothing sensible to restore
+    // to before then, and the menu entry is reachable only from a shown window.
+    if (default_layout_.isEmpty()) return;
+    restoreState(default_layout_);
+
+    // The timeline's height is a dock size, so it came back with the rest -- but
+    // it came back at the height that was right for the track count the layout
+    // was *saved* at. syncTimelineHeight works in differences, so handing it
+    // that count is what makes it grow the strip to the count there is now.
+    // Without this line, restoring a one-track layout into a three-track scene
+    // would leave the strip two rows short and nothing would ever put them back.
+    timeline_rows_shown_ = default_layout_rows_;
+    syncTimelineHeight();
 }
 
 // Split from the menus at the seam that was already in the source: nothing
@@ -1195,7 +1272,12 @@ void MainWindow::onTransformFieldEdited() {
 
 void MainWindow::buildLayerPanel() {
     auto* dock = new QDockWidget(QStringLiteral("Layers"), this);
+    // saveState skips a dock with no object name and warns, so the layout that
+    // Restore default view reads back would come up missing this panel. The name
+    // is stored in that state and is not shown anywhere.
+    dock->setObjectName(QStringLiteral("layersDock"));
     dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    layer_dock_ = dock;
 
     auto* panel = new QWidget(dock);
     // Wide enough for the colour-layer box before it is there.
@@ -1380,6 +1462,8 @@ void MainWindow::buildLayerPanel() {
 
 void MainWindow::buildTimelinePanel() {
     auto* dock = new QDockWidget(QStringLiteral("Timeline"), this);
+    // See the layer dock: without this the saved layout would not have it.
+    dock->setObjectName(QStringLiteral("timelineDock"));
     dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
     timeline_dock_ = dock;
 

@@ -117,6 +117,22 @@ const std::vector<Entry>& built() {
         // than only the rule a test asserts.
         {Id::FitDrawing, "fit-drawing", "Fit drawing", kSpelledOut,
          QKeyCombination(Qt::Key_F).toCombined(), kAlways, Group::Looking, Kind::Action},
+        // Takes the panels away and gives them back. It is also the way back from
+        // a panel shut by accident, which is the reason it is bound at all: a
+        // dock's close button is a *click*, so a pen works it perfectly well,
+        // and dragging the dock back is a drag, which with a pen does not work.
+        // See issue #50.
+        //
+        // H and not the Tab every other drawing program uses, for one reason:
+        // these are ApplicationShortcut, so a binding on Tab does not sit
+        // alongside focus navigation, it replaces it everywhere. Tab is a
+        // one-line change here and the shortcuts panel can make it too.
+        //
+        // Live in a transform as well: what the panels are doing is a question
+        // about the screen and not about the drawing, and nothing in a transform
+        // is disturbed by answering it.
+        {Id::TogglePanels, "toggle-panels", "Panels", kSpelledOut,
+         QKeyCombination(Qt::Key_H).toCombined(), kAlways, Group::Looking, Kind::Action},
 
         {Id::Brush, "brush", "Brush", kSpelledOut, QKeyCombination(Qt::Key_B).toCombined(),
          kAlways, Group::Tools, Kind::Action},

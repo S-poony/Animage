@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <cstdint>
@@ -152,6 +153,9 @@ private:
     void buildToolBar();
     void buildLayerPanel();
     void buildTimelinePanel();
+    // The part of the View menu that needs the docks to exist, so it cannot be
+    // built with the rest of the menus: buildMenus runs before either panel.
+    void buildPanelViewActions();
     void buildStatusBar();
 
     void rebuildLayerList();
@@ -161,6 +165,9 @@ private:
     // to four rows. A request and not a constraint: the dock stays draggable in
     // both directions afterwards.
     void syncTimelineHeight();
+    // Puts the docks back where the window opened them: position, floating,
+    // shown, and size. See default_layout_.
+    void restoreDefaultView();
     // The timeline's own metrics, so the dock asks for a height that matches
     // what the widget will draw.
     static constexpr int kRowHeight = 46;
@@ -334,6 +341,26 @@ private:
     TimelineWidget* timeline_widget_ = nullptr;
     QScrollArea* timeline_scroll_ = nullptr;
     QDockWidget* timeline_dock_ = nullptr;
+    QDockWidget* layer_dock_ = nullptr;
+    // Kept because the dock entries are added to it after the panels are built
+    // and not while the menus are.
+    QMenu* view_menu_ = nullptr;
+    // What the window looked like when it had just opened and settled, as
+    // QMainWindow writes it: where each dock is, whether it is floating, whether
+    // it is shown at all, and how big it is. One QByteArray covers all four,
+    // which is why "restore the default view" needs nothing else -- the timeline
+    // height is a dock size like any other.
+    //
+    // Taken after the first show and not in the constructor. See showEvent: from
+    // the constructor the dock has not been laid out and its title bar has no
+    // height to read, and a layout saved there is the one the program itself
+    // then corrects.
+    QByteArray default_layout_;
+    // The track count `default_layout_` was saved at, so that restoring it can
+    // hand syncTimelineHeight the difference it works in. Restoring a layout
+    // saved for one track into a scene with three would otherwise leave the
+    // strip two rows short.
+    int default_layout_rows_ = 0;
     // How many rows the dock was last sized for. Without it every refresh --
     // and there is one per frame change -- would shove the dock back to the
     // height the track count implies, undoing a drag the moment you scrubbed.
