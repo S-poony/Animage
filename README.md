@@ -308,15 +308,20 @@ whatever is under the tip. So:
 
 - The colour dialog's **pick screen colour** grabs the pointer to follow it
   across the screen. With a pen it never hears the click. Hence `Alt`+click.
-- **Dragging a dock** by its title bar grabs the pointer for the length of the
-  drag, so the timeline and layer panels cannot be undocked or re-docked with a
-  pen. The mouse does it. See
-  [#50](https://github.com/S-poony/Animage/issues/50) — this one is a bug and is
-  being worked on, not a limitation being recorded.
 - A **modal dialog** is the same fact from the other side: Qt withholds mouse
   events from a window a dialog has blocked, but tablet events go by what is
   under the tip regardless, so the pen used to draw on the canvas behind an open
   dialog. That one is fixed.
+
+**Panels can be torn off and dragged back with a pen**, and getting there found
+a second mechanism worth knowing about. A floating panel used to be given a
+*native* window frame, which means its title bar belonged to Windows rather than
+to Qt — and Windows Ink never reports a press on one. The panel could be dragged
+out, because that gesture starts on a docked title bar, and then could not be
+picked up again, because a fresh press on the floating one reached nothing at
+all. Floating panels now wear a title bar Qt draws, which a pen can press like
+any other part of a window. See
+[#50](https://github.com/S-poony/Animage/issues/50).
 
 **Whether a pen produces a double click depends on the platform**, which is worth
 knowing if you are reading the code. Where Qt does the promoting it sends one,
