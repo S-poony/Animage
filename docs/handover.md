@@ -2797,11 +2797,43 @@ lead straight back in. It needs a re-entrancy flag, and the canvas must *accept*
 those keys including auto-repeats, or holding one past the repeat delay
 recurses until the stack runs out. See `MainWindow::eventFilter`.
 
-**Guessing cost more than instrumenting, twice.** The first crash took two wrong
-theories before a test that sent real key events found it in one run. The second
-took four, and was answered in one round trip once `crash_report.cpp` existed.
-The lesson is written into the commits because it will happen again: after the
-second wrong theory, stop and instrument.
+**Guessing cost more than instrumenting, three times now.** The first crash took
+two wrong theories before a test that sent real key events found it in one run.
+The second took four, and was answered in one round trip once
+`crash_report.cpp` existed. The lesson is written into the commits because it
+will happen again: after the second wrong theory, stop and instrument.
+
+**And then it happened again, with the rule already written down here.**
+[#50](https://github.com/S-poony/Animage/issues/50) — a pen cannot drag a
+floating panel back — cost four wrong theories and two whole implementations
+that were written, tested, reported broken and deleted. A `QDockWidget` title bar
+was replaced with one driven by hand, on a premise that was never checked; then
+an event filter was written to give the pen events it was already receiving. Both
+were reverted. What answered it was an afternoon's logging in the real
+application: which widget receives each event, where the pointer is, and what the
+window manager thinks it owns.
+
+Three things made the guessing feel safe, and each is worth recognising:
+
+- **A test that is genuinely falsified can still prove nothing.** The event
+  filter had a test that failed when the fix was disabled — and the fix was inert
+  on real hardware, because offscreen *Qt* promotes tablet events while on
+  Windows the *platform* does. See the double-click trap above for
+  `platformSynthesizesMouse`, which is the switch. **An offscreen test of pen
+  input answers a question about Qt, never a question about a pen.**
+- **A synthetic mouse drag is not a drag.** Sent to a `QDockWidget` it leaves
+  Qt's own drag state machine half finished, and the wreckage looks exactly like
+  a layout bug. Two conclusions were drawn from one, and both were wrong; the
+  real layout fault is narrower and is
+  [#54](https://github.com/S-poony/Animage/issues/54).
+- **A screenshot shows a thing exists, not that it works.** The replaced title
+  bar was checked by looking at a picture of it. The close button in that picture
+  could not be clicked.
+
+The reporter's own observation is what finally cracked it — *it works if I never
+lift the pen* — which turned a vague "cannot put it back" into a precise "cannot
+start a gesture on a floating panel". **Ask what the neighbouring gesture does.**
+Half the wrong theories would have died at the first question.
 
 **An implicit background as a *seed* was tried and removed — then solved from
 the other side.** A single scribble has nothing to be cut against, so it labelled
@@ -3100,6 +3132,64 @@ double click, since the second press is an ordinary press and everything else on
 the row is still listening — the layer panel takes it on the name only, because
 the visibility tick is in the same column and flicking a layer off and on is the
 commonest gesture in the panel.
+
+**A floating panel's title bar belongs to the window manager, and a pen cannot
+press it.** This is [#50](https://github.com/S-poony/Animage/issues/50), and it
+is the *other* half of the pen story: not how an event is promoted, but whether
+Qt is given one at all.
+
+A floating `QDockWidget` on Windows is handed a **native window frame** —
+`windowFlags` comes back `0xa00340b`, with no `Qt::FramelessWindowHint` in it.
+Its title bar is therefore non-client area, and Qt only ever hears about it
+through `QEvent::NonClientAreaMouseButtonPress` and its siblings. That is the
+path a *mouse* re-docks a panel through, and it works. **Windows Ink generates no
+non-client press for a pen** — measured with a real stylus: hovering that title
+bar produces a stream of `NonClientAreaMouseMove` and a press never arrives, so
+`QDockWidget`'s drag is never entered.
+
+Everything else about the pen and the docks is fine, which is what made this hard
+to see. Dragging a *docked* panel works, because its title bar is Qt's own and
+inside the main window. Dragging one out and back in a single unbroken gesture
+works, because the drag began in client area. Only a fresh press on an
+already-floating panel fails.
+
+**The only lever is `setTitleBarWidget`.** Setting `Qt::FramelessWindowHint`
+directly is discarded — measured, `windowFlags()` comes back unchanged — because
+Qt decides native decoration for itself and stands down only when a title bar
+widget is supplied. `FloatingDockFrame` supplies one while a panel floats and
+takes it away when it docks, so the ordinary window is untouched.
+
+Two things about that widget matter more than what it looks like. It handles
+**no** mouse or tablet events, so Qt still runs the drag, the drop preview and
+the dock areas — the previous attempt overrode them and lost all three. And it is
+applied only once **nothing is held down**, because `topLevelChanged(true)`
+arrives mid-drag and changing the decoration recreates the window, which would
+break the one gesture that already worked.
+
+**A title bar is a drawn thing, not a row of widgets** — and this cost six
+attempts, all of them spent matching numbers. `DockTitleStrip` paints itself with
+`CE_DockWidgetTitle`, the same call `QDockWidget` makes, so the background, the
+frame and the elided title come out right without any of it being restated. The
+version before it was a `QLabel` and a `QToolButton` in a layout, and every
+measurable thing about it was eventually made to match — strip height, button
+box, icon, icon resolution — while it still looked wrong, because nothing was
+painting the background at all. The reporter is who noticed: *the title and the
+cross are in a rectangle when docked and in nothing when floating.*
+
+**And `iconSize()` on a title-bar button is an upper bound, not the drawn size.**
+The last of those attempts had every number identical to Qt's and still drew a
+cross half again too big. The rule Qt follows is that the glyph is fitted to the
+button's *inside*: the button is 20 px, `PM_DockWidgetTitleBarButtonMargin` is 5
+a side, so the icon is drawn at 10 — whose ink is 9 px across, which is exactly
+what Qt paints. `iconSize()` reads 16 and is never the answer. Every metric
+reached for instead of this one — `PM_SmallIconSize`, `PM_ButtonIconSize`,
+`QDockWidgetTitleButton::sizeHint`'s formula, `SE_DockWidgetCloseButton` —
+reports the bound rather than the drawing.
+
+The shot `panels-the-close-button-itself` is what settled it and is worth
+reaching for before any more arithmetic: it magnifies Qt's button and ours side
+by side and prints the bounding box of the *ink* in each. Every metric can agree
+while the painted glyph does not, and only the picture says so.
 
 **A window state change and a widget resize arrive in either order.** Maximising
 the window frames the canvas in it, and restoring frames it again — the canvas

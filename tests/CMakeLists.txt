@@ -62,6 +62,13 @@ if(TARGET animage_ui)
   target_include_directories(test_pen_promotion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_pen_promotion COMMAND test_pen_promotion -platform offscreen)
 
+  # Issue #50: a floating panel's title bar has to be Qt's own, or a pen cannot
+  # press it. Plain widget state, so no private Qt headers are needed.
+  add_executable(test_floating_dock_frame test_floating_dock_frame.cpp)
+  target_link_libraries(test_floating_dock_frame PRIVATE animage_ui)
+  target_include_directories(test_floating_dock_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_floating_dock_frame COMMAND test_floating_dock_frame -platform offscreen)
+
   add_executable(test_serialise test_serialise.cpp)
   target_link_libraries(test_serialise PRIVATE animage_ui)
   target_include_directories(test_serialise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

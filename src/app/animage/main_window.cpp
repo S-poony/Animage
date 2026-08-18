@@ -14,6 +14,8 @@
 #include <QPalette>
 #include <QDialogButtonBox>
 #include <QDockWidget>
+
+#include "floating_dock_frame.h"
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEventLoop>
@@ -1277,6 +1279,9 @@ void MainWindow::buildLayerPanel() {
     // is stored in that state and is not shown anywhere.
     dock->setObjectName(QStringLiteral("layersDock"));
     dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    // What lets a pen pick this panel up again once it is floating. See
+    // FloatingDockFrame and issue #50.
+    new FloatingDockFrame(dock);
     layer_dock_ = dock;
 
     auto* panel = new QWidget(dock);
@@ -1465,6 +1470,8 @@ void MainWindow::buildTimelinePanel() {
     // See the layer dock: without this the saved layout would not have it.
     dock->setObjectName(QStringLiteral("timelineDock"));
     dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    // See the layer dock: the pen reaches this one back the same way.
+    new FloatingDockFrame(dock);
     timeline_dock_ = dock;
 
     auto* panel = new QWidget(dock);

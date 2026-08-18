@@ -65,6 +65,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFont>
+#include <QFontMetrics>
 #include <QStatusBar>
 #include <QTimer>
 #include <QImage>
@@ -78,6 +79,7 @@
 #include <QRect>
 #include <QString>
 #include <QToolBar>
+#include <QAbstractButton>
 #include <QTreeWidget>
 
 #include <algorithm>
@@ -88,6 +90,7 @@
 
 #include "canvas_widget.h"
 #include "document.h"
+#include "floating_dock_frame.h"
 #include "layer_list.h"
 #include "main_window.h"
 #include "shortcuts.h"
@@ -421,6 +424,18 @@ struct Stage {
                            Qt::IgnoreAspectRatio, Qt::FastTransformation);
     }
 
+    // The top strip of a dock -- its title bar, whoever drew it. Taken by height
+    // rather than by asking for the title bar widget, because a docked panel has
+    // no such widget to ask: Qt paints its own.
+    static QImage stripOf(QWidget* dock, int magnify = 2) {
+        if (!dock) return {};
+        const QImage shot = dock->grab().toImage();
+        const int tall = std::min(shot.height(), static_cast<int>(30 * shot.devicePixelRatio()));
+        const QImage strip = shot.copy(QRect(0, 0, shot.width(), tall));
+        return strip.scaled(strip.width() * magnify, strip.height() * magnify,
+                            Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+
     static QImage closeUpOf(QWidget* widget, int magnify = 2) {
         if (!widget) return {};
         const QImage shot = widget->grab().toImage();
@@ -489,6 +504,68 @@ private:
 // The cursors, side by side, each on paper and on ink -- because the rule they
 // follow is light under dark, and a cursor crosses both by definition. A glyph
 // that reads on white and vanishes on black has half a rule.
+// Several pictures down the page, each with a name over it, so two states of the
+// same thing can be compared without flipping between files.
+QImage stackOf(const std::vector<std::pair<QString, QImage>>& rows) {
+    constexpr int kPad = 10;
+    constexpr int kLabel = 22;
+
+    int width = 0;
+    int height = kPad;
+    // The label has to fit too, or the measurement written beside a picture is
+    // clipped off and the picture alone cannot answer the question.
+    const QFontMetrics metrics((QFont()));
+    for (const auto& [name, picture] : rows) {
+        width = std::max({width, picture.width(), metrics.horizontalAdvance(name)});
+        height += kLabel + picture.height() + kPad;
+    }
+    width += 2 * kPad;
+
+    QImage sheet(width, height, QImage::Format_ARGB32);
+    sheet.fill(QColor(250, 250, 250));
+    QPainter painter(&sheet);
+    painter.setPen(QColor(40, 40, 40));
+
+    int y = kPad;
+    for (const auto& [name, picture] : rows) {
+        painter.drawText(QRect(kPad, y, width - 2 * kPad, kLabel), Qt::AlignVCenter, name);
+        y += kLabel;
+        painter.drawImage(kPad, y, picture);
+        // An outline, or a pale title bar on a pale sheet has no edges to judge.
+        painter.drawRect(QRect(kPad, y, picture.width() - 1, picture.height() - 1));
+        y += picture.height() + kPad;
+    }
+    return sheet;
+}
+
+// The bounding box of everything that is not the background, which is the only
+// honest measure of "how big does this glyph look". Every metric can agree while
+// the drawn cross does not, which is exactly what happened in #50.
+QRect inkOf(const QImage& picture) {
+    if (picture.isNull()) return {};
+    const QImage rgb = picture.convertToFormat(QImage::Format_ARGB32);
+    const QRgb background = rgb.pixel(0, 0);
+    int left = rgb.width();
+    int top = rgb.height();
+    int right = -1;
+    int bottom = -1;
+    for (int y = 0; y < rgb.height(); ++y) {
+        for (int x = 0; x < rgb.width(); ++x) {
+            const QRgb here = rgb.pixel(x, y);
+            const int difference = std::abs(qRed(here) - qRed(background)) +
+                                   std::abs(qGreen(here) - qGreen(background)) +
+                                   std::abs(qBlue(here) - qBlue(background));
+            if (difference < 40) continue;  // near enough to the background
+            left = std::min(left, x);
+            top = std::min(top, y);
+            right = std::max(right, x);
+            bottom = std::max(bottom, y);
+        }
+    }
+    if (right < 0) return {};
+    return QRect(QPoint(left, top), QPoint(right, bottom));
+}
+
 QImage sheetOf(const std::vector<CursorRow>& rows) {
     constexpr int kPatch = 32 * kCursorMagnify;
     constexpr int kText = 470;
@@ -1031,6 +1108,138 @@ const std::vector<Situation>& situations() {
         // the timeline comes back with a white rectangle over it. Three shots
         // rather than one because the report does not say which step shows it,
         // and a picture of the wrong step says nothing.
+        {"panels-the-floating-panel",
+         "issue #50: the layer panel torn off, as an artist sees it on a second screen. Its "
+         "title bar is drawn by us because a native one cannot be pressed with a pen -- so it "
+         "has to look like it belongs: one colour from the name down to the buttons, and no "
+         "grey bar meeting the window's rounded corners",
+         [](Stage& s) {
+             auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
+             if (!dock) return;
+             dock->setFloating(true);
+             s.settle();
+             if (auto* frame = dock->findChild<FloatingDockFrame*>()) frame->applyIfNothingIsHeld();
+             s.settle();
+             dock->resize(280, 380);
+             s.settle();
+             s.picture = Stage::closeUpOf(dock);
+         }},
+
+        {"panels-the-close-button-itself",
+         "issue #50: Qt's close button on a docked panel, and ours on a floating one, both "
+         "magnified. The number beside each is the bounding box of its *ink* -- every metric "
+         "agreed while the drawn cross did not, so this measures what is actually painted",
+         [](Stage& s) {
+             auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
+             if (!dock) return;
+
+             QImage qts;
+             if (auto* b = dock->findChild<QAbstractButton*>(QStringLiteral("qt_dockwidget_closebutton"))) {
+                 qts = b->grab().toImage();
+             }
+
+             dock->setFloating(true);
+             s.settle();
+             if (auto* frame = dock->findChild<FloatingDockFrame*>()) frame->applyIfNothingIsHeld();
+             s.settle();
+             dock->resize(280, 360);
+             s.settle();
+
+             QImage ours;
+             if (QWidget* bar = dock->titleBarWidget()) {
+                 if (auto* b = bar->findChild<QAbstractButton*>()) ours = b->grab().toImage();
+             }
+
+             const auto magnified = [](const QImage& one) {
+                 return one.isNull() ? one
+                                     : one.scaled(one.width() * 6, one.height() * 6,
+                                                  Qt::IgnoreAspectRatio, Qt::FastTransformation);
+             };
+             const auto describe = [](const char* who, const QImage& one) {
+                 const QRect ink = inkOf(one);
+                 return QStringLiteral("%1 -- button %2x%3, ink %4x%5 at %6,%7")
+                     .arg(QString::fromUtf8(who))
+                     .arg(one.width())
+                     .arg(one.height())
+                     .arg(ink.width())
+                     .arg(ink.height())
+                     .arg(ink.x())
+                     .arg(ink.y());
+             };
+             // And the icon on its own, drawn straight at the size the button is
+             // told to use. If its ink matches Qt's, the icon is right and the
+             // button is scaling it; if it matches ours, we have the wrong icon.
+             QImage bare;
+             QString bare_what = QStringLiteral("our icon at 16 -- none found");
+             if (QWidget* bar = dock->titleBarWidget()) {
+                 if (auto* b = bar->findChild<QAbstractButton*>()) {
+                     bare = b->icon().pixmap(b->iconSize()).toImage();
+                     QImage onto(b->iconSize(), QImage::Format_ARGB32);
+                     onto.fill(Qt::white);
+                     QPainter into(&onto);
+                     into.drawImage(0, 0, bare);
+                     into.end();
+                     bare = onto;
+                     bare_what = QStringLiteral("our icon alone at %1 px").arg(b->iconSize().width());
+                 }
+             }
+             s.picture = stackOf({{describe("Qt's, docked", qts), magnified(qts)},
+                                  {describe("ours, floating", ours), magnified(ours)},
+                                  {describe(bare_what.toUtf8().constData(), bare), magnified(bare)}});
+         }},
+
+        {"panels-the-title-bar-docked-and-floating",
+         "issue #50: the same panel's title bar docked (Qt draws it) above, and floating (we "
+         "draw it) below. The strip and its close button must be the same size in both -- a "
+         "button that grows when a panel is torn off was reported and is what this shot exists "
+         "to catch",
+         [](Stage& s) {
+             auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
+             if (!dock) return;
+
+             // Docked first: Qt's own title bar, which is the thing to match.
+             // Its height is where the panel's contents begin.
+             const QImage docked = Stage::stripOf(dock);
+             const int docked_content_top = dock->widget() ? dock->widget()->geometry().y() : 0;
+             // The device pixel ratio of each grab, because if the two differ
+             // then this comparison magnifies one more than the other and
+             // "bigger" is the picture's fault rather than the widget's.
+             const qreal docked_dpr = dock->grab().devicePixelRatio();
+
+             dock->setFloating(true);
+             s.settle();
+             // The watcher waits for the pointer to be let go, which never
+             // happens here because nothing is holding it. Nudged rather than
+             // waited for, so the shot is not a race.
+             if (auto* frame = dock->findChild<FloatingDockFrame*>()) frame->applyIfNothingIsHeld();
+             s.settle();
+             dock->resize(280, 360);
+             s.settle();
+             const QImage floating = Stage::stripOf(dock);
+
+             // The heights, because "it looks bigger" is a guess and a number is
+             // not. Qt's docked title bar is however far down its content
+             // starts; ours is the widget we supplied.
+             const int qt_tall = docked_content_top;
+             const int ours_tall = dock->titleBarWidget() ? dock->titleBarWidget()->height() : 0;
+             QString ours_icon = QStringLiteral(", dpr %1").arg(dock->grab().devicePixelRatio());
+             if (QWidget* bar = dock->titleBarWidget()) {
+                 if (auto* b = bar->findChild<QAbstractButton*>()) {
+                     ours_icon += QStringLiteral(", button %1x%2, icon %3")
+                                      .arg(b->width())
+                                      .arg(b->height())
+                                      .arg(b->iconSize().width());
+                 }
+             }
+             s.picture = stackOf(
+                 {{QStringLiteral("docked -- Qt's own, %1 px tall, dpr %2")
+                       .arg(qt_tall)
+                       .arg(docked_dpr),
+                   docked},
+                  {QStringLiteral("floating -- ours, %1 px tall%2").arg(ours_tall).arg(ours_icon),
+                   floating}});
+         }},
+
         {"panels-1-the-layer-panel-floated",
          "the layer panel undocked and floating, timeline still where it was: the state the "
          "glitch is reached from, and nothing should be wrong yet",
