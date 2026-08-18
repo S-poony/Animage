@@ -1220,6 +1220,9 @@ void MainWindow::buildLayerPanel() {
     // responding. A colour layer could not be hidden at all.
     layer_list_ = new LayerList(panel);
     layer_list_->setColumnCount(2);
+    // The first of these is replaced with the current track's name on every
+    // rebuild -- see rebuildLayerList, which is where it means something. This
+    // is the value before the first one runs and nothing else.
     layer_list_->setHeaderLabels({QStringLiteral("Layer"), QStringLiteral("Marks")});
     layer_list_->setRootIsDecorated(false);
     layer_list_->setUniformRowHeights(true);
@@ -2715,6 +2718,33 @@ void MainWindow::refreshLayerFlags() {
 void MainWindow::rebuildLayerList() {
     const Track* track = doc_.scene().findTrack(track_);
     if (!track || !layer_list_) return;
+
+    // Whose layers these are, in the one place in this panel that had nothing to
+    // say and room to say it.
+    //
+    // Nothing here used to name the track. The dock is titled "Layers" and the
+    // column beneath it was headed "Layer", which is the same word twice and no
+    // information -- while the fact a reader actually needs is that these are
+    // *this track's* layers and another track's may be called exactly the same
+    // thing. That fact was on screen, in the status bar, eight readings along and
+    // the width of the window away from the rows it qualifies; being far from the
+    // decision is the same as being absent. So the dock says what the panel is
+    // and the header says whose, and the two read as a pair.
+    //
+    // Here rather than in buildLayerPanel because this is the one function every
+    // path that changes the current track ends in -- clicking a row in the
+    // timeline through setCurrentTrack, Add and Delete track, undo, Open, New --
+    // and it is also where a *rename* of the track arrives, by both routes: the
+    // gutter editor through documentChanged, and Track > Rename track through
+    // refreshEverything.
+    //
+    // The tooltip says the name in full and says what it is, which is the answer
+    // to both of the things a bare name in a header cannot do: a long one is
+    // elided in a column this narrow, and "rough" alone could be read as another
+    // layer rather than as the track the layers belong to.
+    const QString called = QString::fromStdString(track->name);
+    layer_list_->headerItem()->setText(0, called);
+    layer_list_->headerItem()->setToolTip(0, QStringLiteral("Layers of \"%1\"").arg(called));
 
     const LayerId active = canvas_->activeLayer();
 

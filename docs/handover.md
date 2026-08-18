@@ -889,6 +889,47 @@ argue, which was that it "has to be visible from the row itself"; the argument
 was right about the fact mattering and wrong about a permanent label being how
 you make somebody notice one.
 
+### What the layer panel says it is showing
+
+The dock is titled "Layers" and the column beneath it was headed "Layer": the
+same word twice and no information. What was missing was whose layers these are.
+Another track's layers can be named exactly the same — every track starts with a
+"layer 1" — so a panel that names neither is a panel you can edit the wrong track
+in without noticing.
+
+The fact was not absent from the window. The status bar had it all along, eight
+readings along and the width of the window away from the rows it qualifies, and
+the timeline shows it as a highlighted row. Both are far from the decision, and
+far from the decision is the same as absent for something you have to remember to
+check. So the header carries the current track's name now, and the two read as a
+pair: the dock says what the panel is, the header says whose.
+
+`rebuildLayerList` is where it is set, and that is the whole of why this is one
+line rather than a hunt: it is the function every path that changes the current
+track ends in — clicking a row in the timeline through `setCurrentTrack`, Add and
+Delete track, undo, Open, New — and it is also where a *rename* of the track
+arrives by both of its routes, the gutter editor through `documentChanged` and
+Track ▸ Rename track through `refreshEverything`.
+
+Two things were checked by looking rather than assumed, with a `shots` situation
+added and deleted again:
+
+- **A long name does not shove the canvas sideways.** That is not a hypothetical
+  worry in this panel — the Colour layer box appearing once took the dock from
+  274 px to 292 and moved the canvas eighteen pixels. It does not happen here
+  because column 0 is `QHeaderView::Stretch`, so it takes the width it is given
+  rather than asking for more. A name at the sixty-character cap left the dock
+  and the canvas exactly where they were.
+- **The second column is usually not there at all.** "Marks" is
+  `ResizeToContents` and a track with no colour layer has nothing to put in it,
+  so most of the time that strip holds one word. Which is why replacing it cost
+  nothing.
+
+The tooltip says `Layers of "name"` rather than repeating the name alone,
+because it has two jobs: a name too long for the column is elided, and a bare
+name in a header could be read as one more layer rather than as the track the
+layers belong to.
+
 ### Where the layer panel had been scrolling to
 
 Issue #12, and it is worth reading before touching `rebuildLayerList`, because

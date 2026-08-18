@@ -6586,6 +6586,87 @@ void aWindowIsDestroyedSafelyFromAnyState() {
     QCoreApplication::processEvents();
 }
 
+// The layer panel says which track's layers it is showing.
+//
+// It said "Layer" under a dock titled "Layers" -- the same word twice and no
+// information -- while the fact worth having is that another track's layers can
+// be called exactly the same thing. The status bar had it all along, eight
+// readings along and the width of the window away from the rows it qualifies.
+void theLayerPanelSaysWhichTrackItIsShowing() {
+    TEST("the layer panel is headed with the track whose layers it is showing");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* layers = static_cast<LayerList*>(window.findChild<QTreeWidget*>());
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(layers != nullptr);
+    CHECK(timeline != nullptr);
+    if (!layers || !timeline) return;
+
+    const auto heading = [&] { return layers->headerItem()->text(0).toStdString(); };
+
+    Document& doc = window.documentForTesting();
+    const TrackId first = doc.scene().tracks.front().id;
+    CHECK_EQ(heading(), std::string("track 1"));
+    // And it says what it is, for a name too long for the column and for a name
+    // that could be read as one of the rows beneath it.
+    CHECK_EQ(layers->headerItem()->toolTip(0).toStdString(),
+             std::string("Layers of \"track 1\""));
+
+    // A second track, which is the case the panel could not distinguish: both
+    // tracks start with a layer called "layer 1".
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Add track")) action->trigger();
+    }
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().tracks.size(), std::size_t(2));
+    if (doc.scene().tracks.size() != 2) return;
+    const TrackId second = doc.scene().tracks.back().id;
+    CHECK_EQ(heading(), std::string("track 2"));
+    CHECK_EQ(layers->topLevelItem(0)->text(0).toStdString(), std::string("layer 1"));
+
+    // Back to the first, the way clicking its row does it.
+    timeline->setTrack(first);
+    QCoreApplication::processEvents();
+    CHECK_EQ(heading(), std::string("track 1"));
+    // Same rows, different track: which is the whole reason the heading matters.
+    CHECK_EQ(layers->topLevelItem(0)->text(0).toStdString(), std::string("layer 1"));
+
+    // Renaming the track follows, by the route the gutter editor takes.
+    timeline->renameTrackForTesting(0);
+    QCoreApplication::processEvents();
+    QLineEdit* editor = timeline->renameEditorForTesting();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    editor->setText(QStringLiteral("rough"));
+    Q_EMIT editor->editingFinished();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(first)->name, std::string("rough"));
+    CHECK_EQ(heading(), std::string("rough"));
+    CHECK_EQ(layers->headerItem()->toolTip(0).toStdString(), std::string("Layers of \"rough\""));
+
+    // And by the route the Track menu's dialog takes, which reaches the panel
+    // through refreshEverything rather than through documentChanged.
+    TrackProperties props = doc.scene().findTrack(second)->properties();
+    props.name = "colour pass";
+    doc.updateTrack(second, props);
+    timeline->setTrack(second);
+    QCoreApplication::processEvents();
+    CHECK_EQ(heading(), std::string("colour pass"));
+
+    // Undo puts the name back, and the heading with it. Through the action, so
+    // the refresh is the one the program actually does.
+    QAction* undo = window.actionForTesting(shortcuts::Id::Undo);
+    CHECK(undo != nullptr);
+    if (!undo) return;
+    undo->trigger();
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().findTrack(second)->name, std::string("track 2"));
+    CHECK_EQ(heading(), std::string("track 2"));
+}
+
 // Issue #12. A colour layer goes to the bottom of the stack, so in a track with
 // enough layers to need a scrollbar the layer you have just made is off the end
 // of the panel -- and the list scrolled itself against the panel as it stood
@@ -7023,6 +7104,7 @@ int main(int argc, char** argv) {
     aRenameGivenUpKeepsTheNameAndTheKeyboard();
     aWindowDestroyedMidRenameGivesItUp();
     aWindowIsDestroyedSafelyFromAnyState();
+    theLayerPanelSaysWhichTrackItIsShowing();
     aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }
