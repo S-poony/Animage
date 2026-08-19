@@ -1370,7 +1370,9 @@ const std::vector<Situation>& situations() {
                  QScrollBar* hbar = scroll->horizontalScrollBar();
                  QScrollBar* vbar = scroll->verticalScrollBar();
                  std::printf("      --- %s\n", when);
-                 std::printf("        dock     %d tall, title bar %d, body %d\n", dock->height(),
+                 std::printf("        dock     %d tall, hint %d, spare %d, title bar %d, body %d\n",
+                             dock->height(), dock->sizeHint().height(),
+                             dock->height() - dock->sizeHint().height(),
                              body ? body->y() : -1, body ? body->height() : -1);
                  std::printf("        scroll   %d tall, hint %d, viewport %d, strip %d "
                              "(min %d, hint %d)\n",
@@ -1421,6 +1423,31 @@ const std::vector<Situation>& situations() {
              s.window.addDockWidget(Qt::LeftDockWidgetArea, layers);
              s.settle();
              report("layer panel moved to the left area (#55 -- and it keeps its width)");
+
+             // And the gesture #57 is actually about, which is the *timeline*
+             // being torn off and put back -- not another panel leaving. Both
+             // ways of putting height into it are tried, because either could be
+             // the one that survives: the rows, which is syncTimelineHeight
+             // asking through resizeDocks, and a drag, which is a hand.
+             s.window.resizeDocks({dock}, {dock->height() + 120}, Qt::Vertical);
+             s.settle();
+             report("and the timeline dragged 120 px taller");
+
+             dock->setFloating(true);
+             s.settle();
+             report("timeline floated");
+
+             // What a hand also gets and setFloating alone does not: issue #50's
+             // title bar going on, which recreates the window. The watcher waits
+             // for the pointer to be let go, and nothing is holding it here, so
+             // it is nudged rather than waited for.
+             if (auto* frame = dock->findChild<FloatingDockFrame*>()) frame->applyIfNothingIsHeld();
+             s.settle();
+             report("and our title bar applied to it (#50's frame)");
+
+             dock->setFloating(false);
+             s.settle();
+             report("timeline docked again (#57 -- does it come back shorter?)");
          }},
 
         {"panels-3-then-shown-again",

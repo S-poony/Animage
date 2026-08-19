@@ -26,13 +26,13 @@ echo.
 echo ================================================================
 echo  1 of 2: the REAL Animage window.
 echo.
-echo  Add two tracks first (Track menu, Add track, twice). With one
-echo  track the timeline dock is already at its own size hint and has
-echo  no spare height to lose.
+echo  First drag the top edge of the Timeline panel upward, so it is
+echo  taller than it opened. A dock sitting exactly on its own size
+echo  hint has no spare height to lose and would report nothing.
 echo.
-echo  Then, watching the panel sizes:
-echo    #57  drag Layers right out of the window and let go.
-echo         Did Timeline get shorter?
+echo  Then:
+echo    #57  drag Timeline right out of the window, let go, then drag
+echo         it back in. Did it come back shorter than it left?
 echo    #55  drag Layers from the right edge over to the left edge.
 echo         Did it arrive a different width?
 echo.
@@ -45,9 +45,10 @@ echo.
 echo ================================================================
 echo  2 of 2: PLAIN QT, with none of Animage in it.
 echo.
-echo  The same two drags, on "Side" and "Under" this time. If plain Qt
-echo  does the same thing, the fault is Qt's; if it does not, it is
-echo  ours.
+echo  The same two drags: tear "Under" out and put it back, and move
+echo  "Side" from the right edge to the left. Both start at Animage's
+echo  sizes, with Under already above its own hint. If plain Qt does
+echo  the same thing, the fault is Qt's; if it does not, it is ours.
 echo.
 echo  Close the window when you are done.
 echo ================================================================
