@@ -711,18 +711,20 @@ bool ProjectIO::load(Document& doc, const QString& folder, QString* error, Damag
         };
 
         QByteArray bytes;
-        QString why;
+        // Not named `why`: the scene reader above has one of those, and MSVC
+        // makes shadowing an error where GCC says nothing.
+        QString cel_error;
         // Missing counts the same as unreadable. A project is a folder, so a
         // sync that brought back all of it but one file is at least as likely
         // as a file that arrived damaged.
-        if (!readFile(path, bytes, &why)) {
-            if (!lose(why)) return false;
+        if (!readFile(path, bytes, &cel_error)) {
+            if (!lose(cel_error)) return false;
             continue;
         }
 
         TileGrid tiles;
-        if (!unpackCel(bytes, tiles, &why)) {
-            if (!lose(why)) return false;
+        if (!unpackCel(bytes, tiles, &cel_error)) {
+            if (!lose(cel_error)) return false;
             continue;
         }
 
