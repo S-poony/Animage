@@ -2409,6 +2409,119 @@ void aSaveAfterTheFolderVanishedIsStillWhole() {
     CHECK(ProjectIO::load(back, folder, &error));
     CHECK_EQ(ProjectIO::writeSceneJson(back), ProjectIO::writeSceneJson(doc));
 }
+
+// --- issue #41: one unreadable drawing must not cost the project -----------
+//
+// A project is a folder, so it is synced, copied and backed up a file at a
+// time, and one cel arriving damaged or not arriving at all used to make the
+// whole shot unopenable -- three hundred intact drawings unreachable because of
+// one bad one.
+//
+// The recovery is **opt-in at the call**. A `load` handed no `Damage*` still
+// refuses, which is what keeps every caller that has nowhere to report damage
+// from silently accepting a project with holes in it: an empty cel looks
+// exactly like one that was erased on purpose, so opening what can be read is
+// only safe where somebody is going to say what is missing.
+
+// Breaks one cel file in `folder` and answers which one, by name.
+QString breakOneCel(const QString& folder, bool by_deleting) {
+    const QString cels = folder + QStringLiteral("/cels");
+    const QStringList names = QDir(cels).entryList(QDir::Files);
+    CHECK(!names.isEmpty());
+    if (names.isEmpty()) return QString();
+
+    const QString victim = cels + QStringLiteral("/") + names.first();
+    if (by_deleting) {
+        CHECK(QFile::remove(victim));
+    } else {
+        QFile file(victim);
+        CHECK(file.open(QIODevice::WriteOnly));
+        file.write("ANIMCELZ and then nonsense");
+        file.close();
+    }
+    return names.first();
+}
+
+void adamagedCelCostsItsDrawingAndNotTheProject() {
+    TEST("a cel that cannot be read costs that drawing, not the project");
+
+    // Corrupted and missing are the same fault from the animator's side, and a
+    // sync that brought back all of a folder but one file is at least as likely
+    // as one that brought a file back damaged.
+    for (const bool by_deleting : {false, true}) {
+        QTemporaryDir dir;
+        CHECK(dir.isValid());
+        const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+
+        const Document whole = buildDrawnScene();
+        CHECK(ProjectIO::save(whole, folder, nullptr));
+        const QString broken = breakOneCel(folder, by_deleting);
+        if (broken.isEmpty()) continue;
+
+        // Without somewhere to report it, this is still a project that will not
+        // open. That is the contract and not an oversight.
+        Document refused;
+        QString error;
+        CHECK_EQ(ProjectIO::load(refused, folder, &error), false);
+        CHECK(!error.isEmpty());
+
+        // With somewhere to report it, the drawing is what is lost. Its own
+        // message variable: `error` is only ever written on a failure, so the
+        // refusal above is still sitting in the other one.
+        Document opened;
+        ProjectIO::Damage damage;
+        QString opened_error;
+        CHECK(ProjectIO::load(opened, folder, &opened_error, &damage));
+        CHECK_EQ(opened_error.toStdString(), std::string());
+        CHECK_EQ(damage.lost.size(), std::size_t{1});
+        if (damage.lost.size() == 1) {
+            CHECK_EQ(damage.lost.front().file.toStdString(), broken.toStdString());
+            CHECK(!damage.lost.front().why.isEmpty());
+        }
+
+        // The structure is all there -- the scene read fine, it was only the
+        // pixels that did not.
+        CHECK_EQ(ProjectIO::writeSceneJson(opened), ProjectIO::writeSceneJson(whole));
+
+        // The lost cel is empty and every other one came back whole.
+        const std::vector<CelId> cels = ProjectIO::celsReferencedBy(opened);
+        std::size_t empty = 0;
+        std::size_t drawn = 0;
+        for (CelId id : cels) {
+            const Cel* cel = opened.cel(id);
+            const bool has_pixels = cel && !animage::paintedBounds(cel->tiles()).isEmpty();
+            if (has_pixels) {
+                ++drawn;
+            } else if (damage.lost.front().cel == id) {
+                ++empty;
+            }
+        }
+        CHECK_EQ(empty, std::size_t{1});
+        CHECK(drawn > 0);  // the rest of the shot survived, which is the point
+    }
+}
+
+// A scene that will not parse is still a project that will not open, whoever is
+// asking. There is no document to have holes in.
+void adamagedSceneIsStillRefusedOutright() {
+    TEST("a project whose scene will not read is refused even when damage is allowed");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+
+    QFile scene(folder + QStringLiteral("/scene.json"));
+    CHECK(scene.open(QIODevice::WriteOnly));
+    scene.write("not json at all");
+    scene.close();
+
+    Document doc;
+    ProjectIO::Damage damage;
+    QString error;
+    CHECK_EQ(ProjectIO::load(doc, folder, &error, &damage), false);
+    CHECK(!error.isEmpty());
+    CHECK(!damage.any());
+}
 void abrokenProjectDoesNotReplaceTheOpenOne() {
     TEST("a project that will not open leaves the open one alone");
     QTemporaryDir scratch;
@@ -2594,6 +2707,172 @@ void openingLeavesTheFolderKnown() {
     CHECK_EQ(projectBytes(folder) == projectBytes(again), true);
 }
 
+
+// The damaged-project question, answered from a timer for `answerNextDialog`'s
+// reason: `exec()` blocks in the dialog's own event loop and nothing in the
+// test runs again until it is gone. The button is clicked rather than
+// `accept()` called, so that the wiring is under test too.
+void answerNextRescueDialog(bool accept) {
+    auto* timer = new QTimer(qApp);
+    auto* attempts = new int(0);
+    timer->setInterval(10);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, accept, attempts] {
+        if (++*attempts > 200) {  // two seconds; the dialog is not coming
+            timer->stop();
+            delete attempts;
+            timer->deleteLater();
+            return;
+        }
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog || dialog->objectName() != QStringLiteral("damaged-project")) return;
+        auto* buttons = dialog->findChild<QDialogButtonBox*>();
+        if (!buttons) return;
+
+        QAbstractButton* pressed = nullptr;
+        for (QAbstractButton* button : buttons->buttons()) {
+            const bool is_cancel = buttons->buttonRole(button) == QDialogButtonBox::RejectRole;
+            if (is_cancel != accept) pressed = button;
+        }
+        if (!pressed) return;
+        pressed->click();
+        timer->stop();
+        delete attempts;
+        timer->deleteLater();
+    });
+    timer->start();
+}
+
+// **The whole point of the rescue, and the thing that would be worst to get
+// wrong.** A project opened with drawings missing is still pointing at a folder,
+// and autosave fires two minutes later. If it wrote back there, the damaged cel
+// -- which may still hold most of a drawing, and which a more forgiving reader
+// could one day get something out of -- would be overwritten with the empty cel
+// that stood in for it, and the drawing would be gone for good.
+//
+// So the rescued copy gets a folder of its own and the damaged original is
+// never written to at all. Checked here byte for byte, before and after an
+// autosave that really does write.
+void adamagedProjectOpensAsARescuedCopyAndTheOriginalIsNeverWritten() {
+    TEST("a damaged project opens as a rescued copy and the original is never written");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+    const QString broken = breakOneCel(folder, false);
+    if (broken.isEmpty()) return;
+
+    const std::map<QString, QByteArray> damaged_bytes = projectBytes(folder);
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString error;
+    answerNextRescueDialog(true);
+    CHECK(window.openProjectAt(folder, &error));
+    QCoreApplication::processEvents();
+    CHECK_EQ(error.toStdString(), std::string());
+
+    // Beside the original and named after it.
+    const QString rescued = dir.filePath(QStringLiteral("rescued_shot.animage"));
+    CHECK(QFileInfo::exists(rescued));
+
+    // Written straight away rather than left to the first stroke: a document
+    // off disk has nothing to autosave, so a rescued copy that lived only in
+    // memory would not be on disk at all until somebody drew something.
+    Document rescued_back;
+    CHECK(ProjectIO::load(rescued_back, rescued, nullptr));
+    CHECK_EQ(ProjectIO::writeSceneJson(rescued_back),
+             ProjectIO::writeSceneJson(window.documentForTesting()));
+
+    // The original has not been touched.
+    CHECK(projectBytes(folder) == damaged_bytes);
+
+    // And still is not, after an autosave that really writes. The window is
+    // pointing at the rescued copy, which is the whole mechanism.
+    auto* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    drawWithMouse(canvas, QPointF(300, 300), QPointF(360, 340), 4);
+    QCoreApplication::processEvents();
+    CHECK(window.windowTitle().contains(QLatin1Char('*')));
+
+    window.onAutosaveTick();
+    QCoreApplication::processEvents();
+    CHECK(!window.windowTitle().contains(QLatin1Char('*')));  // it wrote
+    CHECK(projectBytes(folder) == damaged_bytes);             // and not here
+
+    // The stroke went to the rescued copy.
+    Document after;
+    CHECK(ProjectIO::load(after, rescued, nullptr));
+    CHECK(after.undoDepth() == 0);  // a load forgets the history
+    CHECK(projectBytes(rescued) != damaged_bytes);
+}
+
+// Writing a folder to somebody's disk is not something to do without asking, so
+// the question can be answered no -- and then nothing at all has happened.
+void decliningTheRescueWritesNothingAndKeepsTheOpenProject() {
+    TEST("declining the rescue writes nothing and leaves the open project alone");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+    if (breakOneCel(folder, false).isEmpty()) return;
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    // Something recognisable in the window, to prove it is still what is open.
+    window.documentForTesting().setFramerate(19);
+    QCoreApplication::processEvents();
+
+    QString error;
+    answerNextRescueDialog(false);
+    CHECK_EQ(window.openProjectAt(folder, &error), false);
+    QCoreApplication::processEvents();
+
+    // Declined, not failed. The difference is what stops the window putting a
+    // warning box over an answer it asked for.
+    CHECK(error.isEmpty());
+
+    // Nothing was written anywhere.
+    CHECK(!QFileInfo::exists(dir.filePath(QStringLiteral("rescued_shot.animage"))));
+    CHECK(QDir(dir.path())
+              .entryList(QStringList() << QStringLiteral("rescued_*"), QDir::Dirs)
+              .isEmpty());
+
+    // And the project that was open is still the project that is open.
+    CHECK_EQ(window.documentForTesting().scene().framerate, 19);
+}
+
+// A second go at the same damaged project must not land on the first rescue.
+void asecondRescueGetsAFolderOfItsOwn() {
+    TEST("rescuing the same project twice does not write over the first rescue");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    CHECK(ProjectIO::save(buildDrawnScene(), folder, nullptr));
+    if (breakOneCel(folder, false).isEmpty()) return;
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    answerNextRescueDialog(true);
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    answerNextRescueDialog(true);
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK(QFileInfo::exists(dir.filePath(QStringLiteral("rescued_shot.animage"))));
+    CHECK(QFileInfo::exists(dir.filePath(QStringLiteral("rescued_2_shot.animage"))));
+}
 // Autosave through the window. The two things worth pinning are that it writes
 // when there is something to write and that it stays entirely out of the way
 // when there is not -- a save that fires every two minutes regardless would put
@@ -7590,11 +7869,16 @@ int main(int argc, char** argv) {
     aRescueThatCannotBeMovedIsNamedWhereItIs();
     aSaveAfterTheFolderVanishedIsStillWhole();
     abrokenProjectDoesNotReplaceTheOpenOne();
+    adamagedCelCostsItsDrawingAndNotTheProject();
+    adamagedSceneIsStillRefusedOutright();
     savingTwiceWritesTheSameBytes();
     anIncrementalSaveWritesTheSameProject();
     anIncrementalSaveReplacesWhatWentMissing();
     savingElsewhereCarriesNothingForward();
     openingLeavesTheFolderKnown();
+    adamagedProjectOpensAsARescuedCopyAndTheOriginalIsNeverWritten();
+    decliningTheRescueWritesNothingAndKeepsTheOpenProject();
+    asecondRescueGetsAFolderOfItsOwn();
     autosaveWritesOnlyWhenSomethingMoved();
     adifferentEditFromTheSameDepthIsUnsaved();
     autosaveWaitsForTheStrokeToFinish();

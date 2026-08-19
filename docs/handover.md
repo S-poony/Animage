@@ -613,6 +613,32 @@ about 150× better than it is.
 **In.** `load` reads `scene.json` into a **document of its own**, fills every cel
 it names, and only then assigns over the open document. A project with one bad
 cel in it therefore cannot leave you with half of it and none of what you had.
+
+A cel that cannot be read costs that drawing rather than the project — issue
+[#41](https://github.com/S-poony/Animage/issues/41) — but **only for a caller
+that passes a `Damage*`**. Without one, `load` refuses exactly as it always did,
+and that is the design and not a leftover: an empty cel is indistinguishable
+from one that was erased on purpose, so opening what could be read is only safe
+where somebody is going to *say* which drawings are gone. A missing cel file
+counts the same as a damaged one, because a project is a folder and a sync that
+brings back all of it but one file is at least as likely. A `scene.json` that
+will not parse still refuses outright; there is no document without it.
+
+**The window opens a damaged project as a rescued copy**, beside the original
+and named `rescued_<name>`, and the damaged folder is never written to. That is
+what stands between the animator and the worst outcome here: a project opened
+with holes in it is still pointing at a folder, and autosave fires two minutes
+later. Writing back would overwrite a damaged cel — which may still hold most of
+a drawing, and which a more forgiving reader could one day recover something
+from — with the empty cel that stood in for it. The rescued copy is written
+immediately rather than left to the first autosave tick, because a document
+straight off disk has nothing to autosave and would otherwise not be on disk at
+all until somebody drew something.
+
+The save state from a damaged load is thrown away rather than carried. A cel
+that could not be read is recorded at the revision of the empty cel standing in
+for it, so the state claims a file matches pixels that file has never held, and
+carrying it forward would propagate the damage instead of noticing it.
 `MainWindow::afterProjectLoaded` then rebinds everything that was holding ids
 from the document that has just gone: the canvas, the timeline, the layer panel
 and the status bar.

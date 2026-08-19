@@ -659,8 +659,9 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
     return true;
 }
 
-bool ProjectIO::load(Document& doc, const QString& folder, SaveState& state, QString* error) {
-    if (!load(doc, folder, error)) return false;
+bool ProjectIO::load(Document& doc, const QString& folder, SaveState& state, QString* error,
+                     Damage* damage) {
+    if (!load(doc, folder, error, damage)) return false;
 
     // Read after the load rather than during it: setCelTiles installs a fresh
     // Cel, so a revision taken while reading would be replaced by the one the
@@ -676,7 +677,7 @@ bool ProjectIO::load(Document& doc, const QString& folder, SaveState& state, QSt
     return true;
 }
 
-bool ProjectIO::load(Document& doc, const QString& folder, QString* error) {
+bool ProjectIO::load(Document& doc, const QString& folder, QString* error, Damage* damage) {
     QByteArray text;
     if (!readFile(folder + QStringLiteral("/scene.json"), text, error)) return false;
 
@@ -692,20 +693,44 @@ bool ProjectIO::load(Document& doc, const QString& folder, QString* error) {
     }
 
     for (CelId id : celsReferencedBy(loaded)) {
-        const QString path = folder + QStringLiteral("/cels/") + celFileName(id);
+        const QString name = celFileName(id);
+        const QString path = folder + QStringLiteral("/cels/") + name;
+
+        // One drawing that cannot be read. With somewhere to report it, it
+        // costs that drawing: the cel is simply never set, which leaves it
+        // absent -- the same as a layer that was never drawn on, and what the
+        // rest of the program already handles everywhere. With nowhere to
+        // report it, it costs the project, exactly as it always did.
+        const auto lose = [&](const QString& why) {
+            if (!damage) {
+                if (error) *error = QStringLiteral("%1: %2").arg(name, why);
+                return false;
+            }
+            damage->lost.push_back({id, name, why});
+            return true;
+        };
+
         QByteArray bytes;
-        if (!readFile(path, bytes, error)) return false;
+        QString why;
+        // Missing counts the same as unreadable. A project is a folder, so a
+        // sync that brought back all of it but one file is at least as likely
+        // as a file that arrived damaged.
+        if (!readFile(path, bytes, &why)) {
+            if (!lose(why)) return false;
+            continue;
+        }
 
         TileGrid tiles;
-        QString cel_error;
-        if (!unpackCel(bytes, tiles, &cel_error)) {
-            if (error) *error = QStringLiteral("%1: %2").arg(celFileName(id), cel_error);
-            return false;
+        if (!unpackCel(bytes, tiles, &why)) {
+            if (!lose(why)) return false;
+            continue;
         }
+
+        // Not damage, and never survivable: the file is fine and the scene
+        // disagrees with it about what is in this project. That is a broken
+        // file rather than a lost drawing, and reading on would be guessing.
         if (!loaded.setCelTiles(id, std::move(tiles))) {
-            if (error) {
-                *error = QStringLiteral("%1 is not part of this scene").arg(celFileName(id));
-            }
+            if (error) *error = QStringLiteral("%1 is not part of this scene").arg(name);
             return false;
         }
     }

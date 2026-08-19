@@ -49,6 +49,10 @@ public:
     // and the way a test drives it: what has gone wrong here before is not the
     // file but the canvas and the panels still holding ids from the document
     // that was just replaced.
+    // False on a project that would not open *and* on one the user declined to
+    // rescue, which are told apart by `error`: a message means it failed, an
+    // empty one means the damaged-project question was answered no and nothing
+    // has happened at all.
     bool openProjectAt(const QString& folder, QString* error = nullptr);
 
     // What the autosave timer does when it fires. Public for the same reason as
@@ -325,6 +329,12 @@ private:
     // Points everything at the document that was just loaded: the canvas, the
     // timeline and the layer panel all hold ids from the old one.
     void afterProjectLoaded();
+
+    // What a project with unreadable drawings in it opens with: how many were
+    // lost, which ones, where the rescued copy is going and that the damaged
+    // original will not be touched. True to go ahead.
+    bool askAboutDamage(const QString& folder, const QString& rescued,
+                        const animage::Document& loaded, const ProjectIO::Damage& damage);
     void updateTitle();
 
     void togglePlayback();

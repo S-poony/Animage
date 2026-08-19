@@ -61,6 +61,27 @@ public:
         std::unordered_map<animage::CelId, std::uint64_t> revisions;
     };
 
+    // What a load could not read: one entry per cel file that was missing or
+    // would not decode. The drawing comes back empty rather than the whole
+    // project not coming back at all.
+    //
+    // **Only ever filled in for a caller that asks for it.** A `load` given no
+    // `Damage*` refuses a project with a bad cel in it exactly as it always
+    // did, and that is deliberate rather than a convenience: opening what can
+    // be read is only safe where somebody is going to *say* that drawings are
+    // missing, and an empty cel is indistinguishable from one that was erased
+    // on purpose. A caller with nowhere to report is a caller that must not
+    // silently accept a damaged project.
+    struct Damage {
+        struct Lost {
+            animage::CelId cel = animage::kNoId;
+            QString file;  // the cel file, for a report somebody technical reads
+            QString why;   // what the reader said was wrong with it
+        };
+        std::vector<Lost> lost;
+        bool any() const { return !lost.empty(); }
+    };
+
     // The conventional suffix for a project folder. Not enforced anywhere; a
     // project is a folder and works under any name.
     static QString folderSuffix();
@@ -108,13 +129,26 @@ public:
 
     // Replaces everything in `doc`. On failure `doc` is untouched and `error`
     // says what was wrong -- a project that will not open must not take the
-    // open one down with it.
-    static bool load(animage::Document& doc, const QString& folder, QString* error = nullptr);
+    // open one down with it. That holds however this returns: the document is
+    // built whole, in isolation, and adopted only at the end.
+    //
+    // With a `Damage*`, a cel that cannot be read costs that drawing rather
+    // than the project: it is recorded there, left empty, and the load goes on.
+    // A missing or unreadable `scene.json` still refuses outright, because
+    // there is no document without it.
+    static bool load(animage::Document& doc, const QString& folder, QString* error = nullptr,
+                     Damage* damage = nullptr);
 
     // The same, recording what was on disk so the first save after an open is
-    // incremental too. Everything just read matches its file by definition.
+    // incremental too. Everything just read matches its file by definition --
+    // which is exactly why a caller that took damage must **not** keep this
+    // state for the folder it read. A cel that could not be read is recorded at
+    // the revision of the empty cel standing in for it, so the state claims a
+    // file matches pixels that file has never held. The next save would then
+    // carry that file forward as current, which is the damage being propagated
+    // rather than noticed.
     static bool load(animage::Document& doc, const QString& folder, SaveState& state,
-                     QString* error = nullptr);
+                     QString* error = nullptr, Damage* damage = nullptr);
 
     // --- the cel bytes, uncompressed ----------------------------------------
     //

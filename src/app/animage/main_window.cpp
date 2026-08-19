@@ -26,6 +26,8 @@
 #include <QLineEdit>
 #include <QSinglePointEvent>
 #include <QListWidget>
+#include <QDialog>
+#include <QPlainTextEdit>
 #include <QProgressDialog>
 #include <QFileInfo>
 #include <QLayout>
@@ -89,6 +91,83 @@ void sayCannot(QStatusBar* bar, const char* verb, CanvasWidget::Refusal refusal)
                      6000);
 }
 
+
+// Where a project opens when the one on disk is damaged. Beside the original
+// and named after it, so the two sit together in a file dialog and it is
+// obvious which came from which.
+//
+// "rescued" is already this program's word for a copy kept when something went
+// wrong -- `folder.rescued-<ms>` is what a save that cannot be put in place
+// leaves behind. Same idea, so the same word rather than a second one.
+QString rescuedFolderFor(const QString& folder) {
+    const QFileInfo info(folder);
+    const QString parent = info.absolutePath();
+    const QString name = info.fileName();
+
+    // The number goes in front of the name rather than inside it, so the
+    // `.animage` suffix stays where it belongs whatever the project is called.
+    QString candidate = parent + QStringLiteral("/rescued_") + name;
+    for (int n = 2; QFileInfo::exists(candidate); ++n) {
+        candidate = parent + QStringLiteral("/rescued_%1_").arg(n) + name;
+    }
+    return candidate;
+}
+
+// Which drawings the unreadable files actually cost, named the way an animator
+// names them -- a drawing number and a layer -- rather than as cel filenames,
+// which say nothing to the person who has to decide what to redraw.
+//
+// One cel can be held by two drawings, which is what duplicating a drawing as a
+// link does, so one lost file can cost more than one of them. `drawings` counts
+// the drawings and not the files, because that is the number being asked about.
+QStringList describeLostDrawings(const Scene& scene, const ProjectIO::Damage& damage,
+                                 int* drawings) {
+    std::vector<std::pair<int, QString>> numbered;
+    std::vector<std::pair<TrackId, ImageId>> affected;
+    const bool several_tracks = scene.tracks.size() > 1;
+
+    for (const ProjectIO::Damage::Lost& lost : damage.lost) {
+        bool named = false;
+        for (const Track& track : scene.tracks) {
+            for (const auto& [image_id, image] : track.images) {
+                for (const auto& [layer_id, cel] : image.cels) {
+                    if (cel != lost.cel) continue;
+                    const Layer* layer = track.findLayer(layer_id);
+                    QString line = QStringLiteral("drawing %1").arg(image.number);
+                    if (layer) {
+                        line += QStringLiteral(" - layer \"%1\"")
+                                    .arg(QString::fromStdString(layer->name));
+                    }
+                    if (several_tracks) {
+                        line += QStringLiteral(" - track \"%1\"")
+                                    .arg(QString::fromStdString(track.name));
+                    }
+                    numbered.emplace_back(image.number, line);
+                    affected.emplace_back(track.id, image_id);
+                    named = true;
+                }
+            }
+        }
+        // Cannot happen -- the manifest is walked from the drawings -- and kept
+        // rather than asserted away, because a list that silently dropped an
+        // entry would be a list nobody could count on.
+        if (!named) {
+            numbered.emplace_back(0, QStringLiteral("%1 (not held by any drawing)").arg(lost.file));
+        }
+    }
+
+    // By drawing number, which is the order they were made in and the order
+    // somebody will go looking through them.
+    std::stable_sort(numbered.begin(), numbered.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::sort(affected.begin(), affected.end());
+    affected.erase(std::unique(affected.begin(), affected.end()), affected.end());
+    if (drawings) *drawings = static_cast<int>(affected.size());
+
+    QStringList lines;
+    for (const auto& [number, line] : numbered) lines.push_back(line);
+    return lines;
+}
 // An autosave costs about a tenth of a second on a shot of a hundred drawings
 // now that it only writes the cels that moved, so the interval is chosen for
 // how much work an animator is willing to lose rather than for what it costs.
@@ -1806,6 +1885,10 @@ void MainWindow::openProject() {
 
     QString error;
     if (!openProjectAt(folder, &error)) {
+        // An empty message is the damaged-project question answered no. Nothing
+        // has happened and there is nothing to report; a warning box saying so
+        // would be the program arguing with an answer it asked for.
+        if (error.isEmpty()) return;
         // The open document is untouched -- ProjectIO::load builds a new one and
         // only swaps it in once every cel has come back -- so this is a plain
         // refusal and nothing has been lost.
@@ -1813,9 +1896,109 @@ void MainWindow::openProject() {
     }
 }
 
+// The question a damaged project opens with. Built rather than reached for as a
+// QMessageBox because what the animator needs is a *list* -- which drawings are
+// gone -- and a list has to scroll when a badly synced folder lost a hundred of
+// them, and has to be selectable so it can be pasted into a message to whoever
+// else is on the show.
+//
+// The count comes first and in bold, because "how much did I lose" is the
+// question asked before any other and the list is only the answer to the second
+// one.
+bool MainWindow::askAboutDamage(const QString& folder, const QString& rescued,
+                                const Document& loaded, const ProjectIO::Damage& damage) {
+    int drawings = 0;
+    const QStringList lines = describeLostDrawings(loaded.scene(), damage, &drawings);
+
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("damaged-project"));
+    dialog.setWindowTitle(QStringLiteral("This project is damaged"));
+    dialog.setMinimumWidth(520);
+
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* headline = new QLabel(drawings == 1
+                                    ? QStringLiteral("1 drawing could not be read.")
+                                    : QStringLiteral("%1 drawings could not be read.").arg(drawings),
+                                &dialog);
+    QFont emphasis = headline->font();
+    emphasis.setBold(true);
+    headline->setFont(emphasis);
+    layout->addWidget(headline);
+
+    auto* list = new QPlainTextEdit(&dialog);
+    list->setObjectName(QStringLiteral("lost-drawings"));
+    list->setReadOnly(true);
+    list->setPlainText(lines.join(QStringLiteral("\n")));
+    layout->addWidget(list, 1);
+
+    // Said plainly, because the thing people fear at this point is that opening
+    // it will make things worse.
+    auto* what_happens = new QLabel(
+        QStringLiteral("Animage will open a rescued copy at:\n%1\n\nThe damaged project at %2 "
+                       "will not be changed, so nothing will be lost that is not lost already. "
+                       "The other drawings come back as they were; the ones above come back "
+                       "empty.")
+            .arg(rescued, folder),
+        &dialog);
+    what_happens->setWordWrap(true);
+    what_happens->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(what_happens);
+
+    auto* buttons = new QDialogButtonBox(&dialog);
+    // Named for what it does rather than "OK". This writes a folder to
+    // somebody's disk, which is not what OK usually means.
+    buttons->addButton(QStringLiteral("Open rescued copy"), QDialogButtonBox::AcceptRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    return dialog.exec() == QDialog::Accepted;
+}
+
 bool MainWindow::openProjectAt(const QString& folder, QString* error) {
-    if (!ProjectIO::load(doc_, folder, save_state_, error)) return false;
-    project_folder_ = folder;
+    // Read into a document of its own rather than over the open one, so that
+    // everything below -- the question, the rescued copy, and either of those
+    // failing -- happens with the open project still open and still intact.
+    // `ProjectIO::load` builds in isolation anyway; this only moves the moment
+    // of adoption past the decision.
+    Document loaded;
+    ProjectIO::SaveState state;
+    ProjectIO::Damage damage;
+    if (!ProjectIO::load(loaded, folder, state, error, &damage)) return false;
+
+    QString home = folder;
+    if (damage.any()) {
+        home = rescuedFolderFor(folder);
+        if (!askAboutDamage(folder, home, loaded, damage)) {
+            // Cancelled rather than failed: nothing was written and nothing was
+            // replaced. An empty message is how the caller tells the two apart.
+            if (error) error->clear();
+            return false;
+        }
+
+        // Written now rather than left to the next autosave tick. A document
+        // straight off disk has nothing to autosave -- its history stamp is
+        // already the saved one -- so a rescued copy that existed only in
+        // memory would sit unwritten until the first stroke, which is the
+        // opposite of what the dialog has just promised.
+        //
+        // And written from a *fresh* state. The state `load` filled in
+        // describes the damaged folder, and in it a cel that could not be read
+        // is recorded at the revision of the empty cel standing in for it -- so
+        // it claims a file matches pixels that file has never held. Kept, it
+        // would carry the damaged file forward into the rescued copy as though
+        // it were current, which is the damage being propagated rather than
+        // noticed.
+        ProjectIO::SaveState fresh;
+        if (!ProjectIO::save(loaded, home, fresh, error)) return false;
+        state = std::move(fresh);
+    }
+
+    doc_ = std::move(loaded);
+    save_state_ = std::move(state);
+    project_folder_ = home;
     afterProjectLoaded();
     return true;
 }
