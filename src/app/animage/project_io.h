@@ -4,6 +4,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -81,6 +82,29 @@ public:
     // everything, so Save As always produces a project that stands on its own.
     static bool save(const animage::Document& doc, const QString& folder, SaveState& state,
                      QString* error = nullptr);
+
+    // Renaming one folder to another, as the save's last step performs it.
+    // Handed in rather than called directly so that a test can supply one that
+    // refuses -- see `swapIntoPlace`.
+    using RenameFn = std::function<bool(const QString& from, const QString& to)>;
+
+    // The swap at the end of a save: the old project moved aside, the new one
+    // moved into place, and only then the old one deleted. True when `folder`
+    // holds the new project.
+    //
+    // **Nothing here deletes the only copy of anything**, which is the whole of
+    // what it is for. On every path out either `folder` holds a complete
+    // project, or `error` names every folder that does -- because a message
+    // that names the path is the difference between a recoverable scare and a
+    // lost shot.
+    //
+    // Exposed because the failure it exists to survive is a rename the
+    // filesystem refuses at one exact instant -- a sync client or a virus
+    // scanner holding the path for a moment, which Windows does -- and there is
+    // no way to arrange that from outside the function. Everything but the
+    // rename is the real filesystem in the test too.
+    static bool swapIntoPlace(const QString& scratch, const QString& folder,
+                              const RenameFn& rename, QString* error);
 
     // Replaces everything in `doc`. On failure `doc` is untouched and `error`
     // says what was wrong -- a project that will not open must not take the

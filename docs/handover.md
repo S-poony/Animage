@@ -586,6 +586,21 @@ to writing the bytes, so the state is a hint and never a promise. Then
 `scene.json`, then the swap: the old folder is moved aside, the new one renamed
 into place, and only then is the old one deleted.
 
+The swap is `swapIntoPlace`, and its rule is that **nothing on any path out of
+it deletes the only copy of anything**. On every failure either `folder` holds a
+complete project or the error names every folder that does. That is issue
+[#42](https://github.com/S-poony/Animage/issues/42): the restore used to be
+attempted and its answer discarded, so when it failed too the project sat under
+`folder.replaced-<ms>` with nothing naming it, and the tidy-up then deleted the
+copy that had just been written — the only copy of the work being saved. Both
+are kept now, and the message says where they are.
+
+The kept copy is moved out of the scratch name before anything else, and that
+part is not cosmetic: the scratch path is named after the *process*, so it is
+the same path for every save in a session, and the next save's first act is to
+clear it. A rescue copy left there would be deleted two minutes later by
+autosave, without a word.
+
 `encodeCel` drops fully transparent tiles, sorts the coordinates so an unchanged
 drawing encodes to identical bytes, and writes only the occupied span of each
 row — which is the difference between handing the compressor 3.3 MB and handing
@@ -2734,6 +2749,7 @@ trap.
 | [What the screenshot showed, and what the run had never set up](#what-the-screenshot-showed-and-what-the-run-had-never-set-up) | Screenshot review needs the harness itself verified first |
 | [The gap coordinates that built an open box out of plausible numbers](#the-gap-coordinates-that-built-an-open-box-out-of-plausible-numbers) | drawGappedBox takes coordinates, not offsets |
 | [Four tool states in three booleans, and the pair a handler half-cleared](#four-tool-states-in-three-booleans-and-the-pair-a-handler-half-cleared) | Mutually exclusive state in separate flags drifts apart |
+| [What the tests for a failed swap do and do not prove](#what-the-tests-for-a-failed-swap-do-and-do-not-prove) | The recovery is tested; the rename that triggers it never was |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -4034,6 +4050,32 @@ one at a time by a strict chain and cleared together, with "is one of them
 running" spelled out at four call sites, two of which were re-deriving by hand
 what `continueNavigation` already returns as a bool. Both are enums now, and the
 test that pins the first one fails on the commit before it.
+
+### What the tests for a failed swap do and do not prove
+**A seam that lets a test watch the failure is not the same as having seen the
+failure.** `swapIntoPlace` takes the rename as an argument so a test can hand it
+one that refuses on the second call. Everything else in those tests is real —
+real folders, real projects in them, and what is asserted afterwards is what is
+actually on disk. So the *recovery* is genuinely tested: the previous project
+goes back, or both copies are kept and both are named, and a rescue copy is
+moved out of the scratch path.
+
+**What is reasoned and not reproduced is the trigger.** Nobody has made Windows
+refuse that rename. The argument is that the first rename moved `folder` away,
+so the second fails if anything recreated or locked the path in between — a
+cloud-sync client watching the folder, an antivirus handle — and that the
+restore then fails the same way. That is plausible and is why the code guards
+it; it is not an observation. If it turns out the second rename cannot fail
+while the first succeeds, these tests still pass and are still testing nothing
+that happens.
+
+**And the one thing no test here covers is whether anybody reads the message.**
+An autosave failure is a status-bar line for eight seconds, deliberately — a
+dialog every two minutes would be worse than the fault it reports. But this
+message now carries two paths and an instruction, which is not what a line that
+disappears is for, and this is the one failure where the project is not at its
+path at all. Left as it is rather than changed quietly; it is a decision about
+interrupting somebody who is drawing, and it belongs to whoever owns that.
 
 ## How to work on it
 

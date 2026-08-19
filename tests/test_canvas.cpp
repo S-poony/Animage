@@ -2218,6 +2218,197 @@ void aFailedSaveLeavesTheOldProjectAlone() {
     CHECK_EQ(leftovers.size(), 0);
 }
 
+
+// --- issue #42: the swap at the end of a save ------------------------------
+//
+// The old project is moved aside, the new one is moved into place, and only
+// then is the old one deleted. What #42 is about is the middle rename failing,
+// which on Windows it can: the first rename moved `folder` away, so the second
+// fails if anything recreated or locked the path in the instant between them --
+// a cloud-sync client watching the folder, an antivirus handle. The restore
+// then fails for exactly the same reason.
+//
+// There is no way to arrange that instant from outside, so `swapIntoPlace`
+// takes the rename as an argument and these tests hand it one that refuses.
+// Everything else is the real filesystem: the folders are real, the projects in
+// them are real, and what is checked afterwards is what is actually on disk.
+//
+// The calls, in the order the swap makes them:
+//   1  the previous project moved aside, to `.replaced-<ms>`
+//   2  the new project moved into place
+//   3  the previous project put back
+//   4  the new project moved out of the scratch name and kept
+
+// A whole project at `path`, with a framerate that says which one it is.
+void projectAt(const QString& path, int framerate) {
+    Document doc = buildDrawnScene();
+    doc.setFramerate(framerate);
+    CHECK(ProjectIO::save(doc, path, nullptr));
+}
+
+QStringList leftoversIn(const QString& parent, const QString& pattern) {
+    return QDir(parent).entryList(QStringList() << pattern, QDir::Dirs);
+}
+
+// The line the issue is actually about. The restore was attempted and its
+// answer thrown away; when it works, this is what has to be true afterwards.
+void aFailedSwapPutsThePreviousProjectBack() {
+    TEST("a swap that cannot finish puts the previous project back");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    const QString scratch = dir.filePath(QStringLiteral("shot.animage.saving-abc"));
+
+    projectAt(folder, 12);
+    const std::map<QString, QByteArray> was = projectBytes(folder);
+    projectAt(scratch, 30);
+
+    int calls = 0;
+    QString error;
+    CHECK_EQ(ProjectIO::swapIntoPlace(scratch, folder,
+                                      [&calls](const QString& from, const QString& to) {
+                                          ++calls;
+                                          return calls == 2 ? false : QDir().rename(from, to);
+                                      },
+                                      &error),
+             false);
+    CHECK(error.contains(QStringLiteral("cannot move the new project into place")));
+
+    // Back where it lives, byte for byte, with nothing left lying beside it.
+    CHECK(projectBytes(folder) == was);
+    CHECK(leftoversIn(dir.path(), QStringLiteral("*.replaced-*")).isEmpty());
+    CHECK(leftoversIn(dir.path(), QStringLiteral("*.rescued-*")).isEmpty());
+    CHECK(!QFileInfo::exists(scratch));
+}
+
+// And when the restore fails too, which is the case that used to leave a
+// project orphaned under a name nothing mentioned. Both copies are kept and
+// both are named, because a path is the difference between a recoverable scare
+// and a lost shot.
+void aSwapThatCannotBePutBackKeepsBothCopiesAndNamesThem() {
+    TEST("a swap that cannot be undone keeps both copies and names them");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    const QString scratch = dir.filePath(QStringLiteral("shot.animage.saving-abc"));
+
+    projectAt(folder, 12);
+    projectAt(scratch, 30);
+
+    // Calls 2 and 3 refused. Call 4 -- moving the new project out of the
+    // scratch name -- is allowed, which is the ordinary shape of this failure:
+    // what the filesystem is holding is `folder`, not either of the two copies.
+    int calls = 0;
+    QString error;
+    CHECK_EQ(ProjectIO::swapIntoPlace(
+                 scratch, folder,
+                 [&calls](const QString& from, const QString& to) {
+                     ++calls;
+                     return (calls == 2 || calls == 3) ? false : QDir().rename(from, to);
+                 },
+                 &error),
+             false);
+
+    CHECK(!QFileInfo::exists(folder));
+
+    const QStringList replaced = leftoversIn(dir.path(), QStringLiteral("*.replaced-*"));
+    const QStringList rescued = leftoversIn(dir.path(), QStringLiteral("*.rescued-*"));
+    CHECK_EQ(replaced.size(), 1);
+    CHECK_EQ(rescued.size(), 1);
+    if (replaced.size() != 1 || rescued.size() != 1) return;
+
+    // Named in the message, both of them, and said to be intact.
+    CHECK(error.contains(replaced.first()));
+    CHECK(error.contains(rescued.first()));
+    CHECK(error.contains(QStringLiteral("Nothing has been deleted")));
+
+    // And they really are whole projects rather than the wreckage of one.
+    Document old_one;
+    Document new_one;
+    CHECK(ProjectIO::load(old_one, dir.filePath(replaced.first()), nullptr));
+    CHECK(ProjectIO::load(new_one, dir.filePath(rescued.first()), nullptr));
+    CHECK_EQ(old_one.scene().framerate, 12);
+    CHECK_EQ(new_one.scene().framerate, 30);
+
+    // Nothing is left at the scratch name. That path is named after the process
+    // and so is the same one every save, and the next save's first act is to
+    // clear it -- a rescue copy left there would be gone two minutes later
+    // without a word.
+    CHECK(!QFileInfo::exists(scratch));
+}
+
+// The fallback, when even moving the new project out of the scratch name is
+// refused. There is nothing further to try, so the message has to name where it
+// actually is rather than where it was meant to go.
+void aRescueThatCannotBeMovedIsNamedWhereItIs() {
+    TEST("a rescue copy that cannot be moved is named at the path it is on");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    const QString scratch = dir.filePath(QStringLiteral("shot.animage.saving-abc"));
+
+    projectAt(folder, 12);
+    projectAt(scratch, 30);
+
+    int calls = 0;
+    QString error;
+    CHECK_EQ(ProjectIO::swapIntoPlace(scratch, folder,
+                                      [&calls](const QString& from, const QString& to) {
+                                          ++calls;
+                                          return calls == 1 ? QDir().rename(from, to) : false;
+                                      },
+                                      &error),
+             false);
+
+    CHECK(error.contains(QStringLiteral("shot.animage.saving-abc")));
+    CHECK(QFileInfo::exists(scratch));
+    Document still_there;
+    CHECK(ProjectIO::load(still_there, scratch, nullptr));
+    CHECK_EQ(still_there.scene().framerate, 30);
+}
+
+// **The regression that would matter.** The failure above leaves `folder` with
+// nothing in it and the caller's `SaveState` still describing what used to be
+// there. That state is what decides which cel files are carried forward as hard
+// links instead of re-encoded, so the question is whether the *next* save can
+// build a project out of files that are no longer on disk -- which would be a
+// corrupt project written silently, two minutes later, by autosave.
+//
+// It cannot. `carryForward` asks whether the file is there and writes the bytes
+// when it is not, which is what "the state is a hint and never a promise" means.
+// Pinned here rather than reasoned about, because the reasoning is what would
+// quietly stop being true.
+void aSaveAfterTheFolderVanishedIsStillWhole() {
+    TEST("a save into a folder that vanished writes a whole project, not a difference");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("shot.animage"));
+    const QString reference = dir.filePath(QStringLiteral("reference.animage"));
+
+    const Document doc = buildDrawnScene();
+    ProjectIO::SaveState state;
+    CHECK(ProjectIO::save(doc, folder, state, nullptr));
+    CHECK_EQ(state.folder.toStdString(), folder.toStdString());
+    CHECK(!state.revisions.empty());
+
+    // Exactly what a swap that could not put anything back leaves behind.
+    CHECK(QDir(folder).removeRecursively());
+    CHECK(!QFileInfo::exists(folder));
+
+    // Nothing in the document has changed, so every revision still matches and
+    // every cel is a candidate to be carried forward -- with nothing left to
+    // carry it from.
+    QString error;
+    CHECK(ProjectIO::save(doc, folder, state, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+
+    CHECK(ProjectIO::save(doc, reference, nullptr));
+    CHECK_EQ(projectBytes(folder) == projectBytes(reference), true);
+
+    Document back;
+    CHECK(ProjectIO::load(back, folder, &error));
+    CHECK_EQ(ProjectIO::writeSceneJson(back), ProjectIO::writeSceneJson(doc));
+}
 void abrokenProjectDoesNotReplaceTheOpenOne() {
     TEST("a project that will not open leaves the open one alone");
     QTemporaryDir scratch;
@@ -7394,6 +7585,10 @@ int main(int argc, char** argv) {
     aProjectSurvivesSavingAndLoading();
     aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
+    aFailedSwapPutsThePreviousProjectBack();
+    aSwapThatCannotBePutBackKeepsBothCopiesAndNamesThem();
+    aRescueThatCannotBeMovedIsNamedWhereItIs();
+    aSaveAfterTheFolderVanishedIsStillWhole();
     abrokenProjectDoesNotReplaceTheOpenOne();
     savingTwiceWritesTheSameBytes();
     anIncrementalSaveWritesTheSameProject();

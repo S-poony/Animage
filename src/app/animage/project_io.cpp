@@ -508,6 +508,67 @@ bool carryForward(const QString& from, const QString& to) {
 
 QString ProjectIO::folderSuffix() { return QStringLiteral(".animage"); }
 
+bool ProjectIO::swapIntoPlace(const QString& scratch, const QString& folder,
+                              const RenameFn& rename, QString* error) {
+    const auto fail = [&](const QString& why) {
+        if (error) *error = why;
+        return false;
+    };
+
+    // The old project is moved aside rather than deleted first, so that a
+    // failure to rename the new one into place still leaves something.
+    const QString displaced = folder + QStringLiteral(".replaced-%1")
+                                           .arg(QDateTime::currentMSecsSinceEpoch());
+    const bool had_one = QFileInfo::exists(folder);
+    if (had_one && !rename(folder, displaced)) {
+        // Nothing moved. The project on disk is the one that was already there
+        // and this save is the only thing that has been lost.
+        removeTree(scratch);
+        return fail(QStringLiteral("cannot move the previous project aside"));
+    }
+
+    if (rename(scratch, folder)) {
+        if (had_one) removeTree(displaced);
+        return true;
+    }
+
+    // `folder` is empty and the new project is still in `scratch`. Put the old
+    // one back, and *check that it went back* -- this is the line the whole
+    // function is here for. It used to be attempted and its answer discarded.
+    if (had_one && rename(displaced, folder)) {
+        removeTree(scratch);
+        return fail(QStringLiteral("cannot move the new project into place"));
+    }
+
+    // Nothing is at `folder` and nothing can be put there. Both copies are
+    // kept: the one just written is the only copy of the work being saved, and
+    // deleting it to tidy up would be the failure doing more damage than the
+    // fault that caused it.
+    //
+    // Moved out of the scratch name first, because the *next* save's first act
+    // is to clear that path -- it is named after the process and so is the same
+    // path every time -- and a rescue copy left there would be gone two minutes
+    // later without a word. If even that rename is refused there is nothing
+    // further to try, and the message names where it actually is.
+    QString kept =
+        folder + QStringLiteral(".rescued-%1").arg(QDateTime::currentMSecsSinceEpoch());
+    if (!rename(scratch, kept)) kept = scratch;
+
+    // Naming the paths is the whole point of the message. Without them this is
+    // a project that has vanished from where it lives; with them it is two
+    // folders and a rename.
+    if (had_one) {
+        return fail(QStringLiteral("cannot move the new project into place, and the previous "
+                                   "project could not be put back. Nothing has been deleted: "
+                                   "this save is in \"%1\" and the previous project is in "
+                                   "\"%2\". Rename either one to \"%3\".")
+                        .arg(kept, displaced, folder));
+    }
+    return fail(QStringLiteral("cannot move the new project into place. Nothing has been "
+                               "deleted: this save is in \"%1\". Rename it to \"%2\".")
+                    .arg(kept, folder));
+}
+
 bool ProjectIO::save(const Document& doc, const QString& folder, QString* error) {
     // A full save is the incremental one with nothing to carry forward, which
     // keeps one code path rather than two that must agree about the layout.
@@ -578,19 +639,18 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
         return giveUp(why);
     }
 
-    // The swap. The old project is moved aside rather than deleted first, so
-    // that a failure to rename the new one into place still leaves something.
-    const QString displaced = folder + QStringLiteral(".replaced-%1")
-                                           .arg(QDateTime::currentMSecsSinceEpoch());
-    const bool had_one = QFileInfo::exists(folder);
-    if (had_one && !root.rename(folder, displaced)) {
-        return giveUp(QStringLiteral("cannot move the previous project aside"));
+    // The swap, which cleans up after itself on every path -- including the
+    // paths where cleaning up means *not* deleting something. So no `giveUp`
+    // here: it would remove the copy the swap has deliberately kept.
+    QString swap_error;
+    if (!swapIntoPlace(scratch, folder,
+                       [](const QString& from, const QString& to) {
+                           return QDir().rename(from, to);
+                       },
+                       &swap_error)) {
+        if (error) *error = swap_error;
+        return false;
     }
-    if (!root.rename(scratch, folder)) {
-        if (had_one) root.rename(displaced, folder);  // put it back
-        return giveUp(QStringLiteral("cannot move the new project into place"));
-    }
-    if (had_one) removeTree(displaced);
 
     // Only now, with the folder in place, does what was written become what is
     // on disk. A save that gave up above leaves the caller's state describing
