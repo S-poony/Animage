@@ -162,6 +162,14 @@ question had been answered by reasoning twice and wrong both times.
 cmake --build build --target dock_probe && ./build/tests/dock_probe
 ```
 
+`window_probe` is the other half of that question: the same readings taken from
+the real window, so that doing one drag in each says whether a dock fault is ours
+or Qt's by subtraction.
+
+```bash
+cmake --build build --target window_probe && ./build/tests/window_probe
+```
+
 ### On Windows with MSYS2
 
 ```bash
@@ -178,7 +186,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/animage/` | The application. |
 | `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
-| `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, `shots.cpp` — pictures of the interface, one per named situation — and `dock_probe.cpp`, plain Qt with docks in it, for telling our bugs from Qt's. |
+| `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, `shots.cpp` — pictures of the interface, one per named situation — and the two dock probes — `dock_probe.cpp`, plain Qt with docks in it, beside `window_probe.cpp`, the real window, for telling our bugs from Qt's. |
 | `third_party/` | tinyexr (BSD-3), a header included only by `exr_writer.cpp`, and miniz (MIT), its own translation unit in `animage_ui`. Both vendored. |
 | `packaging/` | The desktop entry, and the icon. `animage.af` is the mark as drawn, `animage.svg` is exported from it by hand, and `make-icons.py` renders the PNG, `.ico` and `.icns` beside them. |
 | `docs/fr/` | Original design documents. |

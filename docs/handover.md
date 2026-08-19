@@ -2366,6 +2366,30 @@ Like `shots` it is **not a test and must not become one**: nothing asserts,
 Unlike `shots` it links Qt directly rather than `animage_ui`, and that is the
 whole point — a reproducer containing our code proves nothing about Qt.
 
+`tests/window_probe.cpp` is **the other half of the same question**, and the two
+are meant to be run side by side. It opens the real `MainWindow` on screen and
+prints every dock's size on every change, against the size it was at the previous
+reading and against the hint and the minimum it could be falling back to. Do the
+same drag in both and the answer is a subtraction:
+
+```bash
+./build/tests/window_probe            the real window, logging every dock change
+```
+
+A separate binary and **not a flag on `dock_probe`**, because one binary cannot
+be both free of Animage and made of it, and a flag would have quietly destroyed
+the property that makes the first one worth having. They share about forty lines
+of printing, which is the price of that and a good price.
+
+Two things it is built around, both of which cost a run to learn. Add a couple of
+**tracks before starting**: with one track the timeline dock sits exactly on its
+own size hint, so a Qt that re-fits a layout to its hints takes nothing and the
+run reports a real fault as absent — the rows are what put height above the hint,
+and height above the hint is what there is to lose. And it watches
+`dockLocationChanged` as well as `topLevelChanged`, because **a dock changing
+side never floats**: drag a panel from the right edge straight to the left and
+the second signal is the only one there is.
+
 Three things it does that are worth knowing before writing another one:
 
 - **It reads Qt's private state without needing a private symbol.** With
@@ -3934,7 +3958,8 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
-./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault ours or Qt's?
+./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault Qt's?
+./build/tests/window_probe            # the same readings from the real window: is it ours?
 ```
 
 `shots` is the one that is not a number. It drives the real window through a

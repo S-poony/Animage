@@ -19,7 +19,32 @@
 // ./build/tests/dock_probe --bench      try the cures, print a table, exit
 // ./build/tests/dock_probe --frameless  give the floating panel a title bar
 //                                       widget, as FloatingDockFrame does
+// ./build/tests/dock_probe --plain      stock dock sizes instead of Animage's
 // ```
+//
+// --- If you are an agent reading this, this file is yours ---------------------
+//
+// The same licence `tests/shots.cpp` carries, and for the same reason. Change
+// it, add the reading you need, delete the one in your way. Nothing depends on
+// any of it: no test reads this, `ctest` never runs it, and the build does not
+// care. It exists to be bent at the question in front of you -- a probe that
+// only answers the question it was written for is a probe nobody reaches for
+// the second time.
+//
+// Two things worth keeping as they are. It must stay **free of Animage**: it
+// links Qt directly and not `animage_ui`, and a reproducer with our code in it
+// proves nothing about Qt, which is the entire reason this is a separate
+// program. And it must stay a probe rather than a test -- see below.
+//
+// **The docks start at Animage's sizes**, so that a reading here can be put
+// beside a reading from the application without arguing about the difference.
+// The side dock has a 232 px minimum width and is set to 274, which is the layer
+// panel; the under dock is set well above its own hint through `resizeDocks`,
+// which is how `MainWindow::syncTimelineHeight` sizes the timeline. Both of
+// those matter to what is being asked: whether a dock keeps a width across a
+// side change is a question about a *minimum*, and whether it keeps a height is
+// a question about height held above the hint. `--plain` puts the stock sizes
+// back if what you are asking has nothing to do with either.
 //
 // Everything it prints goes to `dock_probe.log` beside the working directory as
 // well as to stdout, because a Qt application on Windows is built `WIN32` and
@@ -52,6 +77,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QFile>
+#include <QHash>
 #include <QLabel>
 #include <QLibraryInfo>
 #include <QLoggingCategory>
@@ -64,6 +90,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <cstdlib>
 #include <functional>
 #include <vector>
 
@@ -166,14 +193,29 @@ public:
         }
 
         resize(1100, 760);
+
+        // Animage's sizes unless told otherwise -- see the top of this file for
+        // why they are the default. Both have to be applied after the window has
+        // a size, because resizeDocks divides up a layout that has to exist.
+        if (!qApp->arguments().contains(QStringLiteral("--plain"))) {
+            side_->widget()->setMinimumWidth(232);   // MainWindow::buildLayerPanel
+            resizeDocks({side_}, {274}, Qt::Horizontal);
+            resizeDocks({under_}, {215}, Qt::Vertical);  // three timeline rows
+        }
+
         baseline_ = saveState();
         qApp->installEventFilter(this);
+        ready_ = true;
     }
 
     // What the window's children occupy against what the window is. This is the
     // whole symptom of issue #54 and it needs no private header: if the status
     // bar is not at the bottom, the layout did not run.
     void report(const QString& why) {
+        // addDockWidget emits dockLocationChanged, so the constructor reports
+        // twice before it has finished building anything -- the second dock is
+        // still null at the first of them. Nothing before "start" is a reading.
+        if (!ready_) return;
         QWidget* c = centralWidget();
         QWidget* sb = statusBar();
         const int got_bottom = sb ? sb->geometry().bottom() + 1 : -1;
@@ -189,13 +231,66 @@ public:
             say(QStringLiteral("  status bar      %1, %2   %3 x %4   bottom %5, window bottom %6")
                     .arg(sb->x()).arg(sb->y()).arg(sb->width()).arg(sb->height())
                     .arg(got_bottom).arg(height()));
-        say(QStringLiteral("  docks           Side %1, Under %2")
-                .arg(side_->isFloating() ? QStringLiteral("FLOATING") : QStringLiteral("docked"),
-                     under_->isFloating() ? QStringLiteral("FLOATING") : QStringLiteral("docked")));
+        sayDock(side_, QStringLiteral("Side"));
+        sayDock(under_, QStringLiteral("Under"));
         say(adrift || too_wide
                 ? QStringLiteral("  ** FROZEN -- children are laid out for a window this is not **")
                 : QStringLiteral("  ok -- children fill the window"));
         say(QString());
+    }
+
+    // One dock's size, against the size it was at the last report and against
+    // what it is entitled to.
+    //
+    // **The difference is the whole reading**, which is why the previous size is
+    // carried rather than recomputed: [#57][] and [#55][] are both a dock coming
+    // back a few pixels different from how it left, and a column of absolute
+    // numbers makes a reader do the subtraction across two screens of log. A
+    // marked line does not.
+    //
+    // The hint and the minimum are beside it because they are the two sizes Qt
+    // could plausibly be falling back to. A dock that lands on its hint has been
+    // re-fitted; one that lands on its minimum has been squeezed; one that lands
+    // on neither has been given away to a neighbour.
+    //
+    // [#57]: https://github.com/S-poony/Animage/issues/57
+    // [#55]: https://github.com/S-poony/Animage/issues/55
+    void sayDock(QDockWidget* dock, const QString& name) {
+        if (!dock) return;
+        const QSize now = dock->size();
+        const QSize was = last_size_.value(dock, now);
+        last_size_[dock] = now;
+
+        QString moved;
+        if (now.width() != was.width())
+            moved += QStringLiteral("  ** %1 px %2 **")
+                         .arg(std::abs(now.width() - was.width()))
+                         .arg(now.width() < was.width() ? QStringLiteral("NARROWER")
+                                                        : QStringLiteral("wider"));
+        if (now.height() != was.height())
+            moved += QStringLiteral("  ** %1 px %2 **")
+                         .arg(std::abs(now.height() - was.height()))
+                         .arg(now.height() < was.height() ? QStringLiteral("SHORTER")
+                                                          : QStringLiteral("taller"));
+
+        say(QStringLiteral("  %1%2 x %3   was %4 x %5   hint %6 x %7   min %8 x %9   %10%11")
+                .arg(name.leftJustified(16, QLatin1Char(' ')))
+                .arg(now.width()).arg(now.height())
+                .arg(was.width()).arg(was.height())
+                .arg(dock->sizeHint().width()).arg(dock->sizeHint().height())
+                .arg(dock->minimumSizeHint().width()).arg(dock->minimumSizeHint().height())
+                .arg(dock->isFloating() ? QStringLiteral("FLOATING") : areaName(dock), moved));
+    }
+
+    static QString areaName(QDockWidget* dock) {
+        auto* window = qobject_cast<QMainWindow*>(dock->parentWidget());
+        switch (window ? window->dockWidgetArea(dock) : Qt::NoDockWidgetArea) {
+            case Qt::LeftDockWidgetArea: return QStringLiteral("left");
+            case Qt::RightDockWidgetArea: return QStringLiteral("right");
+            case Qt::TopDockWidgetArea: return QStringLiteral("top");
+            case Qt::BottomDockWidgetArea: return QStringLiteral("bottom");
+            default: return QStringLiteral("nowhere");
+        }
     }
 
     // Try each candidate cure against a forged frozen layout, and say which ones
@@ -378,11 +473,20 @@ private:
                        .arg(title, floating ? QStringLiteral("FLOATING")
                                             : QStringLiteral("docked")));
         });
+        // A dock changing side never floats and so never says so through
+        // topLevelChanged -- drag one from the right edge straight to the left
+        // and the only signal is this one. That is issue #55's whole gesture.
+        connect(d, &QDockWidget::dockLocationChanged, this, [this, d, title](Qt::DockWidgetArea) {
+            report(QStringLiteral("%1 is now in the %2 area").arg(title, areaName(d)));
+        });
         return d;
     }
 
     QDockWidget* side_ = nullptr;
     QDockWidget* under_ = nullptr;
+    // Each dock's size at the last report, so the next one can say what changed.
+    QHash<QDockWidget*, QSize> last_size_;
+    bool ready_ = false;
     QByteArray baseline_;
     QString last_state_;
     QString moves_;
@@ -407,7 +511,12 @@ int main(int argc, char** argv) {
 #ifndef ANIMAGE_HAVE_QT_PRIVATE
     say(QStringLiteral("Built without Qt's private headers: the drag state is not available."));
 #endif
-    say(QStringLiteral("By hand: drag a panel out of the window, let go, then resize the window."));
+    say(QStringLiteral("By hand, and each one is a different question:"));
+    say(QStringLiteral("  #54  drag a panel out of the window, let go, then resize the window."));
+    say(QStringLiteral("       Watch for FROZEN."));
+    say(QStringLiteral("  #57  drag Side out of the window. Watch Under's height."));
+    say(QStringLiteral("  #55  drag Side from the right edge to the left. Watch its width."));
+    say(QStringLiteral("Anything marked ** changed since the line above it."));
     say(QString());
     w.report(QStringLiteral("start"));
 

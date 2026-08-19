@@ -99,6 +99,17 @@ if(TARGET animage_ui)
     message(STATUS "Qt private headers not found: dock_probe cannot read the drag state")
   endif()
 
+  # The other half of dock_probe: the same readings taken from the real window,
+  # so a hand doing the same drag in both says whether a dock fault is ours or
+  # Qt's. Built but never run by ctest, for dock_probe's reasons.
+  #
+  # A separate target and not a flag on dock_probe, deliberately: that one must
+  # stay free of Animage and this one is nothing but Animage, and one binary
+  # cannot be both. See the header of window_probe.cpp.
+  add_executable(window_probe WIN32 window_probe.cpp)
+  target_link_libraries(window_probe PRIVATE animage_ui)
+  target_include_directories(window_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
   # Issue #50: a floating panel's title bar has to be Qt's own, or a pen cannot
   # press it. Plain widget state, so no private Qt headers are needed.
   add_executable(test_floating_dock_frame test_floating_dock_frame.cpp)
