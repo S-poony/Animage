@@ -2614,6 +2614,7 @@ trap.
 | [What a stroke's dirty rectangle misses when the whole fill is resolved](#what-a-strokes-dirty-rectangle-misses-when-the-whole-fill-is-resolved) | A regenerated fill changes far from the pen; dirty everything |
 | [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
 | [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
+| [What a band counted in coarse rows really costs](#what-a-band-counted-in-coarse-rows-really-costs) | Coarse rows times step is image rows; band the barrier in bytes |
 | [What made saving slow, and why skipping unchanged cels would not have helped](#what-made-saving-slow-and-why-skipping-unchanged-cels-would-not-have-helped) | Tiles were 92.6% zeros; store each row's occupied span |
 | [Why an ever-true tablet flag leaves the mouse unable to draw](#why-an-ever-true-tablet-flag-leaves-the-mouse-unable-to-draw) | Pen-seen must be a time window, not a permanent flag |
 | [What was never timed, and what the benchmark stopped anyone timing](#what-was-never-timed-and-what-the-benchmark-stopped-anyone-timing) | Compositing was tuned unmeasured; the benchmark hid the larger loop |
@@ -3061,6 +3062,67 @@ two-pixel line becomes a dotted line, the barrier acquires holes that are not in
 the drawing, and the fill pours out through its own outline. Composite at full
 resolution and reduce by taking the *most* covered pixel in each block — too
 solid costs a little gap tolerance, too thin costs the whole fill.
+
+
+### What a band counted in coarse rows really costs
+**A band counted in the coarse unit is `step` times bigger than it reads as.**
+`ctgBarrier` composites at full resolution and reduces, so it works a band at a
+time to keep the framebuffer small — and the band was counted in *coarse* rows.
+Thirty-two coarse rows is thirty-two times `step` image rows, so the buffer went
+on growing with the drawing much as it would have with no banding at all, and
+the comment above it claimed the opposite.
+
+The worst caller is `estimateCtgShift`, whose grid is a fixed ninety-six cells
+across however large the drawing is, so its `step` grows without limit. On a
+16384-wide one that is a 1.4 GB framebuffer, asked for twice per solve. On a
+worker thread with nothing to catch it, the `bad_alloc` left the thread function
+and `std::terminate` took the program — no dialog, no crash report, nothing
+saved, and up to two minutes of drawing with it.
+
+**Two things were wrong and only one of them was the arithmetic.** Bounding the
+band in image rows rather than coarse rows is the obvious repair and it is not
+enough on its own: the buffer is rows times *width*, and the width is the whole
+drawing, so pinning the height at a thousand rows still leaves hundreds of
+megabytes — and makes every ordinary case thirty-two times worse, because at
+`step` 1 the band was thirty-two rows and would become a thousand. Bytes is the
+quantity that was meant all along, and writing it in bytes is what stops the
+constant doing two jobs.
+
+**And a band does not have to line up with a coarse row.** That is what lets the
+floor be one image row rather than one coarse row — `step` times smaller, and
+the difference between a bound and a smaller unbounded thing. The reduction
+accumulates with `min` into an array that starts at 1.0, so a coarse row
+finished by two bands is the same answer as one finished by one; that was always
+true and nothing had leaned on it. `test_ctg` reads the same ink over a narrow
+region and a wide one and requires them to agree exactly. That is the only part
+of this a test can reach: how tall a band was is not observable from outside, so
+raising the budget far enough would leave the test passing and testing nothing.
+
+**The catch is a backstop and it is not the fix.** `CtgSolver::run` now treats a
+`bad_alloc` out of a solve as that solve failing. Everything a solve touches is
+its own — the job is a copy, the fill is derived, no part of the document is
+half written — so giving up on one costs a recompute and the session lives. It
+is narrow on purpose: anything else escaping a solve is a bug in the solve and
+should still be loud. What it does not do is make a huge allocation safe. On a
+machine with room to swap it succeeds and the answer simply takes minutes, which
+no `catch` can see. The caller is then holding a question with no answer coming;
+it re-asks the next time the drawing changes, and until then shows the fill it
+already had. `CtgSolver::failedCount` is the only trace it leaves.
+
+**What is left is the time.** The band is 4 MB now and measures it: peak working
+set over a 16384-wide barrier at step 171 is 4 MB above where it started, where
+the formula for the old one says 1.4 GB. What that did not buy is speed. The
+barrier still composites every pixel of the region at full resolution whatever
+the step — and `compositeGrids` clears its framebuffer, so an empty region costs
+the same as a drawn one: about 0.4 s a call at that size, three calls a solve.
+That is not this bug and it is not fixed. The shift estimate does not need a
+full-resolution composite at all: it wants ink weighted by how much of it there
+is, which `halve` says in its own comment and the reduction on the way in then
+contradicts by taking the `max`. Read straight off the tiles it would cost what
+the ink costs rather than what the bounding box costs. Sharing `ctgBarrier` with
+the solve, whose reduction must be `max` or the fill pours out of its own
+outline, is what dragged a full-resolution composite into a job that never
+wanted one.
 
 
 ### What made saving slow, and why skipping unchanged cels would not have helped

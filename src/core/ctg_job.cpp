@@ -55,37 +55,56 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
     Compositor compositor;
     Framebuffer band;
 
-    // A few coarse rows at a time, so the full-resolution buffer stays small
-    // whatever the canvas is. At one point this was the whole region at once,
-    // which for a 3000x2400 canvas is a hundred megabytes of framebuffer.
-    constexpr int kBandRows = 32;
-    for (int y0 = 0; y0 < height; y0 += kBandRows) {
-        const int rows = std::min(kBandRows, height - y0);
-        const PixelRect strip{region.x, region.y + y0 * step, region.width,
-                              std::min(rows * step, region.height - y0 * step)};
-        if (strip.height <= 0) break;
+    // A band at a time, counted in bytes.
+    //
+    // Banding at all is because the whole region at once is a hundred megabytes
+    // of framebuffer on a 3000x2400 drawing. Counting the band in *coarse* rows
+    // was the mistake: thirty-two coarse rows is thirty-two times `step` image
+    // rows, so the buffer went on growing with the drawing exactly as it had
+    // before. On a 16384-wide one matched at step 171 -- which is what
+    // estimateCtgShift asks for, its grid being a fixed number of cells across
+    // however large the drawing is -- that is 1.4 GB, asked for on a worker
+    // thread where a bad_alloc is the end of the program rather than the end of
+    // the fill.
+    //
+    // A band does not have to line up with a coarse row, and that is what lets
+    // the floor here be one image row rather than one coarse row -- `step` times
+    // smaller, and the difference between a bound and a smaller unbounded thing.
+    // The reduction below accumulates with min() into an array that starts at
+    // 1.0, so a coarse row finished by two bands is the same answer as one
+    // finished by a single band.
+    constexpr long long kBandBytes = 4LL << 20;
+    const long long row_bytes =
+        static_cast<long long>(region.width) * static_cast<long long>(sizeof(Rgba));
+    const int band_rows =
+        static_cast<int>(std::clamp(kBandBytes / std::max<long long>(1, row_bytes), 1LL,
+                                    static_cast<long long>(region.height)));
+
+    for (int y0 = 0; y0 < region.height; y0 += band_rows) {
+        const PixelRect strip{region.x, region.y + y0, region.width,
+                              std::min(band_rows, region.height - y0)};
 
         compositor.compositeGrids(passes, strip, band);
 
-        for (int y = 0; y < rows; ++y) {
-            float* out = intensity.data() + static_cast<std::size_t>(y0 + y) * width;
-            for (int sub = 0; sub < step; ++sub) {
-                const int row = y * step + sub;
-                if (row >= band.height()) break;
-                const Rgba* source = band.row(row);
+        const int rows = std::min(band.height(), strip.height);
+        for (int row = 0; row < rows; ++row) {
+            // Which coarse row this image row falls in. One division is the
+            // whole of what banding in image rows costs.
+            float* out =
+                intensity.data() + static_cast<std::size_t>((y0 + row) / step) * width;
+            const Rgba* source = band.row(row);
 
-                for (int x = 0; x < width; ++x) {
-                    const int from = x * step;
-                    const int to = std::min(from + step, band.width());
-                    float covered = 0.0f;
-                    for (int i = from; i < to; ++i) covered = std::max(covered, source[i].a);
-                    // Coverage is what stops a cut, so the barrier is one minus
-                    // alpha: solid ink reads as 0, bare paper as 1, and the
-                    // antialiased rim of a stroke reads as the grey between --
-                    // which is the whole reason the boundary can be placed
-                    // inside the line rather than beside it.
-                    out[x] = std::min(out[x], std::clamp(1.0f - covered, 0.0f, 1.0f));
-                }
+            for (int x = 0; x < width; ++x) {
+                const int from = x * step;
+                const int to = std::min(from + step, band.width());
+                float covered = 0.0f;
+                for (int i = from; i < to; ++i) covered = std::max(covered, source[i].a);
+                // Coverage is what stops a cut, so the barrier is one minus
+                // alpha: solid ink reads as 0, bare paper as 1, and the
+                // antialiased rim of a stroke reads as the grey between --
+                // which is the whole reason the boundary can be placed inside
+                // the line rather than beside it.
+                out[x] = std::min(out[x], std::clamp(1.0f - covered, 0.0f, 1.0f));
             }
         }
     }

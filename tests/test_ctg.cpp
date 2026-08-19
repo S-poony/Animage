@@ -1850,6 +1850,84 @@ void ahiddenSourceIsStillABarrier() {
     CHECK_NEAR(fillAt(hidden, 30, 200).a, fillAt(seen, 30, 200).a, 0.001);
 }
 
+// One ink pixel, into whatever tile holds it.
+void inkAt(TileGrid& grid, int px, int py) {
+    const TileCoord coord = tileCoordFor(px, py);
+    const TileRef held = grid.find(coord);
+    auto tile = held ? std::make_shared<Tile>(*held) : std::make_shared<Tile>();
+    tile->setPixel(tileLocal(px), tileLocal(py), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
+    grid.set(coord, std::move(tile));
+}
+
+// How the barrier was banded must not be visible in the barrier.
+//
+// The band used to be counted in *coarse* rows, so it was `step` times taller
+// in image rows than it read as, and the full-resolution buffer went on growing
+// with the drawing -- 1.4 GB for a wide one matched at a coarse step, asked for
+// on a worker thread where a bad_alloc ends the program rather than the fill.
+// It is counted in bytes now, and the consequence worth a test is that a band
+// no longer lines up with a coarse row: two of them can each finish part of
+// one, so the reduction has to accumulate into a coarse row instead of writing
+// it once.
+//
+// So the same ink is read twice. The narrow region is a few kilobytes a row and
+// fits in one band, which is the answer with no banding in it at all; the wide
+// one is 128 KB a row, so its bands are a few dozen rows against a step of 64
+// and every coarse row is split across two of them. Where the two regions
+// overlap they have to agree exactly -- not nearly, because both are a minimum
+// over the same set of alphas and only a lost row can move it.
+//
+// If the band budget is ever raised far enough that a whole coarse row fits
+// again, this still passes and simply stops being about anything. There is no
+// way to ask from out here how tall a band was.
+void theBarrierDoesNotDependOnHowItWasBanded() {
+    TEST("the barrier is the same however many bands it took");
+
+    constexpr int kStep = 64;
+    constexpr int kNarrow = 256;   // one band, whole coarse rows
+    constexpr int kWide = 8192;    // many bands, none of them a whole coarse row
+    constexpr int kRows = 3;
+    constexpr int kHeight = kStep * kRows;
+    constexpr int kCells = kNarrow / kStep;
+
+    // One pixel in every cell of the narrow grid, at a sub-row that changes
+    // with the column so that both sides of a band's end are covered.
+    TileGrid ink;
+    const std::array<int, 4> offsets{0, 31, 32, 63};
+    for (int row = 0; row < kRows; ++row) {
+        for (int cell = 0; cell < kCells; ++cell) {
+            inkAt(ink, cell * kStep + 7,
+                  row * kStep + offsets[static_cast<std::size_t>(cell) % offsets.size()]);
+        }
+    }
+
+    const std::vector<float> whole =
+        ctgBarrier({ink}, PixelRect{0, 0, kNarrow, kHeight}, kStep);
+    const std::vector<float> split = ctgBarrier({ink}, PixelRect{0, 0, kWide, kHeight}, kStep);
+    CHECK_EQ(whole.size(), static_cast<std::size_t>(kCells) * kRows);
+    CHECK_EQ(split.size(), static_cast<std::size_t>(kWide / kStep) * kRows);
+
+    int found = 0;
+    for (int row = 0; row < kRows; ++row) {
+        for (int cell = 0; cell < kCells; ++cell) {
+            const float one = whole[static_cast<std::size_t>(row) * kCells + cell];
+            const float many = split[static_cast<std::size_t>(row) * (kWide / kStep) + cell];
+            if (one != many) {
+                // Which cell, so a failure names the row that was lost rather
+                // than only the line.
+                std::printf("    coarse row %d cell %d: %.3f in one band, %.3f in several\n",
+                            row, cell, static_cast<double>(one), static_cast<double>(many));
+            }
+            CHECK_EQ(one, many);
+            if (one < 1.0f) ++found;
+        }
+    }
+
+    // And there was ink in every cell, so that two barriers of bare paper
+    // cannot agree their way through this.
+    CHECK_EQ(found, kCells * kRows);
+}
+
 }  // namespace
 
 int main() {
@@ -1914,5 +1992,6 @@ int main() {
     anUnboundedSolveIsFinerThanABoundedOne();
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
+    theBarrierDoesNotDependOnHowItWasBanded();
     return testing::summarise("ctg");
 }

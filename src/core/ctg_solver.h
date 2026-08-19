@@ -101,6 +101,12 @@ public:
     std::uint64_t solveCount() const;
     std::uint64_t supersededCount() const;
 
+    // And how many could not be finished at all. A solve that runs out of
+    // memory gives up on that solve rather than taking the program with it --
+    // see run() -- and this count is the only trace it leaves, so a report of
+    // "the colour never appeared on that drawing" has something to check.
+    std::uint64_t failedCount() const;
+
 private:
     struct Request {
         CtgKey key;
@@ -142,6 +148,7 @@ private:
     bool stopping_ = false;
     std::uint64_t solves_ = 0;
     std::uint64_t superseded_ = 0;
+    std::uint64_t failed_ = 0;
 };
 
 }  // namespace animage

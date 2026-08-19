@@ -2,6 +2,7 @@
 #include "ctg_solver.h"
 
 #include <algorithm>
+#include <new>
 #include <utility>
 
 namespace animage {
@@ -78,7 +79,34 @@ void CtgSolver::run() {
         Request taken;
         if (!takeNext(taken)) return;
 
-        CtgFill fill = solveCtgJob(taken.job, taken.wanted_tiles, taken.abandon.get());
+        // A solve that cannot get its memory fails that solve, and nothing else.
+        //
+        // An exception leaving a thread function is std::terminate: the whole
+        // program gone, with no dialog and no crash report and no chance to
+        // save, because one drawing's colour did not work out. Everything a
+        // solve touches is its own -- the job is a copy, the fill is derived,
+        // and nothing in the document is half written when this throws -- so
+        // giving up on one is an ordinary outcome here in a way it is almost
+        // nowhere else.
+        //
+        // bad_alloc only, on purpose. It is the failure this is for and the one
+        // that is safe to swallow; anything else escaping a solve is a bug in
+        // the solve and should still be loud. And it is a backstop rather than a
+        // fix: an allocation large enough to fail is one that should not have
+        // been asked for, and on a machine with room to swap it will succeed and
+        // simply be slow. See ctgBarrier for the one that was asking.
+        //
+        // Counted, not reported. Whoever asked is left holding a question with
+        // no answer coming, which it re-asks the next time the drawing changes;
+        // until then the fill on screen is the one it already had, which is the
+        // same thing that happens while any solve is still running.
+        CtgFill fill;
+        bool failed = false;
+        try {
+            fill = solveCtgJob(taken.job, taken.wanted_tiles, taken.abandon.get());
+        } catch (const std::bad_alloc&) {
+            failed = true;
+        }
 
         std::function<void()> notify;
         {
@@ -97,6 +125,8 @@ void CtgSolver::run() {
                     {taken.key, std::move(fill), taken.wanted_tiles, taken.priority});
                 ++solves_;
                 notify = notify_;
+            } else if (failed) {
+                ++failed_;
             } else {
                 ++superseded_;
             }
@@ -170,6 +200,11 @@ std::uint64_t CtgSolver::solveCount() const {
 std::uint64_t CtgSolver::supersededCount() const {
     std::lock_guard<std::mutex> held(mutex_);
     return superseded_;
+}
+
+std::uint64_t CtgSolver::failedCount() const {
+    std::lock_guard<std::mutex> held(mutex_);
+    return failed_;
 }
 
 }  // namespace animage
