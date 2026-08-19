@@ -170,6 +170,11 @@ or Qt's by subtraction.
 cmake --build build --target window_probe && ./build/tests/window_probe
 ```
 
+Both need a real hand — `setFloating` does not enter Qt's drag machinery, so a
+dock fault cannot be reached from code. Double-click `run-dock-probes.bat` to
+build both and open them one after the other, with the drags to try written on
+the way in.
+
 ### On Windows with MSYS2
 
 ```bash
