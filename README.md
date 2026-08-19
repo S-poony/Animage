@@ -152,6 +152,16 @@ added to — see [docs/handover.md](docs/handover.md).
 cmake --build build --target shots && ./build/tests/shots --list
 ```
 
+`dock_probe` is beside it and answers a different question. It is a plain Qt
+window with docks in it and **none of this program**, for deciding whether a
+fault in a panel is ours or Qt's — which it settled for
+[#54](https://github.com/S-poony/Animage/issues/54) in one run, after the same
+question had been answered by reasoning twice and wrong both times.
+
+```bash
+cmake --build build --target dock_probe && ./build/tests/dock_probe
+```
+
 ### On Windows with MSYS2
 
 ```bash
@@ -168,7 +178,7 @@ Then run the CMake commands above from a UCRT64 shell.
 | `src/app/animage/` | The application. |
 | `src/app/animage/project_io.*` | The one place a project folder meets the disk: scene.json and the cels, Qt's JSON and compression included. |
 | `src/app/latency/` | M0: the pen latency harness. |
-| `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, and `shots.cpp` — pictures of the interface, one per named situation. |
+| `tests/` | Unit tests, for the core and for the application's save and load. Plus the benchmarks, `shots.cpp` — pictures of the interface, one per named situation — and `dock_probe.cpp`, plain Qt with docks in it, for telling our bugs from Qt's. |
 | `third_party/` | tinyexr (BSD-3), a header included only by `exr_writer.cpp`, and miniz (MIT), its own translation unit in `animage_ui`. Both vendored. |
 | `packaging/` | The desktop entry, and the icon. `animage.af` is the mark as drawn, `animage.svg` is exported from it by hand, and `make-icons.py` renders the PNG, `.ico` and `.icns` beside them. |
 | `docs/fr/` | Original design documents. |

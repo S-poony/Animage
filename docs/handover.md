@@ -31,6 +31,7 @@ the shape of the program. Those five maps are.
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
+| [**Asking Qt a question directly**](#asking-qt-a-question-directly) | `dock_probe`: plain Qt with docks in it, for "ours or theirs?" |
 | [**The same source, two different pictures**](#the-same-source-two-different-pictures) | what a downloaded build does not share with yours, and where to look first |
 | [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
@@ -2340,6 +2341,53 @@ system stamps the live modifier state on all of them. So a hover sent with
 absent when it was the harness that had let go. `Stage` holds the modifiers and
 stamps them on, the way the window system does.
 
+## Asking Qt a question directly
+
+`tests/dock_probe.cpp` is a plain Qt main window with two docks, a central
+widget and a status bar, and **none of this program in it**. It is the tool for
+the question that comes up every time something goes wrong with a panel: *is
+this ours or is it Qt's?*
+
+```bash
+./build/tests/dock_probe              a window to drag panels around by hand
+./build/tests/dock_probe --bench      try the cures against a forged fault
+./build/tests/dock_probe --frameless  give the floating panel a title bar
+                                      widget, the way FloatingDockFrame does
+```
+
+It answered [#54](https://github.com/S-poony/Animage/issues/54) in a single run
+— plain Qt froze its layout exactly as Animage did — and that one fact turned
+the work from "find our bug" into "find the Qt release that has it", which was
+a different and much shorter job. Before it existed the same question had been
+answered by *reasoning*, twice, and wrong both times; see the traps.
+
+Like `shots` it is **not a test and must not become one**: nothing asserts,
+`ctest` never runs it, and it needs a real display and in places a real hand.
+Unlike `shots` it links Qt directly rather than `animage_ui`, and that is the
+whole point — a reproducer containing our code proves nothing about Qt.
+
+Three things it does that are worth knowing before writing another one:
+
+- **It reads Qt's private state without needing a private symbol.** With
+  `Qt6WidgetsPrivate` present it prints `QMainWindowLayout`'s drag bookkeeping —
+  `savedState`, `currentGapPos`, `pluggingWidget`, `movingSeparator` — whenever
+  any of it changes. `QMainWindowLayoutState::isValid()` is `rect.isValid()` and
+  `rect` is a public member, so reading the field works where calling the method
+  would not link. The private package is optional and asked for **in `tests/`**,
+  never in the root `find_package`; without it the probe still builds and still
+  shows the geometry, which is the symptom.
+- **It turns on Qt's own logging** — `qt.widgets.dockwidgets` — and folds it into
+  the same log as the measurements, in order. Qt saying *"will be unplugged with
+  size"* next to our own sample of the flag is what made #54 legible.
+- **It prints to a file**, because a Qt program built `WIN32` has no console.
+
+**And the technique it exists to make cheap is forging.** A synthetic drag sent
+to a `QDockWidget` leaves Qt's state machine half finished and lies — so the
+drag has to be a hand. But once a hand has shown that the fault *is* one piece
+of state, that state can be set directly and a dozen candidate fixes tried by
+machine in a second each. That is what `--bench` does, and it is the reason #54
+has a table of eight cures rather than an argument about one.
+
 ## The same source, two different pictures
 
 This section exists because it was missing, and its absence cost most of an
@@ -3392,15 +3440,13 @@ even a frozen window photographs clean. **The geometry is wrong; the painting is
 not.** Before reaching for `shots` on anything about docks, ask whether the state
 can be reached without a hand.
 
-**What answered it was a standalone plain-Qt program built against Qt's private
-headers**, which is a shape this repository did not have before and should reach
-for again. It is a `QMainWindow` that prints its own children's geometry on every
-resize and reads `savedState` directly — `isValid()` is `rect.isValid()` and
-`rect` is a public member, so no unexported symbol is needed. Two rules make it
-cheap: it lives outside the tree, so the rule about private headers and the
-application does not apply to it; and it answers questions about *Qt*, which is
-exactly the class of question this program keeps needing and cannot ask from
-inside itself.
+**What answered it was a standalone plain-Qt program**, which is kept:
+`tests/dock_probe.cpp`, and it has [a section of its
+own](#asking-qt-a-question-directly). Reach for it before reasoning about
+anything a dock does. It answers questions about *Qt*, which is a class of
+question this program keeps needing and cannot ask from inside itself, and the
+answer it gave here — plain Qt does this too — turned the work into a much
+shorter one.
 
 **Forging the broken state is what made the cures testable by machine.** The hand
 test established that the whole fault is one flag with everything else already
@@ -3792,6 +3838,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
+./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault ours or Qt's?
 ```
 
 `shots` is the one that is not a number. It drives the real window through a

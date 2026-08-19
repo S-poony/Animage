@@ -76,6 +76,29 @@ if(TARGET animage_ui)
     message(STATUS "Qt private headers not found: skipping test_pen_promotion")
   endif()
 
+  # A plain Qt window with docks in it and none of Animage, for deciding whether
+  # a dock or layout fault is ours or Qt's. Built but never run by ctest: it
+  # asserts nothing, needs a real display, and in places needs a real hand. See
+  # the file's own header, and the issue #54 trap in docs/handover.md.
+  #
+  # It links Qt directly rather than animage_ui, because being free of this
+  # program is the entire point of it.
+  #
+  # WidgetsPrivate is what lets it read QMainWindowLayout's drag bookkeeping,
+  # and it is optional: without it the probe still builds and still shows the
+  # geometry, which is the symptom. Asked for as its own package and never in
+  # the top-level find_package -- see test_pen_promotion above for what that
+  # mistake costs.
+  add_executable(dock_probe WIN32 dock_probe.cpp)
+  target_link_libraries(dock_probe PRIVATE Qt6::Widgets)
+  find_package(Qt6WidgetsPrivate QUIET)
+  if(Qt6WidgetsPrivate_FOUND)
+    target_link_libraries(dock_probe PRIVATE Qt6::WidgetsPrivate)
+    target_compile_definitions(dock_probe PRIVATE ANIMAGE_HAVE_QT_PRIVATE)
+  else()
+    message(STATUS "Qt private headers not found: dock_probe cannot read the drag state")
+  endif()
+
   # Issue #50: a floating panel's title bar has to be Qt's own, or a pen cannot
   # press it. Plain widget state, so no private Qt headers are needed.
   add_executable(test_floating_dock_frame test_floating_dock_frame.cpp)
