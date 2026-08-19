@@ -1,0 +1,41 @@
+16:13:32.683  qt       Saving state for dock widget: "sideDock" StateFlags(Visible)
+16:13:32.685  qt       Saving state for dock widget: "underDock" StateFlags(Visible)
+16:13:32.705  state    savedState=empty movingSeparator=none plugging=no gap=0 grabber=none
+Qt 6.11.1 at build, 6.11.1 at run, platform windows
+By hand, and each one is a different question:
+  #54  drag a panel out of the window, let go, then resize the window.
+       Watch for FROZEN.
+  #57  drag Under out of the window, then drag it back in.
+       Does it come back shorter than it left? It starts
+       above its own hint, so there is height to lose.
+  #55  drag Side from the right edge to the left. Watch its width.
+Anything marked ** changed since the line above it.
+
+16:13:32.742  start
+  window          1100 x 760
+  central widget  0, 0   822 x 520
+  status bar      0, 739   1100 x 21   bottom 760, window bottom 760
+  Side            274 x 520   was 274 x 520   hint 232 x 114   min 232 x 114   right
+  Under           1100 x 215   was 1100 x 215   hint 160 x 114   min 160 x 114   bottom
+  ok -- children fill the window
+
+16:13:32.744  resize
+  window          1100 x 760
+  central widget  0, 0   822 x 520
+  status bar      0, 739   1100 x 21   bottom 760, window bottom 760
+  Side            274 x 520   was 274 x 520   hint 232 x 114   min 232 x 114   right
+  Under           1100 x 215   was 1100 x 215   hint 160 x 114   min 160 x 114   bottom
+  ok -- children fill the window
+
+16:13:32.832  event    NC-Move on main window (further moves not listed)
+16:13:32.857  event    MouseMove on Side dock (further moves not listed)
+16:13:33.083  event    MouseMove on main window (further moves not listed)
+16:13:33.282  event    MouseMove on Under dock (further moves not listed)
+16:13:33.780  event    MouseMove on main window (further moves not listed)
+16:13:33.780  event    MouseMove on Under dock (further moves not listed)
+16:13:33.791  event    MouseMove on main window (further moves not listed)
+16:15:47.315  event    MouseMove on Under dock (further moves not listed)
+16:15:47.337  event    MouseMove on main window (further moves not listed)
+16:15:47.360  event    MouseMove on Side dock (further moves not listed)
+16:15:48.386  event    NC-Move on main window (further moves not listed)
+16:15:48.752  event    NC-Press on main window   at 1488,120   buttons=1

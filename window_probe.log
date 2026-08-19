@@ -1,0 +1,229 @@
+Qt 6.11.1, platform windows
+By hand, and each one is a different question:
+  #57  drag Timeline out of the window, then drag it back in.
+       Does it come back shorter than it left?
+  #55  drag Layers from the right edge to the left.
+       Does it arrive a different width?
+Anything marked ** changed since the line above it.
+
+First drag the top edge of the Timeline panel upward, so it is
+taller than it opened. A dock sitting exactly on its own size
+hint has no spare height to lose, and would report nothing.
+Run tests/dock_probe beside this: same drags, plain Qt, no Animage.
+
+16:12:55.073  start
+  window          1400 x 900
+  canvas          0, 63   1122 x 668
+  Layers          274 x 668   was 274 x 668   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 144   was 1400 x 144   hint 694 x 144   min 694 x 96   bottom
+
+16:12:57.510  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 668   hint 274 x 374   min 232 x 240   right  ** 154 px SHORTER **
+  Timeline        1396 x 274   was 1400 x 144   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 130 px taller **
+
+16:12:57.512  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 274   was 1396 x 274   hint 694 x 120   min 694 x 72   FLOATING
+
+16:12:58.334  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 816
+  Layers          274 x 816   was 274 x 514   hint 274 x 374   min 232 x 240   right  ** 302 px taller **
+  Timeline        1396 x 274   was 1396 x 274   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:03.349  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 211   1122 x 668
+  Layers          274 x 668   was 274 x 816   hint 274 x 374   min 232 x 240   right  ** 148 px SHORTER **
+  Timeline        1400 x 144   was 1396 x 274   hint 694 x 144   min 694 x 96   top  ** 4 px wider **  ** 130 px SHORTER **
+
+16:13:03.350  Timeline is now in the top area
+  window          1400 x 900
+  canvas          0, 211   1122 x 668
+  Layers          274 x 668   was 274 x 668   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 144   was 1400 x 144   hint 694 x 144   min 694 x 96   top
+
+16:13:04.274  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 211   1122 x 668
+  Layers          274 x 668   was 274 x 668   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 120   was 1400 x 144   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 24 px SHORTER **
+
+16:13:04.276  Timeline is now in the top area
+  window          1400 x 900
+  canvas          0, 211   1122 x 668
+  Layers          274 x 668   was 274 x 668   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 120   was 1396 x 120   hint 694 x 120   min 694 x 72   FLOATING
+
+16:13:05.875  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 668   hint 274 x 374   min 232 x 240   right  ** 154 px SHORTER **
+  Timeline        1396 x 120   was 1396 x 120   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:06.075  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 298   was 1396 x 120   hint 694 x 144   min 694 x 96   bottom  ** 4 px wider **  ** 178 px taller **
+
+16:13:06.076  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:07.173  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 274   was 1400 x 298   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 24 px SHORTER **
+
+16:13:07.173  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 274   was 1396 x 274   hint 694 x 120   min 694 x 72   FLOATING
+
+16:13:07.737  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 816
+  Layers          274 x 816   was 274 x 514   hint 274 x 374   min 232 x 240   right  ** 302 px taller **
+  Timeline        1396 x 274   was 1396 x 274   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:10.021  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 816   hint 274 x 374   min 232 x 240   right  ** 302 px SHORTER **
+  Timeline        1400 x 298   was 1396 x 274   hint 694 x 144   min 694 x 96   bottom  ** 4 px wider **  ** 24 px taller **
+
+16:13:10.022  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:11.320  Layers is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 486   was 274 x 514   hint 274 x 350   min 232 x 216   FLOATING  ** 28 px SHORTER **
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:11.320  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 486   was 274 x 486   hint 274 x 350   min 232 x 216   FLOATING
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:11.785  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1400 x 514
+  Layers          274 x 486   was 274 x 486   hint 280 x 380   min 238 x 246   FLOATING
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:14.151  Layers is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 486   hint 274 x 374   min 232 x 240   right  ** 28 px taller **
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:14.152  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:15.317  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 274   was 1400 x 298   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 24 px SHORTER **
+
+16:13:15.317  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 274   was 1396 x 274   hint 694 x 120   min 694 x 72   FLOATING
+
+16:13:17.252  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 572
+  Layers          274 x 572   was 274 x 514   hint 274 x 374   min 232 x 240   right  ** 58 px taller **
+  Timeline        1396 x 274   was 1396 x 274   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:20.290  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 572   hint 274 x 374   min 232 x 240   right  ** 58 px SHORTER **
+  Timeline        1400 x 298   was 1396 x 274   hint 694 x 144   min 694 x 96   bottom  ** 4 px wider **  ** 24 px taller **
+
+16:13:20.290  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 514
+  Layers          274 x 514   was 274 x 514   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 298   was 1400 x 298   hint 694 x 144   min 694 x 96   bottom
+
+16:13:24.484  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 514   hint 274 x 374   min 232 x 240   right  ** 167 px taller **
+  Timeline        1396 x 107   was 1400 x 298   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 191 px SHORTER **
+
+16:13:24.484  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 681   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 107   was 1396 x 107   hint 694 x 120   min 694 x 72   FLOATING
+
+16:13:24.987  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 816
+  Layers          274 x 816   was 274 x 681   hint 274 x 374   min 232 x 240   right  ** 135 px taller **
+  Timeline        1396 x 107   was 1396 x 107   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:27.163  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 816   hint 274 x 374   min 232 x 240   right  ** 135 px SHORTER **
+  Timeline        1400 x 131   was 1396 x 107   hint 694 x 144   min 694 x 96   bottom  ** 4 px wider **  ** 24 px taller **
+
+16:13:27.164  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 681   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 131   was 1400 x 131   hint 694 x 144   min 694 x 96   bottom
+
+16:13:28.199  Timeline is now FLOATING
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 681   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 107   was 1400 x 131   hint 694 x 120   min 694 x 72   FLOATING  ** 4 px NARROWER **  ** 24 px SHORTER **
+
+16:13:28.201  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 681   hint 274 x 374   min 232 x 240   right
+  Timeline        1396 x 107   was 1396 x 107   hint 694 x 120   min 694 x 72   FLOATING
+
+16:13:28.523  Layers is now in the right area
+  window          1400 x 900
+  canvas          0, 63   1122 x 816
+  Layers          274 x 816   was 274 x 681   hint 274 x 374   min 232 x 240   right  ** 135 px taller **
+  Timeline        1396 x 107   was 1396 x 107   hint 700 x 150   min 700 x 102   FLOATING
+
+16:13:30.274  Timeline is now docked
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 816   hint 274 x 374   min 232 x 240   right  ** 135 px SHORTER **
+  Timeline        1400 x 131   was 1396 x 107   hint 694 x 144   min 694 x 96   bottom  ** 4 px wider **  ** 24 px taller **
+
+16:13:30.274  Timeline is now in the bottom area
+  window          1400 x 900
+  canvas          0, 63   1122 x 681
+  Layers          274 x 681   was 274 x 681   hint 274 x 374   min 232 x 240   right
+  Timeline        1400 x 131   was 1400 x 131   hint 694 x 144   min 694 x 96   bottom
+

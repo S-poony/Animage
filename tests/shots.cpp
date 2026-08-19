@@ -1450,6 +1450,55 @@ const std::vector<Situation>& situations() {
              report("timeline docked again (#57 -- does it come back shorter?)");
          }},
 
+        {"panels-5-tearing-the-timeline-off",
+         "not a picture: #57. The timeline dock torn off and put back, from three starting "
+         "heights, because the reporter found it only loses height when it has not been "
+         "dragged taller first -- so how much spare height it holds is the variable",
+         [](Stage&) {
+             // Three runs of one gesture, and a fresh window for each: a dock
+             // that has already been floated once is not the same dock, and
+             // running the cases in one window would let the first contaminate
+             // the rest. Which is what a Stage is cheap enough for.
+             struct Case {
+                 const char* what;
+                 int tracks;
+                 int drag_taller_by;
+             };
+             for (const Case& c : {Case{"one track, left at the height it opens at", 1, 0},
+                                   Case{"three tracks, left at the height syncTimelineHeight asks for", 3, 0},
+                                   Case{"three tracks, then dragged 120 px taller by hand", 3, 120}}) {
+                 Stage own;
+                 auto* dock = qobject_cast<QDockWidget*>(own.timelinePanel());
+                 if (!dock) continue;
+                 for (int t = 1; t < c.tracks; ++t) own.choose("Add track");
+                 if (c.drag_taller_by > 0) {
+                     own.window.resizeDocks({dock}, {dock->height() + c.drag_taller_by},
+                                            Qt::Vertical);
+                 }
+                 own.settle();
+
+                 const int before = dock->height();
+                 const int hint = dock->sizeHint().height();
+
+                 dock->setFloating(true);
+                 own.settle();
+                 if (auto* frame = dock->findChild<FloatingDockFrame*>())
+                     frame->applyIfNothingIsHeld();
+                 own.settle();
+                 const int floated = dock->height();
+
+                 dock->setFloating(false);
+                 own.settle();
+                 const int after = dock->height();
+
+                 std::printf("      %-52s  before %3d (hint %3d, spare %3d)  "
+                             "floated %3d  back %3d  %s\n",
+                             c.what, before, hint, before - hint, floated, after,
+                             after == before ? "kept it"
+                                             : (after < before ? "** SHORTER **" : "** taller **"));
+             }
+         }},
+
         {"panels-3-then-shown-again",
          "and brought back: the timeline should be drawn in full, with no white rectangle over "
          "it and its height the one it had",

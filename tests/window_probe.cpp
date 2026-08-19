@@ -176,20 +176,12 @@ int main(int argc, char** argv) {
     say(QStringLiteral("By hand, and each one is a different question:"));
     say(QStringLiteral("  #57  drag Timeline out of the window, then drag it back in."));
     say(QStringLiteral("       Does it come back shorter than it left?"));
+    say(QStringLiteral("       ** Do NOT drag it taller first. ** The reporter found"));
+    say(QStringLiteral("       it only loses height when it has been left alone --"));
+    say(QStringLiteral("       a dock that has been dragged keeps what it was given."));
     say(QStringLiteral("  #55  drag Layers from the right edge to the left."));
     say(QStringLiteral("       Does it arrive a different width?"));
     say(QStringLiteral("Anything marked ** changed since the line above it."));
-    say(QString());
-    // The dock has to be holding height above its own hint before it is torn
-    // off, or there is nothing for a re-fit to take and the run reports a real
-    // fault as absent. Dragging the separator is the quickest way to put some
-    // there; adding tracks does it too, since syncTimelineHeight asks for the
-    // rows through resizeDocks while the hint stays where it was -- measured,
-    // three tracks is a dock of 225 against a hint of 133.
-    say(QStringLiteral("First drag the top edge of the Timeline panel upward, so it is"));
-    say(QStringLiteral("taller than it opened. A dock sitting exactly on its own size"));
-    say(QStringLiteral("hint has no spare height to lose, and would report nothing."));
-    say(QStringLiteral("Run tests/dock_probe beside this: same drags, plain Qt, no Animage."));
     say(QString());
     watch.report(QStringLiteral("start"));
 

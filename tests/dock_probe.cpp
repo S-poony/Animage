@@ -515,8 +515,9 @@ int main(int argc, char** argv) {
     say(QStringLiteral("  #54  drag a panel out of the window, let go, then resize the window."));
     say(QStringLiteral("       Watch for FROZEN."));
     say(QStringLiteral("  #57  drag Under out of the window, then drag it back in."));
-    say(QStringLiteral("       Does it come back shorter than it left? It starts"));
-    say(QStringLiteral("       above its own hint, so there is height to lose."));
+    say(QStringLiteral("       Does it come back shorter than it left? Do not drag"));
+    say(QStringLiteral("       it taller first -- in Animage that is the case that"));
+    say(QStringLiteral("       works, so it is the untouched dock that is the test."));
     say(QStringLiteral("  #55  drag Side from the right edge to the left. Watch its width."));
     say(QStringLiteral("Anything marked ** changed since the line above it."));
     say(QString());
