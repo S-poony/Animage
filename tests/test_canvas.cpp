@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QPainter>
 #include <QThread>
@@ -531,6 +532,64 @@ void theTimelineDockCanBeResizedByHand() {
     window.resizeDocks({dock}, {settled * 3}, Qt::Vertical);
     QCoreApplication::processEvents();
     CHECK(dock->height() > settled);
+}
+
+// The pan slider goes under the track row, not over it.
+//
+// Issue #26, and the cause is one line of Qt: `QScrollArea::sizeHint` adds the
+// horizontal scrollbar's height only when the policy is `ScrollBarAlwaysOn`, and
+// the timeline's is `ScrollBarAsNeeded`. So the dock is sized as though the pan
+// slider does not exist, and when a shot grows wider than the window the slider
+// appears and takes its height out of the viewport -- ten pixels of the bottom of
+// the row, on the desk this was measured on.
+//
+// **Asserted once, with the slider showing, as "does the row still fit".** Not
+// as a before-and-after: what the dock was before the shot got long is a reading
+// taken on the far side of the thing that goes wrong, and two readings the same
+// side of an event agree with each other perfectly and say nothing. That mistake
+// shipped a dock fix twice; see the handover.
+//
+// In viewport pixels and not in dock pixels, because how much taller the dock
+// has to be is the style's business -- a scrollbar is 14 px here and something
+// else on another theme -- while "the strip is inside the space it is shown in"
+// is the same sentence everywhere.
+void aLongShotsPanSliderLeavesTheTrackRowWhole() {
+    TEST("a shot too long to fit leaves the track row whole under its pan slider");
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+    QScrollArea* scroll = nullptr;
+    for (QWidget* w = timeline; w; w = w->parentWidget()) {
+        if (auto* area = qobject_cast<QScrollArea*>(w)) { scroll = area; break; }
+    }
+    CHECK(scroll != nullptr);
+    if (!scroll) return;
+
+    // Nothing to see until the strip is wider than what it is shown in: the
+    // slider is what the fault arrives with, so a short shot tests nothing. The
+    // count is worked out rather than written down, so this still bites on a
+    // window or a cell of another size.
+    Document& doc = window.documentForTesting();
+    const TrackId track = timeline->track();
+    while (timeline->minimumWidth() <= scroll->viewport()->width()) {
+        doc.insertImage(track, doc.scene().timelineFrames());
+        timeline->refresh();
+        QCoreApplication::processEvents();
+    }
+    CHECK(scroll->horizontalScrollBar()->isVisible());
+
+    // The whole of it: every row the strip draws is inside the viewport, with
+    // the slider taking its height from somewhere else.
+    CHECK(scroll->viewport()->height() >= timeline->minimumHeight());
+    // And no vertical scrollbar, which is the same shortfall seen from the side:
+    // a strip that does not fit its viewport asks for one, and a timeline of one
+    // track scrolling up and down is nonsense.
+    CHECK(!scroll->verticalScrollBar()->isVisible());
 }
 
 // A track that holds or cycles is showing a picture out past its last drawing,
@@ -7091,6 +7150,7 @@ int main(int argc, char** argv) {
     pastATracksEndYouCanSeeItButNotDrawOnIt();
     theTimelineDockFollowsTheTrackCount();
     theTimelineDockCanBeResizedByHand();
+    aLongShotsPanSliderLeavesTheTrackRowWhole();
     theInsertButtonObeysTheOverwriteSetting();
     draggingATracksNameRestacksIt();
     whereADroppedRowLands();

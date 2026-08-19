@@ -3038,6 +3038,40 @@ stopped working, meaning no colour layer could be hidden at all. The panel is
 two real check columns now. If you are tempted to put a control on a row, don't.
 
 
+### The scrollbar a size hint does not admit to, and where it takes its height
+**`QScrollArea::sizeHint` adds the horizontal scrollbar's height only when the
+policy is `ScrollBarAlwaysOn`.** With `ScrollBarAsNeeded` — which is what you
+want, and what the timeline has — the hint describes a scroll area that will
+never grow a slider, and anything sized from that hint has no room for one. When
+the slider then appears it takes its height out of the *viewport*, which is
+[#26](https://github.com/S-poony/Animage/issues/26): a shot wider than the window
+put the pan slider across the bottom of the track row. Measured on a 1400 px
+window, one track: viewport 68 px for a 64 px strip with no slider, 54 px for the
+same strip with one — so ten pixels of the row outside the viewport, plus a
+*vertical* scrollbar to scroll a single track up and down, which is the same
+shortfall arriving as its own second symptom.
+
+`ReservingScrollArea` in `main_window.cpp` adds it back, and asks the scrollbar
+for its height rather than writing 14 down — that number is the style's and the
+screen's.
+
+**Reserved always, and the alternative is the interesting part.** Asking for the
+height only when the slider appears would be exact in both states, and it would
+also move the dock while somebody is working: a timeline deliberately dragged
+down to one row would spring taller the moment the shot outgrew the window. That
+is the complaint `timeline_rows_shown_` exists to prevent, arriving through a new
+door. So the height is spent once, where the dock opens, and nothing moves it
+afterwards. The cost is about ten pixels of canvas on a shot short enough that no
+slider ever appears.
+
+**And the test is single-sided on purpose.** It makes the shot long, checks the
+slider is showing, and asserts the viewport still holds the strip. Not a
+before-and-after: "the dock before the shot got long" is a reading on the far
+side of the thing that goes wrong, and see
+[where the first dock-width reading was taken](#where-the-first-dock-width-reading-was-taken-and-why-the-fix-shipped-twice)
+for what that costs.
+
+
 ### What a stroke's dirty rectangle misses when the whole fill is resolved
 **Solving globally and repainting locally is a bug that looks like a feature.**
 A regenerated CTG fill changes colour across whole regions, nowhere near the

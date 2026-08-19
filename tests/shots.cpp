@@ -66,6 +66,8 @@
 #include <QEventLoop>
 #include <QFont>
 #include <QFontMetrics>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QStatusBar>
 #include <QTimer>
 #include <QImage>
@@ -899,6 +901,18 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
+        {"the-timeline-under-a-shot-too-long-to-fit",
+         "issue #26: a shot wider than the window, so the pan slider is there. The slider "
+         "belongs under the track row and not over it -- the bottom edge of the cells must be "
+         "visible above it, and there should be no vertical scrollbar beside it either",
+         [](Stage& s) {
+             // Sixty, which is comfortably past the fifty or so cells a 1400 px
+             // window has room for. The strip only asks for a pan slider once it
+             // is wider than the viewport, so a short shot photographs nothing.
+             for (int d = 0; d < 60; ++d) s.press(Id::InsertDrawing);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
         {"the-timeline-palette",
          "the cells against the background, with the numbers behind the picture printed. "
          "Every colour here is bent out of a palette role, which makes this the one part "
@@ -1336,6 +1350,77 @@ const std::vector<Situation>& situations() {
              }
              s.settle();
              report("and the layout invalidated and activated");
+         }},
+
+        {"panels-4-what-the-timeline-dock-is-made-of",
+         "not a picture: every height between the dock and the strip inside it, printed at each "
+         "step. #26 and #57 are both a few pixels of the dock going somewhere, and the picture "
+         "only ever says that something is a bit short",
+         [](Stage& s) {
+             QScrollArea* scroll = nullptr;
+             for (QWidget* w = s.timeline; w; w = w->parentWidget()) {
+                 if (auto* area = qobject_cast<QScrollArea*>(w)) { scroll = area; break; }
+             }
+             auto* dock = qobject_cast<QDockWidget*>(s.timelinePanel());
+             auto* layers = qobject_cast<QDockWidget*>(s.layerPanel());
+             if (!scroll || !dock || !layers) return;
+
+             const auto report = [&](const char* when) {
+                 QWidget* body = dock->widget();
+                 QScrollBar* hbar = scroll->horizontalScrollBar();
+                 QScrollBar* vbar = scroll->verticalScrollBar();
+                 std::printf("      --- %s\n", when);
+                 std::printf("        dock     %d tall, title bar %d, body %d\n", dock->height(),
+                             body ? body->y() : -1, body ? body->height() : -1);
+                 std::printf("        scroll   %d tall, hint %d, viewport %d, strip %d "
+                             "(min %d, hint %d)\n",
+                             scroll->height(), scroll->sizeHint().height(),
+                             scroll->viewport()->height(), s.timeline->height(),
+                             s.timeline->minimumHeight(), s.timeline->sizeHint().height());
+                 std::printf("        bars     h %s %d tall, v %s %d wide\n",
+                             hbar->isVisible() ? "shown" : "hidden", hbar->sizeHint().height(),
+                             vbar->isVisible() ? "shown" : "hidden", vbar->sizeHint().width());
+                 std::printf("        cut off  %d px of the strip is not in the viewport\n",
+                             s.timeline->height() - scroll->viewport()->height());
+                 std::printf("        layers   %d wide (min %d), area %d, floating %s\n",
+                             layers->width(), layers->widget() ? layers->widget()->minimumWidth() : -1,
+                             static_cast<int>(s.window.dockWidgetArea(layers)),
+                             layers->isFloating() ? "yes" : "no");
+             };
+
+             report("as it opens: one track, a shot short enough to fit");
+
+             // Long enough that the strip is wider than the window, which is
+             // the whole of #26: the pan slider only exists once it is.
+             for (int i = 0; i < 60; ++i) s.press(Id::InsertDrawing);
+             s.settle();
+             report("60 drawings, so the strip no longer fits across");
+
+             for (int t = 0; t < 2; ++t) s.choose("Add track");
+             s.settle();
+             report("three tracks, so syncTimelineHeight has asked for two more rows");
+
+             // The last three steps are #57 and #55 asked from code, and the
+             // answer is that **neither reproduces**: the timeline holds its
+             // height and the layer dock holds its width through all of them.
+             //
+             // Kept rather than deleted, because that is worth knowing before
+             // anybody spends an afternoon on it. setFloating and addDockWidget
+             // do not enter Qt's drag, so they do not produce the state a hand
+             // produces -- the same reason panels-0 says a synthetic drag lies.
+             // Both issues need a real hand, and tests/dock_probe.cpp is where
+             // that hand goes.
+             layers->setFloating(true);
+             s.settle();
+             report("layer panel floated (#57 -- and it does not lose height)");
+
+             layers->setFloating(false);
+             s.settle();
+             report("and put back");
+
+             s.window.addDockWidget(Qt::LeftDockWidgetArea, layers);
+             s.settle();
+             report("layer panel moved to the left area (#55 -- and it keeps its width)");
          }},
 
         {"panels-3-then-shown-again",

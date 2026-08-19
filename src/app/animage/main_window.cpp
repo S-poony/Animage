@@ -100,6 +100,39 @@ bool isTypingInto(const QWidget* widget) {
 // wording here silently changed what scene.json means, and the two are free to
 // disagree -- the format's words are pinned by the round-trip tests and these
 // are pinned by nothing but taste.
+// A scroll area that leaves room for its own horizontal scrollbar.
+//
+// **Issue #26, and it is one line of Qt.** `QScrollArea::sizeHint` adds the
+// horizontal scrollbar's height only when the policy is `ScrollBarAlwaysOn`. The
+// timeline's is `ScrollBarAsNeeded`, so the dock is sized as though the pan
+// slider does not exist -- and when a shot grows wider than the window the
+// slider appears and takes its height out of the viewport instead. Measured on
+// a 1400 px window: viewport 68 px for a 64 px strip with no slider, and 54 px
+// for the same strip the moment there is one, so ten pixels of the track row are
+// outside the viewport with a slider sitting where they should be. That is the
+// whole of what "the slider goes slightly over the track" is.
+//
+// Reserved always rather than asked for when the slider appears. Asking for it
+// on the transition would be exact -- the dock would be the right height with a
+// slider and with none -- and it would also move the dock while the animator is
+// working: a timeline deliberately dragged down to one row would spring taller
+// the moment the shot outgrew the window, which is the same complaint
+// `timeline_rows_shown_` exists to stop. So the height is spent once, at the
+// size the dock opens at, and nothing moves it afterwards.
+//
+// The scrollbar is asked rather than assumed, because its height is the style's
+// and the screen's -- 14 px on this desk and not a number to write down.
+class ReservingScrollArea : public QScrollArea {
+public:
+    using QScrollArea::QScrollArea;
+
+    QSize sizeHint() const override {
+        QSize wanted = QScrollArea::sizeHint();
+        wanted.setHeight(wanted.height() + horizontalScrollBar()->sizeHint().height());
+        return wanted;
+    }
+};
+
 QString endWord(TrackEnd end) {
     switch (end) {
         case TrackEnd::HoldLast: return QStringLiteral("hold");
@@ -1649,7 +1682,7 @@ void MainWindow::buildTimelinePanel() {
     connect(timeline_widget_, &TimelineWidget::trackChanged, this,
             &MainWindow::setCurrentTrack);
 
-    timeline_scroll_ = new QScrollArea(panel);
+    timeline_scroll_ = new ReservingScrollArea(panel);
     timeline_scroll_->setWidget(timeline_widget_);
     timeline_scroll_->setWidgetResizable(true);
     timeline_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
