@@ -67,6 +67,17 @@ public:
     // What the timer would do, run now. A test drives this rather than sleeping.
     void applyIfNothingIsHeld();
 
+Q_SIGNALS:
+    // The drag that floated this panel has finished, and nothing is held down.
+    //
+    // Emitted where the decoration is changed, because that moment is already
+    // worked out here and there should be one thing deciding it rather than two.
+    // **Issue #54 wants the same moment for an unrelated reason**: Qt leaves the
+    // main window's layout frozen after a drag that ends with a panel outside
+    // the window, and the cure has to be applied once the drag is really over.
+    // See MainWindow::wakeLayout.
+    void settled();
+
 private:
     QWidget* makeTitleBar();
     void rememberQtsTitleBar();

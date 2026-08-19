@@ -851,6 +851,77 @@ void MainWindow::restoreDefaultView() {
     syncTimelineHeight();
 }
 
+// Unstick the window's layout after a panel has been dragged out of it.
+//
+// **Issue #54, and it is Qt's bug rather than ours.** It reproduces in a plain
+// `QMainWindow` with a central widget, a status bar and two stock docks, with
+// none of this program in it, on Qt 6.11.1.
+//
+// `QMainWindowLayout::setGeometry` begins with
+//
+//     if (savedState.isValid() || ...) return;
+//
+// and `savedState` is the copy the layout takes when a dock is *unplugged* at
+// the start of a drag. A drag that ends with the panel outside the window never
+// clears it. That is measured and not inferred: Qt does receive the mouse
+// release, does run `endDrag`, does drop the mouse grab and does reclaim the
+// space the panel left -- and leaves that one flag set behind it. From then on
+// every child of the window keeps the geometry it had. The canvas stays wider
+// than the window and the status bar sits above the bottom with unpainted window
+// behind it, and nothing lays any of it out again for as long as the state
+// lasts.
+//
+// What gets noticed first is a **blank strip** where the panel used to be, which
+// is this seen through the canvas's `WA_OpaquePaintEvent`: the canvas is not
+// covering that region and nothing else paints it either. Docking the panel
+// again clears the flag, because docking is a `plug` and `plug` does clear it --
+// which is the whole reason the fault presents as intermittent rather than as a
+// window that is simply broken.
+//
+// **A round trip through the saved layout is the only cure that works, and that
+// is measured rather than chosen.** Hiding and showing the dock,
+// `setDockOptions`, `addDockWidget` again, `invalidate()` and `setTitleBarWidget`
+// were each applied to the frozen state and each left it frozen.
+// `QMainWindow::restoreState` clears `savedState` on its way through, so saving
+// the layout and putting it straight back leaves every panel exactly where it is
+// and unsticks the one thing that was stuck.
+//
+// Nothing has to be put back afterwards, which is the difference from Restore
+// default view: that reads back an *older* layout and has to tell
+// `syncTimelineHeight` what track count the layout was saved at. This saves the
+// layout the window is in at that moment, so the timeline dock comes back at the
+// height it already had and `timeline_rows_shown_` still describes it.
+//
+// **And it was checked that the round trip moves nothing**, because the obvious
+// worry about it is that Qt writes a floating panel's geometry into the state
+// and reads it back through `constrainedRect`. It does not move the panel, with
+// Qt's decoration or with the frameless one issue #50 gives it -- both measured.
+// Eight lines that took the geometry before and put it back after were written
+// against a panel that was reported landing below the pointer, and then deleted:
+// the panel does that with this fix and without it, so it is not this. It is
+// issue #56 instead.
+//
+// **`shots` cannot see any of this**, and it is worth saying why rather than
+// leaving somebody to try. The state cannot be reached by code: `setFloating`
+// makes a panel float without ever entering Qt's drag, so it does not freeze
+// anything, and a synthetic drag sent to a `QDockWidget` leaves Qt's own state
+// machine half finished and produces convincing symptoms that are not this one.
+// A real hand is the only way in. `QWidget::grab()` would force a repaint on top
+// of that, so even a frozen window photographs clean -- the geometry is wrong,
+// the painting is not.
+void MainWindow::wakeLayout() {
+    if (waking_layout_) return;
+    waking_layout_ = true;
+    // Out of whatever call stack asked for it. The settled() this answers can
+    // arrive from inside Qt's own restoreState -- Restore default view floats a
+    // panel, and a panel floated with nothing held settles at once -- and
+    // starting another restoreState from in there is asking for trouble.
+    QTimer::singleShot(0, this, [this] {
+        restoreState(saveState());
+        waking_layout_ = false;
+    });
+}
+
 // Split from the menus at the seam that was already in the source: nothing
 // crosses it. The menu half touches overwrite_action_ and end_actions_; this
 // half touches the four tool actions and their group, the size box, the
@@ -1280,8 +1351,10 @@ void MainWindow::buildLayerPanel() {
     dock->setObjectName(QStringLiteral("layersDock"));
     dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
     // What lets a pen pick this panel up again once it is floating. See
-    // FloatingDockFrame and issue #50.
-    new FloatingDockFrame(dock);
+    // FloatingDockFrame and issue #50. The moment it works out -- the drag is
+    // over -- is also when this window's layout has to be unstuck; issue #54.
+    connect(new FloatingDockFrame(dock), &FloatingDockFrame::settled, this,
+            &MainWindow::wakeLayout);
     layer_dock_ = dock;
 
     auto* panel = new QWidget(dock);
@@ -1470,8 +1543,10 @@ void MainWindow::buildTimelinePanel() {
     // See the layer dock: without this the saved layout would not have it.
     dock->setObjectName(QStringLiteral("timelineDock"));
     dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
-    // See the layer dock: the pen reaches this one back the same way.
-    new FloatingDockFrame(dock);
+    // See the layer dock: the pen reaches this one back the same way, and the
+    // layout needs the same waking when this one is dragged out.
+    connect(new FloatingDockFrame(dock), &FloatingDockFrame::settled, this,
+            &MainWindow::wakeLayout);
     timeline_dock_ = dock;
 
     auto* panel = new QWidget(dock);

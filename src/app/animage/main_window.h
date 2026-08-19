@@ -168,6 +168,10 @@ private:
     // Puts the docks back where the window opened them: position, floating,
     // shown, and size. See default_layout_.
     void restoreDefaultView();
+    // Unsticks the window's layout after a panel has been dragged out of it.
+    // Issue #54, and Qt's bug rather than ours -- the reasoning is on the
+    // definition.
+    void wakeLayout();
     // The timeline's own metrics, so the dock asks for a height that matches
     // what the widget will draw.
     static constexpr int kRowHeight = 46;
@@ -361,6 +365,10 @@ private:
     // saved for one track into a scene with three would otherwise leave the
     // strip two rows short.
     int default_layout_rows_ = 0;
+    // Whether a wake is already on its way. The restoreState a wake performs can
+    // float a dock, which arrives back here as another settled(); one round trip
+    // is the fix and a second is a loop. See wakeLayout.
+    bool waking_layout_ = false;
     // How many rows the dock was last sized for. Without it every refresh --
     // and there is one per frame change -- would shove the dock back to the
     // height the track count implies, undoing a drag the moment you scrubbed.

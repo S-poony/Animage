@@ -83,6 +83,9 @@ void FloatingDockFrame::applyIfNothingIsHeld() {
 
     if (waiting_) waiting_->stop();
     dock_->setTitleBarWidget(makeTitleBar());
+    // The drag is over, which is the decoration's cue and also somebody else's.
+    // See the signal.
+    Q_EMIT settled();
 }
 
 // The title bar itself: a name and two buttons, and **no event handlers at all**.

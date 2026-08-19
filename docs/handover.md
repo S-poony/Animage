@@ -2825,7 +2825,9 @@ Three things made the guessing feel safe, and each is worth recognising:
   Qt's own drag state machine half finished, and the wreckage looks exactly like
   a layout bug. Two conclusions were drawn from one, and both were wrong; the
   real layout fault is narrower and is
-  [#54](https://github.com/S-poony/Animage/issues/54).
+  [#54](https://github.com/S-poony/Animage/issues/54) — which turned out to be
+  Qt's rather than ours, and is worked around rather than fixed. Its own entry
+  below has the mechanism.
 - **A screenshot shows a thing exists, not that it works.** The replaced title
   bar was checked by looking at a picture of it. The close button in that picture
   could not be clicked.
@@ -3190,6 +3192,107 @@ The shot `panels-the-close-button-itself` is what settled it and is worth
 reaching for before any more arithmetic: it magnifies Qt's button and ours side
 by side and prints the bounding box of the *ink* in each. Every metric can agree
 while the painted glyph does not, and only the picture says so.
+
+**Dragging a panel out of the window stops the layout running, and it is Qt's
+bug rather than ours.** This is
+[#54](https://github.com/S-poony/Animage/issues/54), and it is worth reading
+whole, because almost everything that made it hard was about *how it was
+answered* rather than about the answer.
+
+`QMainWindowLayout::setGeometry` begins:
+
+```cpp
+    if (savedState.isValid() || (restoredState && isInApplyState))
+        return;
+```
+
+`savedState` is the copy the layout takes in `unplug` when a dock is pulled out
+at the *start* of a drag. A drag that ends with the panel outside the window
+never clears it, so every child of the window keeps the geometry it had — the
+canvas stays wider than the window, and the status bar sits above the bottom
+with unpainted window behind it. What gets noticed is a **blank strip** where the
+panel was, which is that seen through the canvas's `WA_OpaquePaintEvent`: the
+canvas is not covering the region and nothing else paints it either. Docking the
+panel again clears the flag, because docking is a `plug`, which is the whole
+reason it presents as intermittent rather than as a window that is simply broken.
+
+**It reproduces in plain Qt** — one `QMainWindow`, a central widget, a status bar
+and two stock docks, none of this program in it, Qt 6.11.1, plain mouse. That is
+what makes it upstream, and it is the experiment the issue had been sitting on.
+
+**What the guess got wrong is the interesting half.** The issue reasoned that
+Qt still believed a drag was in progress. It does not. Measured, in order: the
+mouse release *is* delivered as an ordinary client-area event, `endDrag` *does*
+run, the mouse grab *is* dropped, the space the panel left *is* reclaimed — and
+the flag stays set. `currentGapPos`, `pluggingWidget` and `movingSeparator` are
+all clear throughout. It is one flag and not a wedged state machine, and the
+difference matters: a wedged machine wants poking, one flag wants clearing.
+
+**`restoreState(saveState())` is the cure, and it is measured rather than
+chosen.** `MainWindow::wakeLayout` does it on the moment the drag settles. Six
+other candidates were applied to the frozen state and each left it frozen:
+hiding and showing the dock, `setDockOptions`, `addDockWidget` again,
+`invalidate()`, `setFloating` off and on, and `setTitleBarWidget` — which is what
+#50 does, so **#50 does not cure this** and the two fixes are independent.
+
+A seventh does work and is unusable: a mouse press and release on a dock
+separator, with no move in between, makes Qt clear the flag itself through
+`endSeparatorMove`. It is surgical and it needs a separator to exist, and when
+every panel is floating there is none.
+
+### Three things about how this was answered
+
+**`shots` cannot see it, and that is not a failure of `shots`.** The state cannot
+be reached from code: `setFloating(true)` never enters Qt's drag, so it freezes
+nothing, and a synthetic drag sent to a `QDockWidget` leaves Qt's own machine
+half finished and produces convincing symptoms that are not this one — the trap
+[#50](https://github.com/S-poony/Animage/issues/50) already records. A real hand
+is the only way in, and `QWidget::grab()` forces a repaint on top of that, so
+even a frozen window photographs clean. **The geometry is wrong; the painting is
+not.** Before reaching for `shots` on anything about docks, ask whether the state
+can be reached without a hand.
+
+**What answered it was a standalone plain-Qt program built against Qt's private
+headers**, which is a shape this repository did not have before and should reach
+for again. It is a `QMainWindow` that prints its own children's geometry on every
+resize and reads `savedState` directly — `isValid()` is `rect.isValid()` and
+`rect` is a public member, so no unexported symbol is needed. Two rules make it
+cheap: it lives outside the tree, so the rule about private headers and the
+application does not apply to it; and it answers questions about *Qt*, which is
+exactly the class of question this program keeps needing and cannot ask from
+inside itself.
+
+**Forging the broken state is what made the cures testable by machine.** The hand
+test established that the whole fault is one flag with everything else already
+cleaned up — so `savedState.rect = layoutState.rect` reproduces it exactly, with
+no drag. Eight cures were then tried in one run of a program, in about a second,
+where each would otherwise have cost a hand-made drag. **Measure the state once
+by hand, then forge it.**
+
+### And a lesson about believing a bug report, including your own
+
+The first hand test of the fix came back with four complaints: a panel landing
+below the pointer, the timeline losing height, a panel not keeping its width
+across a side change, and resizing gone laggy. All four read as regressions.
+
+Two builds settled it — the fix and today's `main`, side by side in one folder,
+same four gestures each. **Three of the four happen without the fix**, and are now
+[#55](https://github.com/S-poony/Animage/issues/55),
+[#56](https://github.com/S-poony/Animage/issues/56) and
+[#57](https://github.com/S-poony/Animage/issues/57); the fourth did not reproduce
+at all and was a machine having a bad minute. Nothing in the fix caused any of
+them.
+
+The cost of not doing that was already being paid: eight lines had been written
+to save and restore the floating panel's geometry around the round trip, to fix
+the panel landing below the pointer. They fixed nothing, because the round trip
+does not move the panel — checked afterwards in the bench, with Qt's decoration
+and with the frameless one #50 gives it. They are deleted, and the reasoning is
+in the comment on `wakeLayout` so nobody writes them again.
+
+**A regression report is a claim about a difference, so it needs both sides.**
+Building the other side costs one `git stash` and one incremental build here, and
+it is cheaper than the change it stops you making.
 
 **A component added to the top-level `find_package(Qt6 ...)` can silently turn
 the whole application off.** `test_pen_promotion` needs a private Qt header, so
