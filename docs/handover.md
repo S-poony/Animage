@@ -2351,8 +2351,8 @@ this ours or is it Qt's?*
 ```bash
 ./build/tests/dock_probe              a window to drag panels around by hand
 ./build/tests/dock_probe --bench      try the cures against a forged fault
-./build/tests/dock_probe --frameless  give the floating panel a title bar
-                                      widget, the way FloatingDockFrame does
+./build/tests/dock_probe --native-frame  let the window manager decorate a
+                                      floating panel, as stock Qt does
 ```
 
 It answered [#54](https://github.com/S-poony/Animage/issues/54) in a single run
@@ -2389,6 +2389,15 @@ and height above the hint is what there is to lose. And it watches
 `dockLocationChanged` as well as `topLevelChanged`, because **a dock changing
 side never floats**: drag a panel from the right edge straight to the left and
 the second signal is the only one there is.
+
+**A floating panel wears a Qt title bar by default**, and that is not a
+decoration choice: a native title bar is non-client area, Windows Ink sends no
+non-client press for a pen, and so a stylus cannot drag a floating panel back
+in *at all* — issue #50, and the reason `FloatingDockFrame` exists. A probe a
+pen cannot re-dock cannot answer any question about re-docking, which is most
+of them; that was found by a reporter who could not finish a run, because the
+flag then reached only the side dock and left the bottom one unpressable.
+`--native-frame` restores Qt's own default for the #50 question itself.
 
 Three things it does that are worth knowing before writing another one:
 

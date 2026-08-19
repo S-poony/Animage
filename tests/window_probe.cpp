@@ -45,7 +45,9 @@
 #include <QFile>
 #include <QHash>
 #include <QMainWindow>
+#include <QEvent>
 #include <QTextStream>
+#include <QTimer>
 
 #include <cstdlib>
 
@@ -109,8 +111,43 @@ public:
                 report(QStringLiteral("%1 is now in the %2 area")
                            .arg(dock->windowTitle(), areaName(window_, dock)));
             });
+            dock->installEventFilter(this);
         }
+
+        // A hand dragging a splitter emits no dock signal at all, so without
+        // this the next reading carries a "was" from before the drag and prints
+        // the hand's own work as though the panel had jumped. That happened on
+        // the first run of this: a panel widened by 192 px and then floated
+        // reported "192 px wider" against floating, which is nobody's bug.
+        //
+        // Coalesced, because a drag is a hundred resizes and a hundred lines is
+        // not a reading. The delay only has to outlast the gap between two
+        // moves of a hand.
+        settling_ = new QTimer(this);
+        settling_->setSingleShot(true);
+        settling_->setInterval(250);
+        // And only when something actually differs: a float and a re-dock resize
+        // the dock too and already have a line each, so without this every one
+        // of them would be followed by an empty second reading.
+        connect(settling_, &QTimer::timeout, this, [this] {
+            for (QDockWidget* dock : window_.findChildren<QDockWidget*>()) {
+                if (last_size_.value(dock, dock->size()) != dock->size()) {
+                    report(QStringLiteral("a panel was resized by hand"));
+                    return;
+                }
+            }
+        });
     }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        // Only a resize nothing else has announced. A float or a re-dock resizes
+        // the dock too, and those already have a line of their own.
+        if (event->type() == QEvent::Resize && settling_) settling_->start();
+        return QObject::eventFilter(watched, event);
+    }
+
+public:
 
     void report(const QString& why) {
         say(QStringLiteral("%1  %2").arg(stamp(), why));
@@ -153,6 +190,7 @@ private:
 
     QMainWindow& window_;
     QHash<QDockWidget*, QSize> last_size_;
+    QTimer* settling_ = nullptr;
 };
 
 }  // namespace

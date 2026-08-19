@@ -17,10 +17,26 @@
 // ```
 // ./build/tests/dock_probe              a window to drag panels around by hand
 // ./build/tests/dock_probe --bench      try the cures, print a table, exit
-// ./build/tests/dock_probe --frameless  give the floating panel a title bar
-//                                       widget, as FloatingDockFrame does
 // ./build/tests/dock_probe --plain      stock dock sizes instead of Animage's
+// ./build/tests/dock_probe --native-frame  let the window manager decorate a
+//                                       floating panel, as stock Qt does
 // ```
+//
+// **A floating panel wears a Qt title bar by default, and that is not a
+// decoration choice — it is what makes the probe drivable.** A floating
+// `QDockWidget` on Windows gets a *native* frame, whose title bar is non-client
+// area, and **Windows Ink sends no non-client press for a pen**: hovering it
+// produces a stream of moves and no press ever arrives, so the panel cannot be
+// dragged back in with a stylus at all. That is issue #50, and it is why
+// Animage puts `FloatingDockFrame` on every dock. A probe that a pen cannot
+// re-dock is a probe that cannot answer any question about re-docking, which is
+// most of them — this was found by a reporter who could not complete a run.
+//
+// It is also the *closer* comparison, not a contaminated one: `setTitleBarWidget`
+// with a bare label is stock Qt, and it puts the probe in the state Animage is
+// always in. `--native-frame` restores Qt's own default for the #50 question
+// itself. Both docks get it, which the old `--frameless` flag did not — it
+// reached only the side dock, so the bottom one stayed unreachable by pen.
 //
 // --- If you are an agent reading this, this file is yours ---------------------
 //
@@ -186,10 +202,14 @@ public:
         under_ = makeDock(QStringLiteral("Under"), QStringLiteral("underDock"));
         addDockWidget(Qt::BottomDockWidgetArea, under_);
 
-        if (qApp->arguments().contains(QStringLiteral("--frameless"))) {
-            // What FloatingDockFrame does, and the only lever that makes Qt
-            // stand down from native decoration. See issue #50.
+        // Both docks, and by default: see the top of this file. A pen cannot
+        // press a native title bar, so without this the probe cannot be driven
+        // by the hand it needs. setTitleBarWidget is the only lever that makes
+        // Qt stand down from native decoration -- FramelessWindowHint is
+        // discarded. Issue #50.
+        if (!qApp->arguments().contains(QStringLiteral("--native-frame"))) {
             side_->setTitleBarWidget(new QLabel(QStringLiteral(" Side"), side_));
+            under_->setTitleBarWidget(new QLabel(QStringLiteral(" Under"), under_));
         }
 
         resize(1100, 760);
@@ -519,6 +539,8 @@ int main(int argc, char** argv) {
     say(QStringLiteral("       it taller first -- in Animage that is the case that"));
     say(QStringLiteral("       works, so it is the untouched dock that is the test."));
     say(QStringLiteral("  #55  drag Side from the right edge to the left. Watch its width."));
+    say(QStringLiteral("       It starts at 274 against a hint of 232, so there is"));
+    say(QStringLiteral("       width above the hint for a re-fit to take."));
     say(QStringLiteral("Anything marked ** changed since the line above it."));
     say(QString());
     w.report(QStringLiteral("start"));
