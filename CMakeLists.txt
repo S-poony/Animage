@@ -109,7 +109,7 @@ add_subdirectory(src/core)
 
 # The core library and its tests never need Qt. Only the application does, so a
 # missing Qt is a skipped target rather than a failed configure.
-find_package(Qt6 6.5 COMPONENTS Widgets GuiPrivate QUIET)
+find_package(Qt6 6.5 COMPONENTS Widgets QUIET)
 if(Qt6_FOUND)
   add_subdirectory(src/app)
 else()

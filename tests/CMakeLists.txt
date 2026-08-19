@@ -54,13 +54,27 @@ if(TARGET animage_ui)
   target_include_directories(test_shortcuts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_shortcuts COMMAND test_shortcuts -platform offscreen)
 
-  # Issue #53: what Qt does with a pen event nobody accepts. GuiPrivate for the
-  # same reason -- this injects at the platform boundary, which is the only place
-  # promotion can be watched from.
-  add_executable(test_pen_promotion test_pen_promotion.cpp)
-  target_link_libraries(test_pen_promotion PRIVATE animage_ui Qt6::GuiPrivate)
-  target_include_directories(test_pen_promotion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  add_test(NAME test_pen_promotion COMMAND test_pen_promotion -platform offscreen)
+  # Issue #53: what Qt does with a pen event nobody accepts. It injects at the
+  # platform boundary through QWindowSystemInterface, which is the only place
+  # promotion can be watched from -- and that header is a *private* one.
+  #
+  # **Asked for separately, and only here.** Putting GuiPrivate in the top-level
+  # find_package made the whole of Qt optional-and-then-missing on any install
+  # that ships no private headers, which is what CI has: Qt6_FOUND went false,
+  # every GUI target was skipped, and packaging then failed with no application
+  # to package. A test that cannot be built is a test that does not run; an
+  # application that cannot be built is a broken release.
+  # As its own package rather than another COMPONENTS list, so a failure here
+  # cannot clobber Qt6_FOUND for anything configured after it.
+  find_package(Qt6GuiPrivate QUIET)
+  if(Qt6GuiPrivate_FOUND)
+    add_executable(test_pen_promotion test_pen_promotion.cpp)
+    target_link_libraries(test_pen_promotion PRIVATE animage_ui Qt6::GuiPrivate)
+    target_include_directories(test_pen_promotion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_pen_promotion COMMAND test_pen_promotion -platform offscreen)
+  else()
+    message(STATUS "Qt private headers not found: skipping test_pen_promotion")
+  endif()
 
   # Issue #50: a floating panel's title bar has to be Qt's own, or a pen cannot
   # press it. Plain widget state, so no private Qt headers are needed.

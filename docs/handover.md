@@ -3191,6 +3191,50 @@ reaching for before any more arithmetic: it magnifies Qt's button and ours side
 by side and prints the bounding box of the *ink* in each. Every metric can agree
 while the painted glyph does not, and only the picture says so.
 
+**A component added to the top-level `find_package(Qt6 ...)` can silently turn
+the whole application off.** `test_pen_promotion` needs a private Qt header, so
+`GuiPrivate` was added to the `COMPONENTS` list in the root `CMakeLists.txt`.
+Qt installs that ship no private headers — which is what CI has — then fail that
+one `find_package` *entirely*, `Qt6_FOUND` comes back false, and the
+`if(Qt6_FOUND)` around `src/app` skips every GUI target.
+
+**What makes it a trap is how quietly it goes wrong.** Configure succeeds. The
+build succeeds. `ctest` reports *100% tests passed* — of ten, because the seven
+that need a window were never built. Nothing says "the application was not
+compiled" until packaging fails at the very end with `Could not find app
+bundle`, `Cannot find path animage.exe`, and `Could not find Qt modules to
+deploy`: three platforms, three unrelated-sounding messages, none of them naming
+the cause. The one line that does is `-- Qt 6 not found: building the core
+library and tests only`, sitting in the middle of a successful configure log.
+
+So a private module is asked for **in `tests/` and as its own package**:
+
+```cmake
+find_package(Qt6GuiPrivate QUIET)
+if(Qt6GuiPrivate_FOUND)
+  ...
+else()
+  message(STATUS "Qt private headers not found: skipping test_pen_promotion")
+endif()
+```
+
+Its own package rather than another `COMPONENTS` list, so a failure cannot
+clobber `Qt6_FOUND` for anything configured after it. A test that cannot be
+built is a test that does not run; an application that cannot be built is a
+broken release, and the two must not share a switch.
+
+**The general rule: nothing the application needs to build may depend on a
+private Qt header, and nothing may be added to the root `find_package` that is
+not available everywhere the program is released.** To check a change here
+without waiting for CI, configure with the private package disabled and confirm
+the app target survives:
+
+```
+cmake -S . -B build-check -DCMAKE_DISABLE_FIND_PACKAGE_Qt6GuiPrivate=ON
+```
+
+It should print the skip line, still find Qt, and still build `animage`.
+
 **A window state change and a widget resize arrive in either order.** Maximising
 the window frames the canvas in it, and restoring frames it again — the canvas
 keeps its zoom and pan across a resize and the pan is the image point at the
