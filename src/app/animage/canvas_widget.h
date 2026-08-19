@@ -168,10 +168,14 @@ public:
     // to infer the difference from two columns disagreeing before this existed.
     std::uint64_t paintCount() const { return paint_count_; }
 
-    // Why an edit could not happen. Transform, cut, copy and paste all refuse
-    // where the brush refuses -- a locked layer, a hidden layer, past the end of
-    // a track where there is no slot and no cel -- and it is easy to forget
-    // precisely because none of them is the brush.
+    // Why an edit could not happen. Transform, cut, copy, paste and erase all
+    // refuse where the brush refuses -- a locked layer, a hidden layer, past the
+    // end of a track where there is no slot and no cel -- and it is easy to
+    // forget precisely because none of them is the brush.
+    //
+    // Every one of them reports through `explain()` rather than returning a
+    // bare `false`. An operation that quietly does nothing is a bug as far as
+    // anybody holding the pen is concerned, and Backspace was exactly that.
     enum class Refusal {
         None,
         NoDrawing,     // past the end of a track: no slot, no cel, nothing to edit
@@ -180,6 +184,7 @@ public:
         HiddenLayer,
         ColourLayer,   // a mark there is a label; interpolating one invents colours
         NothingDrawn,
+        NothingSelected,  // erase takes a loop as its argument and had none
         NothingCopied,
         DifferentLayerKind,
     };
@@ -208,7 +213,14 @@ public:
     // "erase what I selected" and the existing binding is "delete this
     // drawing", which is a bad surprise in the dangerous direction -- and making
     // it depend on whether a selection exists is a bad surprise in the other.
-    bool eraseSelection();
+    //
+    // The fifth operation on the shared refusal list, and the one place that
+    // list is checked *without* the layer kind. The kind matters to the four
+    // that carry marks about, because scribbles are not lines; erasing takes a
+    // mark away and carries nothing, and the eraser already rubs scribbles out
+    // on a colour layer -- so refusing here would make Backspace stricter than
+    // the tool beside it.
+    Refusal eraseSelection();
 
     // --- clipboard -------------------------------------------------------
 
@@ -484,10 +496,34 @@ private:
     void drawLinePreview(QPainter& painter);
     QRect linePreviewRect() const;
 
-    // Everything the brush checks before it draws, plus the layer kind. Shared
-    // by the transform tool and by all three clipboard operations, because
-    // "refuse where the brush refuses" is one list and not four.
+    // Everything the brush checks before it draws: no drawing under the
+    // playhead, no layer, a locked one, a hidden one. `beginStroke` and
+    // `eraseSelection` ask this one, because both of them write where the brush
+    // writes -- the eraser included, which is what a Backspace through a loop
+    // is.
+    Refusal refuseToEditHere() const;
+
+    // That list plus the layer kind. Shared by the transform tool and by all
+    // three clipboard operations, because "refuse where the brush refuses" is
+    // one list and not four -- and the kind is on it because all four carry
+    // marks from one place to another, and what a colour layer holds is
+    // scribbles rather than lines. Erasing carries nothing anywhere, which is
+    // the one place the two lists differ.
     Refusal refuseHere() const;
+
+    // **An empty selection cannot exist**, and this is the one place that rule
+    // is applied. A loop catching no ink is thrown away, because "no selection"
+    // already means "act on the whole drawing" for the transform tool and for
+    // copy -- so a loop over nothing would quietly become a loop over
+    // everything, and there would be nothing for erase to take out of it.
+    //
+    // Asked wherever the loop or what is under it changes: when a loop is
+    // finished, and when another layer is chosen with one still up. A frame
+    // change drops the selection outright and does not come here. True on
+    // arrival at every one of those, which is why nothing downstream has to ask
+    // again. Answers whether it dropped one, since only then is there anything
+    // to repaint or announce.
+    bool dropSelectionIfItCatchesNothing();
 
     void beginLasso(const QPointF& widget_point);
     void extendLasso(const QPointF& widget_point);

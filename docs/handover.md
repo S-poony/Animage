@@ -1900,10 +1900,18 @@ pixels, so it means the same thing at every zoom — and never a threshold on th
 loop's area. A legitimate selection can be a single eyelash: long, thin, and
 near-zero area.
 
-**An empty lasso clears the selection and does not become select-all.** A loop
-enclosing no ink is the same as no selection — there is nothing to lift — but "no
-selection" also means "transform everything", so a stray loop over blank paper
-would quietly become a whole-drawing transform. There is a test.
+**An empty selection cannot exist.** A loop enclosing no ink is the same as no
+selection — there is nothing to lift — but "no selection" also means "transform
+everything", so a stray loop over blank paper would quietly become a
+whole-drawing transform.
+
+The rule is `dropSelectionIfItCatchesNothing`, and it is asked wherever the loop
+or what sits under it changes: when a loop is finished, and when another layer is
+chosen with one still up. Changing layer used to be the gap — a loop carried onto
+a layer it covered no ink on stayed, and there was then a state that had to be
+explained to whoever pressed Backspace in it. Applying the one rule in the one
+place removed the state and the explanation together, which is the reason it is
+one function and not a test repeated at each site.
 
 **Entering a transform dims what is not moving.** Selecting on one layer while
 looking at a composite of every track is a real surprise: you loop around a
@@ -1917,10 +1925,11 @@ is "delete this drawing", which is a bad surprise in the dangerous direction;
 making it depend on whether a selection exists is a bad surprise in the other.
 Two keys, no mode.
 
-**The loop is cleared by changing frame, survives changing layer, and is cleared
-by a transform that commits.** The first two are the design's; the third is not
-in it — after a commit the loop describes where those pixels *were*, and keeping
-it would offer a second transform of a shape that has moved out from under it.
+**The loop is cleared by changing frame, survives changing layer where it still
+catches something, and is cleared by a transform that commits.** The first two
+are the design's; the third is not in it — after a commit the loop describes
+where those pixels *were*, and keeping it would offer a second transform of a
+shape that has moved out from under it.
 
 **Even-odd, so a loop that crosses itself has a hole in it**, which is what a
 figure of eight looks like to anybody drawing one. Eight sub-rows per pixel row
@@ -1953,9 +1962,56 @@ resample nor an undo step.
 
 **Blocked on the layer kind, never on a guess about the pixels.** A CTG cel
 pasted onto a raster layer writes negative light as paint; raster paint onto a
-colour layer is a label nobody meant. `refuseHere` is the single list all four
-operations — transform, cut, copy, paste — check, because "refuse where the brush
-refuses" is one list and not four.
+colour layer is a label nobody meant. `refuseHere` is the single list every
+operation that *carries a mark from one place to another* checks — transform,
+cut, copy, paste — because "refuse where the brush refuses" is one list and not
+four.
+
+**And the kind is the only thing on it the brush does not check**, which is why
+it is two lists rather than one. `refuseToEditHere` is the brush's own — no
+drawing, no layer, locked, hidden — and `refuseHere` is that plus the kind.
+`beginStroke` and `eraseSelection` ask the first; the four above ask the second.
+
+Erasing is the case that decides the split. Issue
+[#43](https://github.com/S-poony/Animage/issues/43) reported Backspace as a
+fifth operation missing from the shared list and proposed adding it whole, kind
+and all — and the kind is exactly the part it must not have. What a colour layer
+holds is scribbles and not lines, which is what the other four have to care
+about: they carry marks from one place to another and the two kinds are not the
+same thing to carry. Erasing carries nothing anywhere. It takes a mark away,
+which is what the eraser already does on that layer, so a Backspace that refused
+there would be stricter than the tool sitting next to it.
+
+**Every one of the five answers `Refusal` and not `bool`**, and that is the other
+half of the same issue. `eraseSelection` returned a `bool` its action discarded,
+so on a locked layer Ctrl+X named the reason and Backspace did nothing at all
+with nothing said. An operation that silently does nothing is a bug as far as
+anybody holding the pen is concerned — the same rule as the status bar saying why
+the brush will not draw past the end of a track.
+
+**But a refusal the status line is already showing is not repeated.** `sayCannot`
+in `main_window.cpp` is the one place the five report from, and it stays quiet
+about `NoDrawing`: past the end of a track the line permanently reads "you cannot
+draw past the end of a track", and a temporary message *hides* the line while it
+is up — so saying the same thing in other words covers over the words that were
+already saying it. That is also why `eraseSelection` asks where before it asks
+what: the frame change that took the playhead past the end already cleared the
+loop, so testing the loop first answered "nothing is selected", which is true and
+is not the reason.
+
+**And the shorter the vocabulary the better.** The first cut of this gave erase a
+refusal of its own for "there is ink on the layer, but not under the loop" —
+reachable only by carrying a loop onto another layer, which
+[an empty selection cannot exist](#the-lasso) now prevents outright. A rule
+applied consistently is worth more than a message explaining the state it would
+have left.
+
+**Where a refused pen-down says so is still open.** `beginStroke` consults the
+list and reports nothing, and on a locked or hidden layer nothing else does
+either: the status line covers only past-the-end, and `pointingAt` never asks
+about the layer, so the cursor does not change. The pen simply leaves no mark.
+Locking is not reachable from the interface yet, which is the only reason this is
+not louder.
 
 **A paste must not call `refreshEverything`.** That puts the canvas back on the
 timeline's frame, and a frame change is exactly what commits a float — so a paste

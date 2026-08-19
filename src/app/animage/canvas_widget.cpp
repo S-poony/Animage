@@ -498,6 +498,15 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
     // a transform must not be committed by a repaint.
     if (transform_) applyTransform();
     active_layer_ = layer;
+
+    // A loop is geometry in image space, so carrying it to another layer of the
+    // same drawing is meaningful -- but only where it still catches something.
+    // Over a layer it covers no ink on it is an empty selection, and those do
+    // not exist.
+    if (dropSelectionIfItCatchesNothing()) {
+        update();
+        Q_EMIT selectionChanged();
+    }
 }
 
 // Picking any tool while a transform is live commits it -- reaching for the
@@ -1238,17 +1247,24 @@ Lift CanvasWidget::liftForTransform() const {
     return liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())));
 }
 
-bool CanvasWidget::eraseSelection() {
-    if (selection_.isEmpty() || track_ == kNoId || image_ == kNoId) return false;
+CanvasWidget::Refusal CanvasWidget::eraseSelection() {
+    // Where before what, in that order, and the same order as the other four.
+    // Past the end of a track the loop has already been cleared by the frame
+    // change that took you there, so asking about the loop first answers
+    // "nothing is selected" -- true, and not the reason.
+    //
+    // The brush's list and not the clipboard's -- see refuseToEditHere. A
+    // colour layer is erasable; that is the one difference between the two.
+    const Refusal refusal = refuseToEditHere();
+    if (refusal != Refusal::None) return refusal;
 
-    const Track* track = doc_.scene().findTrack(track_);
-    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
-    if (!layer || layer->locked || !layer->visible) return false;
+    if (selection_.isEmpty()) return Refusal::NothingSelected;
 
-    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
-    if (!cel) return false;
-    const Lift split = liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())));
-    if (split.lifted.empty()) return false;  // the loop covered no ink
+    // The same lift cut and copy take, and for the same reason: a loop that
+    // exists at all catches something, so this is only empty where there is
+    // nothing on the layer to catch.
+    const Lift split = liftForTransform();
+    if (split.lifted.empty()) return Refusal::NothingDrawn;
 
     {
         ScopedCommand command(doc_, "Erase selection");
@@ -1260,7 +1276,7 @@ bool CanvasWidget::eraseSelection() {
     clearSelection();
     refreshAll();
     Q_EMIT documentChanged();
-    return true;
+    return Refusal::None;
 }
 
 void CanvasWidget::beginLasso(const QPointF& widget_point) {
@@ -1296,30 +1312,24 @@ void CanvasWidget::extendLasso(const QPointF& widget_point) {
     update();
 }
 
+bool CanvasWidget::dropSelectionIfItCatchesNothing() {
+    // `liftForTransform` takes the whole cel when there is no loop, so the
+    // emptiness test has to come first or a drawing with nothing on it would
+    // look like a loop catching nothing.
+    if (selection_.isEmpty() || !liftForTransform().lifted.empty()) return false;
+    selection_ = Selection{};
+    return true;
+}
+
 void CanvasWidget::endLasso() {
     if (!drawing_lasso_) return;
     drawing_lasso_ = false;
 
-    if (!lasso_passed_threshold_) {
-        // A click, which clears. Nothing is lost that cannot be recreated in
-        // two seconds, which is the whole reason a selection can be this cheap.
-        selection_ = Selection{};
-        update();
-        Q_EMIT selectionChanged();
-        return;
-    }
+    // A click, which clears. Nothing is lost that cannot be recreated in two
+    // seconds, which is the whole reason a selection can be this cheap.
+    if (!lasso_passed_threshold_) selection_ = Selection{};
 
-    // An empty lasso must not become select-all. A loop enclosing no
-    // non-transparent pixel is the same as no selection -- there is nothing to
-    // lift -- but "no selection" also means "transform everything", so a stray
-    // loop over blank paper would quietly become a whole-drawing transform.
-    // Clear it, and stop.
-    const Cel* cel = doc_.celAt(track_, image_, active_layer_);
-    const Lift split =
-        cel ? liftThrough(cel->tiles(), rasterise(selection_, paintedBounds(cel->tiles())))
-            : Lift{};
-    if (split.lifted.empty()) selection_ = Selection{};
-
+    dropSelectionIfItCatchesNothing();
     update();
     Q_EMIT selectionChanged();
 }
@@ -1347,18 +1357,37 @@ void CanvasWidget::drawSelection(QPainter& painter) const {
 
 // --- clipboard -----------------------------------------------------------
 
-// Everything copy, cut and paste have to check before they touch anything: the
-// same list the brush checks, plus the layer kind.
-CanvasWidget::Refusal CanvasWidget::refuseHere() const {
+// Everything the brush checks before it lays a dab down, and nothing else. The
+// layer kind is not here: the brush puts scribbles on a colour layer, the
+// eraser rubs them out again, and so does a Backspace through a loop. Nothing
+// on this list moves a mark from one place to another, so nothing on it has to
+// care which kind of mark it is.
+CanvasWidget::Refusal CanvasWidget::refuseToEditHere() const {
     if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
     if (!layer) return Refusal::NoLayer;
-    if (layer->kind == LayerKind::Ctg) return Refusal::ColourLayer;
     if (layer->locked) return Refusal::LockedLayer;
     if (!layer->visible) return Refusal::HiddenLayer;
     return Refusal::None;
+}
+
+// Everything copy, cut, paste and the transform tool have to check before they
+// touch anything: the list above, plus the layer kind. All four carry marks
+// from one place to another, and what a colour layer holds is scribbles rather
+// than lines -- two different kinds of thing to be carrying.
+CanvasWidget::Refusal CanvasWidget::refuseHere() const {
+    // The kind is asked ahead of the lock and the hiding, which is the order
+    // this list has always had: unlocking a colour layer would not make a cut
+    // work on it, so naming the lock would send somebody to fix the wrong
+    // thing.
+    if (track_ != kNoId && image_ != kNoId) {
+        const Track* track = doc_.scene().findTrack(track_);
+        const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+        if (layer && layer->kind == LayerKind::Ctg) return Refusal::ColourLayer;
+    }
+    return refuseToEditHere();
 }
 
 CanvasWidget::Refusal CanvasWidget::copySelection() {
@@ -1438,8 +1467,10 @@ CanvasWidget::Refusal CanvasWidget::paste() {
 QString CanvasWidget::explain(Refusal refusal) {
     switch (refusal) {
         case Refusal::None: return {};
+        // No verb of its own: every caller puts one in front of this ("Cannot
+        // erase: ..."), and there are five of them now.
         case Refusal::NoDrawing:
-            return QStringLiteral("there is no drawing here to transform");
+            return QStringLiteral("there is no drawing here");
         case Refusal::NoLayer: return QStringLiteral("no layer is selected");
         case Refusal::LockedLayer: return QStringLiteral("that layer is locked");
         case Refusal::HiddenLayer: return QStringLiteral("that layer is hidden");
@@ -1448,6 +1479,7 @@ QString CanvasWidget::explain(Refusal refusal) {
                                   "nothing here that can be resampled");
         case Refusal::NothingDrawn:
             return QStringLiteral("nothing is drawn on this layer");
+        case Refusal::NothingSelected: return QStringLiteral("nothing is selected");
         case Refusal::NothingCopied: return QStringLiteral("nothing has been copied");
         case Refusal::DifferentLayerKind:
             return QStringLiteral("what was copied came off a different kind of layer");
@@ -2195,11 +2227,20 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool 
     // finished.
     if (stroking_) endStroke();
 
-    if (track_ == kNoId || image_ == kNoId || active_layer_ == kNoId) return;
+    // The shared list rather than a third copy of it. The answer is only
+    // consulted for whether to go on: a stroke has no status bar of its own and
+    // nothing here reports.
+    //
+    // **And on a locked or hidden layer that means nothing is said at all.**
+    // Past the end of a track the status line covers it, and `pointingAt` never
+    // asks about the layer, so the cursor does not either -- the pen simply
+    // leaves no mark. Reported by the user against issue #43 and left alone
+    // here, because where a refused pen-down should say so is its own question.
+    if (refuseToEditHere() != Refusal::None) return;
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
-    if (!layer || layer->locked || !layer->visible) return;
+    if (!layer) return;
 
     BrushSettings settings = (stylus_eraser_ || isErasing()) ? eraser_settings_ : brush_settings_;
     settings.erase = stylus_eraser_ || isErasing();

@@ -4951,6 +4951,288 @@ void backspaceErasesTheSelectionAndDeleteStillDeletesTheDrawing() {
     CHECK_EQ(doc.scene().findTrack(track)->images.size(), drawings - 1);
 }
 
+// --- issue #43: the fifth operation that removes what is under the loop -----
+//
+// `eraseSelection` is a fifth operation that takes away what the loop covers,
+// and it was never added to the list the other four share. It re-implemented
+// the check with its own copy, and answered `bool` to an action that threw the
+// answer away.
+//
+// The layer kind is deliberately *not* added to it. Cut, copy, paste and
+// transform refuse on a colour layer because what is on one is scribbles and
+// not lines: they carry marks from one place to another, and the two kinds are
+// not the same thing to carry. Erasing carries nothing anywhere -- it takes a
+// mark away, which is what the eraser already does on that layer -- so
+// Backspace being stricter than the eraser beside it would be the surprise,
+// not the consistency. The two are asserted side by side here because that
+// difference is the whole decision.
+void backspaceErasesOnAColourLayerWhereCutRefuses() {
+    TEST("Backspace erases scribbles on a colour layer; Cut still refuses there");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    for (QPushButton* button : fixture.window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add colour layer")) button->click();
+    }
+    QCoreApplication::processEvents();
+
+    const LayerId colour = fixture.canvas->activeLayer();
+    const TrackId track = fixture.doc().scene().tracks.front().id;
+    const Layer* settings = fixture.doc().scene().findTrack(track)->findLayer(colour);
+    CHECK(settings != nullptr);
+    if (!settings) return;
+    CHECK_EQ(static_cast<int>(settings->kind), static_cast<int>(LayerKind::Ctg));
+
+    // A real colour rather than whatever the panel was holding: the transparent
+    // scribble is a label too, and "did the mark land" must not depend on which
+    // one it was.
+    fixture.canvas->setBrushColour(1.0f, 0.0f, 0.0f);
+    drawWithMouse(fixture.canvas, QPointF(300, 300), QPointF(420, 360), 10);
+
+    const auto scribbles = [&]() -> const Cel* {
+        return fixture.doc().celAt(track, fixture.canvas->currentImage(), colour);
+    };
+    CHECK(scribbles() != nullptr);
+    if (!scribbles()) return;
+    CHECK(!animage::paintedBounds(scribbles()->tiles()).isEmpty());
+
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    fixture.lasso(QRectF(270, 270, 180, 120));
+    CHECK(fixture.canvas->hasSelection());
+
+    // Cut refuses, and says so.
+    fixture.window.statusBar()->clearMessage();
+    fixture.action(shortcuts::Id::Cut)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(fixture.window.statusBar()->currentMessage().contains(QStringLiteral("Cannot cut")));
+    CHECK(!animage::paintedBounds(scribbles()->tiles()).isEmpty());
+    CHECK(fixture.canvas->hasSelection());
+
+    // Backspace does not. Cleared first, because the refusal above sits in the
+    // bar for six seconds and would otherwise be read as this one's answer.
+    fixture.window.statusBar()->clearMessage();
+    fixture.action(shortcuts::Id::EraseSelection)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(!fixture.window.statusBar()->currentMessage().contains(QStringLiteral("Cannot")));
+    CHECK(scribbles() == nullptr || animage::paintedBounds(scribbles()->tiles()).isEmpty());
+    CHECK(!fixture.canvas->hasSelection());
+}
+
+// The other half of it. `eraseSelection` returned `bool` and the action
+// discarded it, so on a locked layer Ctrl+X named the reason and Backspace did
+// nothing at all with nothing said. Its four siblings all report through
+// `explain()`.
+void backspaceSaysWhyWhenItRefuses() {
+    TEST("Backspace names the reason it will not erase");
+
+    // No loop at all. Saying so beats a key that looks broken.
+    {
+        WindowWithInk fixture;
+        if (!fixture.canvas) return;
+        CHECK(!fixture.canvas->hasSelection());
+        fixture.window.statusBar()->clearMessage();
+        fixture.action(shortcuts::Id::EraseSelection)->trigger();
+        QCoreApplication::processEvents();
+        const QString said = fixture.window.statusBar()->currentMessage();
+        CHECK(said.contains(QStringLiteral("Cannot erase")));
+        CHECK(said.contains(QStringLiteral("selected")));
+    }
+
+    // A locked layer and a hidden one: the two the brush refuses, and the two
+    // Backspace used to refuse in silence.
+    const std::pair<const char*, bool> cases[] = {{"locked", true}, {"hidden", false}};
+    for (const auto& [expected, lock] : cases) {
+        WindowWithInk fixture;
+        if (!fixture.canvas) return;
+
+        fixture.action(shortcuts::Id::Lasso)->trigger();
+        QCoreApplication::processEvents();
+        fixture.lasso(QRectF(270, 270, 180, 120));
+        CHECK(fixture.canvas->hasSelection());
+
+        Document& doc = fixture.doc();
+        const TrackId track = doc.scene().tracks.front().id;
+        const LayerId ink = doc.scene().findTrack(track)->layers.front().id;
+        Layer settings = *doc.scene().findTrack(track)->findLayer(ink);
+        if (lock) {
+            settings.locked = true;
+        } else {
+            settings.visible = false;
+        }
+        doc.updateLayer(track, ink, settings);
+        QCoreApplication::processEvents();
+
+        fixture.window.statusBar()->clearMessage();
+        fixture.action(shortcuts::Id::EraseSelection)->trigger();
+        QCoreApplication::processEvents();
+
+        const QString said = fixture.window.statusBar()->currentMessage();
+        CHECK(said.contains(QStringLiteral("Cannot erase")));
+        CHECK(said.contains(QString::fromLatin1(expected)));
+        // And the drawing is exactly where it was.
+        CHECK(fixture.ink() != nullptr && fixture.ink()->tiles().pixel(340, 320).a > 0.5f);
+    }
+}
+
+// `beginStroke` held a third copy of the same list, and splitting the shared
+// one is only safe if the brush still refuses precisely where it refused
+// before -- and still draws on a colour layer, where the mark is a label
+// rather than paint.
+void theBrushRefusesWhereItAlwaysDid() {
+    TEST("the brush still refuses a locked or hidden layer, and still labels a colour one");
+
+    const std::pair<const char*, bool> blocked[] = {{"locked", true}, {"hidden", false}};
+    for (const auto& [what, lock] : blocked) {
+        (void)what;
+        WindowWithInk fixture;
+        if (!fixture.canvas) return;
+
+        Document& doc = fixture.doc();
+        const TrackId track = doc.scene().tracks.front().id;
+        const LayerId ink = doc.scene().findTrack(track)->layers.front().id;
+        Layer settings = *doc.scene().findTrack(track)->findLayer(ink);
+        if (lock) {
+            settings.locked = true;
+        } else {
+            settings.visible = false;
+        }
+        doc.updateLayer(track, ink, settings);
+        QCoreApplication::processEvents();
+
+        // Somewhere the fixture's own stroke never reached, so "nothing landed"
+        // is not being read off a pixel that was already clear of it.
+        const std::size_t depth = doc.undoDepth();
+        drawWithMouse(fixture.canvas, QPointF(200, 200), QPointF(260, 240), 8);
+        CHECK_EQ(doc.undoDepth(), depth);  // no command was even opened
+        CHECK(fixture.ink() == nullptr || fixture.ink()->tiles().pixel(230, 220).a < 0.5f);
+        CHECK(!fixture.canvas->isStroking());
+    }
+
+    // And a colour layer is not on that list: the brush draws there, as a label.
+    {
+        WindowWithInk fixture;
+        if (!fixture.canvas) return;
+        for (QPushButton* button : fixture.window.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Add colour layer")) button->click();
+        }
+        QCoreApplication::processEvents();
+
+        const LayerId colour = fixture.canvas->activeLayer();
+        const TrackId track = fixture.doc().scene().tracks.front().id;
+        fixture.canvas->setBrushColour(1.0f, 0.0f, 0.0f);
+        drawWithMouse(fixture.canvas, QPointF(300, 300), QPointF(420, 360), 10);
+
+        const Cel* cel = fixture.doc().celAt(track, fixture.canvas->currentImage(), colour);
+        CHECK(cel != nullptr);
+        if (cel) CHECK(!animage::paintedBounds(cel->tiles()).isEmpty());
+    }
+}
+
+
+// The rule about what *not* to say. Past the end of a track the status line
+// already reads "you cannot draw past the end of a track", permanently, from
+// the moment the playhead gets there. A six-second banner saying the same thing
+// in other words is not more information -- it is the same information covering
+// itself up, and it covers the line that was saying it. So `NoDrawing` is the
+// one refusal nobody announces, and this holds all five of them to it.
+void pastTheEndOfATrackTheRefusalIsNotSaidTwice() {
+    TEST("past the end of a track a refusal is left to the status line");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    auto* timeline = fixture.window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    Document& doc = fixture.doc();
+    const TrackId track = doc.scene().tracks.front().id;
+    const std::size_t frames = doc.scene().findTrack(track)->frameCount();
+    doc.setSceneLength(true, 24);  // somewhere past the track's end to stand
+    QCoreApplication::processEvents();
+    timeline->setCurrentSlot(frames + 3);
+    QCoreApplication::processEvents();
+    CHECK_EQ(fixture.canvas->currentImage(), kNoId);
+
+    // The thing being left unsaid is genuinely being said elsewhere. Found by
+    // its text rather than by which widget holds it, which is not the point.
+    bool the_line_says_it = false;
+    for (QLabel* label : fixture.window.findChildren<QLabel*>()) {
+        if (label->text().contains(QStringLiteral("past the end of a track"))) {
+            the_line_says_it = true;
+        }
+    }
+    CHECK(the_line_says_it);
+
+    const shortcuts::Id quiet[] = {shortcuts::Id::EraseSelection, shortcuts::Id::Transform,
+                                   shortcuts::Id::Cut, shortcuts::Id::Copy};
+    for (const shortcuts::Id id : quiet) {
+        fixture.window.statusBar()->clearMessage();
+        fixture.action(id)->trigger();
+        QCoreApplication::processEvents();
+        CHECK_EQ(fixture.window.statusBar()->currentMessage().toStdString(), std::string());
+    }
+}
+
+// An empty selection cannot exist, and changing layer is the second way one
+// could have come about. `endLasso` had always thrown away a loop that caught
+// no ink where it was drawn; carrying that loop to a layer it covers nothing on
+// went the other way, and left one standing over nothing.
+//
+// One rule applied in one place is what removes the whole question, and with it
+// the refusal that would otherwise have to explain the state to somebody.
+void aLoopIsDroppedWhenItCatchesNothingOnTheNewLayer() {
+    TEST("a loop carried onto a layer it catches nothing on is dropped");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    Document& doc = fixture.doc();
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId inked = doc.scene().findTrack(track)->layers.front().id;
+
+    // A second raster layer with ink of its own, well clear of where the loop
+    // will go -- so the layer is not empty, and `NothingDrawn` is not what is
+    // being tested here. Drawn before the lasso tool is picked up, because
+    // while it is held a drag makes a loop rather than a mark.
+    const LayerId elsewhere = doc.addLayer(track, "elsewhere");
+    fixture.canvas->setActiveLayer(elsewhere);
+    QCoreApplication::processEvents();
+    fixture.canvas->setBrushColour(0.0f, 0.0f, 0.0f);
+    drawWithMouse(fixture.canvas, QPointF(150, 150), QPointF(200, 190), 8);
+    const Cel* cel = doc.celAt(track, fixture.canvas->currentImage(), elsewhere);
+    CHECK(cel != nullptr);
+    if (cel) CHECK(!animage::paintedBounds(cel->tiles()).isEmpty());
+
+    // The loop is made over the *inked* layer, which is the only way to make
+    // one at all: a lasso catching nothing is thrown away where it is drawn.
+    fixture.canvas->setActiveLayer(inked);
+    fixture.action(shortcuts::Id::Lasso)->trigger();
+    QCoreApplication::processEvents();
+    fixture.lasso(QRectF(270, 270, 180, 120));
+    CHECK(fixture.canvas->hasSelection());
+
+    // And now carried to the other layer, where it covers none of its ink. It
+    // does not survive the trip.
+    fixture.canvas->setActiveLayer(elsewhere);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->hasSelection());
+
+    // So Backspace here is the ordinary "nothing is selected" and not a state
+    // of its own needing words of its own.
+    fixture.window.statusBar()->clearMessage();
+    fixture.action(shortcuts::Id::EraseSelection)->trigger();
+    QCoreApplication::processEvents();
+
+    const QString said = fixture.window.statusBar()->currentMessage();
+    CHECK(said.contains(QStringLiteral("Cannot erase")));
+    CHECK(said.contains(QStringLiteral("nothing is selected")));
+    // And nothing was taken off either layer. The inked one is asked for by id
+    // rather than through the fixture: `addLayer` defaults to the top of the
+    // stack, so `layers.front()` is no longer the layer that was drawn on.
+    if (cel) CHECK(!animage::paintedBounds(cel->tiles()).isEmpty());
+    const Cel* untouched = doc.celAt(track, fixture.canvas->currentImage(), inked);
+    CHECK(untouched != nullptr && untouched->tiles().pixel(340, 320).a > 0.5f);
+}
 void theSelectionSurvivesALayerChangeAndNotAFrameChange() {
     TEST("a loop survives changing layer and is cleared by changing frame");
     WindowWithInk fixture;
@@ -4962,6 +5244,17 @@ void theSelectionSurvivesALayerChangeAndNotAFrameChange() {
     doc.addDrawing(track, 0);
     QCoreApplication::processEvents();
     fixture.canvas->setFrame(0);
+
+    // The second layer is given ink under where the loop will go. A loop
+    // catching nothing on the layer it arrives at is dropped -- an empty
+    // selection cannot exist -- so a layer with nothing on it would test that
+    // rule rather than this one.
+    fixture.canvas->setActiveLayer(second);
+    QCoreApplication::processEvents();
+    drawWithMouse(fixture.canvas, QPointF(300, 300), QPointF(420, 360), 10);
+    fixture.canvas->setActiveLayer(
+        doc.scene().findTrack(track)->layers.back().id);
+    QCoreApplication::processEvents();
 
     fixture.action(shortcuts::Id::Lasso)->trigger();
     QCoreApplication::processEvents();
@@ -7064,6 +7357,11 @@ int main(int argc, char** argv) {
     anEmptyLassoDoesNotBecomeSelectAll();
     transformingASelectionMovesOnlyWhatWasSelected();
     backspaceErasesTheSelectionAndDeleteStillDeletesTheDrawing();
+    backspaceErasesOnAColourLayerWhereCutRefuses();
+    backspaceSaysWhyWhenItRefuses();
+    theBrushRefusesWhereItAlwaysDid();
+    pastTheEndOfATrackTheRefusalIsNotSaidTwice();
+    aLoopIsDroppedWhenItCatchesNothingOnTheNewLayer();
     theSelectionSurvivesALayerChangeAndNotAFrameChange();
     theWindowTakesItsKeysFromTheTable();
     theTooltipsFollowTheKeys();

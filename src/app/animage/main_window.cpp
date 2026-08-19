@@ -70,6 +70,25 @@ using namespace animage;
 
 namespace {
 
+// Says why an operation refused -- "Cannot cut: that layer is locked" -- for
+// the five that share `CanvasWidget::refuseHere`'s vocabulary. One function
+// rather than a `showMessage` at each call site, because the rule about what
+// *not* to say has to live somewhere:
+//
+// **a refusal the status line is already showing is not repeated.** Past the
+// end of a track that line permanently reads "you cannot draw past the end of a
+// track", and a temporary message hides the line while it is up -- so saying
+// the same thing in other words covers over the words that were already saying
+// it. `Refusal::NoDrawing` is exactly that case, and so far the only one.
+void sayCannot(QStatusBar* bar, const char* verb, CanvasWidget::Refusal refusal) {
+    if (!bar || refusal == CanvasWidget::Refusal::None) return;
+    if (refusal == CanvasWidget::Refusal::NoDrawing) return;
+
+    bar->showMessage(QStringLiteral("Cannot %1: %2")
+                         .arg(QString::fromLatin1(verb), CanvasWidget::explain(refusal)),
+                     6000);
+}
+
 // An autosave costs about a tenth of a second on a shot of a hundred drawings
 // now that it only writes the cels that moved, so the interval is chosen for
 // how much work an animator is willing to lose rather than for what it costs.
@@ -713,7 +732,14 @@ void MainWindow::buildMenus() {
     edit->addAction(makeAction(Id::SelectAll, [this] { canvas_->selectEverything(); }));
     edit->addAction(makeAction(Id::Deselect, [this] { canvas_->clearSelection(); }));
     edit->addAction(makeAction(Id::EraseSelection, [this] {
-        canvas_->eraseSelection();
+        // Said out loud, like its four siblings on the same refusal list. This
+        // used to discard a `bool`, so on a locked layer Ctrl+X named the
+        // reason and Backspace did nothing at all with nothing said.
+        const CanvasWidget::Refusal refusal = canvas_->eraseSelection();
+        if (refusal != CanvasWidget::Refusal::None) {
+            sayCannot(statusBar(), "erase", refusal);
+            return;
+        }
         refreshEverything();
     }));
 
@@ -1281,9 +1307,9 @@ void MainWindow::chooseTransformTool() {
 
     // Said out loud. A tool that silently does nothing is a bug as far as
     // anybody holding the pen is concerned -- the same reason the status bar
-    // says why the brush will not draw past the end of a track.
-    statusBar()->showMessage(
-        QStringLiteral("Cannot transform: %1").arg(CanvasWidget::explain(refusal)), 6000);
+    // says why the brush will not draw past the end of a track, and the reason
+    // `sayCannot` stays quiet about that one rather than saying it twice.
+    sayCannot(statusBar(), "transform", refusal);
     brush_action_->setChecked(true);
     canvas_->setTool(CanvasWidget::Tool::Brush);
     syncToolSettings();
@@ -1307,10 +1333,7 @@ void MainWindow::clipboard(Clipboard what) {
     }
 
     if (refusal != CanvasWidget::Refusal::None) {
-        statusBar()->showMessage(QStringLiteral("Cannot %1: %2")
-                                     .arg(QString::fromLatin1(verb),
-                                          CanvasWidget::explain(refusal)),
-                                 6000);
+        sayCannot(statusBar(), verb, refusal);
         return;
     }
     // Only a cut has written anything. A paste has not: it arrives as a float,
