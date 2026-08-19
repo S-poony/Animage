@@ -5995,6 +5995,106 @@ struct BoxFixture {
     }
 };
 
+
+// Issue #62. The brush refuses a locked layer, a hidden one, and anywhere past
+// the end of a track, and until this it said so nowhere at all: the status line
+// covered only the last of the three, and `pointingAt` never asked about the
+// layer, so the crosshair sat over a layer that would take no mark and the pen
+// simply left nothing behind.
+//
+// The rule being obeyed is the one the whole function exists for -- **the
+// pointer answers the same question as the press under it** -- and the answer
+// was already in the enum: `Pointing::Nothing` was kept when a transform stopped
+// being able to reach it, on the grounds that it is still right for anywhere
+// else that acquires one. This is that somewhere else.
+void thePointerSaysWhereTheBrushWillNotDraw() {
+    TEST("the pointer says nothing-here on a locked or hidden layer, and again when it is back");
+    Fixture f;
+    f.draw(300.0f, 300.0f, 420.0f, 360.0f);
+    hover(&f.canvas, QPointF(340, 320));
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+
+    const auto setLayer = [&](bool locked, bool visible) {
+        Layer settings = *f.doc.scene().findTrack(f.track)->findLayer(f.layer);
+        settings.locked = locked;
+        settings.visible = visible;
+        f.doc.updateLayer(f.track, f.layer, settings);
+        f.canvas.refreshAll();
+        QCoreApplication::processEvents();
+    };
+
+    // Locked, then hidden. Neither takes a mark, and the arrow is what the rest
+    // of the interface already uses for "this is not a place to draw".
+    setLayer(true, true);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Nothing));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::ArrowCursor));
+
+    setLayer(false, false);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Nothing));
+
+    // And back, which is the half a flag that is only ever set would not catch.
+    setLayer(false, true);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+}
+
+// The answer has to be re-asked wherever what a press would do changes, and
+// choosing another layer is one of those places -- it is not a mouse move, so
+// nothing else would go and look.
+void choosingALockedLayerChangesThePointerWithoutMoving() {
+    TEST("choosing a layer the brush refuses changes the pointer without the pointer moving");
+    Fixture f;
+    f.draw(300.0f, 300.0f, 420.0f, 360.0f);
+    hover(&f.canvas, QPointF(340, 320));
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+
+    const LayerId hidden = f.doc.addLayer(f.track, "hidden");
+    Layer settings = *f.doc.scene().findTrack(f.track)->findLayer(hidden);
+    settings.visible = false;
+    f.doc.updateLayer(f.track, hidden, settings);
+
+    // No mouse event between here and the check: the layer changed and the
+    // pointer is standing exactly where it was.
+    f.canvas.setActiveLayer(hidden);
+    QCoreApplication::processEvents();
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Nothing));
+
+    f.canvas.setActiveLayer(f.layer);
+    QCoreApplication::processEvents();
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
+}
+
+// What must *not* change. Navigation is available inside every tool, so a held
+// key outranks the layer -- a locked layer that swallowed Space would be saying
+// something false about what a press does. And a loop can still be drawn on
+// one: selecting is not editing, and copying off a locked layer is allowed.
+void alockedLayerStillPansZoomsAndLassos() {
+    TEST("a layer the brush refuses still pans, zooms and lassos");
+    Fixture f;
+    f.draw(300.0f, 300.0f, 420.0f, 360.0f);
+
+    Layer settings = *f.doc.scene().findTrack(f.track)->findLayer(f.layer);
+    settings.locked = true;
+    f.doc.updateLayer(f.track, f.layer, settings);
+    f.canvas.refreshAll();
+    hover(&f.canvas, QPointF(340, 320));
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Nothing));
+
+    QKeyEvent space_down(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &space_down);
+    QCoreApplication::processEvents();
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::PanReady));
+
+    QKeyEvent space_up(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
+    QCoreApplication::sendEvent(&f.canvas, &space_up);
+    QCoreApplication::processEvents();
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Nothing));
+
+    f.canvas.setTool(CanvasWidget::Tool::Lasso);
+    QCoreApplication::processEvents();
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Lasso));
+}
 void thePointerSaysWhatAPressOnTheBoxWillDo() {
     TEST("the pointer says which of the four things a press on the box will do");
     BoxFixture box;
@@ -7802,6 +7902,9 @@ void shiftErasesInAStraightLineToo() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    thePointerSaysWhereTheBrushWillNotDraw();
+    choosingALockedLayerChangesThePointerWithoutMoving();
+    alockedLayerStillPansZoomsAndLassos();
     thePointerSaysWhatAPressOnTheBoxWillDo();
     aDragOutsideTheBoxMovesIt();
     theBoxCursorsTurnWithTheBox();

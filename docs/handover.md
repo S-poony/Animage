@@ -2047,12 +2047,32 @@ reachable only by carrying a loop onto another layer, which
 applied consistently is worth more than a message explaining the state it would
 have left.
 
-**Where a refused pen-down says so is still open.** `beginStroke` consults the
-list and reports nothing, and on a locked or hidden layer nothing else does
-either: the status line covers only past-the-end, and `pointingAt` never asks
-about the layer, so the cursor does not change. The pen simply leaves no mark.
-Locking is not reachable from the interface yet, which is the only reason this is
-not louder.
+**A refused pen-down is answered by the pointer, not by a message.**
+`beginStroke` consults the list and reports nothing, which is right — a stroke
+has no status bar of its own and a banner under every refused dab would be
+worse than the silence. For a while nothing else answered either: the status
+line covered only past-the-end and `pointingAt` never asked about the layer, so
+a crosshair sat over a layer that would take no mark and the pen left nothing
+behind. That was issue
+[#62](https://github.com/S-poony/Animage/issues/62).
+
+`pointingAt` asks the refusal list last, after the gestures, the held keys and
+the lasso, and answers `Pointing::Nothing` — the enumerator kept when a
+transform stopped being able to reach it, on the stated grounds that it is
+still right for anywhere else that acquires one. This is that somewhere else,
+and the arrow it maps to already meant "this is not a place to draw". Nothing
+new was invented; the design had left the slot open.
+
+The order matters and is the order a press resolves in. Navigation outranks the
+layer, because a locked layer that swallowed Space would be saying something
+false about what a press does. So does the lasso: a loop can be drawn on a
+locked or hidden layer and copied off one, since selecting is not editing and
+whatever the selection is handed to says its own no.
+
+**And the status line names which of the three it is**, for the reason it
+already gave for past-the-end — a brush that does nothing is otherwise a bug —
+but only when the past-the-end phrase is not already saying it. Two phrases for
+one fault is one too many, which is `sayCannot`'s rule as well.
 
 **A paste must not call `refreshEverything`.** That puts the canvas back on the
 timeline's frame, and a frame change is exactly what commits a float — so a paste

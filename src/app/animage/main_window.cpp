@@ -2452,9 +2452,32 @@ void MainWindow::syncStatus() {
     // nothing to draw on -- while the canvas may still be showing something,
     // because a track that holds or cycles goes on contributing to the picture.
     // Said out loud, because a brush that does nothing is otherwise a bug.
-    const QString past = (image == kNoId && slot >= track->frameCount())
-                             ? QStringLiteral("   you cannot draw past the end of a track")
-                             : QString();
+    QString past = (image == kNoId && slot >= track->frameCount())
+                       ? QStringLiteral("   you cannot draw past the end of a track")
+                       : QString();
+
+    // The other two ways the brush will not draw where you are standing, and
+    // for the same reason as the line above: a brush that does nothing is
+    // otherwise a bug. Locking is not reachable from the interface yet, so the
+    // hidden one is the one that bites -- hiding a layer is one click, and
+    // going on drawing on it is easy.
+    //
+    // Only when the line above is not already saying so. Two phrases for one
+    // fault is one too many, which is the rule `sayCannot` follows as well.
+    if (past.isEmpty()) {
+        switch (canvas_->whyTheBrushWillNotDraw()) {
+            case CanvasWidget::Refusal::LockedLayer:
+                past = QStringLiteral("   this layer is locked");
+                break;
+            case CanvasWidget::Refusal::HiddenLayer:
+                past = QStringLiteral("   this layer is hidden");
+                break;
+            case CanvasWidget::Refusal::NoLayer:
+                past = QStringLiteral("   no layer is selected");
+                break;
+            default: break;
+        }
+    }
 
     // Standing past the end of the shot is a different thing again: there may be
     // a drawing here and you may edit it, but it will not play and will not be

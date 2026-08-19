@@ -507,6 +507,10 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
         update();
         Q_EMIT selectionChanged();
     }
+
+    // The new layer may be one the brush will not draw on. Nothing else here
+    // repaints unconditionally, so the pointer has to be asked by name.
+    refreshPointer();
 }
 
 // Picking any tool while a transform is live commits it -- reaching for the
@@ -940,6 +944,12 @@ void CanvasWidget::ensureCacheCoversView() {
 
 void CanvasWidget::refreshAll() {
     dirty_everything_ = true;
+    // Whatever changed may have changed what a press would do -- a layer hidden
+    // from the panel, a frame that went past the end of the track. Asked from
+    // here rather than added to each of those callers, which is the same reason
+    // there is one function deciding the cursor at all. It reaches the platform
+    // only when the answer is different.
+    refreshPointer();
     update();
 }
 
@@ -2030,7 +2040,18 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
         return Pointing::Nothing;
     }
 
+    // The lasso is not on this list on purpose: a loop can be drawn on a locked
+    // or hidden layer, and copying off one is allowed. Selecting is not
+    // editing, and what the selection is then handed to says its own no.
     if (tool_ == Tool::Lasso) return Pointing::Lasso;
+
+    // Nowhere to draw: a locked layer, a hidden one, or past the end of a
+    // track. The rule this obeys is the one the whole function exists for --
+    // *the pointer answers the same question as the press under it* -- and
+    // until this was here the answer was a crosshair over a layer that would
+    // take no mark, with nothing else saying so either. Issue #62.
+    if (refuseToEditHere() != Refusal::None) return Pointing::Nothing;
+
     // The pen turned over is the eraser as much as the button is, and it is the
     // case with nothing else on screen to announce it.
     return (isErasing() || hover_eraser_) ? Pointing::Erase : Pointing::Draw;

@@ -190,6 +190,12 @@ public:
     };
     static QString explain(Refusal refusal);
 
+    // Why the brush would refuse where the playhead and the active layer stand,
+    // for the status bar to say so out loud. `None` when it would draw.
+    // The brush itself has nowhere to report -- see beginStroke -- so this is
+    // how the answer reaches anybody.
+    Refusal whyTheBrushWillNotDraw() const { return refuseToEditHere(); }
+
     // --- selection -------------------------------------------------------
 
     // The lasso is a tool because it competes with the brush for the pen. What
@@ -304,7 +310,10 @@ public:
         ScaleVertical,
         ScaleFalling,  // "\", top left to bottom right
         ScaleRising,   // "/", bottom left to top right
-        Nothing,       // during a transform, off the box: a press does nothing
+        // A press does nothing here. Unreachable during a transform, which
+        // claims the whole canvas -- the case it is reachable in is a layer
+        // that will take no mark: locked, hidden, or past the end of a track.
+        Nothing,
     };
 
     // The decision the pointer is showing, and what it would be somewhere else.
