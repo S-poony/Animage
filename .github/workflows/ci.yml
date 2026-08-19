@@ -52,21 +52,10 @@ jobs:
 
       # Qt's own binaries need these at build time, and the offscreen platform
       # plugin the interface tests run under needs them at run time.
-      # **The timeouts are not superstition.** The runner image points apt at
-      # `azure.archive.ubuntu.com`, which goes unreachable often, and apt's
-      # default is to retry a dead mirror for minutes per suite before falling
-      # back to `archive.ubuntu.com`. Measured on 2026-08-18: twelve minutes and
-      # eight seconds in this step, against two seconds to configure, twenty-two
-      # to build and seven to test. It made the fastest job the slowest and looked
-      # like the build had got heavier.
-      #
-      # One retry and a ten-second timeout turn that stall into the few seconds
-      # it takes to give up and use the mirror that answers. Nothing here needs
-      # the Azure one specifically.
       - name: Install Linux dependencies
         if: matrix.name == 'linux'
         run: |
-          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build \
             libgl1-mesa-dev libglu1-mesa-dev \
