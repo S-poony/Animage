@@ -82,7 +82,38 @@ void FloatingDockFrame::applyIfNothingIsHeld() {
     if (QGuiApplication::mouseButtons() != Qt::NoButton) return;
 
     if (waiting_) waiting_->stop();
+
+    // **Issue #57: the decoration has to be paid for by the window, not by what
+    // is inside it.** Until the title bar goes on, a floating panel is wearing a
+    // *native* frame -- so Qt hides its own title bar and the whole of the
+    // panel's height is contents. Putting ours on gives the panel a title bar
+    // and a frame it did not have, and Qt takes them out of the contents,
+    // because nothing has told the window it needs to be bigger.
+    //
+    // Measured on the reported case: a timeline dock tears off at 120 px tall
+    // and its size hint immediately becomes 150 -- 24 px of title bar and 3 px
+    // of frame a side -- while the window stays at 120. So the strip inside lost
+    // 30 px, which is most of a 46 px row, and nothing ever asked for it back.
+    //
+    // Which is also why it was reported as *only* happening to a panel nobody
+    // had resized. A dock dragged taller is carrying height above its own hint,
+    // and the decoration comes out of that; a dock left where it opened is
+    // sitting exactly on its hint and has nothing but its contents to give.
+    //
+    // Taken as the difference between the two hints rather than by adding up a
+    // title bar and a frame width. Both of those are the style's, one of them is
+    // doubled and the other is not, and this way the arithmetic is Qt's own --
+    // whatever the decoration costs in either direction is what the window grows
+    // by.
+    const QSize was = dock_->size();
+    const QSize undecorated = dock_->sizeHint();
     dock_->setTitleBarWidget(makeTitleBar());
+    const QSize decorated = dock_->sizeHint();
+    if (decorated.isValid() && undecorated.isValid() && decorated != undecorated) {
+        dock_->resize(was.width() + decorated.width() - undecorated.width(),
+                      was.height() + decorated.height() - undecorated.height());
+    }
+
     // The drag is over, which is the decoration's cue and also somebody else's.
     // See the signal.
     Q_EMIT settled();

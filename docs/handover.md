@@ -3443,6 +3443,43 @@ arrives mid-drag and changing the decoration recreates the window, which would
 break the one gesture that already worked.
 
 
+### What a floating panel's decoration is paid for with, if nobody says otherwise
+**Putting a title bar on a floating panel takes the height out of what is inside
+it.** This is [#57](https://github.com/S-poony/Animage/issues/57), and it is the
+bill for #50 arriving somewhere nobody was looking.
+
+Until `FloatingDockFrame` acts, a panel that has just been torn off wears a
+*native* frame — so Qt hides its own title bar and the whole of the window's
+height is contents. `setTitleBarWidget` then gives it a title bar and a frame it
+did not have, and nothing tells the window it must be bigger, so Qt takes them
+out of the contents. Measured on the reported case: the timeline dock tears off
+at 120 px tall, its size hint becomes 150 the moment the decoration goes on — 24
+px of title bar and 3 px of frame a side — and the window stays at 120. Thirty
+pixels out of the strip, which is most of a 46 px row.
+
+**The reported condition is what identifies it**: it only happens to a panel
+nobody has resized. A dock dragged taller carries height above its own hint and
+the decoration comes out of that; a dock left where it opened sits exactly on its
+hint and has nothing but its contents to give. Any theory that does not explain
+why resizing it first makes the fault go away is the wrong theory — that
+condition ruled out "it falls back to its hint", which was two days of the
+obvious answer.
+
+The cure is to grow the window by the difference between the two size hints,
+taken across the `setTitleBarWidget` call. Not by adding up a title bar height
+and a frame width: both are the style's, one is doubled and the other is not, and
+reading Qt's own arithmetic off its hint is right in both directions and in both
+dimensions.
+
+**None of it is reachable offscreen**, which is why it survived a suite that
+tests `FloatingDockFrame` directly. Offscreen there is no native frame, so Qt
+never hides its title bar, so the hint does not move when ours goes on and the
+fix is a no-op — measured, 135 before and 135 after. `shots` cannot see it and
+neither can a test. `tests/window_probe.cpp` is what saw it, on a real window
+with a real hand, and it now marks any dock smaller than its own hint as
+**SQUEEZED** so the next one is a glance rather than a subtraction.
+
+
 ### Why a rebuilt title bar matched every metric and still looked wrong
 **A title bar is a drawn thing, not a row of widgets** — and this cost six
 attempts, all of them spent matching numbers. `DockTitleStrip` paints itself with

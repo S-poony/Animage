@@ -132,7 +132,7 @@ public:
         connect(settling_, &QTimer::timeout, this, [this] {
             for (QDockWidget* dock : window_.findChildren<QDockWidget*>()) {
                 if (last_size_.value(dock, dock->size()) != dock->size()) {
-                    report(QStringLiteral("a panel was resized by hand"));
+                    report(QStringLiteral("a panel changed size with nothing announcing it"));
                     return;
                 }
             }
@@ -178,6 +178,15 @@ private:
                          .arg(now.height() < was.height() ? QStringLiteral("SHORTER")
                                                           : QStringLiteral("taller"));
 
+        // Smaller than it says it needs, which is issue #57's symptom exactly:
+        // the decoration went on and the contents paid for it. Called out rather
+        // than left to be subtracted, because it is the one comparison in this
+        // log that is a fault on its own rather than only in context.
+        const QSize wants = dock->sizeHint();
+        if (now.height() < wants.height())
+            moved += QStringLiteral("  ** SQUEEZED %1 px under its own hint **")
+                         .arg(wants.height() - now.height());
+
         say(QStringLiteral("  %1%2 x %3   was %4 x %5   hint %6 x %7   min %8 x %9   %10%11")
                 .arg(dock->windowTitle().leftJustified(16, QLatin1Char(' ')))
                 .arg(now.width()).arg(now.height())
@@ -220,6 +229,7 @@ int main(int argc, char** argv) {
     say(QStringLiteral("  #55  drag Layers from the right edge to the left."));
     say(QStringLiteral("       Does it arrive a different width?"));
     say(QStringLiteral("Anything marked ** changed since the line above it."));
+    say(QStringLiteral("SQUEEZED means a panel is smaller than its own hint -- #57's symptom."));
     say(QString());
     watch.report(QStringLiteral("start"));
 
