@@ -16,6 +16,11 @@ CMakeUserPresets.json
 *.so
 .claude/
 
+# What the dock probes write where they are run from. Run artifacts, and the
+# whole point of them is that each run replaces the last.
+dock_probe.log
+window_probe.log
+
 # Editor and tool caches
 .dirac-cache/
 
