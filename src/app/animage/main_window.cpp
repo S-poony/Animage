@@ -44,7 +44,9 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QLibraryInfo>
 #include <QTimer>
+#include <QVersionNumber>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -853,9 +855,26 @@ void MainWindow::restoreDefaultView() {
 
 // Unstick the window's layout after a panel has been dragged out of it.
 //
-// **Issue #54, and it is Qt's bug rather than ours.** It reproduces in a plain
-// `QMainWindow` with a central widget, a status bar and two stock docks, with
-// none of this program in it, on Qt 6.11.1.
+// **Issue #54, and it is Qt's bug rather than ours** -- reported upstream as
+// [QTBUG-147209][] and **already fixed there**, which is why this is scoped to
+// the one release that has it rather than run for ever.
+//
+// | Qt | what `endDrag` does with the flag | |
+// |---|---|---|
+// | 6.11.0 | `restore()`, defaulting to clear | correct |
+// | **6.11.1** | `restore(QInternal::KeepSavedState)` | **the bug** |
+// | 6.11.2 | `restore(QInternal::ClearSavedState)` | fixed |
+//
+// A regression, introduced by "Code cleanup in QMainWindowLayout" turning a
+// defaulted bool into an enum and picking the wrong enumerator at one call
+// site, and fixed by e9a22af5ab7f. So the CI builds never had it -- `ci.yml`
+// pins Qt 6.8 -- and neither will a local build once MSYS2 moves past 6.11.1.
+// **When the oldest Qt anyone builds this with is 6.11.2, delete all of this.**
+//
+// It reproduces in a plain `QMainWindow` with a central widget, a status bar and
+// two stock docks, with none of this program in it.
+//
+// [QTBUG-147209]: https://bugreports.qt.io/browse/QTBUG-147209
 //
 // `QMainWindowLayout::setGeometry` begins with
 //
@@ -909,7 +928,16 @@ void MainWindow::restoreDefaultView() {
 // A real hand is the only way in. `QWidget::grab()` would force a repaint on top
 // of that, so even a frozen window photographs clean -- the geometry is wrong,
 // the painting is not.
+// Whether the Qt this is *running* against is the one that leaves the flag set.
+// The runtime version and not QT_VERSION: Qt is a DLL here, so the build that
+// compiled this and the build that will run it need not agree.
+static bool qtForgetsToClearTheDragState() {
+    const QVersionNumber qt = QLibraryInfo::version();
+    return qt >= QVersionNumber(6, 11, 1) && qt < QVersionNumber(6, 11, 2);
+}
+
 void MainWindow::wakeLayout() {
+    if (!qtForgetsToClearTheDragState()) return;
     if (waking_layout_) return;
     waking_layout_ = true;
     // Out of whatever call stack asked for it. The settled() this answers can

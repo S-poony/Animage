@@ -2546,6 +2546,59 @@ Do not propose it.
 
 These are the things that cost hours, in the order they hurt.
 
+The section is far too long to read through, and nobody does. Every trap is its
+own heading, so this is the list to scan when you are about to touch something
+and want to know what has already gone wrong there. Add a row when you add a
+trap.
+
+| | |
+|---|---|
+| [Which rectangle counts the columns, and which sizes the buffer](#which-rectangle-counts-the-columns-and-which-sizes-the-buffer) | Offset layer at reduced zoom indexes one past the framebuffer |
+| [What a missing pen release takes down with it](#what-a-missing-pen-release-takes-down-with-it) | A lost release strands the depth counter; undo and autosave stop |
+| [What is left of a window when its children are destroyed](#what-is-left-of-a-window-when-its-children-are-destroyed) | Members die before children, so late callbacks reach freed memory |
+| [What lighter and darker carry through, and what they cannot lift](#what-lighter-and-darker-carry-through-and-what-they-cannot-lift) | Bending a palette role keeps its alpha and cannot lift black |
+| [Why an application-wide event filter sees its own events twice](#why-an-application-wide-event-filter-sees-its-own-events-twice) | Forwarded and propagated keys re-enter the filter; held keys recurse |
+| [How many wrong theories a bug is worth](#how-many-wrong-theories-a-bug-is-worth) | After the second wrong theory, stop and instrument |
+| [The background seeds that failed, and the rim that cannot be bought](#the-background-seeds-that-failed-and-the-rim-that-cannot-be-bought) | Soft seed and border price both fail; a hard rim works |
+| [Why regenerating the fill whenever it looks stale costs a max-flow per dab](#why-regenerating-the-fill-whenever-it-looks-stale-costs-a-max-flow-per-dab) | Solve the fill on pen-up, not on cache staleness |
+| [Where the fill solve runs, and the resolution that paid for it](#where-the-fill-solve-runs-and-the-resolution-that-paid-for-it) | A synchronous solve capped quality; it is threaded now |
+| [What a widget on a list row takes over, including the row's own tick](#what-a-widget-on-a-list-row-takes-over-including-the-rows-own-tick) | setItemWidget swallows presses and kills the visibility tick |
+| [What a stroke's dirty rectangle misses when the whole fill is resolved](#what-a-strokes-dirty-rectangle-misses-when-the-whole-fill-is-resolved) | A regenerated fill changes far from the pen; dirty everything |
+| [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
+| [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
+| [What made saving slow, and why skipping unchanged cels would not have helped](#what-made-saving-slow-and-why-skipping-unchanged-cels-would-not-have-helped) | Tiles were 92.6% zeros; store each row's occupied span |
+| [Why an ever-true tablet flag leaves the mouse unable to draw](#why-an-ever-true-tablet-flag-leaves-the-mouse-unable-to-draw) | Pen-seen must be a time window, not a permanent flag |
+| [What was never timed, and what the benchmark stopped anyone timing](#what-was-never-timed-and-what-the-benchmark-stopped-anyone-timing) | Compositing was tuned unmeasured; the benchmark hid the larger loop |
+| [Why sharpness changed at 70.7%, and the cache cap nobody attributed it to](#why-sharpness-changed-at-707-and-the-cache-cap-nobody-attributed-it-to) | A memory cap, not zoom, chose the sharpness threshold |
+| [Why a cache sized by the drawing asks for half a gigabyte at 5% zoom](#why-a-cache-sized-by-the-drawing-asks-for-half-a-gigabyte-at-5-zoom) | Size caches and margins in screen terms, never image terms |
+| [Why the step boundary kept moving, and the screen-pixel cache that removed it](#why-the-step-boundary-kept-moving-and-the-screen-pixel-cache-that-removed-it) | An integer step must jump somewhere; screen-pixel entries remove it |
+| [Why the max-flow keeps its trees, and how an orphan adopts its own descendant](#why-the-max-flow-keeps-its-trees-and-how-an-orphan-adopts-its-own-descendant) | Keep search trees; cut the stale parent link before searching |
+| [Why an edit that matched nothing still built and passed](#why-an-edit-that-matched-nothing-still-built-and-passed) | A silent no-op edit; build green, the button simply absent |
+| [Who promotes a pen's taps, and whether a double click arrives](#who-promotes-a-pens-taps-and-whether-a-double-click-arrives) | Pen double clicks depend on the promoter; count presses instead |
+| [The native frame a floating dock gets, and the press a pen never sends](#the-native-frame-a-floating-dock-gets-and-the-press-a-pen-never-sends) | A floating dock's title bar is non-client; Ink sends no press |
+| [Why a rebuilt title bar matched every metric and still looked wrong](#why-a-rebuilt-title-bar-matched-every-metric-and-still-looked-wrong) | Paint the title bar with the style, do not assemble it |
+| [What size a title-bar button's glyph is really drawn at](#what-size-a-title-bar-buttons-glyph-is-really-drawn-at) | The glyph is fitted inside the button; every metric reports a bound |
+| [The flag a drag that ends outside the window leaves set](#the-flag-a-drag-that-ends-outside-the-window-leaves-set) | A dock dragged out freezes the layout; Qt 6.11.1 only |
+| [What asking for a private Qt component at the top level switches off](#what-asking-for-a-private-qt-component-at-the-top-level-switches-off) | A root find_package failure skips every GUI target, silently |
+| [Why fitting the canvas on a maximise cannot trust either event alone](#why-fitting-the-canvas-on-a-maximise-cannot-trust-either-event-alone) | A maximise reframe needs both the state change and the resize |
+| [The nine-character band where an export makes the folder and no frames](#the-nine-character-band-where-an-export-makes-the-folder-and-no-frames) | Names of 247-255 characters export partially, destroying the last run |
+| [What `findChild` hands back after the view has closed its editor](#what-findchild-hands-back-after-the-view-has-closed-its-editor) | A pending deferred delete leaves a dead editor findable |
+| [Where the first dock-width reading was taken, and why the fix shipped twice](#where-the-first-dock-width-reading-was-taken-and-why-the-fix-shipped-twice) | Both measurements landed on the same side of the growth |
+| [What emptying the fill cache does not reach while a solve is in flight](#what-emptying-the-fill-cache-does-not-reach-while-a-solve-is-in-flight) | Async solves outlive invalidation without a generation count |
+| [What went stale when the solve stopped finishing in the same call stack](#what-went-stale-when-the-solve-stopped-finishing-in-the-same-call-stack) | Refreshes that piggybacked on a synchronous re-solve now lag |
+| [The tests that construct the bug, and go red when it is fixed](#the-tests-that-construct-the-bug-and-go-red-when-it-is-fixed) | A whole fixture reddening can mean the feature works |
+| [Why a cache key of cel revisions serves wrong fills, not slow ones](#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones) | Revisions collide freely, so a shared scribble key swaps answers |
+| [Why an erased scribble left every later solve on that drawing coarser](#why-an-erased-scribble-left-every-later-solve-on-that-drawing-coarser) | Emptied tiles kept the bounds that pick solve resolution |
+| [Why the proposed confidence score reads 1 on every case](#why-the-proposed-confidence-score-reads-1-on-every-case) | Confidence is constant; spread separates but carries no verdict |
+| [Why the carried-mark flag was removed rather than tuned](#why-the-carried-mark-flag-was-removed-rather-than-tuned) | Spread is an amount, not a correspondence; no threshold works |
+| [What a stylesheet with no type selector also paints](#what-a-stylesheet-with-no-type-selector-also-paints) | Swatch styling leaks into its own tooltip, invisible to grab() |
+| [How long a `QTreeWidgetItem` pointer stays valid once a rebuild is queued](#how-long-a-qtreewidgetitem-pointer-stays-valid-once-a-rebuild-is-queued) | A queued list rebuild deletes rows other code still holds |
+| [What the screenshot showed, and what the run had never set up](#what-the-screenshot-showed-and-what-the-run-had-never-set-up) | Screenshot review needs the harness itself verified first |
+| [The gap coordinates that built an open box out of plausible numbers](#the-gap-coordinates-that-built-an-open-box-out-of-plausible-numbers) | drawGappedBox takes coordinates, not offsets |
+| [Four tool states in three booleans, and the pair a handler half-cleared](#four-tool-states-in-three-booleans-and-the-pair-a-handler-half-cleared) | Mutually exclusive state in separate flags drifts apart |
+
+
+### Which rectangle counts the columns, and which sizes the buffer
 **Two rectangles of the same width can span a different number of entries, and
 sizing a buffer from one while indexing it from the other is a heap overflow.**
 This one shipped too, and it is a *write*, so on a build with a sanitizer it
@@ -2576,6 +2629,8 @@ to the ratios where the box reads every image pixel, because above those the
 lattice legitimately drops a one-pixel mark — with no offset at all, so that is
 the reduction working rather than this bug.
 
+
+### What a missing pen release takes down with it
 **A gesture that opens a command on the press and closes it on the release will
 one day not get the release, and the undo history dies silently for the rest of
 the session.** This one shipped, and it is first because of how quiet it was.
@@ -2605,6 +2660,8 @@ opening another, because the cost of missing one route is the whole session.
 guard. The test that pins it fails three ways on the commit before it, and two of
 those three are the history, not the flag.
 
+
+### What is left of a window when its children are destroyed
 **A window is destroyed from the top down, and everything it owns is destroyed
 after it — so a child reporting to its parent during teardown is reporting to
 something that has stopped existing.** This one shipped, and it turned the
@@ -2715,6 +2772,8 @@ Two smaller things fell out of chasing it, both worth knowing:
   window mid-rename in the first place. `LayerList` holds the live editor now,
   told to it by the delegate's `createEditor`.
 
+
+### What lighter and darker carry through, and what they cannot lift
 **A palette role arrived with alpha on it, and the timeline vanished.** The
 downloaded Windows build drew the timeline white on white — no cell outlines, no
 tick marking a held frame — while the same commit built here drew it correctly.
@@ -2789,6 +2848,8 @@ reproduce locally" and "reproduced locally in a minute" was entirely the idea of
 these situations are, and it is worth reaching for before the next release goes
 out to find something.
 
+
+### Why an application-wide event filter sees its own events twice
 **Two crashes, one cause, and I caused it.** Space and Z are held modifiers, not
 shortcuts, so they are forwarded to the canvas by an application-wide event
 filter. An application filter also sees the events it sends itself — and sees
@@ -2797,6 +2858,8 @@ lead straight back in. It needs a re-entrancy flag, and the canvas must *accept*
 those keys including auto-repeats, or holding one past the repeat delay
 recurses until the stack runs out. See `MainWindow::eventFilter`.
 
+
+### How many wrong theories a bug is worth
 **Guessing cost more than instrumenting, three times now.** The first crash took
 two wrong theories before a test that sent real key events found it in one run.
 The second took four, and was answered in one round trip once
@@ -2837,6 +2900,8 @@ lift the pen* — which turned a vague "cannot put it back" into a precise "cann
 start a gesture on a floating panel". **Ask what the neighbouring gesture does.**
 Half the wrong theories would have died at the first question.
 
+
+### The background seeds that failed, and the rim that cannot be bought
 **An implicit background as a *seed* was tried and removed — then solved from
 the other side.** A single scribble has nothing to be cut against, so it labelled
 everything, and filling one shape took a second scribble for the world outside
@@ -2881,6 +2946,8 @@ It also got faster, against expectation: `bench_composite` at 512x512 went 152 m
 smaller sub-problems — the paper's largest-first pruning finally has something to
 prune with.
 
+
+### Why regenerating the fill whenever it looks stale costs a max-flow per dab
 **Solving on a stale cache is not the same as solving when asked.** Every dab
 bumps the cel's revision, so regenerating a CTG fill whenever it looked stale
 meant a max-flow per dab. The cost was invisible for a while because a separate
@@ -2888,6 +2955,8 @@ bug meant the result was never drawn; fixing the repaint made it obvious. The
 solve now happens once, when the pen lifts, and the scribble itself is shown
 during the stroke.
 
+
+### Where the fill solve runs, and the resolution that paid for it
 **The solve used to run where the interface was waiting, so it was capped.** A
 max-flow grows faster than its region — about 1.3 s for a megapixel — and on a
 large drawing an unbounded one does not take a while, it stops the program, so
@@ -2910,6 +2979,8 @@ its solve off**: playback is twenty-four questions a second against answers
 taking a tenth of one, and a queue that fills faster than it drains never
 catches up.
 
+
+### What a widget on a list row takes over, including the row's own tick
 **A widget on a list row disables that row's own tick.** The show-scribbles box
 was a `QCheckBox` in a widget set on the layer's row with `setItemWidget`. Qt
 treats an index widget as a persistent editor, so it routes the press into the
@@ -2917,6 +2988,8 @@ widget instead of to the delegate — and the row's *visibility* tick silently
 stopped working, meaning no colour layer could be hidden at all. The panel is
 two real check columns now. If you are tempted to put a control on a row, don't.
 
+
+### What a stroke's dirty rectangle misses when the whole fill is resolved
 **Solving globally and repainting locally is a bug that looks like a feature.**
 A regenerated CTG fill changes colour across whole regions, nowhere near the
 pen. Marking only the stroke's own rectangle dirty left the new fill beside the
@@ -2924,12 +2997,16 @@ stroke and the old one everywhere else, while hiding and showing the layer
 repainted the lot — so the same operation appeared to have two behaviours. Any
 path that regenerates a fill has to mark everything dirty.
 
+
+### Which strokes count as drawing, and the one the solve guard missed
 **The per-dab solve came back through the other door.** The guard was "is a
 scribble being drawn", which covers drawing on the colour layer and misses
 drawing on the line art it is cut against — so inking over a filled drawing ran
 a max-flow per dab. The condition is any stroke at all, and the solve belongs at
 the end of it.
 
+
+### What point-sampling the barrier does to a two-pixel line
 **Never point-sample the barrier.** `ctgBarrier` used the compositor's `step`
 argument, which samples every nth pixel. Line art is thin: at a coarse step a
 two-pixel line becomes a dotted line, the barrier acquires holes that are not in
@@ -2937,6 +3014,8 @@ the drawing, and the fill pours out through its own outline. Composite at full
 resolution and reduce by taking the *most* covered pixel in each block — too
 solid costs a little gap tolerance, too thin costs the whole fill.
 
+
+### What made saving slow, and why skipping unchanged cels would not have helped
 **The obvious optimisation was the wrong one, and only a measurement said so.**
 Saving ninety-six drawings took 10.5 seconds and opening them 3.9, every time,
 changed or not. The obvious fix is to skip cels that have not moved — which would
@@ -2953,11 +3032,15 @@ run**, so if the first run is also slow the problem is somewhere else. And forma
 decisions are the ones to measure early: this was a change to the bytes on disk,
 which is cheap while no project exists and a migration afterwards.
 
+
+### Why an ever-true tablet flag leaves the mouse unable to draw
 **A counter is not a state.** Mouse events promoted from the pen were recognised
 by "has this canvas ever seen a tablet event", which is true forever after the
 first time the pen came near — so touching the tablet once left the mouse unable
 to draw for the rest of the session, silently. It is a time window now.
 
+
+### What was never timed, and what the benchmark stopped anyone timing
 **Nothing was measured until it had been "optimised" three times.** Every lag
 complaint traced to one operation — flattening the visible region — which had
 never been timed. It was 27 ms for four layers, against a 16.7 ms frame. Two
@@ -2978,6 +3061,8 @@ pixel and not per stroke. **A benchmark defines where you will look, so it also
 defines where the next problem will be.** `bench_zoom` now times the whole path
 through the real widget, which is the only reason this was found.
 
+
+### Why sharpness changed at 70.7%, and the cache cap nobody attributed it to
 **Three rendering faults, one root: a memory limit making decisions nobody
 attributed to it.** Reported as "strokes are jagged at 68% but crisp at 72%,
 and it lags when zoomed out", which sounds like three unrelated complaints and
@@ -3016,11 +3101,15 @@ Two more, from the same investigation:
 one of them was a decision the code made and a decision can be asserted exactly.
 Reverting any single fix turns it red, which was checked rather than assumed.
 
+
+### Why a cache sized by the drawing asks for half a gigabyte at 5% zoom
 **Caches must be sized by the window, not by the drawing.** The composite cache
 was sized from the visible *image* area, so at 5% zoom it asked for half a
 gigabyte, and its margin was measured in image pixels, so it grew as you zoomed
 in. Both are fixed; the shape of the mistake is worth remembering.
 
+
+### Why the step boundary kept moving, and the screen-pixel cache that removed it
 **An integer cannot track a continuous quantity, so it will pick somewhere to
 jump — and something else will pick where.** Issue #10 moved the step boundary
 from 70.7% to 61% and left it there. It was still a boundary: `cache_step_` was
@@ -3066,6 +3155,8 @@ four-layer drawing, 6 ms → 17 ms). Both buy the continuity; the first was
 previously "free" only because you were looking at a cache built for a
 different zoom, which is what jagged meant.
 
+
+### Why the max-flow keeps its trees, and how an orphan adopts its own descendant
 **The max-flow needs its trees kept.** Rebuilding the search trees per
 augmenting path is Edmonds-Karp in disguise: correct, and 214 seconds on a
 megapixel instead of 1.3. And repairing trees has one trap — an orphan that
@@ -3073,12 +3164,16 @@ still points at its old parent can adopt its own descendant, since the
 candidate's chain runs back through it and still appears rooted. Cut the link
 before searching. See `gridflow.cpp`.
 
+
+### Why an edit that matched nothing still built and passed
 **A green build proves nothing about the interface.** An edit that was meant to
 add the "Add colour layer" button matched nothing, silently. The build passed,
 all tests passed, and the button was simply absent. Screenshots caught it, and
 caught a mis-encoded character and a fresh document with three undoable setup
 steps. Look at the thing.
 
+
+### Who promotes a pen's taps, and whether a double click arrives
 **Whether a pen produces a double click depends on who promotes, and it is not
 Qt's decision.** This entry said flatly that a pen produces no double click. That
 is wrong, and the correction is worth more than the original claim was.
@@ -3135,6 +3230,8 @@ the row is still listening — the layer panel takes it on the name only, becaus
 the visibility tick is in the same column and flicking a layer off and on is the
 commonest gesture in the panel.
 
+
+### The native frame a floating dock gets, and the press a pen never sends
 **A floating panel's title bar belongs to the window manager, and a pen cannot
 press it.** This is [#50](https://github.com/S-poony/Animage/issues/50), and it
 is the *other* half of the pen story: not how an event is promoted, but whether
@@ -3168,6 +3265,8 @@ applied only once **nothing is held down**, because `topLevelChanged(true)`
 arrives mid-drag and changing the decoration recreates the window, which would
 break the one gesture that already worked.
 
+
+### Why a rebuilt title bar matched every metric and still looked wrong
 **A title bar is a drawn thing, not a row of widgets** — and this cost six
 attempts, all of them spent matching numbers. `DockTitleStrip` paints itself with
 `CE_DockWidgetTitle`, the same call `QDockWidget` makes, so the background, the
@@ -3178,6 +3277,8 @@ box, icon, icon resolution — while it still looked wrong, because nothing was
 painting the background at all. The reporter is who noticed: *the title and the
 cross are in a rectangle when docked and in nothing when floating.*
 
+
+### What size a title-bar button's glyph is really drawn at
 **And `iconSize()` on a title-bar button is an upper bound, not the drawn size.**
 The last of those attempts had every number identical to Qt's and still drew a
 cross half again too big. The rule Qt follows is that the glyph is fitted to the
@@ -3193,6 +3294,8 @@ reaching for before any more arithmetic: it magnifies Qt's button and ours side
 by side and prints the bounding box of the *ink* in each. Every metric can agree
 while the painted glyph does not, and only the picture says so.
 
+
+### The flag a drag that ends outside the window leaves set
 **Dragging a panel out of the window stops the layout running, and it is Qt's
 bug rather than ours.** This is
 [#54](https://github.com/S-poony/Animage/issues/54), and it is worth reading
@@ -3220,6 +3323,39 @@ reason it presents as intermittent rather than as a window that is simply broken
 and two stock docks, none of this program in it, Qt 6.11.1, plain mouse. That is
 what makes it upstream, and it is the experiment the issue had been sitting on.
 
+**And upstream had already found it.** It is
+[QTBUG-147209](https://bugreports.qt.io/browse/QTBUG-147209), fixed on
+2026-06-03 by `e9a22af5ab7f`, whose message is this bug in our own words —
+*"Saved state was not cleared when a dock widget is dragged. This caused an early
+return in `QMainWindowLayout::setGeometry()` and subsequently in main window
+children not receiving resize events."* Three lines of Qt say the whole story:
+
+| Qt | what `endDrag` does with the flag | |
+|---|---|---|
+| 6.11.0 | `mwLayout->restore();` — a defaulted bool, clearing | correct |
+| **6.11.1** | `mwLayout->restore(QInternal::KeepSavedState);` | **the bug** |
+| 6.11.2 | `mwLayout->restore(QInternal::ClearSavedState);` | fixed |
+
+So it is a regression with a narrow blast radius: a commit called "Code cleanup
+in QMainWindowLayout" replaced a defaulted `bool keepSavedState` with a
+`QInternal::SaveStateRule` enum, and one call site got the wrong enumerator.
+**Nothing that ships ever had it** — `ci.yml` pins Qt 6.8 — so this was only ever
+visible to somebody building locally against MSYS2's Qt while it sat on 6.11.1.
+
+`MainWindow::wakeLayout` is therefore scoped to exactly that release, through
+`QLibraryInfo::version()` rather than `QT_VERSION`, because Qt is a DLL here and
+the build that compiled the check need not be the build that runs it. **When the
+oldest Qt anyone builds this with is 6.11.2, the whole thing can be deleted**,
+signal and all.
+
+**Two hours of the search would have been saved by checking the version first.**
+The Qt source was read from `qt/qtbase` at branch `6.11` — which is *ahead* of
+the 6.11.1 tag — so it showed the fixed code while the binary on the desk ran the
+broken code, and the measurements and the source disagreed for no visible reason.
+Nothing was wrong with either. **Read the source at the tag you are running**, and
+when a measurement contradicts the source, suspect the version before suspecting
+the measurement.
+
 **What the guess got wrong is the interesting half.** The issue reasoned that
 Qt still believed a drag was in progress. It does not. Measured, in order: the
 mouse release *is* delivered as an ordinary client-area event, `endDrag` *does*
@@ -3229,7 +3365,8 @@ all clear throughout. It is one flag and not a wedged state machine, and the
 difference matters: a wedged machine wants poking, one flag wants clearing.
 
 **`restoreState(saveState())` is the cure, and it is measured rather than
-chosen.** `MainWindow::wakeLayout` does it on the moment the drag settles. Six
+chosen.** `MainWindow::wakeLayout` does it on the moment the drag settles, on
+the one Qt that needs it. Six
 other candidates were applied to the frozen state and each left it frozen:
 hiding and showing the dock, `setDockOptions`, `addDockWidget` again,
 `invalidate()`, `setFloating` off and on, and `setTitleBarWidget` — which is what
@@ -3240,9 +3377,12 @@ separator, with no move in between, makes Qt clear the flag itself through
 `endSeparatorMove`. It is surgical and it needs a separator to exist, and when
 every panel is floating there is none.
 
-### Three things about how this was answered
+#### Three things about how this was answered
 
-**`shots` cannot see it, and that is not a failure of `shots`.** The state cannot
+**`shots` cannot see it, and that is not a failure of `shots`** — a conclusion
+Qt's own maintainers reached independently, since the commit fixing it says
+*"The behavior can't be autotested, because a gradual resize of the main window
+is prone to flakiness."* The state cannot
 be reached from code: `setFloating(true)` never enters Qt's drag, so it freezes
 nothing, and a synthetic drag sent to a `QDockWidget` leaves Qt's own machine
 half finished and produces convincing symptoms that are not this one — the trap
@@ -3269,7 +3409,7 @@ no drag. Eight cures were then tried in one run of a program, in about a second,
 where each would otherwise have cost a hand-made drag. **Measure the state once
 by hand, then forge it.**
 
-### And a lesson about believing a bug report, including your own
+#### And a lesson about believing a bug report, including your own
 
 The first hand test of the fix came back with four complaints: a panel landing
 below the pointer, the timeline losing height, a panel not keeping its width
@@ -3294,6 +3434,8 @@ in the comment on `wakeLayout` so nobody writes them again.
 Building the other side costs one `git stash` and one incremental build here, and
 it is cheaper than the change it stops you making.
 
+
+### What asking for a private Qt component at the top level switches off
 **A component added to the top-level `find_package(Qt6 ...)` can silently turn
 the whole application off.** `test_pen_promotion` needs a private Qt header, so
 `GuiPrivate` was added to the `COMPONENTS` list in the root `CMakeLists.txt`.
@@ -3338,6 +3480,8 @@ cmake -S . -B build-check -DCMAKE_DISABLE_FIND_PACKAGE_Qt6GuiPrivate=ON
 
 It should print the skip line, still find Qt, and still build `animage`.
 
+
+### Why fitting the canvas on a maximise cannot trust either event alone
 **A window state change and a widget resize arrive in either order.** Maximising
 the window frames the canvas in it, and restoring frames it again — the canvas
 keeps its zoom and pan across a resize and the pan is the image point at the
@@ -3372,6 +3516,8 @@ which is the order the broken version assumed. The test now also sends a resize
 0.6575, against 0.6575 for a fit at that size. Anything about window state wants
 verifying that way before it is believed.
 
+
+### The nine-character band where an export makes the folder and no frames
 **A path limit is per component, and a name that breaks it breaks it halfway.**
 Windows allows 255 characters per path *component*, not per path — the old
 260-character total does not bite, because Qt prefixes long paths internally, and
@@ -3401,6 +3547,8 @@ first thing that touches the disk and is obvious. A name that is *just* too long
 gets through the first thing and fails at the second, which is always later and
 usually partway through the work.
 
+
+### What `findChild` hands back after the view has closed its editor
 **A closed editor is still a child of the view.** An item view releases its
 editor with `deleteLater`, so `findChild<QLineEdit*>` hands back the dead one
 until the deferred deletes run. A rename test typed into a closed editor and
@@ -3408,6 +3556,8 @@ passed — a rename that goes nowhere leaves the name alone exactly as a refused
 rename does, so the assertion was true and meant nothing. `settleEditors` sends
 the pending `DeferredDelete` events before anything looks for an editor.
 
+
+### Where the first dock-width reading was taken, and why the fix shipped twice
 **A before-and-after test is only a test if "before" is before.** The layer dock
 grew by eighteen pixels when a colour layer was selected, shoving the canvas
 sideways. The test written for it read the width *after* the box was showing and
@@ -3418,6 +3568,8 @@ green test. Measuring a quantity twice on the same side of the event you care
 about will agree with itself perfectly and say nothing. Related: the dock is
 sized from the panel's *preferred* width, so a minimum does not hold it still.
 
+
+### What emptying the fill cache does not reach while a solve is in flight
 **An invalidation that empties a cache has to reach the answers in the air.**
 Some of what a fill depends on is not in its key — which way marks are carried,
 and a whole document being replaced by another whose drawings answer to the same
@@ -3430,6 +3582,8 @@ flight records that count, so every present *and future* way of saying "all of
 that is wrong" invalidates both. A list of call sites to remember would have
 been the same bug with more steps.
 
+
+### What went stale when the solve stopped finishing in the same call stack
 **Anything that rode on a re-solve was riding on it being synchronous.** The
 layer panel's tooltip was refreshed by the solve that changing the colour
 sources happens to trigger. Invisible while the solve finished inside the paint
@@ -3438,6 +3592,8 @@ layer is about the layer, so it is said when the layer changes. Expect more of
 these: anything that was correct only because two things happened in the same
 call stack.
 
+
+### The tests that construct the bug, and go red when it is fixed
 **A test that constructs a failure will be repaired by the fix for it.** Several
 tests build a mark that lands in the wrong place, and moving marks with the
 drawing makes them land right — so they went red on a change that was working
@@ -3445,6 +3601,8 @@ perfectly. They now turn the moving off and say why. The tell is a *whole
 fixture* going green-to-red on a feature that is supposed to improve exactly
 that case; read what the test was for before believing the failure.
 
+
+### Why a cache key of cel revisions serves wrong fills, not slow ones
 **A cache key made of revisions was going to lie, not thrash.** The CTG fill
 cache was keyed on the cel holding the scribbles, which was a bijection for
 exactly as long as one drawing had one scribble cel. The design notes predicted a
@@ -3455,6 +3613,8 @@ equally-worn line art would have swapped answers. The key is `(drawing, layer)`,
 and `inputs` names the scribble *cel* and not only its revision, because
 reordering changes which cel is read and moves no revision anywhere.
 
+
+### Why an erased scribble left every later solve on that drawing coarser
 **A rectangle built from tile coordinates remembers what you erased.**
 The bounds a cel derives from its tiles — `drawnBounds`, in `tile.h`, and called
 `celBounds` in these notes and in issue #23 by a name it has never had in the
@@ -3484,6 +3644,8 @@ it, so rubbing out over blank paper is no longer an undo step that puts an empty
 tile back. This is also the cheap end of [#23](https://github.com/S-poony/Animage/issues/23):
 the tiles a command retains are what the history costs.
 
+
+### Why the proposed confidence score reads 1 on every case
 **The confidence signal the design notes propose does not work, and the
 measurement is the only thing that says so.** Scoring a mark by the fraction of
 it the solver labelled with the mark's own colour comes out at exactly 1 across
@@ -3503,6 +3665,8 @@ fill.** A mark wins its own pixels in the fill whatever the solver decided, so
 read back from the fill every mark is perfectly placed, always. There is a test
 pinning it, because it is the mistake the next person will make.
 
+
+### Why the carried-mark flag was removed rather than tuned
 **The flag that had to come out.** The timeline flagged drawings whose carried
 marks had filled nothing but themselves, from a whole-track audit that judged
 every drawing coarsely so the flag could say "go and look at drawing 34" rather
@@ -3546,12 +3710,16 @@ as you played through a shot. That is not a weaker version of such a feature, it
 is the absence of it, and any future one has to be computed for drawings nobody
 has opened.
 
+
+### What a stylesheet with no type selector also paints
 **A Qt stylesheet with no type selector styles the widget's tooltip too.** A
 swatch styled `background:#c00` handed its own colour to its own tooltip, and the
 slashed "no colour" swatch drew a red streak through the text of its. Name the
 type: `QPushButton { ... }`. Reported by the user; an offscreen `grab()` does not
 contain the tooltip, so it cannot be caught by screenshot.
 
+
+### How long a `QTreeWidgetItem` pointer stays valid once a rebuild is queued
 **A queued signal that rebuilds a list deletes rows out from under whoever holds
 one.** Reporting a finished solve by calling `rebuildLayerList` crashed
 `test_canvas`: a solve runs inside a paint, so the report has to be queued, and
@@ -3561,6 +3729,8 @@ colour, so it changes two words and a colour, in place. gdb found it in one run
 after two wrong theories — the same lesson as the two crashes above, learned
 again.
 
+
+### What the screenshot showed, and what the run had never set up
 **Look at the thing, and check the harness is looking at it.** A screenshot
 caught the "None" control being a second red-slashed swatch beside the one that
 already showed a red slash — two identical patches, one a readout and one a
@@ -3568,11 +3738,15 @@ control, with nothing to say which. The same screenshot run had silently failed
 to add the colour layer it was testing, because it looked for a `QAction` where
 the button is a `QPushButton`, so the first two pictures were of nothing at all.
 
+
+### The gap coordinates that built an open box out of plausible numbers
 **A test fixture can build a shape that is not the shape you meant.**
 `drawGappedBox` takes the gap as coordinates, and handing it two outside the box
 gives a bottom wall running six hundred pixels past the corner — not a closed
 shape at all. The printed numbers looked perfectly reasonable.
 
+
+### Four tool states in three booleans, and the pair a handler half-cleared
 **Four tools spelled as three independent flags, and a handler that kept half of
 a pair.** Which tool had the pen was two booleans and an optional — eight
 combinations for four states — and the window kept them in step by writing the
