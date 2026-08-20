@@ -484,7 +484,7 @@ CanvasWidget::~CanvasWidget() {
 void CanvasWidget::setTrack(TrackId track) {
     // Leaving commits, like changing frame does. A float that followed you to
     // another track would be a transform of the wrong drawing waiting to happen.
-    if (transform_ && track != track_) applyTransform();
+    if (transform_ && track != track_) settleTransform();
     track_ = track;
     setFrame(slot_);
 }
@@ -493,7 +493,7 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // Changing frame commits. A float that follows you to another drawing is a
     // paste onto the wrong drawing waiting to happen, and there is nothing
     // useful it could mean out there.
-    if (transform_ && slot != slot_) applyTransform();
+    if (transform_ && slot != slot_) settleTransform();
     // And the loop goes with it, while surviving a change of layer. A loop is
     // geometry in image space, so re-lifting it from another layer of the same
     // drawing is meaningful; carrying it to another drawing is how you transform
@@ -543,7 +543,7 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
     // you are done with this one. Guarded on the layer actually changing,
     // because rebuilding the layer panel reselects the same row constantly and
     // a transform must not be committed by a repaint.
-    if (transform_) applyTransform();
+    if (transform_) settleTransform();
     active_layer_ = layer;
 
     // A loop is geometry in image space, so carrying it to another layer of the
@@ -569,7 +569,7 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
 // assignment rather than after it, and the re-entrant setTool that arrives
 // through transformEnded finds the tool already where it wants it and returns.
 void CanvasWidget::setTool(Tool tool) {
-    if (tool_ == Tool::Transform && tool != Tool::Transform) applyTransform();
+    if (tool_ == Tool::Transform && tool != Tool::Transform) settleTransform();
     if (tool_ == tool) return;
     tool_ = tool;
     // The pen cannot still be drawing a loop with the lasso put down.
@@ -1482,7 +1482,7 @@ CanvasWidget::Refusal CanvasWidget::cutSelection() {
 }
 
 CanvasWidget::Refusal CanvasWidget::paste() {
-    if (transform_) applyTransform();
+    if (transform_) settleTransform();
 
     const Refusal refusal = refuseHere();
     if (refusal != Refusal::None) return refusal;
@@ -1511,6 +1511,7 @@ CanvasWidget::Refusal CanvasWidget::paste() {
     live.values.pivot_y = bounds.y + bounds.height / 2.0;
     transform_ = std::move(live);
     tool_ = Tool::Transform;
+    refreshTransformFit();
 
     buildTransformPicture();
     refreshAll();
@@ -1531,6 +1532,13 @@ QString CanvasWidget::explain(Refusal refusal) {
         case Refusal::NoLayer: return QStringLiteral("no layer is selected");
         case Refusal::LockedLayer: return QStringLiteral("that layer is locked");
         case Refusal::HiddenLayer: return QStringLiteral("that layer is hidden");
+        // Says what to do about it, because unlike the others this one is not
+        // over as soon as it is read: the transform is still there to be
+        // scaled down, and the box has been red for as long as it has been
+        // true.
+        case Refusal::TooLargeToCommit:
+            return QStringLiteral("it is scaled too large to bake into a drawing -- scale it "
+                                  "down, or cancel it");
         case Refusal::ColourLayer:
             return QStringLiteral("a colour layer holds labels rather than paint, so there is "
                                   "nothing here that can be resampled");
@@ -1582,6 +1590,7 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
     live.values.pivot_y = bounds.y + bounds.height / 2.0;
     transform_ = std::move(live);
     tool_ = Tool::Transform;
+    refreshTransformFit();
 
     buildTransformPicture();
     refreshAll();
@@ -1680,6 +1689,7 @@ void CanvasWidget::setTransformValues(const Transform& values) {
     wanted.pivot_x = middle.x;
     wanted.pivot_y = middle.y;
     transform_->values = wanted;
+    refreshTransformFit();
     update();
     Q_EMIT transformNumbersChanged();
 }
@@ -1688,12 +1698,40 @@ void CanvasWidget::nudgeTransform(int dx, int dy) {
     if (!transform_) return;
     transform_->values.dx += dx;
     transform_->values.dy += dy;
+    // A nudge cannot change the answer -- it moves the destination without
+    // growing it -- but it goes through the same door as everything else, so
+    // that "the numbers changed" and "the answer was worked out again" cannot
+    // come apart.
+    refreshTransformFit();
     update();
     Q_EMIT transformNumbersChanged();
 }
 
-void CanvasWidget::applyTransform() {
-    if (!transform_) return;
+// Worked out here and nowhere else, so that every route to a new set of numbers
+// -- a handle drag, a typed field, a nudge, a flip -- leaves the same answer
+// behind it. Cheap where it matters: below the ceiling it bounds the
+// destination and compares, and it only counts tiles when the numbers are near
+// the ceiling. See commitFitsInBudget.
+void CanvasWidget::refreshTransformFit() {
+    transform_fits_ =
+        !transform_ || commitFitsInBudget(transform_->lifted, transform_->values, kCommitTileBudget);
+}
+
+bool CanvasWidget::applyTransform() {
+    if (!transform_) return true;
+
+    // Asked before the lift is taken apart below, because a refusal has to
+    // leave the transform exactly as it was: still live, still holding the
+    // pixels, still showing the box -- so that scaling it back down and
+    // pressing Enter again is the whole of the remedy.
+    //
+    // An identity is let through whatever this says. Nothing is resampled on
+    // that path and nothing is allocated, and a transform that has not moved
+    // cannot be the one that will not fit.
+    if (!transform_fits_ && !transform_->values.isIdentity()) {
+        Q_EMIT transformRefused(Refusal::TooLargeToCommit);
+        return false;
+    }
 
     // Taken and cleared before anything below runs. Committing writes the
     // document, which repaints, and a repaint that still saw a live transform
@@ -1729,6 +1767,16 @@ void CanvasWidget::applyTransform() {
     refreshPointer();
     Q_EMIT documentChanged();
     Q_EMIT transformEnded();
+    return true;
+}
+
+// A refusal here is not a reason to stay: what these callers are doing is
+// leaving, and leaving with a float still up is what none of them can do. So
+// the drawing goes back where it was picked up from, unresampled and with no
+// undo step, and the message that came out of applyTransform is what says why
+// the placement is not there any more.
+void CanvasWidget::settleTransform() {
+    if (!applyTransform()) cancelTransform();
 }
 
 void CanvasWidget::cancelTransform() {
@@ -1828,6 +1876,14 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     // reads as part of it rather than as something floating nearby.
     const QPointF knob = rotationGizmo(handles);
 
+    // Red when this could not be committed, which is the one thing about a
+    // transform that the preview cannot otherwise show. The float is composited
+    // through a bounded picture and blitted, so it looks exactly as good at a
+    // scale that would take a hundred gigabytes to rasterise as at one that
+    // takes eight megabytes -- and looking right up to the moment Enter is
+    // pressed is what made this worth reporting. See issue #40.
+    const QColor ink = transform_fits_ ? QColor(60, 130, 240) : QColor(220, 50, 50);
+
     painter.save();
     painter.setBrush(Qt::NoBrush);
     // Light under dark, both here and on the stem: the box crosses paper and ink
@@ -1835,7 +1891,7 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     painter.setPen(QPen(QColor(255, 255, 255, 160), 3.0));
     painter.drawPolygon(box);
     painter.drawLine(handles[1], knob);
-    painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+    painter.setPen(QPen(ink, 1.0));
     painter.drawPolygon(box);
     painter.drawLine(handles[1], knob);
 
@@ -1844,7 +1900,7 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
         const QRectF square(handle.x() - half, handle.y() - half, kTransformHandleSize,
                             kTransformHandleSize);
         painter.setBrush(QColor(255, 255, 255));
-        painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+        painter.setPen(QPen(ink, 1.0));
         painter.drawRect(square);
     }
 
@@ -1852,7 +1908,7 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     // operations, which is the only thing on the box saying that this one turns
     // the drawing rather than stretching it.
     painter.setBrush(QColor(255, 255, 255));
-    painter.setPen(QPen(QColor(60, 130, 240), 1.0));
+    painter.setPen(QPen(ink, 1.0));
     painter.drawEllipse(knob, kTransformRotateKnob, kTransformRotateKnob);
     painter.restore();
 }
@@ -2042,6 +2098,7 @@ bool CanvasWidget::continueTransformDrag(const QPointF& widget_point) {
     }
 
     transform_->values = values;
+    refreshTransformFit();
     update();
     Q_EMIT transformNumbersChanged();
     return true;

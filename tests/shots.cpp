@@ -787,6 +787,28 @@ const std::vector<Situation>& situations() {
              s.picture = s.canvas->grab().toImage();
          }},
 
+        {"a-transform-too-large-to-bake",
+         "issue #40: the box, its handles and its knob go red when the scale has gone past "
+         "what a commit may hold, and the status bar says so -- the preview itself cannot, "
+         "because a float is blitted through a bounded picture and looks exactly as good at "
+         "a scale that would take a hundred gigabytes to rasterise",
+         [](Stage& s) {
+             // Zoomed out, because at 1:1 a box this size has no corner on
+             // screen and the picture would be a red line across the canvas.
+             s.circle(s.centre(), 120.0);
+             s.press(Id::Transform);
+             Transform huge = s.canvas->transformValues();
+             // Wider than tall on purpose: an over-budget box is at least
+             // 16384 pixels across whichever way it is shaped, and a square one
+             // that big has no top or bottom edge left on screen at the
+             // furthest this can zoom out.
+             huge.scale_x = 45.0;
+             huge.scale_y = 29.0;
+             s.canvas->setTransformValues(huge);
+             s.canvas->setZoom(0.05, s.centre());
+             s.settle();
+         }},
+
         {"a-transform-box-round-something-tiny",
          "the handles are a fixed screen size, so a box narrower than three of them has "
          "nowhere left to put them -- and the numeric bar is the only way to place it",

@@ -169,4 +169,43 @@ PixelRect transformedBounds(const Matrix& m, const PixelRect& rect);
 // missed. See "what a commit does to a line" in docs/handover.md.
 TileGrid transformTiles(const TileGrid& source, const Transform& t);
 
+// What one commit is allowed to rasterise, in destination tiles.
+//
+// A tile is 128 KB, so this is two gigabytes -- four times the history's whole
+// default budget, and twenty-seven full 4K cels. It is a scale of about ten on
+// a full-frame HD drawing, six on 4K and thirty-four on a small lasso, and
+// about two and a half seconds of resampling on the machine bench_transform was
+// last run on. Nothing about it is derived: it is the largest number where the
+// wait still reads as an operation rather than as a hang, and like the history
+// budget it is one constant to move when somebody reports hitting it.
+//
+// It exists because the destination has no other bound. A scale is unbounded
+// on both routes into it -- the bar's field goes to 10000% and a handle drag is
+// bounded only by where the pointer can reach -- and the destination grows as
+// its square, so a drawing that previews perfectly well can ask for hundreds of
+// gigabytes on commit. See issue #40.
+inline constexpr std::size_t kCommitTileBudget = 16384;
+
+// Whether `transformTiles` would stay inside `tile_budget`, asked before it is
+// called and cheaply enough to ask on every move of a drag.
+//
+// Counted from the source and not from the destination, which is the whole
+// point of it. The destination is what has no bound, so walking it costs what
+// it costs -- 64 ms at 10000% on an HD drawing, and four times that at 20000%.
+// Walking the source instead is a walk over tiles that already exist, and
+// stopping the moment the count passes the budget makes the worst case the
+// budget: the same answer in the same fraction of a millisecond at 200% and at
+// 10000%. An interface that has to ask sixty times a second can only ask a
+// question shaped like that one.
+//
+// Conservative by construction, because the two ends round differently: a
+// destination tile is wanted by `transformTiles` if the *axis-aligned box* of
+// its inverse-mapped square reaches occupied source, and that box is wider than
+// the square it came from. So each source tile's footprint is grown before it
+// is counted, and this says no slightly sooner than the resampler would say
+// yes. It never says yes to a commit the resampler would take past the budget,
+// which is the direction that matters.
+bool commitFitsInBudget(const TileGrid& source, const Transform& t,
+                        std::size_t tile_budget = kCommitTileBudget);
+
 }  // namespace animage

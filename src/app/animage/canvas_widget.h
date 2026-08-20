@@ -187,6 +187,7 @@ public:
         NothingSelected,  // erase takes a loop as its argument and had none
         NothingCopied,
         DifferentLayerKind,
+        TooLargeToCommit,  // the scale asks for more tiles than a commit may hold
     };
     static QString explain(Refusal refusal);
 
@@ -275,9 +276,26 @@ public:
 
     // Bakes it. One resample, one command, and nothing at all if the transform
     // is an identity -- looking at a drawing and putting it back is not an edit.
-    void applyTransform();
+    //
+    // False when it would not fit in `kCommitTileBudget`, in which case nothing
+    // is written and the transform is left live to be scaled down or cancelled.
+    // Whoever asked decides what to do about that, which is the whole reason
+    // this returns something: pressing Enter can leave it up, but the six
+    // callers that commit because you are *leaving* cannot.
+    bool applyTransform();
+    // Commit it, and if it will not commit, put it back where it was.
+    //
+    // What "you are leaving, so commit" means once a commit can refuse.
+    // Changing frame, track or layer, picking another tool, pasting and closing
+    // the document all go through here: none of them can carry a live transform
+    // out with them, and none of them can be left half done either.
+    void settleTransform();
     // Leaves no undo entry, because nothing was ever written.
     void cancelTransform();
+
+    // Whether the live transform could be committed, for the box and the bar to
+    // say so before Enter is ever pressed. True when there is no transform.
+    bool transformFitsInMemory() const { return transform_fits_; }
 
     // --- the pointer -----------------------------------------------------
 
@@ -390,6 +408,12 @@ Q_SIGNALS:
     void transformBegan();
     void transformNumbersChanged();
     void transformEnded();
+
+    // A commit was asked for and would not fit. The canvas has nowhere to say
+    // so itself -- the same reason whyTheBrushWillNotDraw is asked from outside
+    // -- and the six callers that commit on the way out are inside this class,
+    // so a return value would not reach the status bar from any of them.
+    void transformRefused(Refusal why);
 
     // A loop was made or cleared. Nothing but the status bar listens: a
     // selection has no panel and no state of its own to keep in step.
@@ -739,6 +763,16 @@ private:
         animage::SampleStep step;
     };
     std::optional<LiveTransform> transform_;
+
+    // Whether what is on screen could be committed, kept beside the numbers
+    // rather than asked for when it is wanted.
+    //
+    // The box is painted from it and so is the bar, and both are asked on every
+    // repaint -- while the answer only changes when the five numbers do. So it
+    // is worked out where they are set, which is also the only place that can
+    // afford to: see commitFitsInBudget on what asking costs and when.
+    bool transform_fits_ = true;
+    void refreshTransformFit();
 
     // What a press on the box grabbed.
     enum class Grab { None, Move, Rotate, Handle };

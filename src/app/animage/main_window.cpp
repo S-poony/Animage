@@ -297,6 +297,16 @@ MainWindow::MainWindow() {
     connect(canvas_, &CanvasWidget::transformNumbersChanged, this,
             &MainWindow::syncTransformFields);
     connect(canvas_, &CanvasWidget::transformEnded, this, &MainWindow::onTransformEnded);
+    // Not through sayCannot, which times its message out after six seconds: the
+    // other five refusals are over as soon as they are read, and this one is
+    // true until the box is scaled back down. It replaces the standing message
+    // that put itself up when the ceiling was crossed, so that pressing the key
+    // visibly answers rather than appearing to do nothing, and syncTransformFields
+    // takes whichever of the two is up back down again.
+    connect(canvas_, &CanvasWidget::transformRefused, this, [this](CanvasWidget::Refusal why) {
+        statusBar()->showMessage(
+            QStringLiteral("Cannot bake this: %1").arg(CanvasWidget::explain(why)));
+    });
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
@@ -1445,6 +1455,13 @@ void MainWindow::onTransformBegan() {
 }
 
 void MainWindow::onTransformEnded() {
+    // The standing message goes with the thing it was about. Committed or
+    // cancelled, there is no longer a box for it to be describing -- and it has
+    // no timeout to take it down on its own.
+    if (!transform_fitted_) {
+        statusBar()->clearMessage();
+        transform_fitted_ = true;
+    }
     if (transform_bar_) transform_bar_->setVisible(false);
     setShortcutMode(shortcuts::Mode::Normal);
     // Back to the brush, which is what you were going to do next. setChecked
@@ -1474,6 +1491,29 @@ void MainWindow::syncTransformFields() {
     if (transform_flip_x_) transform_flip_x_->setChecked(values.flip_x);
     if (transform_flip_y_) transform_flip_y_->setChecked(values.flip_y);
     updating_transform_fields_ = false;
+
+    // A state and not an event, so it is put up when the ceiling is crossed and
+    // taken down when it is crossed back -- with no timeout in between.
+    //
+    // A timed message was wrong twice over here. It says the box is red while
+    // it may already be blue again, and at 10000% the box is the one thing that
+    // cannot correct it: an over-budget box is at least sixteen thousand pixels
+    // across, so at the furthest this zooms out its nearest edge is still off
+    // the viewport and the bar is the only place the answer appears at all.
+    //
+    // Only on the change, because a drag crosses the ceiling on one move and
+    // then goes on sending them.
+    const bool fits = canvas_->transformFitsInMemory();
+    if (fits != transform_fitted_) {
+        if (fits) {
+            statusBar()->clearMessage();
+        } else {
+            statusBar()->showMessage(
+                QStringLiteral("Scaled too large to bake into a drawing. Scale it back down, or "
+                               "cancel it."));
+        }
+    }
+    transform_fitted_ = fits;
 }
 
 void MainWindow::flipTransform(FlipAxis axis) {
@@ -1816,7 +1856,7 @@ bool MainWindow::leaveCurrentDocument() {
     // A float is document state that is not in the document, so leaving without
     // committing loses it -- and leaving is not a way to discard, which is the
     // rule the rest of this function is built on.
-    canvas_->applyTransform();
+    canvas_->settleTransform();
     if (doc_.historyStamp() == saved_history_stamp_) return true;  // nothing to lose
 
     if (!project_folder_.isEmpty()) {
@@ -3453,7 +3493,7 @@ std::string MainWindow::nextColourLayerName() const {
 // something that is not there. Committed first, so the drawing that was picked
 // up is part of what the deletion undoes.
 void MainWindow::removeCurrentLayer() {
-    canvas_->applyTransform();
+    canvas_->settleTransform();
     const Track* track = doc_.scene().findTrack(track_);
     if (!track || track->layers.size() <= 1) return;  // never leave nothing to draw on
     Layer* layer = currentLayer();

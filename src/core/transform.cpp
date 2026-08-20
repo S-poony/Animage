@@ -5,6 +5,7 @@
 #include <cmath>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace animage {
@@ -445,6 +446,107 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
         if (produced[i]) out.set(wanted[i], std::move(produced[i]));
     }
     return out;
+}
+
+bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t tile_budget) {
+    // The two exact paths cannot grow the grid at all: a whole-pixel
+    // translation re-keys the handles it was given and a mirror permutes them,
+    // so neither allocates a tile the source had not already got. Asking the
+    // general question about them would answer yes anyway, but slowly and for
+    // the wrong reason.
+    if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
+    if (source.empty()) return true;
+
+    // One occupied source tile covers about scale_x * scale_y destination
+    // tiles on its own, so a scale whose product is past the budget cannot fit
+    // however little ink there is. Asked first because it is also what keeps
+    // the arithmetic below inside an int: past this line a tile's footprint is
+    // at most a few million pixels across, and transformedBounds casts doubles
+    // to ints with nothing to catch an overflow.
+    const double widest = std::max(std::abs(t.scale_x), std::abs(t.scale_y));
+    const double area = std::abs(t.scale_x) * std::abs(t.scale_y);
+    const double budget = static_cast<double>(tile_budget);
+    if (!(widest <= budget) || !(area <= budget)) return false;  // false for a NaN scale too
+
+    const Matrix forward = matrixOf(t);
+    const int reach =
+        static_cast<int>(std::ceil(std::max(kernelSpread(t.scale_x), kernelSpread(t.scale_y)))) + 1;
+
+    // Where the whole destination lands, grown the way transformTiles grows the
+    // box it walks, and kept in doubles: this is asked about scales whose box
+    // does not fit in an int at all, and a refusal is the answer there rather
+    // than a wrapped-around width.
+    const PixelRect drawn = drawnBounds(source);
+    const Vec2 corners[4] = {
+        apply(forward, {double(drawn.x), double(drawn.y)}),
+        apply(forward, {double(drawn.x + drawn.width), double(drawn.y)}),
+        apply(forward, {double(drawn.x + drawn.width), double(drawn.y + drawn.height)}),
+        apply(forward, {double(drawn.x), double(drawn.y + drawn.height)})};
+    const double grow =
+        std::ceil(std::max(1.0, std::abs(t.scale_x)) + std::max(1.0, std::abs(t.scale_y))) + 1.0;
+    double left = corners[0].x, right = corners[0].x;
+    double top = corners[0].y, bottom = corners[0].y;
+    for (const Vec2& corner : corners) {
+        left = std::min(left, corner.x - grow);
+        right = std::max(right, corner.x + grow);
+        top = std::min(top, corner.y - grow);
+        bottom = std::max(bottom, corner.y + grow);
+    }
+
+    // Every line below this casts a double to a tile coordinate. The scale
+    // guard above catches the gestures that get anywhere near here, but a
+    // drawing already a long way from the origin multiplied by a scale in the
+    // thousands would not be one of them.
+    constexpr double kFurthest = 1.0e9;
+    if (!(left > -kFurthest && top > -kFurthest && right < kFurthest && bottom < kFurthest)) {
+        return false;
+    }
+
+    // An upper bound on the tiles in that box is an upper bound on the tiles
+    // with anything under them, so anything comfortably under the budget is
+    // answered here without counting a single tile. That is most of a drag,
+    // which is what keeps this off the pen's latency path: the count below only
+    // earns its cost near the ceiling.
+    const double across = std::floor(right / kTileSize) - std::floor(left / kTileSize) + 1.0;
+    const double down = std::floor(bottom / kTileSize) - std::floor(top / kTileSize) + 1.0;
+    if (across * down <= budget) return true;
+
+    std::unordered_set<TileCoord, TileCoordHash> touched;
+    // Sized once for the answer it can be asked to hold, because growing a hash
+    // table repeatedly is most of what this costs otherwise.
+    touched.reserve(tile_budget + 1);
+    for (const auto& [coord, tile] : source.tiles()) {
+        if (!tile) continue;
+
+        // Grown by the filter's reach in *source* pixels, the way the resampler
+        // grows the box it reads, and then by a whole tile once it has landed
+        // -- which is the slack between an inverse-mapped square and the
+        // axis-aligned box the resampler tests against. A rotated 128-pixel
+        // square's box is 128 * (|cos| + |sin|) across, so the excess is under
+        // twenty-seven destination pixels; a tile of margin covers it several
+        // times over and costs a rim of tiles on a count that is already only
+        // being compared against a threshold.
+        const PixelRect square{coord.x * kTileSize - reach, coord.y * kTileSize - reach,
+                               kTileSize + 2 * reach, kTileSize + 2 * reach};
+        PixelRect landed = transformedBounds(forward, square);
+        landed = {landed.x - kTileSize, landed.y - kTileSize, landed.width + 2 * kTileSize,
+                  landed.height + 2 * kTileSize};
+
+        const TileCoord first = tileCoordFor(landed.x, landed.y);
+        const TileCoord last =
+            tileCoordFor(landed.x + landed.width - 1, landed.y + landed.height - 1);
+        for (int ty = first.y; ty <= last.y; ++ty) {
+            for (int tx = first.x; tx <= last.x; ++tx) {
+                touched.insert({tx, ty});
+                // Inside the innermost loop, so that the work this does is
+                // bounded by the budget and not by the footprint it is walking.
+                // One source tile at a large enough scale covers more
+                // destination tiles than the whole budget by itself.
+                if (touched.size() > tile_budget) return false;
+            }
+        }
+    }
+    return true;
 }
 
 }  // namespace animage

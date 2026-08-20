@@ -29,6 +29,7 @@ the shape of the program. Those five maps are.
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
+| [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
 | [**Asking Qt a question directly**](#asking-qt-a-question-directly) | `dock_probe`: plain Qt with docks in it, for "ours or theirs?" |
@@ -2290,6 +2291,92 @@ the palest column and not on the darkest pixel.
 edge contrast, which is a figure nobody would act on; the magnified screenshot of
 a committed arc beside a live one is unarguable. Both are in
 [looking at the interface](#looking-at-the-interface).
+
+## What a commit is allowed to cost
+
+Issue #40, and the shape of it is the one this file keeps running into: **the
+preview and the commit are different orders of work, and only one of them is on
+screen.**
+
+`transformTiles` rasterises every destination tile with anything under it, and
+nothing bounded how many that was. The scale has no ceiling on either route in
+— the bar's own field goes to 10000%, and a handle drag is bounded only by
+where the pointer can reach — while the destination grows as its square. So a
+full-frame HD drawing at the top of the field asks for something like 137 GB and
+several minutes, and the program dies partway through it.
+
+What made it a trap rather than an obvious mistake is that **the float previews
+through `buildTransformPicture`, which is bounded absolutely** — one composite
+of at most 2048 pixels on its longest side, blitted through a `QTransform`. That
+picture looks exactly as good at a scale that cannot be committed as at one that
+can. Nothing on screen was a function of the thing that was about to go wrong.
+
+**The guard is a budget on the commit, and the answer is on screen before Enter
+is pressed.** `kCommitTileBudget` is 16384 destination tiles — two gigabytes,
+four times the history's whole default budget, about a scale of ten on a
+full-frame HD drawing and thirty-four on a small lasso. `commitFitsInBudget`
+answers whether a commit would stay inside it; the box, its handles and its knob
+are red for as long as the answer is no, and `applyTransform` refuses rather
+than rasterising.
+
+**The status bar and not the box is what carries it, and that is not a
+fallback.** An over-budget box is at least sixteen thousand pixels across
+whatever shape it is, so at 5% -- the furthest the canvas zooms out -- its
+nearest edge is still off the viewport. Red works while you are *dragging*,
+because the corner under the pointer is on screen by definition, and at the
+smallest over-budget sizes zoomed right out. It shows nothing at all when a
+number is typed into the field, which is the other route in. So the line goes up
+when the ceiling is crossed and comes down when it is crossed back, with no
+timeout in between: it describes a state, and a timed message says the box is
+red after it has gone blue again.
+
+Four things about it were decisions rather than mechanics.
+
+- **It counts from the source, not from the destination.** The destination is
+  the thing with no bound, so walking it costs whatever it costs — 64 ms at
+  10000% on an HD drawing, and four times that at 20000%. Walking the occupied
+  source tiles instead is a walk over tiles that already exist, and stopping the
+  moment the count passes the budget makes the worst case *the budget*: the same
+  answer in the same fraction of a millisecond at 200% as at 10000%. A question
+  the interface asks on every move of a drag can only be shaped like that one.
+  There is also an `O(1)` box test in front of it, so most of a drag never counts
+  a tile at all.
+- **It is conservative, and in the direction that matters.** A destination tile
+  is wanted if the *axis-aligned box* of its inverse-mapped square reaches
+  occupied source, and that box is wider than the square it came from — so each
+  source tile's footprint is grown before it is counted, and the guard says no
+  slightly sooner than the resampler would say yes. `test_transform` asserts the
+  half that matters against the resampler itself rather than against a second
+  copy of the arithmetic: whatever fits, `transformTiles` then stays inside.
+- **Nothing is clipped, and that is the point.** The canvas is unbounded on
+  purpose. A commit that quietly cropped what it wrote would be a worse bug than
+  the one being fixed, so a transform that will not fit is refused whole and the
+  drawing goes anywhere it likes at a scale that does.
+- **A refusal leaves the transform live, except where something is leaving.**
+  Pressing Enter on a box that is too large writes nothing and keeps the float
+  up, because scaling it back down and pressing Enter again is the whole of the
+  remedy. But six callers commit *because you are leaving* — changing frame,
+  track or layer, picking another tool, pasting, closing the document — and none
+  of them can carry a float out or be left half done. Those go through
+  `settleTransform`, which commits or, failing that, puts the drawing back where
+  it was picked up from.
+
+**What the status bar was saying about this, and now is not.** `undo N (X MB)`
+counts `Command::retainedBytes`, which is the tiles a command *displaced* — and
+a transform's new grid lives in the cel, uncounted. So the commit that creates
+388 MB reports 20 MB, and that 388 MB appears only after the *next* commit
+displaces it. The number is one command behind on exactly the quantity this bug
+is about, which is worth knowing before it is used to judge a report.
+
+**What is not covered.** The budget is a constant with the arithmetic beside it,
+and it is the arithmetic that should be argued with: somebody working at 4K who
+is refused a scale they had a reason for is the report that moves it, the way
+the history budget's number is meant to move. Nothing warns *before* a gesture
+that it is heading for the ceiling — the box goes red when it crosses, and that
+is all. And the drag's own arithmetic is untouched: it is absolute rather than
+accumulating (`scale = (wanted · arm) / |arm|²`, measured against the fixed
+`live.bounds`), so a second drag replaces the first rather than multiplying it,
+and there was never a runaway there to clamp.
 
 ## What the pointer says
 

@@ -5193,6 +5193,130 @@ void nudgingMovesTheDrawingExactly() {
     CHECK_EQ(differing, std::size_t{0});
 }
 
+// Issue #40. A scale the bar's own field allows previews perfectly well and
+// would rasterise into tens of gigabytes, so the commit refuses -- and what it
+// must not do is throw away the placement while refusing it.
+void aTransformTooLargeToCommitRefusesAndStaysUp() {
+    TEST("a transform past the budget refuses, writes nothing, and is still there to fix");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const std::size_t depth = fixture.doc().undoDepth();
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+
+    animage::Transform huge = fixture.canvas->transformValues();
+    huge.scale_x = 100.0;  // 10000%, which is exactly what the scale field allows
+    huge.scale_y = 100.0;
+    fixture.canvas->setTransformValues(huge);
+    // The premise, asserted rather than assumed: if the drawing this fixture
+    // makes ever gets small enough for this to fit, everything below is vacuous
+    // and this is the check that says so.
+    CHECK(!fixture.canvas->transformFitsInMemory());
+
+    fixture.press(Qt::Key_Return);
+    QCoreApplication::processEvents();
+    CHECK(fixture.canvas->transformIsLive());
+    CHECK_EQ(fixture.doc().undoDepth(), depth);
+
+    // And the remedy is the whole point of leaving it up: scaled back down, the
+    // same key commits.
+    animage::Transform sane = fixture.canvas->transformValues();
+    sane.scale_x = 2.0;
+    sane.scale_y = 2.0;
+    fixture.canvas->setTransformValues(sane);
+    CHECK(fixture.canvas->transformFitsInMemory());
+
+    fixture.press(Qt::Key_Return);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK_EQ(fixture.doc().undoDepth(), depth + 1);
+}
+
+// The bar is describing a state, so it has to stop describing it. At 10000% the
+// box is at least sixteen thousand pixels across and has no edge on screen even
+// zoomed right out, which makes this line the only place the answer appears --
+// and a line that outlives what it is about is worse than none.
+void theTooLargeMessageGoesWhenItStopsBeingTrue() {
+    TEST("the too-large message goes up when the ceiling is crossed and down when it is not");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const auto said = [&] { return fixture.window.statusBar()->currentMessage(); };
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(!said().contains(QStringLiteral("too large")));
+
+    animage::Transform huge = fixture.canvas->transformValues();
+    huge.scale_x = 100.0;
+    huge.scale_y = 100.0;
+    fixture.canvas->setTransformValues(huge);
+    QCoreApplication::processEvents();
+    CHECK(said().contains(QStringLiteral("too large")));
+
+    // Refused, and the bar answers the key rather than leaving what was already
+    // there -- pressing Enter and seeing nothing change reads as a dead key.
+    fixture.press(Qt::Key_Return);
+    QCoreApplication::processEvents();
+    CHECK(said().contains(QStringLiteral("Cannot bake")));
+
+    // Scaled back down: the box is blue again and the line goes with it.
+    animage::Transform sane = fixture.canvas->transformValues();
+    sane.scale_x = 2.0;
+    sane.scale_y = 2.0;
+    fixture.canvas->setTransformValues(sane);
+    QCoreApplication::processEvents();
+    CHECK(!said().contains(QStringLiteral("too large")));
+    CHECK(!said().contains(QStringLiteral("Cannot bake")));
+
+    // And it does not outlive the transform either: put back up, then cancelled.
+    fixture.canvas->setTransformValues(huge);
+    QCoreApplication::processEvents();
+    CHECK(said().contains(QStringLiteral("too large")));
+    fixture.press(Qt::Key_Escape);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK(!said().contains(QStringLiteral("too large")));
+}
+
+// The other half: six callers commit because you are *leaving*, and none of
+// them can carry a float out with them or be left half done. So a refusal there
+// puts the drawing back where it was picked up from.
+void leavingATransformThatWillNotCommitPutsTheDrawingBack() {
+    TEST("changing frame under a too-large transform puts the drawing back");
+    WindowWithInk fixture;
+    if (!fixture.canvas) return;
+
+    const animage::TileGrid before = fixture.ink()->tiles();
+    const animage::PixelRect drawn = animage::drawnBounds(before);
+    const std::size_t depth = fixture.doc().undoDepth();
+    const std::size_t frame = fixture.canvas->frame();
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    animage::Transform huge = fixture.canvas->transformValues();
+    huge.scale_x = 100.0;
+    huge.scale_y = 100.0;
+    fixture.canvas->setTransformValues(huge);
+    CHECK(!fixture.canvas->transformFitsInMemory());
+
+    fixture.canvas->setFrame(frame + 1);
+    QCoreApplication::processEvents();
+    CHECK(!fixture.canvas->transformIsLive());
+    CHECK_EQ(fixture.doc().undoDepth(), depth);
+
+    fixture.canvas->setFrame(frame);
+    QCoreApplication::processEvents();
+    std::size_t differing = 0;
+    for (int y = drawn.y; y < drawn.y + drawn.height; ++y) {
+        for (int x = drawn.x; x < drawn.x + drawn.width; ++x) {
+            if (!(before.pixel(x, y) == fixture.ink()->tiles().pixel(x, y))) ++differing;
+        }
+    }
+    CHECK_EQ(differing, std::size_t{0});
+}
+
 void cancellingLeavesTheUndoDepthWhereItWas() {
     TEST("cancelling a transform leaves no undo entry and no changed pixel");
     WindowWithInk fixture;
@@ -8096,6 +8220,9 @@ int main(int argc, char** argv) {
     aTransformAppliesToTheWholeHold();
     changingFrameCommitsTheTransform();
     transformIsRefusedOnAColourLayer();
+    aTransformTooLargeToCommitRefusesAndStaysUp();
+    theTooLargeMessageGoesWhenItStopsBeingTrue();
+    leavingATransformThatWillNotCommitPutsTheDrawingBack();
     undoDuringATransformCancelsIt();
     theNumericFieldsAndTheBoxAreOneThing();
     touchingTheCanvasTakesTheKeyboardBack();

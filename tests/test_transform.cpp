@@ -564,6 +564,76 @@ void aScaleOfZeroIsSurvivable() {
     CHECK(flattened.tileCount() < 1000u);
 }
 
+// What the budget is for, and the assertion is the one that matters: the guard
+// must not say yes to a commit the resampler then takes past the budget. Said
+// against the resampler itself rather than against a second copy of its
+// arithmetic, because two copies of a bound are two bounds.
+void theBudgetNeverPromisesMoreThanTheResamplerTakes() {
+    TEST("what fits in the budget is what the resampler stays inside");
+
+    const TileGrid source = gridWith({0, 0, 300, 200}, kInk);
+    // Small enough that the whole range can be committed for real and counted.
+    const std::size_t budget = 400;
+
+    for (double scale : {0.5, 1.0, 2.0, 4.0, 7.0, 9.0, 11.0, 16.0}) {
+        Transform t;
+        t.scale_x = scale;
+        t.scale_y = scale;
+        t.rotation = 13.0;  // and a turn, which grows the box the guard has to allow for
+        t.pivot_x = 150.0;
+        t.pivot_y = 100.0;
+
+        if (!commitFitsInBudget(source, t, budget)) continue;  // refusing is always allowed
+        const TileGrid out = transformTiles(source, t);
+        CHECK(out.tileCount() <= budget);
+    }
+}
+
+// The other half of it: a guard that answered "no" to everything would satisfy
+// the assertion above and be useless. An ordinary scale of an ordinary drawing
+// has to get through.
+void theBudgetLetsAnOrdinaryScaleThrough() {
+    TEST("an ordinary scale is not refused");
+
+    const TileGrid source = gridWith({0, 0, 300, 200}, kInk);
+    Transform t;
+    t.scale_x = 2.0;
+    t.scale_y = 2.0;
+    t.pivot_x = 150.0;
+    t.pivot_y = 100.0;
+    CHECK(commitFitsInBudget(source, t, kCommitTileBudget));
+
+    // And the exact paths, which allocate nothing per destination tile: a nudge
+    // re-keys the handles it was given, so no budget can be too small for it.
+    Transform nudge;
+    nudge.dx = 5.0;
+    nudge.dy = -9.0;
+    CHECK(commitFitsInBudget(source, nudge, 1));
+}
+
+// The bug: a scale that previews perfectly well and would rasterise into tens
+// of gigabytes. Issue #40.
+void aScaleThatWouldExhaustMemoryIsRefused() {
+    TEST("a scale far past the budget is refused");
+
+    const TileGrid source = gridWith({0, 0, 300, 200}, kInk);
+    Transform t;
+    t.pivot_x = 150.0;
+    t.pivot_y = 100.0;
+
+    // 100x is what the bar's own field allows, and it is refused. So is a scale
+    // no interface offers, which is the arithmetic guard rather than the count:
+    // it must answer rather than overflow the cast into tile coordinates.
+    t.scale_x = t.scale_y = 100.0;
+    CHECK(!commitFitsInBudget(source, t, kCommitTileBudget));
+    t.scale_x = t.scale_y = 1e9;
+    CHECK(!commitFitsInBudget(source, t, kCommitTileBudget));
+    // One axis alone, which the product of the two would let past.
+    t.scale_x = 1e9;
+    t.scale_y = 1e-9;
+    CHECK(!commitFitsInBudget(source, t, kCommitTileBudget));
+}
+
 void transformedBoundsCoversEveryCorner() {
     TEST("transformed bounds maps all four corners");
 
@@ -643,6 +713,9 @@ int main() {
     turningKeepsALineDark();
     reducingKeepsTheInkItRead();
     aScaleOfZeroIsSurvivable();
+    theBudgetNeverPromisesMoreThanTheResamplerTakes();
+    theBudgetLetsAnOrdinaryScaleThrough();
+    aScaleThatWouldExhaustMemoryIsRefused();
     transformedBoundsCoversEveryCorner();
     committingATransformUndoesInOneStep();
     return testing::summarise("transform");

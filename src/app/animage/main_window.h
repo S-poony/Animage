@@ -421,6 +421,9 @@ private:
     QPushButton* transform_flip_x_ = nullptr;
     QPushButton* transform_flip_y_ = nullptr;
     bool updating_transform_fields_ = false;
+    // Whether the transform fitted last time the fields were read, so that the
+    // status bar says it has stopped fitting once rather than on every move.
+    bool transform_fitted_ = true;
 
     // Every action the shortcut table names, by id. See setShortcutMode.
     std::unordered_map<shortcuts::Id, QAction*> keyed_actions_;
