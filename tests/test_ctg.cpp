@@ -146,7 +146,152 @@ struct Sequence {
     ImageId at(int drawing) const { return images[static_cast<std::size_t>(drawing)]; }
 };
 
-Rgba fillAt(const CtgFill& fill, int x, int y) { return fill.tiles.pixel(x, y); }
+Rgba fillAt(const CtgFill& fill, int x, int y) { return ctgFillPixel(fill, x, y); }
+
+// --- the two ways of reading a fill agree ---------------------------------
+//
+// This began as the gate for phase 1 of docs/colour-without-a-canvas.md, where
+// the fill's baked tiles and the accessor that replaces them lived side by side
+// for one commit and every pixel of both was compared. It ran green over the
+// situations below, and then the tiles went.
+//
+// What is left is the half that is worth keeping for good: ctgFillPixel is the
+// reference and the thing every other test here reads, and ctgFillSpan is what
+// the compositor actually calls. They are separate code -- the span hoists the
+// coarse row, works in runs and skips a clear row outright -- so nothing but a
+// test makes them stay the same function.
+void theSpanAgreesWithTheReference(const CtgFill& fill, const char* what) {
+    // The solve, and two tiles of the world beyond it in every direction --
+    // which is where the labels are extended to and where a fill can be asked
+    // about anything at all, since nothing bounds one any more.
+    const PixelRect solved = fill.solved;
+    const int margin = 2 * kTileSize;
+    const int x0 = solved.x - margin;
+    const int x1 = solved.x + solved.width + margin;
+
+    std::size_t wrong = 0;
+    std::size_t missed = 0;
+    std::vector<Rgba> span;
+
+    for (int y = solved.y - margin; y < solved.y + solved.height + margin; ++y) {
+        // Every stride, because the reducing path reads a lattice rather than
+        // every pixel and the run-lengths fall differently on each.
+        for (const int stride : {1, 2, 3, 7}) {
+            const int count = (x1 - x0 + stride - 1) / stride;
+            // Filled with something that is not an answer, so a span that
+            // writes nothing where it should write transparency is caught.
+            span.assign(static_cast<std::size_t>(count), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
+            ctgFillSpan(fill, y, x0, stride, count, span.data());
+
+            // And the extent the compositor skips on has to be honest in the
+            // one direction that matters: it may be too big, and it may never
+            // leave an answer outside itself. Too small is a colour that does
+            // not appear, which is the failure a coverage number would hide.
+            const CtgFillExtent extent = ctgFillExtent(fill, y, x0, stride, count);
+            for (int i = 0; i < count; ++i) {
+                const Rgba here = ctgFillPixel(fill, x0 + i * stride, y);
+                if (!(span[static_cast<std::size_t>(i)] == here)) ++wrong;
+                const bool covered = i >= extent.first && i < extent.first + extent.count;
+                if (!covered && here.a > 0.0f) ++missed;
+            }
+        }
+    }
+
+    if (wrong != 0 || missed != 0) {
+        std::printf("    %s: %zu span samples differ from the reference, %zu answers fall "
+                    "outside the extent\n",
+                    what, wrong, missed);
+    }
+    CHECK_EQ(wrong, std::size_t{0});
+    CHECK_EQ(missed, std::size_t{0});
+}
+
+// A stroke on a CTG layer exactly as the canvas makes one. Defined further
+// down, beside the tests it was written for.
+void ctgStroke(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
+               float x1, float y1, float radius, float r, float g, float b, bool erase);
+
+void theSpanIsTheSameFillAsThePixel() {
+    TEST("a run of the fill is the same fill as one pixel of it at a time");
+
+    {
+        // The ordinary case: a gapped box, one mark inside and one outside.
+        Fixture f;
+        f.doc.setCanvasSize(300, 260);
+        f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+        f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+        f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour), "a gapped box");
+    }
+    {
+        // Ink running off the frame, which is where the extension outside the
+        // solve and the bound the fill still has have to disagree correctly.
+        Fixture f;
+        f.doc.setCanvasSize(400, 400);
+        f.drawGappedBox(f.ink, 100, 100, 700, 300, 380, 420);
+        f.stroke(f.colour, 150, 200, 250, 200, 8.0f, 1.0f, 0.0f, 0.0f);
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
+                                   "a box off the edge");
+    }
+    {
+        // A coarse solve with a mark finer than its grid, so the run-length in
+        // the span crosses cells and the override lands inside one.
+        Fixture f;
+        f.doc.setCanvasSize(300, 260);
+        f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+        f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+        f.stroke(f.colour, 125, 125, 125, 125, 2.0f, 0.0f, 1.0f, 0.0f);
+        CtgSettings coarse;
+        coarse.downscale = 8;
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour, coarse),
+                                   "a coarse solve");
+    }
+    {
+        // A transparent mark, which is a label that paints nothing and has to
+        // punch through the colour under it rather than being hidden by it.
+        Fixture f;
+        f.doc.setCanvasSize(300, 260);
+        f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+        f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+        ctgStroke(f.doc, f.track, f.image, f.colour, 85, 150, 175, 150, 12.0f,
+                  kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b,
+                  false);
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
+                                   "a transparent mark");
+    }
+    {
+        // Marks with nothing to be cut against at all. The solve has no barrier
+        // and the marks are the whole answer.
+        Fixture f;
+        f.doc.setCanvasSize(300, 260);
+        f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
+                                   "marks with no line art");
+    }
+    {
+        // Nothing drawn anywhere: an empty fill still has to answer nothing
+        // everywhere rather than reading off the end of an empty grid.
+        Fixture f;
+        f.doc.setCanvasSize(300, 260);
+        f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour), "no marks");
+    }
+    {
+        // And a carried mark, which is the only case with a non-zero shift: the
+        // marks are read somewhere other than where they are stored, and the
+        // accessor has to move them the same way the seeding did.
+        Sequence s(2);
+        s.doc.setCanvasSize(400, 340);
+        s.followTheMotion();
+        s.box(0, 60, 60, 200, 180, 120, 140);
+        s.box(1, 160, 60, 300, 180, 220, 240);
+        s.stroke(0, s.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+        const CtgFill& carried = s.fillOf(1);
+        CHECK(carried.carried_by.x != 0);
+        theSpanAgreesWithTheReference(carried, "a carried mark");
+    }
+}
 
 void aScribbleFillsItsRegion() {
     TEST("a scribble fills the region the line art encloses");
@@ -190,14 +335,24 @@ void theLayerStoresScribblesNotTheFill() {
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
     const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
-    const std::size_t filled_tiles = fill.tiles.tileCount();
 
     const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
     CHECK(scribbles != nullptr);
 
     // The cel holds only the marks, which cover far less than the fill does.
-    CHECK(scribbles->tiles().tileCount() < filled_tiles);
-    CHECK(filled_tiles > 0);
+    // Counted in pixels over the drawn part of the canvas rather than in tiles,
+    // because the fill has no tiles: it is the labels, and what it covers is
+    // what it answers.
+    std::size_t scribbled = 0;
+    std::size_t coloured = 0;
+    for (int y = 0; y < 250; ++y) {
+        for (int x = 0; x < 300; ++x) {
+            if (scribbles->pixel(x, y).a >= kScribbleAlphaThreshold) ++scribbled;
+            if (fillAt(fill, x, y).a > 0.0f) ++coloured;
+        }
+    }
+    CHECK(coloured > 0);
+    CHECK(scribbled * 4 < coloured);
 
     // Nothing at all where the scribble was not drawn but the fill reaches.
     CHECK_NEAR(scribbles->pixel(130, 160).a, 0.0, 1e-3);
@@ -289,7 +444,7 @@ void noScribblesMeansNoFill() {
     // No cel at all on the colour layer yet.
     const CtgFill& nothing = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(!nothing.valid);
-    CHECK_EQ(nothing.tiles.tileCount(), std::size_t{0});
+    CHECK_EQ(nothing.labels.size(), std::size_t{0});
 }
 
 // Solving coarse while the pen moves is the plan's answer to interactivity. The
@@ -405,7 +560,7 @@ void theSolveStaysBoundedOnALargeDrawing() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     CHECK(fill.valid);
-    CHECK(fill.region.width > 2000);  // the region really is large
+    CHECK(fill.solved.width > 2000);  // the solve really is large
 
     // The budget itself, wherever a wall clock still means something. Under
     // AddressSanitizer this solve takes most of a minute, and none of that is
@@ -430,12 +585,17 @@ void theSolveStaysBoundedOnALargeDrawing() {
     CHECK_NEAR(fillAt(fill, 1200, 70).b, 1.0, 0.02);
 }
 
-// The region solved is the canvas. It used to be the bounding box of every tile
-// anyone had touched, which was wrong at both ends: colour reached out past the
-// frame after a stray stroke, and the colour *around* a shape stopped a tile
-// from the outermost stroke instead of running to the edge of the picture.
-void theFillCoversTheCanvasAndStopsThere() {
-    TEST("the fill covers the canvas and stops at its edge");
+// Colour goes past the frame, and this test used to say the opposite.
+//
+// It was "the fill covers the canvas and stops at its edge", and the reasoning
+// was that colour reaching out past the frame after a stray stroke was wrong.
+// It was wrong for the reason a *stray* stroke is wrong and not for the reason
+// the frame is there: a drawing runs off the edge on purpose -- roughs do, and
+// the surface has no edges at all -- so a shape crossing the frame line was
+// being coloured up to it and cut dead. The frame says what gets exported, and
+// an export still composites exactly it.
+void theFillRunsPastTheCanvasEdge() {
+    TEST("colour carries on past the frame, because the drawing does");
     Fixture f;
     f.doc.setCanvasSize(400, 400);
 
@@ -448,32 +608,110 @@ void theFillCoversTheCanvasAndStopsThere() {
     const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(fill.valid);
 
-    // Exactly the canvas: nothing outside it, and nothing short of it.
-    CHECK_EQ(fill.region.x, 0);
-    CHECK_EQ(fill.region.y, 0);
-    CHECK_EQ(fill.region.width, 400);
-    CHECK_EQ(fill.region.height, 400);
+    // The solve reaches the whole box and not the frame, which is the change:
+    // it used to stop at 400.
+    CHECK(fill.solved.x + fill.solved.width > 700);
 
-    // Inside the box takes the inside colour.
+    // Inside the box takes the inside colour, on both sides of the frame line.
     CHECK_NEAR(fillAt(fill, 200, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 500, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 690, 200).r, 1.0, 0.02);
 
-    // The far corners of the canvas take the background, which is now what a
-    // scribble outside a shape leaves them: the rim cannot be bought, so the
-    // outside colour keeps roughly its own pixels rather than spreading. What
-    // this test still pins is that the *region* is the canvas and the extension
-    // reaches its corners -- whatever label is there is carried all the way out.
+    // And it stops where the drawing says, not where the frame does: past the
+    // box's right-hand wall there is nothing, inside the canvas or outside it.
+    CHECK_NEAR(fillAt(fill, 750, 200).a, 0.0, 0.001);
     CHECK_NEAR(fillAt(fill, 380, 380).a, 0.0, 0.001);
     CHECK_NEAR(fillAt(fill, 10, 390).a, 0.0, 0.001);
 
-    // And nothing beyond the frame, even though the box carries on out there.
-    CHECK_NEAR(fillAt(fill, 500, 200).a, 0.0, 0.001);
-
-    // Growing the canvas re-solves rather than serving the old answer from the
-    // cache: the canvas is one of the fill's inputs.
+    // Resizing the canvas does not touch the fill and does not re-solve it. The
+    // canvas used to be mixed into the hash because it bounded the solve, so
+    // every resize threw away every fill in the document; nothing a fill
+    // depends on moves when the frame does.
+    const std::uint64_t solves = f.doc.ctgCache().storeCount();
     f.doc.setCanvasSize(800, 400);
     const CtgFill& wider = ctgFill(f.doc, f.track, f.image, f.colour);
-    CHECK_EQ(wider.region.width, 800);
+    CHECK_EQ(f.doc.ctgCache().storeCount(), solves);
     CHECK_NEAR(fillAt(wider, 500, 200).r, 1.0, 0.02);
+}
+
+// A drawing made entirely off the frame is coloured entirely off the frame.
+//
+// The case that used to do nothing at all: the solve region was clipped to the
+// canvas, so a shape and its mark out beyond the edge intersected it in
+// nothing, the region came back empty and the fill was blank. Nobody would draw
+// a whole shape out there deliberately, but a ball animating off-screen is
+// exactly this on its last few drawings, and it used to lose its colour.
+void aShapeOffTheCanvasIsColouredToo() {
+    TEST("a shape drawn entirely outside the frame is coloured out there");
+    Fixture f;
+    f.doc.setCanvasSize(400, 400);
+
+    // Well past the right-hand edge, and past the bottom too.
+    f.drawGappedBox(f.ink, 900, 900, 1200, 1150, 1000, 1040);
+    f.stroke(f.colour, 950, 1000, 1150, 1000, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(fill.valid);
+    CHECK_EQ(fill.colours, 1);
+
+    // The shape is filled, away from where the mark was drawn.
+    CHECK_NEAR(fillAt(fill, 1050, 1100).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 950, 1120).r, 1.0, 0.02);
+
+    // And nothing leaked back over the frame, which is the other half: the
+    // extension outside the solve is one label, and here it is the background.
+    CHECK_NEAR(fillAt(fill, 200, 200).a, 0.0, 0.001);
+    CHECK_NEAR(fillAt(fill, 1050, 700).a, 0.0, 0.001);
+}
+
+// What the canvas leaving the job costs, held still so phase 4 can beat it.
+//
+// The box round the ink picks the solve's resolution, and nothing clips that box
+// any more -- so two things drawn far apart are solved on one grid spanning both
+// of them and everything between, and the budget then coarsens the lot. Time and
+// memory do not run away, which is the part that makes this a cost rather than a
+// bug: the budget caps the cells and the barrier composites only where there are
+// tiles, so what is lost is sharpness and nothing else.
+//
+// This asserts the cost rather than complaining about it. It is issue #61 and
+// phase 4 of docs/colour-without-a-canvas.md, where a grid with uneven spacing
+// solves both patches at full resolution and this test is the one that changes.
+void inkFarApartCoarsensTheWholeSolve() {
+    TEST("two shapes far apart are solved on one coarse grid, and still fill");
+    Fixture f;
+    f.doc.setCanvasSize(600, 600);
+
+    // Two shapes of the same size, one on the frame and one a long way off it.
+    f.drawGappedBox(f.ink, 60, 60, 560, 560, 260, 320);
+    f.stroke(f.colour, 200, 300, 400, 300, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& near = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(near.valid);
+    const int alone = near.step;
+
+    f.drawGappedBox(f.ink, 4060, 4060, 4560, 4560, 4260, 4320);
+    f.stroke(f.colour, 4200, 4300, 4400, 4300, 10.0f, 0.0f, 0.0f, 1.0f);
+
+    const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(both.valid);
+    CHECK_EQ(both.colours, 2);
+
+    // One grid over both of them and the paper between, so the solve is a good
+    // deal coarser than either shape needed on its own.
+    CHECK(both.solved.width > 4000);
+    CHECK(both.step > alone);
+
+    // And both shapes still take their colour, blockily. That is what makes
+    // this a loss of sharpness rather than a loss of the feature.
+    CHECK_NEAR(fillAt(both, 300, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 300, 200).b, 0.0, 0.02);
+    CHECK_NEAR(fillAt(both, 4300, 4200).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 4300, 4200).r, 0.0, 0.02);
+
+    // Nothing in the gulf between them takes either colour: the two shapes are
+    // separate regions on one grid, which is exactly what a clustering radius
+    // would have thrown away.
+    CHECK_NEAR(fillAt(both, 2200, 2200).a, 0.0, 0.001);
 }
 
 // The solve is over what has been drawn on, and the labels are extended from
@@ -531,15 +769,12 @@ std::size_t scribblePixelsNotHonoured(const Cel& scribbles, const CtgFill& fill,
             for (int x = 0; x < kTileSize; ++x) {
                 const int px = coord.x * kTileSize + x;
                 const int py = coord.y * kTileSize + y;
-                if (px < fill.region.x || px >= fill.region.x + fill.region.width) continue;
-                if (py < fill.region.y || py >= fill.region.y + fill.region.height) continue;
-
                 const Rgba mark = scribbles.pixel(px, py);
                 if (mark.a < 0.5f) continue;  // the same threshold the seeding uses
                 ++total;
 
                 // Both premultiplied; the mark is opaque, so this is its colour.
-                const Rgba got = fill.tiles.pixel(px, py);
+                const Rgba got = ctgFillPixel(fill, px, py);
                 if (std::fabs(got.r - mark.r / mark.a) > 0.02f ||
                     std::fabs(got.g - mark.g / mark.a) > 0.02f ||
                     std::fabs(got.b - mark.b / mark.a) > 0.02f) {
@@ -581,6 +816,78 @@ void aScribbleWinsInThePixelsItCovers() {
     // disagreement and nothing else.
     CHECK_NEAR(fillAt(fill, 130, 110).r, 1.0, 0.02);
     CHECK_NEAR(fillAt(fill, 130, 170).r, 1.0, 0.02);
+}
+
+// The same invariant with nothing at all for the solver to work with.
+//
+// A ball that vanishes mid-canvas takes the fill with it and leaves the
+// scribble: the line art the mark was cut against has gone, so there is no
+// region to win and nothing to be cut from, and what is left is what somebody
+// drew. It used to hold because the override was baked last, at full
+// resolution, into the tiles; it now has to hold because the accessor asks the
+// marks before it asks the labels, which is exactly the change that could have
+// lost it.
+void aMarkOnADrawingWithNoLineArtStillShows() {
+    TEST("a mark shows its own pixels on a drawing with no line art at all");
+    Fixture f;
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(fill.valid);
+
+    // On the mark, its own colour, at full resolution.
+    CHECK_NEAR(fillAt(fill, 125, 110).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 125, 110).a, 1.0, 0.02);
+
+    // Every pixel of it, and not only the one this test picked.
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(scribbles != nullptr);
+    std::size_t counted = 0;
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, &counted), std::size_t{0});
+    CHECK(counted > 500);
+
+    // And nothing beyond it: with no barrier anywhere the rim is unseverable,
+    // so the mark keeps roughly its own pixels rather than flooding the sheet.
+    CHECK_NEAR(fillAt(fill, 600, 600).a, 0.0, 0.001);
+}
+
+// And a mark in a region the solve is too coarse to spread through.
+//
+// A corridor eight pixels wide solved at a step of eight is a region the cut
+// cannot represent: whatever the solver decides in there, it decides about a
+// cell that also contains both walls. The mark is what somebody asked for, so
+// the mark is what shows -- at full resolution, inside a region that has none.
+void aMarkInARegionNarrowerThanTheStepStillShows() {
+    TEST("a mark shows its own pixels in a region narrower than the solve grid");
+    Fixture f;
+    f.doc.setCanvasSize(600, 400);
+
+    // A box with a narrow corridor down the middle of it, and a mark in the
+    // corridor. The corridor is six pixels of paper between two walls.
+    f.drawGappedBox(f.ink, 60, 60, 400, 340, 200, 220);
+    f.stroke(f.ink, 200, 70, 200, 330, 2.5f, 0, 0, 0);
+    f.stroke(f.ink, 208, 70, 208, 330, 2.5f, 0, 0, 0);
+    f.stroke(f.colour, 204, 150, 204, 250, 1.5f, 0.0f, 1.0f, 0.0f);
+    f.stroke(f.colour, 100, 100, 160, 100, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    CtgSettings coarse;
+    coarse.downscale = 8;
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour, coarse);
+    CHECK(fill.valid);
+    CHECK(fill.step >= 8);  // the solve really is coarser than the corridor
+
+    // Whatever the cut did with a cell that spans both walls, the mark's own
+    // pixels are the colour that was asked for.
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(scribbles != nullptr);
+    std::size_t counted = 0;
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, &counted), std::size_t{0});
+    CHECK(counted > 100);
+
+    // Named explicitly as well, because a helper reporting zero of zero would
+    // pass this test without it.
+    CHECK_NEAR(fillAt(fill, 204, 200).g, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 204, 200).r, 0.0, 0.02);
 }
 
 // The disagreement that matters, and the one this exists for.
@@ -909,8 +1216,8 @@ std::size_t differingPixels(const CtgFill& a, const CtgFill& b, const PixelRect&
     std::size_t differing = 0;
     for (int y = over.y; y < over.y + over.height; ++y) {
         for (int x = over.x; x < over.x + over.width; ++x) {
-            const Rgba p = a.tiles.pixel(x, y);
-            const Rgba q = b.tiles.pixel(x, y);
+            const Rgba p = ctgFillPixel(a, x, y);
+            const Rgba q = ctgFillPixel(b, x, y);
             if (std::fabs(p.r - q.r) > 0.01f || std::fabs(p.g - q.g) > 0.01f ||
                 std::fabs(p.b - q.b) > 0.01f || std::fabs(p.a - q.a) > 0.01f) {
                 ++differing;
@@ -940,7 +1247,7 @@ void erasingAScribbleUndoesWhatItDid() {
     ctgStroke(f.doc, f.track, f.image, f.colour, 90, 150, 160, 150, 5.0f, 0, 0, 1, false);
     const CtgFill with_second = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK_EQ(with_second.colours, 2);
-    CHECK(differingPixels(before, with_second, before.region) > 100);
+    CHECK(differingPixels(before, with_second, f.doc.scene().canvas()) > 100);
 
     // Erased by retracing it with the same nib, which is how anybody rubs a
     // mark out.
@@ -950,7 +1257,7 @@ void erasingAScribbleUndoesWhatItDid() {
     CHECK_EQ(after.colours, before.colours);
     CHECK(sameRect(after.solved, before.solved));
     CHECK_EQ(after.step, before.step);
-    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+    CHECK_EQ(differingPixels(before, after, f.doc.scene().canvas()), std::size_t{0});
 }
 
 // The same question with the erased mark somewhere the line art is not, which
@@ -999,7 +1306,7 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     CHECK_EQ(after.colours, before.colours);
     CHECK(sameRect(after.solved, before.solved));
     CHECK_EQ(after.step, before.step);
-    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+    CHECK_EQ(differingPixels(before, after, f.doc.scene().canvas()), std::size_t{0});
 }
 
 // A mark made outside a shape, near its wall. Reported as colour appearing
@@ -1730,7 +2037,7 @@ void anAbandonedSolveReturnsNothing() {
     // Not a partial fill, because a partial fill is indistinguishable from a
     // finished one and would be cached, drawn and believed.
     CHECK(!given_up.valid);
-    CHECK_EQ(given_up.tiles.tileCount(), std::size_t{0});
+    CHECK_EQ(given_up.labels.size(), std::size_t{0});
 }
 
 void anUnboundedSolveIsFinerThanABoundedOne() {
@@ -1859,6 +2166,248 @@ void inkAt(TileGrid& grid, int px, int py) {
     grid.set(coord, std::move(tile));
 }
 
+// A grid drawn on a pixel at a time, without copying a tile per pixel the way
+// inkAt has to: this one keeps the tiles it is writing and hands them over at
+// the end, which is the difference between a test that runs and one that copies
+// a hundred and twenty-eight kilobytes three thousand times.
+class InkPad {
+public:
+    // Premultiplied, so the colour goes down with the alpha. Only the alpha is
+    // ever read out here -- ink is where the coverage is -- but writing a
+    // premultiplied pixel that could not exist would be a trap for the next
+    // thing that looks at one.
+    void at(int px, int py, float alpha = 1.0f) {
+        const TileCoord coord = tileCoordFor(px, py);
+        auto& tile = tiles_[coord];
+        if (!tile) tile = std::make_shared<Tile>();
+        tile->setPixel(tileLocal(px), tileLocal(py), Rgba{alpha, alpha, alpha, alpha});
+    }
+
+    void rect(int x0, int y0, int x1, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) at(x, y);
+        }
+    }
+
+    void diagonal(int from, int to, int thickness) {
+        for (int i = from; i < to; ++i) {
+            for (int t = 0; t < thickness; ++t) at(i, i + t);
+        }
+    }
+
+    TileGrid grid() const {
+        TileGrid out;
+        for (const auto& [coord, tile] : tiles_) out.set(coord, tile);
+        return out;
+    }
+
+private:
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> tiles_;
+};
+
+TileGrid inkedRect(int x0, int y0, int x1, int y1) {
+    InkPad pad;
+    pad.rect(x0, y0, x1, y1);
+    return pad.grid();
+}
+
+// A hollow square of ink, three pixels thick, without going through the brush.
+TileGrid inkedBox(int x0, int y0, int size) {
+    InkPad pad;
+    for (int t = 0; t < 3; ++t) {
+        pad.rect(x0, y0 + t, x0 + size, y0 + t + 1);
+        pad.rect(x0, y0 + size - t, x0 + size, y0 + size - t + 1);
+        pad.rect(x0 + t, y0, x0 + t + 1, y0 + size);
+        pad.rect(x0 + size - t, y0, x0 + size - t + 1, y0 + size);
+    }
+    return pad.grid();
+}
+
+// The guard that means "nothing to match" has to mean it at every step.
+//
+// It is a threshold on the level-zero ink, and level zero used to be built by
+// the barrier's `Most` reduction: a cell holding any ink read about 1, so the
+// sum was the number of inked cells and a threshold of one meant none of them.
+// Level zero is averaged now -- which is right, and is what every level above
+// it has always done -- so that same cell reads `ink / step^2` and the sum is
+// the ink divided by a cell's area. The threshold did not move with it, and
+// quietly became "fewer than step^2 pixels of ink".
+//
+// Nothing noticed while the region was clipped to the canvas, because `step` is
+// the region's longer side over ninety-six and a 1920-wide canvas caps it at
+// twenty. Unclipped, two things drawn ten thousand pixels apart give a step of
+// a hundred and seven, and a whole drawing's worth of line art then counts as
+// nothing at all: no shift is estimated, marks stop following the line art, and
+// there is nothing on screen to say so. Measured at that separation: 428 px
+// found for a true 400 before the reduction changed, and 0 after.
+//
+// Both halves are asserted, because the cheap way to pass the first is to
+// delete the guard.
+void theShiftGuardCountsInkAndNotCells() {
+    TEST("a shift is still found when the same ink sits in a much wider region");
+
+    // One box, moved 400 px, matched over regions of increasing width. The ink
+    // is identical in every case and only the region round it grows -- which is
+    // the whole of what the threshold was accidentally sensitive to, since
+    // `step` is the region's longer side over ninety-six.
+    //
+    // The region is passed rather than derived, so that nothing else about the
+    // drawings changes with it. A second shape further away would widen the
+    // region too, but it would also be ink in the correlation, and then a
+    // failure could be either this or the search preferring it.
+    const TileGrid from = inkedBox(100, 100, 300);
+    const TileGrid to = inkedBox(500, 100, 300);
+
+    for (const int width : {1024, 4096, 10240, 16384, 24576}) {
+        const PixelRect area{0, 0, width, 512};
+        const CtgShift found = estimateCtgShift({from}, {to}, area);
+
+        // Within two cells of the search's own grid, which is all a translation
+        // quantised to that grid can promise. What is pinned is that an answer
+        // comes back at all: the wide cases returned exactly zero while the
+        // threshold was counted in cells, because a whole box of line art is
+        // less than one cell's worth of coverage once a cell is large.
+        const int step = std::max(1, (std::max(area.width, area.height) + 95) / 96);
+        if (std::abs(found.x - 400) > 2 * step || std::abs(found.y) > 2 * step) {
+            std::printf("    region %5d wide, step %3d: found (%d, %d), wanted (400, 0)\n",
+                        width, step, found.x, found.y);
+        }
+        CHECK(std::abs(found.x - 400) <= 2 * step);
+        CHECK(std::abs(found.y) <= 2 * step);
+    }
+
+    // And the guard still guards. Two drawings with nothing on them agree at
+    // every offset, so the smallest shift is the honest answer -- and less than
+    // one pixel's worth of ink between them is still nothing, however large the
+    // region it is spread over.
+    const PixelRect wide{0, 0, 4096, 4096};
+    CHECK(estimateCtgShift({TileGrid{}}, {TileGrid{}}, wide).isZero());
+
+    InkPad faint;
+    faint.at(2000, 2000, 0.4f);  // four tenths of a pixel of coverage, in total
+    const TileGrid barely = faint.grid();
+    CHECK(estimateCtgShift({barely}, {barely}, wide).isZero());
+
+    // And a region with no shape at all to search over is still nothing. A
+    // sliver is the one case where the step cannot both leave the short axis a
+    // grid and keep the long axis affordable, and giving up is then the honest
+    // answer rather than the accidental one it used to be at twenty-four to
+    // one.
+    CHECK(estimateCtgShift({from}, {to}, PixelRect{0, 0, 100000, 100}).isZero());
+}
+
+// Paper the drawing does not reach costs nothing and changes nothing.
+//
+// The barrier composites only the runs of tile columns with something under
+// them, which is exact rather than an approximation: bare paper composites to
+// fully transparent and reduces to exactly 1.0, which is what the array already
+// holds. This is that claim, stated in a way that survives the unskipped
+// implementation it was first checked against.
+//
+// Every case is read twice: over a region that fits the drawing, and over one
+// grown by a whole number of steps on every side so the two coarse grids line
+// up cell for cell. Where they overlap they must agree exactly -- not nearly,
+// since both are a minimum over the same alphas -- and the paper added around
+// them must come back at exactly 1.0.
+//
+// The shapes are chosen for what skipping by band alone would miss, because
+// that is the version of this change that looks right and is not. Two patches
+// side by side put ink in every row, so a band test buys nothing and only the
+// column runs can. A long diagonal puts ink in every row *and* every column, so
+// neither buys anything and the answer still has to be identical. And a patch
+// that straddles a coarse cell is what would break if the part of a cell left
+// out of a run were not already the identity for min().
+void theBarrierFollowsTheInkAndNotTheBox() {
+    TEST("paper the drawing does not reach changes nothing about the barrier");
+
+    struct Case {
+        const char* what;
+        std::vector<TileGrid> sources;
+        PixelRect region;  // width and height are whole numbers of steps
+        int step;
+    };
+
+    InkPad slope;
+    slope.diagonal(10, 690, 2);
+
+    std::vector<Case> cases;
+    cases.push_back({"nothing drawn at all", {TileGrid{}}, {0, 0, 900, 700}, 1});
+    cases.push_back({"one patch in a big region", {inkedRect(100, 100, 160, 160)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"two patches stacked",
+                     {inkedRect(100, 40, 160, 100), inkedRect(100, 500, 160, 560)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"two patches side by side",
+                     {inkedRect(40, 300, 100, 360), inkedRect(700, 300, 760, 360)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"a long diagonal", {slope.grid()}, {0, 0, 900, 700}, 1});
+    cases.push_back({"a patch straddling a coarse cell", {inkedRect(250, 250, 262, 262)},
+                     {0, 0, 896, 700}, 7});
+    cases.push_back({"a coarse step over a sparse sheet",
+                     {inkedRect(40, 40, 90, 90), inkedRect(760, 600, 810, 650)},
+                     {0, 0, 896, 704}, 64});
+    cases.push_back({"a region that does not start at the origin",
+                     {inkedRect(300, 300, 360, 360)}, {137, 91, 639, 480}, 3});
+    cases.push_back({"a region left of and above the origin",
+                     {inkedRect(-300, -300, -240, -240)}, {-500, -500, 900, 700}, 5});
+    cases.push_back({"two sources over the same paper",
+                     {inkedRect(100, 100, 160, 160), inkedRect(600, 400, 660, 460)},
+                     {0, 0, 900, 700}, 1});
+
+    for (const Case& one : cases) {
+        const int step = one.step;
+        // A couple of tiles of paper, rounded up to a whole number of steps so
+        // that the two grids stay in phase with each other.
+        const int pad = step * ((2 * kTileSize + step - 1) / step);
+        const PixelRect wide{one.region.x - pad, one.region.y - pad, one.region.width + 2 * pad,
+                             one.region.height + 2 * pad};
+
+        const std::vector<float> tight = ctgBarrier(one.sources, one.region, step);
+        const std::vector<float> loose = ctgBarrier(one.sources, wide, step);
+
+        const int width = one.region.width / step;
+        const int height = one.region.height / step;
+        const int wide_width = wide.width / step;
+        const int wide_height = wide.height / step;
+        const int offset = pad / step;
+        CHECK_EQ(tight.size(), static_cast<std::size_t>(width) * height);
+        CHECK_EQ(loose.size(), static_cast<std::size_t>(wide_width) * wide_height);
+
+        std::size_t differing = 0;
+        std::size_t not_bare = 0;
+        for (int y = 0; y < wide_height; ++y) {
+            for (int x = 0; x < wide_width; ++x) {
+                const float there = loose[static_cast<std::size_t>(y) * wide_width + x];
+                const bool overlaps = x >= offset && x < offset + width && y >= offset &&
+                                      y < offset + height;
+                if (!overlaps) {
+                    if (there != 1.0f) ++not_bare;  // paper nothing was drawn on
+                    continue;
+                }
+                const float here =
+                    tight[static_cast<std::size_t>(y - offset) * width + (x - offset)];
+                if (here != there) ++differing;
+            }
+        }
+
+        if (differing != 0 || not_bare != 0) {
+            std::printf("    %s: %zu cells differ, %zu cells of bare paper are not 1.0\n",
+                        one.what, differing, not_bare);
+        }
+        CHECK_EQ(differing, std::size_t{0});
+        CHECK_EQ(not_bare, std::size_t{0});
+    }
+
+    // And there was ink to lose. A barrier of bare paper is all 1.0, and two of
+    // those agree without either of them having composited anything.
+    const std::vector<float> drawn = ctgBarrier(cases[1].sources, cases[1].region, 1);
+    std::size_t inked = 0;
+    for (const float value : drawn) {
+        if (value < 1.0f) ++inked;
+    }
+    CHECK(inked > 1000);
+}
+
 // How the barrier was banded must not be visible in the barrier.
 //
 // The band used to be counted in *coarse* rows, so it was `step` times taller
@@ -1932,8 +2481,11 @@ void theBarrierDoesNotDependOnHowItWasBanded() {
 
 int main() {
     std::printf("ctg:\n");
+    theSpanIsTheSameFillAsThePixel();
     theSolveStaysBoundedOnALargeDrawing();
-    theFillCoversTheCanvasAndStopsThere();
+    theFillRunsPastTheCanvasEdge();
+    aShapeOffTheCanvasIsColouredToo();
+    inkFarApartCoarsensTheWholeSolve();
     theCanvasSizeDoesNotChangeTheFill();
     oneScribbleFillsOneShape();
     aScribbleFillsItsRegion();
@@ -1946,6 +2498,8 @@ int main() {
     theCompositorShowsTheFillNotTheScribbles();
     aScribbleWinsInThePixelsItCovers();
     aMarkFinerThanTheSolveGridStillShows();
+    aMarkOnADrawingWithNoLineArtStillShows();
+    aMarkInARegionNarrowerThanTheStepStillShows();
 
     aDrawingWithNoScribblesInheritsTheEarlierOnes();
     editingADrawingDetachesItAndTheOnesAfterFollow();
@@ -1981,6 +2535,7 @@ int main() {
     movingMarksCanBeTurnedOff();
     redrawingTheOriginMovesTheMarkAgain();
     theShiftIsMeasuredFromTheInkAlone();
+    theShiftGuardCountsInkAndNotCells();
     aShapeRedrawnInPlaceHasNotMoved();
     whatIsShownAgreesWithWhatWasSolved();
 
@@ -1993,5 +2548,6 @@ int main() {
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
     theBarrierDoesNotDependOnHowItWasBanded();
+    theBarrierFollowsTheInkAndNotTheBox();
     return testing::summarise("ctg");
 }

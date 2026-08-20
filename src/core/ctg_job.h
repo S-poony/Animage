@@ -76,9 +76,10 @@ inline constexpr long long kInteractiveSolveBudget = 512 * 512;
 // forty million would be absurd.
 //
 // Four million is 2048x2048, which means a 1080p drawing is solved at full
-// resolution and a 4K one at half. It is the drawn area that is bounded and not
-// the canvas -- see solveCtgJob -- so a figure in the corner of a big canvas
-// gets full resolution whatever the canvas is.
+// resolution and a 4K one at half. It is the drawn area that is bounded, and
+// the canvas has nothing to do with it -- so a figure in the corner of a big
+// canvas gets full resolution whatever the canvas is, and a drawing with ink far
+// off the frame is coarsened by the box round the ink and not by the frame.
 inline constexpr long long kFullSolveBudget = 2048LL * 2048;
 
 // Everything a solve reads. No pointer in here names anything the document can
@@ -86,8 +87,9 @@ inline constexpr long long kFullSolveBudget = 2048LL * 2048;
 struct CtgJob {
     bool valid = false;
 
-    // The area the fill covers: the canvas, the picture that gets exported.
-    PixelRect canvas;
+    // No canvas. What a fill covers is the drawing and whatever the labels
+    // extend to, and the picture that gets exported is somebody else's
+    // rectangle -- see docs/colour-without-a-canvas.md, phase 3.
 
     // Marks and ink, as tiles: shared handles, and a tile is immutable while it
     // is shared.
@@ -133,18 +135,51 @@ struct CtgJob {
 // Runs one. Touches nothing but the job, so it may run anywhere -- and it takes
 // no document, which is not a convenience but the guarantee.
 //
-// `want_tiles` false stops after the labelling and the verdict, skipping a
-// write per pixel of the canvas -- two million of them at 1080p, and they do
-// not get cheaper when the solve is coarse.
+// `want_labels` false keeps only the verdict: the max-flow still runs, and what
+// is thrown away is the labelling it produced. That used to be a saving on a
+// write per pixel of the canvas as well, and is not any more -- there is no
+// paint-out, and the labels the solve already holds *are* the fill. What is
+// left is memory, which is what a whole-track audit needs: a judgement is a few
+// floats, and a 1080p labelling is 4 MB per drawing.
 //
 // `abandon`, if given, is read as the solve runs: set it and the solve stops as
 // soon as it notices and returns an invalid fill. A superseded solve is worth
 // nothing, and the pen does not wait.
-CtgFill solveCtgJob(const CtgJob& job, bool want_tiles,
+CtgFill solveCtgJob(const CtgJob& job, bool want_labels,
                     const std::atomic<bool>* abandon = nullptr);
 
+// How much ink covers each cell: every source layer, flattened, where 0 is bare
+// paper and 1 is solid.
+//
+// The reduction is an argument because the two callers want opposite ones, and
+// that was the bug. A barrier must not lose a thin line -- a hole in it is a
+// fill pouring out -- so it takes the *most* covered pixel in a cell, and a
+// line passing anywhere through a cell still stops a cut there. A correlation
+// wants the ink to weigh what there is of it, so that half a line under a cell
+// counts half; taking the most makes any cell containing any ink read as solid,
+// which at a coarse step is most of the drawing.
+//
+// estimateCtgShift used to build its level zero out of the barrier and inherit
+// the barrier's reduction, while every level above it was built by averaging --
+// and the code said so, in a comment naming the barrier's rule as the opposite
+// one. Only one of them can be right for a correlation.
+//
+// Only where some source has a tile. That is exact and not a saving bought with
+// accuracy: bare paper composites to fully transparent, which is a coverage of
+// zero -- the identity for max() and for a sum alike. It matters because an
+// empty region used to cost the same as a drawn one, and the cost has to follow
+// the ink before the canvas stops bounding the region at all.
+enum class InkReduce {
+    Most,  // the most covered pixel in the cell
+    Mean,  // the average over the cell
+};
+
+std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
+                                  int step, InkReduce reduce_with);
+
 // Builds the barrier the scribbles are cut against: every source layer,
-// flattened, as intensity where 0 is solid line and 1 is bare paper.
+// flattened, as intensity where 0 is solid line and 1 is bare paper. One minus
+// the coverage above, reduced by the most.
 //
 // More than one source is allowed on purpose. TVPaint cuts against a single
 // line-art layer; combining a rough with a clean closes most of the gaps that
@@ -152,6 +187,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles,
 // ask for by name.
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step = 1);
+
 
 // How far the ink moved between one drawing and another.
 //

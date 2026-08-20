@@ -758,7 +758,7 @@ void CanvasWidget::collectColour() {
     dropStaleColourRequests(/*only_this_frame=*/false);
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
-        const ColourAsked key{result.key.image, result.key.layer, result.wanted_tiles};
+        const ColourAsked key{result.key.image, result.key.layer, result.wanted_labels};
         const auto asked = ctg_asked_.find(key);
         // An answer to a question that has since been asked again, about a
         // drawing that has since been left, or about a document that has since

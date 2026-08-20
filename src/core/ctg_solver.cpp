@@ -28,7 +28,7 @@ CtgSolver::~CtgSolver() {
     for (std::thread& worker : workers_) worker.join();
 }
 
-void CtgSolver::request(const CtgKey& key, CtgJob job, bool want_tiles, Priority priority) {
+void CtgSolver::request(const CtgKey& key, CtgJob job, bool want_labels, Priority priority) {
     {
         std::lock_guard<std::mutex> held(mutex_);
         if (stopping_) return;
@@ -36,7 +36,7 @@ void CtgSolver::request(const CtgKey& key, CtgJob job, bool want_tiles, Priority
         const auto supersede = [&](std::deque<Request>& queue) {
             const auto stale = std::remove_if(
                 queue.begin(), queue.end(),
-                [&](const Request& queued) { return sameQuestion(queued, key, want_tiles); });
+                [&](const Request& queued) { return sameQuestion(queued, key, want_labels); });
             superseded_ += static_cast<std::uint64_t>(std::distance(stale, queue.end()));
             queue.erase(stale, queue.end());
         };
@@ -48,12 +48,12 @@ void CtgSolver::request(const CtgKey& key, CtgJob job, bool want_tiles, Priority
         // not a lesser answer, it is the wrong one. It counts itself as
         // superseded when it notices and stops.
         for (Active& active : running_) {
-            if (sameQuestion(active, key, want_tiles)) active.abandon->store(true);
+            if (sameQuestion(active, key, want_labels)) active.abandon->store(true);
         }
 
         Request queued;
         queued.key = key;
-        queued.wanted_tiles = want_tiles;
+        queued.wanted_labels = want_labels;
         queued.priority = priority;
         queued.job = std::move(job);
         queued.abandon = std::make_shared<std::atomic<bool>>(false);
@@ -70,7 +70,7 @@ bool CtgSolver::takeNext(Request& out) {
     std::deque<Request>& queue = now_.empty() ? whenever_ : now_;
     out = std::move(queue.front());
     queue.pop_front();
-    running_.push_back({out.key, out.wanted_tiles, out.abandon});
+    running_.push_back({out.key, out.wanted_labels, out.abandon});
     return true;
 }
 
@@ -103,7 +103,7 @@ void CtgSolver::run() {
         CtgFill fill;
         bool failed = false;
         try {
-            fill = solveCtgJob(taken.job, taken.wanted_tiles, taken.abandon.get());
+            fill = solveCtgJob(taken.job, taken.wanted_labels, taken.abandon.get());
         } catch (const std::bad_alloc&) {
             failed = true;
         }
@@ -122,7 +122,7 @@ void CtgSolver::run() {
             // result must not be able to reach the document.
             if (fill.valid && !taken.abandon->load()) {
                 finished_.push_back(
-                    {taken.key, std::move(fill), taken.wanted_tiles, taken.priority});
+                    {taken.key, std::move(fill), taken.wanted_labels, taken.priority});
                 ++solves_;
                 notify = notify_;
             } else if (failed) {
@@ -147,13 +147,13 @@ void CtgSolver::onFinished(std::function<void()> notify) {
     notify_ = std::move(notify);
 }
 
-void CtgSolver::cancel(const CtgKey& key, bool want_tiles) {
+void CtgSolver::cancel(const CtgKey& key, bool want_labels) {
     std::lock_guard<std::mutex> held(mutex_);
 
     const auto drop = [&](std::deque<Request>& queue) {
         const auto stale = std::remove_if(
             queue.begin(), queue.end(),
-            [&](const Request& queued) { return sameQuestion(queued, key, want_tiles); });
+            [&](const Request& queued) { return sameQuestion(queued, key, want_labels); });
         superseded_ += static_cast<std::uint64_t>(std::distance(stale, queue.end()));
         queue.erase(stale, queue.end());
     };
@@ -161,7 +161,7 @@ void CtgSolver::cancel(const CtgKey& key, bool want_tiles) {
     drop(whenever_);
 
     for (Active& active : running_) {
-        if (sameQuestion(active, key, want_tiles)) active.abandon->store(true);
+        if (sameQuestion(active, key, want_labels)) active.abandon->store(true);
     }
 
     // A result already collected into finished_ is left alone. It is an answer

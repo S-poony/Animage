@@ -2,7 +2,6 @@
 #include "ctg_job.h"
 
 #include <algorithm>
-#include <memory>
 #include <unordered_map>
 
 #include "compositor.h"
@@ -16,6 +15,40 @@ bool abandoned(const std::atomic<bool>* abandon) {
     return abandon != nullptr && abandon->load(std::memory_order_relaxed);
 }
 
+// Whether every label on the ring the lookup clamps to is -1.
+//
+// The ring is the border of the grid one cell in, because that is what the
+// clamp produces: a coordinate outside the solved rectangle lands on it in at
+// least one axis and ranges over it in the other. So this is exactly the set of
+// labels anything outside the solve can read, and when none of them is a colour
+// the whole world out there is transparent.
+//
+// A fact about the labels that were computed, not an estimate of them. It is
+// what lets ctgFillSpan answer an empty row in one test, which is the shortcut
+// an absent tile used to give the compositor for nothing.
+bool ringIsClear(const std::vector<int>& labels, int width, int height) {
+    if (width <= 0 || height <= 0) return true;
+    if (labels.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        return false;
+    }
+
+    const int low_x = (width >= 3) ? 1 : 0;
+    const int high_x = (width >= 3) ? width - 2 : width - 1;
+    const int low_y = (height >= 3) ? 1 : 0;
+    const int high_y = (height >= 3) ? height - 2 : height - 1;
+
+    const auto at = [&](int x, int y) {
+        return labels[static_cast<std::size_t>(y) * width + x];
+    };
+    for (int x = low_x; x <= high_x; ++x) {
+        if (at(x, low_y) >= 0 || at(x, high_y) >= 0) return false;
+    }
+    for (int y = low_y; y <= high_y; ++y) {
+        if (at(low_x, y) >= 0 || at(high_x, y) >= 0) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 // drawnBounds lives in tile.h now: it is a property of a grid, and the box a
@@ -23,15 +56,64 @@ bool abandoned(const std::atomic<bool>* abandon) {
 // picks a solve resolution with. The reasoning that put it here -- what an
 // emptied tile does to a bounding box -- moved with it.
 
-std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
-                              int step) {
+namespace {
+
+// Where any source has a tile, over the tiles the region covers.
+//
+// One pass over every source's tile coordinates, which costs a hash walk and no
+// pixels at all. A tile that exists but holds nothing counts as occupied and is
+// composited anyway: it costs time and never an answer, and testing it would
+// cost a scan of every pixel in it.
+struct InkTiles {
+    int origin_x = 0;  // tile coordinate of column 0
+    int origin_y = 0;
+    int width = 0;  // in tiles
+    int height = 0;
+    std::vector<std::uint8_t> occupied;
+
+    bool anyIn(int column, int first_row, int last_row) const {
+        for (int row = first_row; row <= last_row; ++row) {
+            if (occupied[static_cast<std::size_t>(row) * width + column]) return true;
+        }
+        return false;
+    }
+};
+
+InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& region) {
+    InkTiles ink;
+    if (region.isEmpty()) return ink;
+
+    const TileCoord first = tileCoordFor(region.x, region.y);
+    const TileCoord last = tileCoordFor(region.x + region.width - 1, region.y + region.height - 1);
+    ink.origin_x = first.x;
+    ink.origin_y = first.y;
+    ink.width = last.x - first.x + 1;
+    ink.height = last.y - first.y + 1;
+    ink.occupied.assign(static_cast<std::size_t>(ink.width) * ink.height, 0);
+
+    for (const TileGrid& source : sources) {
+        for (const auto& [coord, tile] : source.tiles()) {
+            if (!tile) continue;
+            const int column = coord.x - ink.origin_x;
+            const int row = coord.y - ink.origin_y;
+            if (column < 0 || column >= ink.width || row < 0 || row >= ink.height) continue;
+            ink.occupied[static_cast<std::size_t>(row) * ink.width + column] = 1;
+        }
+    }
+    return ink;
+}
+
+}  // namespace
+
+std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
+                                  int step, InkReduce reduce_with) {
     step = std::max(1, step);
     const int width = (region.width + step - 1) / step;
     const int height = (region.height + step - 1) / step;
-    std::vector<float> intensity(static_cast<std::size_t>(std::max(0, width)) *
-                                     std::max(0, height),
-                                 1.0f);
-    if (width <= 0 || height <= 0 || sources.empty()) return intensity;
+    std::vector<float> coverage(static_cast<std::size_t>(std::max(0, width)) *
+                                    std::max(0, height),
+                                0.0f);
+    if (width <= 0 || height <= 0 || sources.empty()) return coverage;
 
     // Drawn plainly, at full strength. What the barrier asks of a source is
     // where its ink is, and a layer's opacity is about looking at it.
@@ -55,6 +137,8 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
     Compositor compositor;
     Framebuffer band;
 
+    const InkTiles ink = occupiedTiles(sources, region);
+
     // A band at a time, counted in bytes.
     //
     // Banding at all is because the whole region at once is a hundred megabytes
@@ -70,9 +154,12 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
     // A band does not have to line up with a coarse row, and that is what lets
     // the floor here be one image row rather than one coarse row -- `step` times
     // smaller, and the difference between a bound and a smaller unbounded thing.
-    // The reduction below accumulates with min() into an array that starts at
-    // 1.0, so a coarse row finished by two bands is the same answer as one
-    // finished by a single band.
+    // Both reductions decompose across bands, which is what the banding needs:
+    // `Most` accumulates with max() into an array of zeros and `Mean`
+    // accumulates a sum, divided at the end by the cell's own pixel count. So a
+    // coarse row finished by two bands is the same answer as one finished by a
+    // single band, and a cell no band touched stays at zero -- which is bare
+    // paper, and correct for both.
     constexpr long long kBandBytes = 4LL << 20;
     const long long row_bytes =
         static_cast<long long>(region.width) * static_cast<long long>(sizeof(Rgba));
@@ -80,34 +167,110 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
         static_cast<int>(std::clamp(kBandBytes / std::max<long long>(1, row_bytes), 1LL,
                                     static_cast<long long>(region.height)));
 
-    for (int y0 = 0; y0 < region.height; y0 += band_rows) {
-        const PixelRect strip{region.x, region.y + y0, region.width,
-                              std::min(band_rows, region.height - y0)};
-
+    // One stretch of a band, flattened and reduced into the coarse rows it
+    // touches. Whether it is the whole band or a run of tile columns inside it
+    // makes no difference to any of this.
+    const auto reduce = [&](int from_x, int to_x, int band_top, int band_height, int y0) {
+        const PixelRect strip{from_x, band_top, to_x - from_x, band_height};
         compositor.compositeGrids(passes, strip, band);
 
         const int rows = std::min(band.height(), strip.height);
+        const int first_cell = (from_x - region.x) / step;
+        const int last_cell = std::min(width - 1, (to_x - 1 - region.x) / step);
+
         for (int row = 0; row < rows; ++row) {
             // Which coarse row this image row falls in. One division is the
             // whole of what banding in image rows costs.
             float* out =
-                intensity.data() + static_cast<std::size_t>((y0 + row) / step) * width;
+                coverage.data() + static_cast<std::size_t>((y0 + row) / step) * width;
             const Rgba* source = band.row(row);
 
-            for (int x = 0; x < width; ++x) {
-                const int from = x * step;
-                const int to = std::min(from + step, band.width());
-                float covered = 0.0f;
-                for (int i = from; i < to; ++i) covered = std::max(covered, source[i].a);
-                // Coverage is what stops a cut, so the barrier is one minus
-                // alpha: solid ink reads as 0, bare paper as 1, and the
-                // antialiased rim of a stroke reads as the grey between --
-                // which is the whole reason the boundary can be placed inside
-                // the line rather than beside it.
-                out[x] = std::min(out[x], std::clamp(1.0f - covered, 0.0f, 1.0f));
+            for (int cell = first_cell; cell <= last_cell; ++cell) {
+                // The part of the cell this stretch covers, which is all of it
+                // unless the stretch began or ended inside one.
+                const int from = std::max(from_x, region.x + cell * step);
+                const int to = std::min({to_x, region.x + (cell + 1) * step,
+                                         from_x + band.width()});
+
+                if (reduce_with == InkReduce::Most) {
+                    float covered = 0.0f;
+                    for (int i = from; i < to; ++i) {
+                        covered = std::max(covered, source[i - from_x].a);
+                    }
+                    out[cell] = std::max(out[cell], covered);
+                } else {
+                    float summed = 0.0f;
+                    for (int i = from; i < to; ++i) summed += source[i - from_x].a;
+                    out[cell] += summed;
+                }
+            }
+        }
+    };
+
+    for (int y0 = 0; y0 < region.height; y0 += band_rows) {
+        const int band_top = region.y + y0;
+        const int band_height = std::min(band_rows, region.height - y0);
+
+        // Only the runs of tile columns that have something under them, in this
+        // band's own tile rows.
+        //
+        // Exact rather than an approximation, and that is what makes it small:
+        // a stretch with no tile under it composites to fully transparent,
+        // which is a coverage of zero -- the identity for max() and for a sum
+        // alike. Skipping it and compositing it produce the same array,
+        // including where a coarse cell straddles the end of a run.
+        //
+        // In both directions and not only by band. A whole-band test alone buys
+        // everything on two patches stacked one above the other and nothing at
+        // all on two side by side, since every row then has ink somewhere in it
+        // -- and nothing on a long diagonal, which is an ordinary thing to draw.
+        const int first_row = tileCoordFor(0, band_top).y - ink.origin_y;
+        const int last_row = tileCoordFor(0, band_top + band_height - 1).y - ink.origin_y;
+
+        int column = 0;
+        while (column < ink.width) {
+            if (!ink.anyIn(column, first_row, last_row)) {
+                ++column;
+                continue;
+            }
+            int end = column + 1;
+            while (end < ink.width && ink.anyIn(end, first_row, last_row)) ++end;
+
+            const int from_x = std::max(region.x, (ink.origin_x + column) * kTileSize);
+            const int to_x =
+                std::min(region.x + region.width, (ink.origin_x + end) * kTileSize);
+            if (to_x > from_x) reduce(from_x, to_x, band_top, band_height, y0);
+            column = end;
+        }
+    }
+
+    // The mean's divisor is the cell's own pixel count, which is `step` squared
+    // everywhere but along the far edges, where the region can end partway
+    // through a cell. Dividing by the block a cell stands for rather than by
+    // the part of it inside the region would read those edge cells as emptier
+    // than they are.
+    if (reduce_with == InkReduce::Mean) {
+        for (int cy = 0; cy < height; ++cy) {
+            const float rows_in = static_cast<float>(std::min(step, region.height - cy * step));
+            for (int cx = 0; cx < width; ++cx) {
+                const float columns_in =
+                    static_cast<float>(std::min(step, region.width - cx * step));
+                float& value = coverage[static_cast<std::size_t>(cy) * width + cx];
+                value = std::clamp(value / (rows_in * columns_in), 0.0f, 1.0f);
             }
         }
     }
+    return coverage;
+}
+
+std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
+                              int step) {
+    // Coverage is what stops a cut, so the barrier is one minus it: solid ink
+    // reads as 0, bare paper as 1, and the antialiased rim of a stroke reads as
+    // the grey between -- which is the whole reason the boundary can be placed
+    // inside the line rather than beside it.
+    std::vector<float> intensity = ctgInkCoverage(sources, region, step, InkReduce::Most);
+    for (float& value : intensity) value = std::clamp(1.0f - value, 0.0f, 1.0f);
     return intensity;
 }
 
@@ -161,11 +324,10 @@ InkLevel halve(const InkLevel& fine) {
     coarse.height = std::max(1, fine.height / 2);
     coarse.ink.assign(static_cast<std::size_t>(coarse.width) * coarse.height, 0.0f);
 
-    // Averaged rather than maxed, which is the opposite of what the barrier
-    // does and right for the opposite reason. A barrier must not lose a thin
-    // line, because a hole in it is a fill pouring out; a correlation wants the
-    // ink to weigh what there is of it, so that half a line under a cell counts
-    // half.
+    // Averaged, the same way level zero is now built -- see InkReduce. This is
+    // where the argument for it was written down first, and for a while it was
+    // the only level that took it: a correlation wants the ink to weigh what
+    // there is of it, so that half a line under a cell counts half.
     for (int y = 0; y < coarse.height; ++y) {
         for (int x = 0; x < coarse.width; ++x) {
             float sum = 0.0f;
@@ -229,27 +391,75 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     // keeps an exhaustive search affordable: the cost is offsets times cells,
     // and both scale with this.
     constexpr int kAcross = 96;
-    const int step = std::max(1, (std::max(area.width, area.height) + kAcross - 1) / kAcross);
+
+    // But the step has to leave the *short* axis a grid too, and it was taken
+    // from the long one alone. A region much wider than it is tall therefore
+    // collapsed the short axis below the minimum below and the whole estimate
+    // was abandoned -- silently, and back to carrying marks unchanged. Twenty-
+    // four to one was enough, which was unreachable while the region was
+    // clipped to the canvas and is ordinary now that it is the drawn bounds of
+    // a whole sheet.
+    constexpr int kLeastAcross = 4;
+
+    // And a ceiling on the long axis, because paying for the short one in step
+    // is paying for the long one in cells: the exhaustive search at the top is
+    // offsets times cells, which is roughly the fourth power of the grid. A
+    // sliver is the one shape where the two cannot both be had, and that is
+    // what the minimum below is then for.
+    constexpr int kMostAcross = 4 * kAcross;
+
+    const int longest = std::max(area.width, area.height);
+    const int shortest = std::min(area.width, area.height);
+    const int wanted = std::max(1, (longest + kAcross - 1) / kAcross);
+    const int coarsest = std::max(1, shortest / kLeastAcross);
+    const int finest = std::max(1, (longest + kMostAcross - 1) / kMostAcross);
+    const int step = std::max(finest, std::min(wanted, coarsest));
 
     InkLevel a;
     InkLevel b;
     a.width = b.width = (area.width + step - 1) / step;
     a.height = b.height = (area.height + step - 1) / step;
-    if (a.width < 4 || a.height < 4) return {};
 
-    a.ink = ctgBarrier(from, area, step);
-    b.ink = ctgBarrier(to, area, step);
-    for (float& value : a.ink) value = 1.0f - value;  // coverage, not intensity
-    for (float& value : b.ink) value = 1.0f - value;
+    // Now this means what it says: not enough region to search over, rather
+    // than enough region in one direction and none in the other.
+    if (a.width < kLeastAcross || a.height < kLeastAcross) return {};
+
+    // Averaged and not maxed, which is the opposite of what the barrier does
+    // and right for the opposite reason -- see InkReduce. `halve` below has
+    // always averaged, and said in its own comment why the barrier must not;
+    // level zero was the one level built the other way, and only because it was
+    // borrowing a function written for something else.
+    a.ink = ctgInkCoverage(from, area, step, InkReduce::Mean);
+    b.ink = ctgInkCoverage(to, area, step, InkReduce::Mean);
 
     // Nothing to match. Two blank drawings agree at every offset, and the
     // smallest shift is the honest answer.
-    const auto ink_total = [](const InkLevel& level) {
+    //
+    // Counted in image pixels of ink and not in cells, because a threshold has
+    // to mean the same thing at every step and this one stopped when the
+    // reduction changed under it. `Most` gave a cell holding any ink a value
+    // near 1, so a sum over cells was "how many cells have ink in them" and a
+    // threshold of one meant "none of them". `Mean` gives that same cell
+    // `ink / step^2`, so the same sum is the ink divided by a cell's area --
+    // and the same threshold silently became "fewer than step^2 pixels of ink",
+    // which at a step of 107 is four hundred times stricter than it reads.
+    //
+    // That step is not hypothetical. The region is the drawn bounds of the
+    // whole sheet now rather than the canvas, so two things drawn ten thousand
+    // pixels apart give exactly it -- and the drawing then had no shift
+    // estimated at all, silently, falling back to carrying marks unchanged.
+    // Measured: 428 px found for a true 400 before, 0 after.
+    //
+    // Multiplying by the cell's area restores what was meant and says it in a
+    // unit that does not move: fewer than one opaque pixel of ink in the whole
+    // drawing is nothing to match.
+    const double cell_pixels = static_cast<double>(step) * static_cast<double>(step);
+    const auto ink_pixels = [&](const InkLevel& level) {
         double sum = 0.0;
         for (float value : level.ink) sum += value;
-        return sum;
+        return sum * cell_pixels;
     };
-    if (ink_total(a) < 1.0 || ink_total(b) < 1.0) return {};
+    if (ink_pixels(a) < 1.0 || ink_pixels(b) < 1.0) return {};
 
     blur(a);
     blur(b);
@@ -303,37 +513,33 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     return {best.x * step, best.y * step};
 }
 
-CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>* abandon) {
+CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>* abandon) {
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
 
-    // Two rectangles, and the difference between them is where the resolution
-    // comes from.
+    // One rectangle now, and nothing clips it.
     //
-    // `filled` is the canvas: the whole picture takes a colour, and nothing
-    // outside the picture does. `region` is only the part worth solving -- what
-    // has been drawn on, plus a tile of margin -- and the labels are extended
-    // outwards from it to cover the rest.
+    // `region` is what is worth solving -- what has been drawn on, plus a tile
+    // of margin -- and the labels are extended outwards from it to cover
+    // everything else, which is to say the rest of the world.
     //
     // The extension is exact rather than an approximation. Outside the drawn
     // area there is, by definition, no line art, so everything out there is one
     // connected stretch of blank paper: a cut cannot pass through it and it can
     // only take one label. Whatever label reaches the edge of the solved region
     // is therefore the label of everything beyond that edge, and clamping the
-    // lookup at the region's border is exactly that answer.
+    // lookup at the region's border is exactly that answer. Nothing in that
+    // argument names a rectangle -- the canvas was only ever where somebody
+    // stopped writing.
     //
-    // Solving the canvas directly instead was correct and wasteful: the budget
-    // below is on the number of cells, so paying for empty paper is paid for in
-    // resolution over the drawing. A small drawing on a 1080p canvas was solved
-    // at a third of full size when it could be solved at full size.
-    const PixelRect filled = job.canvas;
-    if (filled.isEmpty()) {
-        CtgFill empty;
-        empty.inputs = job.inputs;
-        empty.budget = job.budget;
-        empty.valid = true;
-        return empty;
-    }
+    // It used to be clipped to the canvas, and that clip is the one this whole
+    // change is about: a shape running off the frame was coloured up to the
+    // frame and no further, and a ball animating off-screen lost its colour at
+    // the frame line. What the clip was quietly also doing was protecting the
+    // solve's resolution, since the budget below is on the number of cells --
+    // so ink far off the frame now coarsens the whole drawing. Time and memory
+    // do not run away, because the budget still caps both and the barrier costs
+    // what the ink costs; what is lost is sharpness, and that is issue #61.
 
     // Where the drawing has got to since the marks were made on it.
     //
@@ -347,18 +553,9 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     // drawing's own, or the layer is set to leave them where they were put.
     CtgShift shift;
     if (!job.origin_sources.empty()) {
-        PixelRect ink = intersect(
-            [&] {
-                PixelRect all;
-                for (const TileGrid& source : job.sources) {
-                    all = unite(all, drawnBounds(source));
-                }
-                for (const TileGrid& source : job.origin_sources) {
-                    all = unite(all, drawnBounds(source));
-                }
-                return all;
-            }(),
-            filled);
+        PixelRect ink;
+        for (const TileGrid& source : job.sources) ink = unite(ink, drawnBounds(source));
+        for (const TileGrid& source : job.origin_sources) ink = unite(ink, drawnBounds(source));
         shift = estimateCtgShift(job.origin_sources, job.sources, ink);
         if (abandoned(abandon)) return kNothing;
     }
@@ -370,16 +567,19 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     for (const TileGrid& source : job.sources) {
         region = unite(region, drawnBounds(source));
     }
-    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
-              region.height + 2 * kTileSize};
-    region = intersect(region, filled);
     if (region.isEmpty()) {
+        // Nothing drawn is still an empty fill. The margin is added below
+        // rather than here so that this stays reachable: a tile of margin round
+        // nothing is a rectangle, and solving one would be solving a square of
+        // blank paper to find out it is blank.
         CtgFill empty;
         empty.inputs = job.inputs;
         empty.budget = job.budget;
         empty.valid = true;
         return empty;
     }
+    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
+              region.height + 2 * kTileSize};
 
     // The solve is bounded by whatever the caller can afford to wait for. Where
     // the interface is waiting that is a few hundred thousand cells, because a
@@ -436,7 +636,6 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     }
 
     CtgFill built;
-    built.region = filled;
     built.solved = region;
     built.step = step;
     built.inputs = job.inputs;
@@ -445,13 +644,24 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     built.inherited = job.inherited;
     built.carried_by = shift;
     built.colours = static_cast<int>(palette.size());
-    if (palette.empty()) return built;
 
-    problem.colour_count = static_cast<int>(palette.size());
-    problem.hard.assign(palette.size(), 0);
+    // No mark landed on the sampling lattice, so there is nothing to cut and
+    // the labelling is empty -- but the marks are still shown at the bottom of
+    // this function, at full resolution. This used to return from here instead,
+    // which made a mark too small for the solve's own lattice invisible: the
+    // one case where the rule that a mark shows its own pixels whatever the
+    // solver decided was not kept.
+    //
+    // The verdict below is a no-op on an empty palette: every loop in it runs
+    // over the colours there are.
+    LazyBrushResult solved;
+    if (!palette.empty()) {
+        problem.colour_count = static_cast<int>(palette.size());
+        problem.hard.assign(palette.size(), 0);
 
-    const LazyBrushResult solved = solveLazyBrush(problem, job.settings.lazybrush, abandon);
-    if (solved.abandoned) return kNothing;
+        solved = solveLazyBrush(problem, job.settings.lazybrush, abandon);
+        if (solved.abandoned) return kNothing;
+    }
 
     // Two numbers about how well each mark landed, both free at solve time and
     // both taken from the solver's labels rather than the finished fill. That
@@ -500,122 +710,41 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     }
 
     // A caller that only wants the verdict stops here, and that is most of why
-    // the verdict is affordable for a whole track. Everything above is a
-    // max-flow over a grid the size of the solve; everything below is a write
-    // per pixel of the canvas, which on a 1080p frame is two million of them
-    // and does not get cheaper when the solve is made coarse.
-    if (!want_tiles) {
+    // the verdict is affordable for a whole track: everything above is a
+    // max-flow over a grid the size of the solve, and what it keeps below is
+    // the labelling itself, which on a large sparse sheet is the larger half of
+    // what a fill weighs.
+    if (!want_labels) {
         return built;
     }
     if (abandoned(abandon)) return kNothing;
 
-    // Paint the labels back into tiles, over the whole canvas and at full
-    // resolution even when the solve was coarse: a blocky fill is better than
-    // none while a finer one is still being worked out.
+    // The answer, kept as the answer.
     //
-    // Outside the solved region the lookup is clamped inwards, which extends the
-    // labels across the rest of the picture. See above for why that is the same
-    // answer solving the whole canvas would have given.
+    // There is no paint-out any more: the labels and the palette are the fill,
+    // and ctgFillPixel works a colour out per pixel asked for -- extending the
+    // labels outwards from the solve by clamping, exactly as the paint-out used
+    // to, and letting a mark win in its own pixels at full resolution however
+    // coarse the solve was. See docs/colour-without-a-canvas.md, phase 1.
     //
-    // Clamped to one cell *inside* the grid rather than to its edge, because the
-    // outermost ring is the background seed. It is scaffolding, not an answer:
-    // sampling it would paint the whole picture beyond the drawing as background
-    // even where a colour had filled right up to it, and would leave a one-cell
-    // seam at the region's edge.
-    const auto solvedIndex = [&](int value, int origin, int extent, int limit) {
-        const int clamped = std::clamp(value, origin, origin + extent - 1);
-        const int cell = std::min((clamped - origin) / step, limit - 1);
-        return (limit >= 3) ? std::clamp(cell, 1, limit - 2) : cell;
-    };
-
-    std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;
-
-    // Transparency is a label like any other, and paints nothing. Over a tile
-    // that already holds something it punches a hole; over one that does not
-    // exist it is simply the canvas, so no tile is made to hold a square of
-    // nothing.
-    const auto paint = [&](int px, int py, const Rgba& colour) {
-        const TileCoord coord = tileCoordFor(px, py);
-        const std::uint64_t key =
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |
-            static_cast<std::uint32_t>(coord.y);
-        auto found = tiles.find(key);
-        if (found == tiles.end()) {
-            if (colour.a <= 0.0f) return;
-            found = tiles.emplace(key, std::make_shared<Tile>()).first;
-        }
-        found->second->setPixel(tileLocal(px), tileLocal(py), colour);
-    };
-
-    for (int y = 0; y < filled.height; ++y) {
-        const int py = filled.y + y;
-        const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
-        for (int x = 0; x < filled.width; ++x) {
-            const int px = filled.x + x;
-            const int solved_x = solvedIndex(px, region.x, region.width, problem.width);
-
-            const int label =
-                solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
-            if (label < 0) continue;  // nothing reached this pixel
-
-            paint(px, py, scribbleColour(palette[static_cast<std::size_t>(label)]));
-        }
-    }
-
-    // And then the scribble wins wherever it was drawn.
-    //
-    // A scribble is a statement about the pixels it covers -- this is the
-    // colour here -- and the solver's job is only the pixels nobody said
-    // anything about. So where the two disagree the scribble is what was meant,
-    // and a mark becomes a manual touch-up for whatever the min-cut missed, at
-    // no cost to the solver at all.
-    //
-    // It has to be the scribble over the fill rather than under it, and a
-    // transparent scribble is what settles that: under the fill it would be the
-    // one thing hidden, so scribbling "nothing here" would do nothing. The rule
-    // that lets a transparent scribble mean anything is the rule that makes an
-    // opaque one an override.
-    //
-    // The marks are self-effacing, which is what stops this looking like scrawl
-    // over the artwork: a scribble carries the colour of the label it produces,
-    // so wherever the fill agreed with it the override paints the colour that
-    // was already there. What you see is exactly the disagreement.
-    //
-    // Painted from the marks at full resolution rather than from the solved
-    // grid, because the solve may be coarse and a mark you made should not be.
-    // And painted as the quantised label colour rather than the pixel's own, for
-    // the same reason the seeding thresholds: a scribble is a label, so its
-    // antialiased rim must not leave a stripe of some colour between.
-    //
-    // Through the same shift as the seeding, and that is not a detail. The two
-    // are the same statement about the same mark -- what colour is here -- so a
-    // seed read from one place and an override painted in another would put the
-    // mark's own pixels somewhere the solver never saw it, which is a stripe of
-    // colour across a region that has every reason to be a different one.
-    for (const auto& [coord, tile] : job.scribbles.tiles()) {
-        const PixelRect whole{coord.x * kTileSize + shift.x, coord.y * kTileSize + shift.y,
-                              kTileSize, kTileSize};
-        const PixelRect part = intersect(whole, filled);
-        if (part.isEmpty()) continue;
-
-        for (int py = part.y; py < part.y + part.height; ++py) {
-            for (int px = part.x; px < part.x + part.width; ++px) {
-                const Rgba pixel = job.scribbles.pixel(px - shift.x, py - shift.y);
-                if (pixel.a < job.settings.scribble_alpha_threshold) continue;  // not a label
-                paint(px, py, scribbleColour(scribbleLabel(pixel)));
-            }
-        }
-    }
-
-    for (auto& [key, tile] : tiles) {
-        // A tile every one of whose pixels was punched back out by a
-        // transparent scribble is a tile of nothing, and the grid says nothing
-        // by not holding it.
-        if (tile->isFullyTransparent()) continue;
-        const TileCoord coord{static_cast<int>(static_cast<std::int32_t>(key >> 32)),
-                              static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
-        built.tiles.set(coord, std::move(tile));
-    }
+    // The marks travel with the fill, and the shift with them, so that reading
+    // a fill needs nothing but the fill. Copying a grid copies handles, and a
+    // run of drawings inheriting one scribble cel shares one set of pixels.
+    built.marks = job.scribbles;
+    built.marks_drawn = [&] {
+        const PixelRect drawn = drawnBounds(job.scribbles);
+        return drawn.isEmpty() ? drawn
+                               : PixelRect{drawn.x + shift.x, drawn.y + shift.y, drawn.width,
+                                           drawn.height};
+    }();
+    built.mark_threshold = job.settings.scribble_alpha_threshold;
+    built.palette_colours.reserve(palette.size());
+    for (const std::uint32_t key : palette) built.palette_colours.push_back(scribbleColour(key));
+    built.palette = std::move(palette);
+    // Narrowed to two bytes on the way in. See CtgFill::labels for why 32767
+    // colours is not a cap anybody can reach.
+    built.labels.assign(solved.labels.begin(), solved.labels.end());
+    built.outside_is_clear = ringIsClear(solved.labels, problem.width, problem.height);
     return built;
 }
 

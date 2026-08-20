@@ -30,9 +30,9 @@ namespace animage {
 //     one describes the drawing as it was two strokes ago and nobody wants that
 //     answer. A superseded solve is told to give up and produces nothing.
 //   - **A fill and a verdict are different questions.** The audit judges every
-//     drawing coarsely and keeps a few bytes; the canvas wants the picture. One
-//     may not cancel the other, so the identity of a request is the drawing,
-//     the layer *and* which of the two was asked for.
+//     drawing coarsely and keeps a few bytes; the canvas wants the fill itself.
+//     One may not cancel the other, so the identity of a request is the
+//     drawing, the layer *and* which of the two was asked for.
 //   - **What you are looking at goes first.** The audit is a whole track's
 //     worth of work and the canvas is one drawing, so an interactive request
 //     jumps the queue. Without this, colouring a shot means every stroke
@@ -53,7 +53,7 @@ public:
     struct Result {
         CtgKey key;
         CtgFill fill;
-        bool wanted_tiles = false;
+        bool wanted_labels = false;
         Priority priority = Priority::Now;
     };
 
@@ -69,7 +69,7 @@ public:
 
     // Queue one. Supersedes any earlier request for the same drawing, layer and
     // kind of answer.
-    void request(const CtgKey& key, CtgJob job, bool want_tiles,
+    void request(const CtgKey& key, CtgJob job, bool want_labels,
                  Priority priority = Priority::Now);
 
     // Everything that has finished since the last call.
@@ -82,7 +82,7 @@ public:
     // Call one off. What playing a coloured shot needs: the drawing that was on
     // screen a frame ago is a question nobody is waiting for the answer to any
     // more, and without this the queue fills faster than it drains.
-    void cancel(const CtgKey& key, bool want_tiles);
+    void cancel(const CtgKey& key, bool want_labels);
 
     // Forget everything queued and give up on everything running. Used when the
     // document underneath is being replaced -- opening a project, closing one --
@@ -110,7 +110,7 @@ public:
 private:
     struct Request {
         CtgKey key;
-        bool wanted_tiles = false;
+        bool wanted_labels = false;
         Priority priority = Priority::Now;
         CtgJob job;
         std::shared_ptr<std::atomic<bool>> abandon;
@@ -120,15 +120,15 @@ private:
     // and to call it off -- the job itself is with the worker running it.
     struct Active {
         CtgKey key;
-        bool wanted_tiles = false;
+        bool wanted_labels = false;
         std::shared_ptr<std::atomic<bool>> abandon;
     };
 
     // What makes two requests the same question: the drawing, the layer, and
-    // whether a picture or a judgement was asked for.
+    // whether the fill or only a judgement about it was asked for.
     template <typename T>
-    static bool sameQuestion(const T& a, const CtgKey& key, bool tiles) {
-        return a.key == key && a.wanted_tiles == tiles;
+    static bool sameQuestion(const T& a, const CtgKey& key, bool labels) {
+        return a.key == key && a.wanted_labels == labels;
     }
 
     void run();

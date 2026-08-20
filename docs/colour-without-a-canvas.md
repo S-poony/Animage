@@ -1,6 +1,12 @@
 # Colour without a canvas
 
-A plan, not a description. Nothing in here is built yet.
+A plan, not a description.
+
+**Phases 0 to 3 are built.** Phase 4 is not, and was not skipped for lack of
+time: the measurement it was always waiting on now exists and says the cost it
+removes is small at any separation a person is likely to draw. The reasoning is
+on [#61](https://github.com/S-poony/Animage/issues/61); what every phase
+measured is in [the colour benchmarks](colour-baseline.md), run by run.
 
 Three issues, one goal: **the colour layer stops being bounded by the canvas.**
 [#59](https://github.com/S-poony/Animage/issues/59) is the shape — the fill is
@@ -68,6 +74,9 @@ and each has a gate that is a measurement rather than an opinion.
 | 2b | the correlation stops borrowing its reducer (#60) | `bench_carry`, on a branch, no worse |
 | 3 | the canvas leaves the job (#59, second half) | off-canvas ink solves and colours |
 | 4 | the grid stops being uniform (#61) | a dense drawing's grid is unchanged; two patches both solve at step 1 |
+
+Phases 0 to 3 ran their gates and are built. Phase 4 is on #61, unbuilt and with
+the arithmetic that decides it written down there.
 
 Phase 1 before phase 3 is the whole of the safety here: while the canvas clip is
 still in place, the lazy fill has to answer *exactly* what the baked tiles

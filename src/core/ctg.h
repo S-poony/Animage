@@ -62,11 +62,10 @@ CtgJob ctgJobFor(const Document& doc, TrackId track, ImageId image, LayerId laye
 const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer,
                        const CtgSettings& settings = {});
 
-// The same solve without the cache. `want_tiles` false stops after the
-// labelling and the verdict, skipping a write per pixel of the canvas -- which
-// is two million of them at 1080p and does not get cheaper when the solve is
-// coarse.
+// The same solve without the cache. `want_labels` false keeps only the verdict
+// and throws the labelling away, which is what a whole-track audit wants: the
+// judgement is a few floats and a 1080p labelling is 4 MB per drawing.
 CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer,
-                     const CtgSettings& settings, bool want_tiles);
+                     const CtgSettings& settings, bool want_labels);
 
 }  // namespace animage

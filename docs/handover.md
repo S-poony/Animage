@@ -504,14 +504,37 @@ finishes with whatever fill is in the cache, which is the last answer.
 
 A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
 marks were made (`estimateCtgShift`), flatten the ink into a barrier
-(`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
-(`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
-poll on the canvas collects the result, puts it in the cache, marks everything
-dirty and emits `colourChanged`; `MainWindow` refreshes the timeline, the layer
-panel and the status bar from that one signal.
+(`ctgBarrier`), read the marks through that shift into seeds, and run the
+max-flow (`solveLazyBrush` over `GridFlow`). What it keeps is the labelling
+itself — one label per solved cell, the palette, and the marks it was solved
+from — and not a picture of it. A 16 ms poll on the canvas collects the result,
+puts it in the cache, marks everything dirty and emits `colourChanged`;
+`MainWindow` refreshes the timeline, the layer panel and the status bar from
+that one signal.
+
+**The fill has no pixels, so somebody has to work them out.** `ctgFillPixel`
+is the reference and what tests read; `ctgFillSpan` is what the compositor
+calls, a run of a row at a time, and `ctgFillExtent` says which part of a row
+can hold an answer at all — which is how a fill gets back the shortcut an absent
+tile gives a grid, and it is not optional: without it a colour layer costs the
+area of the viewport rather than the area of the fill. All three are pure
+functions of what the fill stores, because `compositeGrids` runs its bands on
+several threads over one pass list and every one of them reads the same fill.
+
+**Nothing bounds a fill.** Not the canvas, which used to: a shape running off
+the frame is coloured out there too, under the veil, and a ball animating
+off-screen keeps its colour instead of losing it at the frame line. What bounds
+a *solve* is the drawn bounds of the marks and the ink plus a tile of margin,
+and a cell budget that coarsens it until it fits; the labels are extended
+outwards from there by clamping, which is exact because there is no line art
+outside the drawn area for a cut to pass through. Export is unaffected and
+always was — it composites the canvas. The cost is that ink far off the frame
+coarsens the whole drawing, which is issue #61.
 
 The compositor draws whatever fill is in the cache and never starts a solve —
-`Document::ctgFillFor` is const for exactly that reason.
+`Document::ctgFillFor` is const for exactly that reason. A colour layer reaches
+it as a `LayerPass` carrying a fill rather than a grid, which is the only pass
+that is not a picture.
 
 ### Where a transform's pixels go, in order
 
@@ -2923,6 +2946,12 @@ three different answers:
   the interface thread on a 16 ms poll. A worker never touches a widget, and the
   solver's own wake-up callback is deliberately unused by the canvas for that
   reason.
+- **Reading a fill has to be a pure function of what the fill stores.** The
+  compositor's bands all read the same `CtgFill` at once, and a fill has no
+  pixels — so `ctgFillPixel`, `ctgFillSpan` and `ctgFillExtent` work the answer
+  out rather than looking it up. That rules out the obvious first design,
+  materialising a tile on first touch and keeping it, which would want a lock on
+  the path the whole thing exists to make faster.
 - An export does the same, through its own `CtgSolver` and a nested event loop
   rather than a poll — it is a thing the user is waiting for, so it waits, and
   the loop is what keeps the progress dialog painting while it does. Every write
@@ -2971,10 +3000,12 @@ trap.
 | [Why regenerating the fill whenever it looks stale costs a max-flow per dab](#why-regenerating-the-fill-whenever-it-looks-stale-costs-a-max-flow-per-dab) | Solve the fill on pen-up, not on cache staleness |
 | [Where the fill solve runs, and the resolution that paid for it](#where-the-fill-solve-runs-and-the-resolution-that-paid-for-it) | A synchronous solve capped quality; it is threaded now |
 | [What a widget on a list row takes over, including the row's own tick](#what-a-widget-on-a-list-row-takes-over-including-the-rows-own-tick) | setItemWidget swallows presses and kills the visibility tick |
+| [What a fill with no absent tile stops getting for free](#what-a-fill-with-no-absent-tile-stops-getting-for-free) | A lazy fill costs the viewport, not the fill, unless it is told where to look |
 | [What a stroke's dirty rectangle misses when the whole fill is resolved](#what-a-strokes-dirty-rectangle-misses-when-the-whole-fill-is-resolved) | A regenerated fill changes far from the pen; dirty everything |
 | [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
 | [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
 | [What a band counted in coarse rows really costs](#what-a-band-counted-in-coarse-rows-really-costs) | Coarse rows times step is image rows; band the barrier in bytes |
+| [What a threshold meant before the thing under it changed](#what-a-threshold-meant-before-the-thing-under-it-changed) | A constant calibrated against one reduction survives the reduction changing |
 | [What made saving slow, and why skipping unchanged cels would not have helped](#what-made-saving-slow-and-why-skipping-unchanged-cels-would-not-have-helped) | Tiles were 92.6% zeros; store each row's occupied span |
 | [Why an ever-true tablet flag leaves the mouse unable to draw](#why-an-ever-true-tablet-flag-leaves-the-mouse-unable-to-draw) | Pen-seen must be a time window, not a permanent flag |
 | [What was never timed, and what the benchmark stopped anyone timing](#what-was-never-timed-and-what-the-benchmark-stopped-anyone-timing) | Compositing was tuned unmeasured; the benchmark hid the larger loop |
@@ -3433,6 +3464,34 @@ side of the thing that goes wrong, and see
 for what that costs.
 
 
+### What a fill with no absent tile stops getting for free
+**The compositor's oldest shortcut is a property of tiles, not of layers.** An
+area a layer left empty has no tile there, and the whole run is skipped on one
+pointer test before a channel is read — which is why a 66-tile drawing and a
+2425-tile one refresh in the same time. A fill that works its colour out per
+pixel has no absent tile to skip on, and the first version of one duly cost the
+area of the *viewport* where the tiles cost the area of the fill: the coloured
+frame went from 14.6 ms to 37.6 ms at HD, and four tracks from 96 frames shown
+to 89.
+
+The fix is not a faster loop, it is giving the shortcut back. `ctgFillExtent`
+answers which samples of a row can be anything but transparent — three
+rectangles, no per-sample work — and the compositor asks it before it asks for
+anything else. Two facts make it exact rather than a guess: `outside_is_clear`,
+which is a fact about the labels that were computed and not an estimate of them,
+and the marks' own drawn bounds, cached on the fill because working them out is
+a scan of every mark pixel and it is wanted per row.
+
+**And a run-length is worth nothing at the resolution that matters.** The other
+half of the same regression: a run of pixels sharing one solved cell is `step`
+long, and a 1080p drawing solves at `step` 1, so the run is one pixel and what
+is left is a clamp, two divisions and a colour decoded from a key, per pixel.
+The row is cut into its two clamped ends and the interior between them, so the
+clamps are paid twice a row rather than twice a pixel, and the palette is
+decoded once at solve time. Both were found by running `bench_playback`, which
+is the whole reason the plan measures before it changes anything.
+
+
 ### What a stroke's dirty rectangle misses when the whole fill is resolved
 **Solving globally and repainting locally is a bug that looks like a feature.**
 A regenerated CTG fill changes colour across whole regions, nowhere near the
@@ -3507,17 +3566,92 @@ already had. `CtgSolver::failedCount` is the only trace it leaves.
 **What is left is the time.** The band is 4 MB now and measures it: peak working
 set over a 16384-wide barrier at step 171 is 4 MB above where it started, where
 the formula for the old one says 1.4 GB. What that did not buy is speed. The
-barrier still composites every pixel of the region at full resolution whatever
-the step — and `compositeGrids` clears its framebuffer, so an empty region costs
-the same as a drawn one: about 0.4 s a call at that size, three calls a solve.
-That is not this bug and it is not fixed. The shift estimate does not need a
-full-resolution composite at all: it wants ink weighted by how much of it there
-is, which `halve` says in its own comment and the reduction on the way in then
-contradicts by taking the `max`. Read straight off the tiles it would cost what
-the ink costs rather than what the bounding box costs. Sharing `ctgBarrier` with
-the solve, whose reduction must be `max` or the fill pours out of its own
-outline, is what dragged a full-resolution composite into a job that never
-wanted one.
+barrier composited every pixel of the region at full resolution whatever the
+step, so an empty region cost the same as a drawn one — about 0.4 s a call at
+that size, three calls a solve. That was recorded here for a while as "not this
+bug and not fixed", and both halves of it are fixed now, in phase 2 of
+[colour without a canvas](colour-without-a-canvas.md). They are separate
+findings and each is worth having on its own.
+
+**The barrier composites only where some source has a tile.** Exact rather than
+an approximation, which is what makes it small: bare paper composites to fully
+transparent, which is a coverage of zero — the identity for the max the barrier
+reduces with and for the sum the correlation reduces with alike. Skipped in both
+directions and not only by band, because a band test alone buys everything on
+two patches stacked one above the other, nothing at all on two side by side, and
+nothing on a long diagonal. Measured: over four times as much paper as the
+drawing needs, compositing everywhere costs 3.5x and compositing where the ink is
+costs 1.3x.
+
+**And the correlation stopped borrowing the barrier's reducer.** The shift
+estimate built both level zeroes with `ctgBarrier` and inherited a reduction that
+takes the *most* covered pixel in a cell, while every level above it was built by
+averaging — and `halve` said why in its own comment, naming the barrier's rule as
+the opposite one. A barrier must not lose a thin line, because a hole in it is a
+fill pouring out. A correlation wants the ink to weigh what there is of it, so
+that half a line under a cell counts half; taking the most makes any cell holding
+any ink read as solid, which at the step the search uses is most of the drawing.
+The reduction is an argument now (`InkReduce`), and coverage rather than
+intensity is the quantity both share.
+
+That changed what the search finds, which was the point of it rather than a risk
+run by it. On `bench_carry` the answer moved on eight rows, always by exactly one
+cell of the search's own grid, six times towards the true shift and once away.
+The row it was for is a shape carried 400 px: matched at 252 before and losing
+both its regions outright, matched at 396 now with the left one fully coloured.
+Coverage, leak and spread are otherwise unchanged. The numbers are in
+[the colour benchmarks](colour-baseline.md).
+
+
+### What a threshold meant before the thing under it changed
+**A constant is calibrated against the code it reads, and changing that code
+silently recalibrates it.** `estimateCtgShift` guards itself with "nothing to
+match": sum the level-zero ink and give up below one. Level zero used to be
+built by the barrier's reduction, which takes the *most* covered pixel in a
+cell -- so a cell holding any ink read about 1, the sum was the number of inked
+cells, and a threshold of one meant "no cell has ink in it". Level zero is
+averaged now, which is right and is what every level above it always did. The
+same cell then reads `ink / step^2`, the same sum is the ink divided by a cell's
+area, and the same constant quietly became **"fewer than step² pixels of ink"**
+-- eleven thousand of them at a step of 107.
+
+Nothing noticed, because `step` is the region's longer side over ninety-six and
+the region was clipped to the canvas: 1920 wide caps it at twenty, where the
+old meaning and the new one differ by a factor nobody could see. Unclipping the
+region for [colour without a canvas](colour-without-a-canvas.md) removed the
+cap, and a whole drawing's worth of line art in a ten-thousand-pixel-wide region
+then counted as nothing: no shift estimated, marks silently stopped following
+the line art, and there was nothing on screen to say so.
+
+**The fix is a unit, not a number.** Multiply back by the cell's area and the
+threshold is in image pixels of ink, which is the same quantity at every step.
+The rule generalises: a threshold on a reduced quantity has to name the unit it
+is counted in, or the next change to the reduction moves it.
+
+**The same function had the same shape of bug twice**, and the second one is not
+about a reduction at all. The step was taken from the region's *longer* side
+alone, so a region much wider than it is tall left the short axis with fewer
+than the four cells the guard demands, and the estimate was abandoned outright
+-- at twenty-four to one, which the canvas clip had made unreachable and the
+drawn bounds of a sheet make ordinary. The step is now the coarsest of what the
+long side asks for and what leaves the short side a grid, with a floor so the
+long axis cannot grow without bound in exchange: paying for the short axis in
+step is paying for the long one in cells, and the top-level search is offsets
+times cells, which is about the fourth power of the grid. A sliver is the one
+shape where both cannot be had, and giving up there is the honest answer rather
+than the accidental one.
+
+**And two wrong attributions before the right one**, which is worth as much as
+the bug. The first reproduction used a small shift, which the search quantises
+to zero at a large step whatever the reduction does -- so the guard looked
+guilty and was not being reached. The second used two shapes far apart, where
+the answer really does change with the reduction, but because the averaged
+correlation weighs a small dense shape against a large sparse one differently --
+not because of the guard at all. Only a case with one shape, a shift large
+enough to survive quantisation, and a region widened by nothing but its own
+argument isolates it. See
+[how many wrong theories a bug is worth](#how-many-wrong-theories-a-bug-is-worth):
+each theory was tested and each was wrong in a way that looked like the answer.
 
 
 ### What made saving slow, and why skipping unchanged cels would not have helped
@@ -4437,16 +4571,19 @@ hold cannot help, composite fewer entries while playing, earn the reduction from
 measurement rather than applying it unconditionally, and decide it at a loop
 boundary so the picture never changes sharpness mid-take.
 
-**And the colour cache cannot hold a shot.** A fill covers the canvas at full
-resolution, so the bound works out at about 2000 tiles: 48 of 48 fills survive an
-HD shot of 24 drawings, 62 of 192 survive four tracks of 48, and **20 of 48**
-survive at 4K. What playback then shows is whichever fills are still there. The
-solves it provokes are counted rather than timed, and the count is 6 in two
-seconds at HD against **0 at 4K** — where the same mechanism demonstrably works,
-so a 4K fill either never finishes or is superseded before it can. Either way the
-colour does not arrive. That is worth knowing before item 4 is read as the answer
-to it: the max-flow is staying on the CPU, so a GPU compositor does not touch
-this.
+**And the colour cache holds about half a shot.** It used to hold a good deal
+less: a fill was a picture of the canvas at full resolution, the budget worked
+out at about 2000 tiles, and 62 of 192 fills survived four tracks of 48 against
+**20 of 48** at 4K. A fill is now the labelling rather than a picture of it —
+about a quarter of the memory — so on the same budget the four-track shot keeps
+127 of 192 and the 4K one 40 of 48. What playback shows is still whichever fills
+are there, and the shortfall is still real. The solves it provokes are counted
+rather than timed. Worth knowing before item 4 is read as the answer to it: the
+max-flow is staying on the CPU, so a GPU compositor does not touch this.
+
+The numbers, run by run, are in
+[the colour benchmarks](colour-baseline.md), which is where the plan below
+gates itself.
 
 `bench_zoom` drives the real `CanvasWidget` across the zoom range and reports,
 per zoom, the step and margin it chose, what a full refresh costs against the

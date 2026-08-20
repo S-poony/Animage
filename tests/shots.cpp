@@ -907,6 +907,21 @@ const std::vector<Situation>& situations() {
              s.picture = s.canvas->grab().toImage();
          }},
 
+        {"a-coloured-drawing-off-the-frame",
+         "a shape crossing the frame line, coloured: the colour carries on past the edge "
+         "under the veil, because the drawing does. It used to be cut dead at the frame -- "
+         "see docs/colour-without-a-canvas.md. What an export writes is still the frame and "
+         "nothing outside it",
+         [](Stage& s) {
+             s.circle(QPointF(s.canvas->width() - 60.0, s.centre().y()), 120.0);
+             s.choose("Add colour layer");
+             s.canvas->setBrushColour(0.85f, 0.32f, 0.12f);
+             const QPointF middle(s.canvas->width() - 60.0, s.centre().y());
+             s.line(middle - QPointF(30.0, 0.0), middle + QPointF(30.0, 14.0), 6);
+             s.settleColour();
+             s.picture = s.canvas->grab().toImage();
+         }},
+
         {"the-timeline-with-three-tracks",
          "one row per track under one ruler and one playhead; the blue rim marking the "
          "frame being edited belongs to the current track's row and to no other",

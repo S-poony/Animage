@@ -1772,7 +1772,7 @@ void theColourIsCoarseFirstAndThenAsFineAsTheDrawing() {
     if (!better) return;
     CHECK_EQ(better->step, 1);
     CHECK_EQ(better->inputs, question);
-    CHECK_NEAR(better->tiles.pixel(1400, 1000).r, 1.0, 0.02);
+    CHECK_NEAR(ctgFillPixel(*better, 1400, 1000).r, 1.0, 0.02);
 
     // ...and then it is finished. Nothing asks a third time.
     canvas.grab();
@@ -1868,7 +1868,7 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     const CtgFill* fill = doc.ctgFillFor(track_id, second, colour);
     CHECK(fill != nullptr);
     if (!fill) return;
-    CHECK_NEAR(fill->tiles.pixel(850, 450).r, 1.0, 0.02);
+    CHECK_NEAR(ctgFillPixel(*fill, 850, 450).r, 1.0, 0.02);
 
     // And a stroke made here takes the drawing over from the marks as they are
     // being shown, so the fill it had survives the taking over.
@@ -1880,7 +1880,7 @@ void movedMarksAgreeWithThemselvesInTheWindow() {
     CHECK(after != nullptr);
     if (!after) return;
     CHECK(!after->inherited);
-    CHECK_NEAR(after->tiles.pixel(850, 450).r, 1.0, 0.02);
+    CHECK_NEAR(ctgFillPixel(*after, 850, 450).r, 1.0, 0.02);
 }
 
 // A fill depends on some things it is not keyed on -- which way marks are
@@ -1956,7 +1956,7 @@ void emptyingTheFillCacheThrowsAwayASolveAlreadyRunning() {
     const CtgFill* fill = doc.ctgFillFor(track, image, colour);
     CHECK(fill != nullptr);
     if (!fill) return;
-    CHECK_NEAR(fill->tiles.pixel(390, 280).r, 1.0, 0.02);
+    CHECK_NEAR(ctgFillPixel(*fill, 390, 280).r, 1.0, 0.02);
 }
 
 // --- saving ----------------------------------------------------------------

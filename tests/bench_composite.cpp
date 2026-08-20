@@ -245,6 +245,33 @@ int main() {
                         timed, shift.x, shift.y);
         }
 
+        // What flattening the ink costs, over the drawing and over four times
+        // as much paper as the drawing needs.
+        //
+        // Two numbers rather than one, because the interesting quantity is the
+        // ratio between them. The barrier used to cost the area of the region
+        // whatever was in it, so the second was four times the first; it now
+        // costs the area of the tiles in it, so the two should be about equal.
+        // That is what makes a region nobody has bounded affordable, and it is
+        // why it is measured where the region can be made large rather than
+        // where it happens to fit the drawing.
+        {
+            const CtgJob job = ctgJobFor(doc, track, image, colour);
+            const PixelRect drawn = doc.scene().canvas();
+            const PixelRect wide{drawn.x - drawn.width / 2, drawn.y - drawn.height / 2,
+                                 drawn.width * 2, drawn.height * 2};
+
+            for (const auto& [name, area] :
+                 {std::pair<const char*, PixelRect>{"over the drawing         ", drawn},
+                  std::pair<const char*, PixelRect>{"over four times the paper", wide}}) {
+                const auto start = Clock::now();
+                const std::vector<float> barrier = ctgBarrier(job.sources, area, 1);
+                const double timed = milliseconds(start, Clock::now());
+                std::printf("    barrier %s  %9.1f ms  (%.1f Mpx)\n", name, timed,
+                            static_cast<double>(area.width) * area.height / 1.0e6);
+            }
+        }
+
         for (const auto& [name, budget] :
              {std::pair<const char*, long long>{"first  ", kInteractiveSolveBudget},
               std::pair<const char*, long long>{"refined", kFullSolveBudget}}) {
@@ -252,9 +279,11 @@ int main() {
             const auto start = Clock::now();
             const CtgFill fill = solveCtgJob(job, true);
             const double timed = milliseconds(start, Clock::now());
-            std::printf("    %s  budget %8lld  step %d  %9.1f ms  (%d colours, %zu tiles)\n",
+            std::printf("    %s  budget %8lld  step %d  %9.1f ms  (%d colours, %zu KB)\n",
                         name, budget, fill.step, timed, fill.colours,
-                        fill.tiles.tileCount());
+                        (fill.labels.size() * sizeof(std::int16_t) +
+                         fill.palette.size() * sizeof(std::uint32_t)) /
+                            1024);
         }
     }
 

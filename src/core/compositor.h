@@ -124,6 +124,18 @@ struct LayerPass {
     // drawn. Zero for everything else, and zero is the path that existed
     // before this.
     CtgShift offset{};
+
+    // ...and the second kind of source: a colour layer's fill, which is not a
+    // picture. Set instead of `tiles`, never as well, and everything else here
+    // applies to it exactly as it does to a grid -- a colour layer has an
+    // opacity like any other.
+    //
+    // A fill is drawn where it is: the shift is applied inside the accessor,
+    // when the marks are read, so this pass always carries `offset` zero and
+    // takes the ordinary column plan unchanged. That is why "which rectangle
+    // counts the columns, and which sizes the buffer" does not apply to it --
+    // the corner is not entered rather than being guarded against.
+    const CtgFill* fill = nullptr;
 };
 
 // A layer whose pixels are not what the document says, for one composite.
