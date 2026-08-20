@@ -2084,6 +2084,127 @@ void inkAt(TileGrid& grid, int px, int py) {
     grid.set(coord, std::move(tile));
 }
 
+// A grid drawn on a pixel at a time, without copying a tile per pixel the way
+// inkAt has to: this one keeps the tiles it is writing and hands them over at
+// the end, which is the difference between a test that runs and one that copies
+// a hundred and twenty-eight kilobytes three thousand times.
+class InkPad {
+public:
+    void at(int px, int py) {
+        const TileCoord coord = tileCoordFor(px, py);
+        auto& tile = tiles_[coord];
+        if (!tile) tile = std::make_shared<Tile>();
+        tile->setPixel(tileLocal(px), tileLocal(py), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
+    }
+
+    void rect(int x0, int y0, int x1, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) at(x, y);
+        }
+    }
+
+    void diagonal(int from, int to, int thickness) {
+        for (int i = from; i < to; ++i) {
+            for (int t = 0; t < thickness; ++t) at(i, i + t);
+        }
+    }
+
+    TileGrid grid() const {
+        TileGrid out;
+        for (const auto& [coord, tile] : tiles_) out.set(coord, tile);
+        return out;
+    }
+
+private:
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> tiles_;
+};
+
+TileGrid inkedRect(int x0, int y0, int x1, int y1) {
+    InkPad pad;
+    pad.rect(x0, y0, x1, y1);
+    return pad.grid();
+}
+
+// Skipping bare paper must not change the barrier, at all.
+//
+// The gate for phase 2a of docs/colour-without-a-canvas.md, and what it checks
+// is an identity rather than an approximation: bare paper composites to fully
+// transparent and reduces to exactly 1.0, which is what the array already
+// holds. So this is byte for byte and not nearly -- a tolerance here would be
+// admitting the argument might be wrong.
+//
+// The shapes are chosen for what a whole-band test alone would miss. Two
+// patches side by side put ink in every row, so banding buys nothing and only
+// the column runs can; a diagonal puts ink in every row *and* every column, so
+// neither buys anything and the answer still has to be identical; and a patch
+// crossing a coarse cell boundary is what would break if the part of a cell
+// left out of a run were not already the identity for min().
+void skippingBarePaperDoesNotChangeTheBarrier() {
+    TEST("skipping where nothing is drawn gives exactly the same barrier");
+
+    struct Case {
+        const char* what;
+        std::vector<TileGrid> sources;
+        PixelRect region;
+        int step;
+    };
+
+    InkPad slope;
+    slope.diagonal(10, 690, 2);
+
+    std::vector<Case> cases;
+    cases.push_back({"nothing drawn at all", {TileGrid{}}, {0, 0, 900, 700}, 1});
+    cases.push_back({"one patch in a big region", {inkedRect(100, 100, 160, 160)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"two patches stacked",
+                     {inkedRect(100, 40, 160, 100), inkedRect(100, 500, 160, 560)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"two patches side by side",
+                     {inkedRect(40, 300, 100, 360), inkedRect(700, 300, 760, 360)},
+                     {0, 0, 900, 700}, 1});
+    cases.push_back({"a long diagonal", {slope.grid()}, {0, 0, 900, 700}, 1});
+    cases.push_back({"a patch across a coarse cell", {inkedRect(250, 250, 262, 262)},
+                     {0, 0, 900, 700}, 7});
+    cases.push_back({"a coarse step over a sparse sheet",
+                     {inkedRect(40, 40, 90, 90), inkedRect(760, 600, 810, 650)},
+                     {0, 0, 900, 700}, 64});
+    cases.push_back({"a region that does not start at the origin",
+                     {inkedRect(300, 300, 360, 360)}, {137, 91, 640, 480}, 3});
+    cases.push_back({"a region left of and above the origin",
+                     {inkedRect(-300, -300, -240, -240)}, {-500, -500, 900, 700}, 5});
+    cases.push_back({"two sources over the same paper",
+                     {inkedRect(100, 100, 160, 160), inkedRect(600, 400, 660, 460)},
+                     {0, 0, 900, 700}, 1});
+
+    for (const Case& one : cases) {
+        const std::vector<float> skipped = ctgBarrier(one.sources, one.region, one.step);
+        const std::vector<float> everywhere =
+            ctgBarrierEverywhere(one.sources, one.region, one.step);
+
+        CHECK_EQ(skipped.size(), everywhere.size());
+        if (skipped.size() != everywhere.size()) continue;
+
+        std::size_t differing = 0;
+        for (std::size_t i = 0; i < skipped.size(); ++i) {
+            if (skipped[i] != everywhere[i]) ++differing;
+        }
+        if (differing != 0) {
+            std::printf("    %s: %zu of %zu cells differ\n", one.what, differing,
+                        skipped.size());
+        }
+        CHECK_EQ(differing, std::size_t{0});
+    }
+
+    // And there was ink to lose. A barrier of bare paper is all 1.0, and two of
+    // those agree without either of them having composited anything.
+    const std::vector<float> drawn = ctgBarrier(cases[1].sources, cases[1].region, 1);
+    std::size_t inked = 0;
+    for (const float value : drawn) {
+        if (value < 1.0f) ++inked;
+    }
+    CHECK(inked > 1000);
+}
+
 // How the barrier was banded must not be visible in the barrier.
 //
 // The band used to be counted in *coarse* rows, so it was `step` times taller
@@ -2221,5 +2342,6 @@ int main() {
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
     theBarrierDoesNotDependOnHowItWasBanded();
+    skippingBarePaperDoesNotChangeTheBarrier();
     return testing::summarise("ctg");
 }

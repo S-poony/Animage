@@ -56,8 +56,55 @@ bool ringIsClear(const std::vector<int>& labels, int width, int height) {
 // picks a solve resolution with. The reasoning that put it here -- what an
 // emptied tile does to a bounding box -- moved with it.
 
-std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
-                              int step) {
+namespace {
+
+// Where any source has a tile, over the tiles the region covers.
+//
+// One pass over every source's tile coordinates, which costs a hash walk and no
+// pixels at all. A tile that exists but holds nothing counts as occupied and is
+// composited anyway: it costs time and never an answer, and testing it would
+// cost a scan of every pixel in it.
+struct InkTiles {
+    int origin_x = 0;  // tile coordinate of column 0
+    int origin_y = 0;
+    int width = 0;  // in tiles
+    int height = 0;
+    std::vector<std::uint8_t> occupied;
+
+    bool anyIn(int column, int first_row, int last_row) const {
+        for (int row = first_row; row <= last_row; ++row) {
+            if (occupied[static_cast<std::size_t>(row) * width + column]) return true;
+        }
+        return false;
+    }
+};
+
+InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& region) {
+    InkTiles ink;
+    if (region.isEmpty()) return ink;
+
+    const TileCoord first = tileCoordFor(region.x, region.y);
+    const TileCoord last = tileCoordFor(region.x + region.width - 1, region.y + region.height - 1);
+    ink.origin_x = first.x;
+    ink.origin_y = first.y;
+    ink.width = last.x - first.x + 1;
+    ink.height = last.y - first.y + 1;
+    ink.occupied.assign(static_cast<std::size_t>(ink.width) * ink.height, 0);
+
+    for (const TileGrid& source : sources) {
+        for (const auto& [coord, tile] : source.tiles()) {
+            if (!tile) continue;
+            const int column = coord.x - ink.origin_x;
+            const int row = coord.y - ink.origin_y;
+            if (column < 0 || column >= ink.width || row < 0 || row >= ink.height) continue;
+            ink.occupied[static_cast<std::size_t>(row) * ink.width + column] = 1;
+        }
+    }
+    return ink;
+}
+
+std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
+                                   int step, bool skip_bare_paper) {
     step = std::max(1, step);
     const int width = (region.width + step - 1) / step;
     const int height = (region.height + step - 1) / step;
@@ -88,6 +135,8 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
     Compositor compositor;
     Framebuffer band;
 
+    const InkTiles ink = occupiedTiles(sources, region);
+
     // A band at a time, counted in bytes.
     //
     // Banding at all is because the whole region at once is a hundred megabytes
@@ -113,13 +162,17 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
         static_cast<int>(std::clamp(kBandBytes / std::max<long long>(1, row_bytes), 1LL,
                                     static_cast<long long>(region.height)));
 
-    for (int y0 = 0; y0 < region.height; y0 += band_rows) {
-        const PixelRect strip{region.x, region.y + y0, region.width,
-                              std::min(band_rows, region.height - y0)};
-
+    // One stretch of a band, flattened and reduced into the coarse rows it
+    // touches. Whether it is the whole band or a run of tile columns inside it
+    // makes no difference to any of this.
+    const auto reduce = [&](int from_x, int to_x, int band_top, int band_height, int y0) {
+        const PixelRect strip{from_x, band_top, to_x - from_x, band_height};
         compositor.compositeGrids(passes, strip, band);
 
         const int rows = std::min(band.height(), strip.height);
+        const int first_cell = (from_x - region.x) / step;
+        const int last_cell = std::min(width - 1, (to_x - 1 - region.x) / step);
+
         for (int row = 0; row < rows; ++row) {
             // Which coarse row this image row falls in. One division is the
             // whole of what banding in image rows costs.
@@ -127,21 +180,81 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
                 intensity.data() + static_cast<std::size_t>((y0 + row) / step) * width;
             const Rgba* source = band.row(row);
 
-            for (int x = 0; x < width; ++x) {
-                const int from = x * step;
-                const int to = std::min(from + step, band.width());
+            for (int cell = first_cell; cell <= last_cell; ++cell) {
+                // The part of the cell this stretch covers, which is all of it
+                // unless the stretch began or ended inside one.
+                const int from = std::max(from_x, region.x + cell * step);
+                const int to = std::min({to_x, region.x + (cell + 1) * step,
+                                         from_x + band.width()});
                 float covered = 0.0f;
-                for (int i = from; i < to; ++i) covered = std::max(covered, source[i].a);
+                for (int i = from; i < to; ++i) {
+                    covered = std::max(covered, source[i - from_x].a);
+                }
                 // Coverage is what stops a cut, so the barrier is one minus
                 // alpha: solid ink reads as 0, bare paper as 1, and the
                 // antialiased rim of a stroke reads as the grey between --
                 // which is the whole reason the boundary can be placed inside
                 // the line rather than beside it.
-                out[x] = std::min(out[x], std::clamp(1.0f - covered, 0.0f, 1.0f));
+                out[cell] = std::min(out[cell], std::clamp(1.0f - covered, 0.0f, 1.0f));
             }
+        }
+    };
+
+    for (int y0 = 0; y0 < region.height; y0 += band_rows) {
+        const int band_top = region.y + y0;
+        const int band_height = std::min(band_rows, region.height - y0);
+
+        if (!skip_bare_paper) {
+            reduce(region.x, region.x + region.width, band_top, band_height, y0);
+            continue;
+        }
+
+        // Only the runs of tile columns that have something under them, in this
+        // band's own tile rows.
+        //
+        // Exact rather than an approximation, and that is what makes it small:
+        // `intensity` starts at 1.0, which is bare paper, and a stretch with no
+        // tile under it composites to fully transparent, which reduces to
+        // exactly 1.0. Skipping it and compositing it produce the same array --
+        // including where a coarse cell straddles the end of a run, since the
+        // part left out contributes the value min() already holds.
+        //
+        // In both directions and not only by band. A whole-band test alone buys
+        // everything on two patches stacked one above the other and nothing at
+        // all on two side by side, since every row then has ink somewhere in it
+        // -- and nothing on a long diagonal, which is an ordinary thing to draw.
+        const int first_row = tileCoordFor(0, band_top).y - ink.origin_y;
+        const int last_row = tileCoordFor(0, band_top + band_height - 1).y - ink.origin_y;
+
+        int column = 0;
+        while (column < ink.width) {
+            if (!ink.anyIn(column, first_row, last_row)) {
+                ++column;
+                continue;
+            }
+            int end = column + 1;
+            while (end < ink.width && ink.anyIn(end, first_row, last_row)) ++end;
+
+            const int from_x = std::max(region.x, (ink.origin_x + column) * kTileSize);
+            const int to_x =
+                std::min(region.x + region.width, (ink.origin_x + end) * kTileSize);
+            if (to_x > from_x) reduce(from_x, to_x, band_top, band_height, y0);
+            column = end;
         }
     }
     return intensity;
+}
+
+}  // namespace
+
+std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
+                              int step) {
+    return buildCtgBarrier(sources, region, step, /*skip_bare_paper=*/true);
+}
+
+std::vector<float> ctgBarrierEverywhere(const std::vector<TileGrid>& sources,
+                                        const PixelRect& region, int step) {
+    return buildCtgBarrier(sources, region, step, /*skip_bare_paper=*/false);
 }
 
 namespace {

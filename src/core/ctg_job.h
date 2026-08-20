@@ -153,8 +153,25 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels,
 // line-art layer; combining a rough with a clean closes most of the gaps that
 // leak from either alone, which is the one improvement over it the design notes
 // ask for by name.
+//
+// Only where some source has a tile. That is exact and not a saving bought with
+// accuracy: bare paper composites to fully transparent and reduces to exactly
+// 1.0, which is what the array already holds, so the answer is the same array
+// either way -- see the implementation for why a coarse cell straddling the end
+// of a run is covered by the same argument. It matters because an empty region
+// used to cost the same as a drawn one, and the cost has to follow the ink
+// before the canvas stops bounding the region at all.
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step = 1);
+
+// The same with nothing skipped, which is the only thing the skipping can be
+// checked against.
+//
+// Exists for one commit -- see the gate for phase 2a in
+// docs/colour-without-a-canvas.md -- and then goes, exactly as the fill's tiles
+// did. Nothing but a test may call it.
+std::vector<float> ctgBarrierEverywhere(const std::vector<TileGrid>& sources,
+                                        const PixelRect& region, int step = 1);
 
 // How far the ink moved between one drawing and another.
 //
