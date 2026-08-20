@@ -436,7 +436,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     }
 
     CtgFill built;
-    built.region = filled;
+    built.canvas = filled;
     built.solved = region;
     built.step = step;
     built.inputs = job.inputs;

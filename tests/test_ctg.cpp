@@ -405,7 +405,7 @@ void theSolveStaysBoundedOnALargeDrawing() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     CHECK(fill.valid);
-    CHECK(fill.region.width > 2000);  // the region really is large
+    CHECK(fill.solved.width > 2000);  // the solve really is large
 
     // The budget itself, wherever a wall clock still means something. Under
     // AddressSanitizer this solve takes most of a minute, and none of that is
@@ -449,10 +449,10 @@ void theFillCoversTheCanvasAndStopsThere() {
     CHECK(fill.valid);
 
     // Exactly the canvas: nothing outside it, and nothing short of it.
-    CHECK_EQ(fill.region.x, 0);
-    CHECK_EQ(fill.region.y, 0);
-    CHECK_EQ(fill.region.width, 400);
-    CHECK_EQ(fill.region.height, 400);
+    CHECK_EQ(fill.canvas.x, 0);
+    CHECK_EQ(fill.canvas.y, 0);
+    CHECK_EQ(fill.canvas.width, 400);
+    CHECK_EQ(fill.canvas.height, 400);
 
     // Inside the box takes the inside colour.
     CHECK_NEAR(fillAt(fill, 200, 200).r, 1.0, 0.02);
@@ -472,7 +472,7 @@ void theFillCoversTheCanvasAndStopsThere() {
     // cache: the canvas is one of the fill's inputs.
     f.doc.setCanvasSize(800, 400);
     const CtgFill& wider = ctgFill(f.doc, f.track, f.image, f.colour);
-    CHECK_EQ(wider.region.width, 800);
+    CHECK_EQ(wider.canvas.width, 800);
     CHECK_NEAR(fillAt(wider, 500, 200).r, 1.0, 0.02);
 }
 
@@ -531,8 +531,8 @@ std::size_t scribblePixelsNotHonoured(const Cel& scribbles, const CtgFill& fill,
             for (int x = 0; x < kTileSize; ++x) {
                 const int px = coord.x * kTileSize + x;
                 const int py = coord.y * kTileSize + y;
-                if (px < fill.region.x || px >= fill.region.x + fill.region.width) continue;
-                if (py < fill.region.y || py >= fill.region.y + fill.region.height) continue;
+                if (px < fill.canvas.x || px >= fill.canvas.x + fill.canvas.width) continue;
+                if (py < fill.canvas.y || py >= fill.canvas.y + fill.canvas.height) continue;
 
                 const Rgba mark = scribbles.pixel(px, py);
                 if (mark.a < 0.5f) continue;  // the same threshold the seeding uses
@@ -940,7 +940,7 @@ void erasingAScribbleUndoesWhatItDid() {
     ctgStroke(f.doc, f.track, f.image, f.colour, 90, 150, 160, 150, 5.0f, 0, 0, 1, false);
     const CtgFill with_second = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK_EQ(with_second.colours, 2);
-    CHECK(differingPixels(before, with_second, before.region) > 100);
+    CHECK(differingPixels(before, with_second, f.doc.scene().canvas()) > 100);
 
     // Erased by retracing it with the same nib, which is how anybody rubs a
     // mark out.
@@ -950,7 +950,7 @@ void erasingAScribbleUndoesWhatItDid() {
     CHECK_EQ(after.colours, before.colours);
     CHECK(sameRect(after.solved, before.solved));
     CHECK_EQ(after.step, before.step);
-    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+    CHECK_EQ(differingPixels(before, after, f.doc.scene().canvas()), std::size_t{0});
 }
 
 // The same question with the erased mark somewhere the line art is not, which
@@ -999,7 +999,7 @@ void erasingAStrayScribbleUndoesWhatItDid() {
     CHECK_EQ(after.colours, before.colours);
     CHECK(sameRect(after.solved, before.solved));
     CHECK_EQ(after.step, before.step);
-    CHECK_EQ(differingPixels(before, after, before.region), std::size_t{0});
+    CHECK_EQ(differingPixels(before, after, f.doc.scene().canvas()), std::size_t{0});
 }
 
 // A mark made outside a shape, near its wall. Reported as colour appearing

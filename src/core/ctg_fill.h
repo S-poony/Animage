@@ -34,9 +34,20 @@ struct CtgShift {
 // pixels in the first place.
 struct CtgFill {
     TileGrid tiles;
-    PixelRect region;  // the area the fill covers: the canvas
 
-    // What was actually solved, and how coarsely. Not the same as `region`:
+    // What bounds the fill, which today is the canvas.
+    //
+    // Named for what it is rather than for what it does. The other rectangle
+    // here is `solved`, and "region" told the two apart by convention rather
+    // than by name -- which is fine while nothing but a test reads it, and not
+    // fine once the accessor does.
+    //
+    // It goes when the canvas stops bounding a fill at all: see
+    // docs/colour-without-a-canvas.md, phase 3. Until then this is the thing
+    // that says the colour stops at the frame.
+    PixelRect canvas;
+
+    // What was actually solved, and how coarsely. Not the same as `canvas`:
     // the solve covers only what has been drawn on and the labels are extended
     // outwards from it, and it is reduced until it fits the budget.
     //
