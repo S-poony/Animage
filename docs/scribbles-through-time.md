@@ -7,7 +7,9 @@ Design notes for two things, in this order:
 
 **Part 1 is built. Part 2 is built as far as its second rung** — one translation
 per drawing, estimated from the line art, on by default — and the rungs past it
-are still research. This document was written straight after the
+are still research. Rung 3 has moved since this was written, because the fill it
+would read has: see the note under
+[estimating the transform](#estimating-the-transform) before starting it. This document was written straight after the
 single-scribble change, while the solver was still in hand, because a good deal
 of it is a consequence of decisions already made rather than free choices. Where
 building either part contradicted it, the original text is kept and the
@@ -98,11 +100,15 @@ because nothing fails — it just gets slow, and slowly.
 > whichever drawing used to precede this one. There is a test with the two
 > scribbles drawn identically, so only their identity tells them apart.
 >
-> The cache also had to be bounded. A fill covers the canvas — 135 tiles at
+> The cache also had to be bounded. A fill covered the canvas — 135 tiles at
 > 1080p, about 17 MB — and before inheritance it took scribbles of your own to
 > get one. Every drawing has one now, so playing a coloured shot through once was
-> a gigabyte. Least recently used, budgeted in tiles; evicting costs a recompute,
-> which is the whole reason the layer stores marks instead of pixels.
+> a gigabyte. Least recently used; evicting costs a recompute, which is the whole
+> reason the layer stores marks instead of pixels.
+>
+> **Since built:** a fill is no longer a picture and the budget is no longer
+> counted in tiles. It is the labelling — about 4 MB at 1080p — and the budget is
+> a quarter of a gigabyte of those. Same budget, four times as much of a shot.
 
 ### Undo, deletion, reordering
 
@@ -225,6 +231,57 @@ search translations that minimise a distance between drawing *N*'s ink and
 `ctgBarrier` already produces exactly the ink-coverage raster both sides need,
 at whatever resolution the solve is running at, and it already downsamples
 conservatively. Reuse it; do not write a second rasteriser.
+
+> **Since built, and rung 3 starts somewhere else now.** The paragraph above is
+> the right idea against the wrong two objects, because
+> [colour without a canvas](colour-without-a-canvas.md) changed both of them.
+> Read this before writing any of rung 3.
+>
+> **The previous drawing's fill is no longer a tile grid of labels.** It is
+> `CtgFill::labels` — one `int16_t` per solved cell, row-major over
+> `CtgFill::solved` at `CtgFill::step`, `-1` where nothing reached — with
+> `CtgFill::palette` turning a label into a scribble key. That is *better* for
+> this than what the paragraph assumed: regions are already the thing stored, so
+> a per-region bounding box is a walk over the label array rather than a
+> re-derivation from pixels. Remember the two conversions, because nothing else
+> will remind you: a cell `(cx, cy)` covers image pixels
+> `[solved.x + cx*step, solved.x + (cx+1)*step)`, and the answer outside
+> `solved` is the label on the ring clamped one cell inwards, not a lookup.
+>
+> **`ctgBarrier` is no longer the raster to reuse.** The advice survives — do not
+> write a second rasteriser — but the function to call is `ctgInkCoverage`, and
+> the argument that matters is `InkReduce`. `ctgBarrier` is `1 - Mean`'s
+> opposite: it reduces by the *most* covered pixel in a cell, which is what a
+> barrier must do because a hole in it is a fill pouring out. A correlation
+> wants `InkReduce::Mean`, so that half a line under a cell counts half. Rung 2
+> was built the wrong way round on exactly this and it changed what the search
+> found — see the plan's phase 2b for the measurement.
+>
+> **Nothing clips a region any more.** The solve is the drawn bounds of the marks
+> and the ink plus a tile of margin, and that is all. For rung 3 this is the
+> point rather than an obstacle: a per-region box is small even when the regions
+> are far apart, so each gets a fine step of its own where one global translation
+> gets the coarse step of the box round everything. That is the whole of the
+> failure a user reported against rung 2 — draw something a long way off and the
+> carrying of a mark somewhere else changes — and rung 3 is what fixes it, not
+> rungs 4 or 5.
+>
+> **And two traps that are the same trap, both paid for in this function.** A
+> threshold on a reduced quantity has to name the unit it is counted in: the
+> "nothing to match" guard was a count of inked cells, the reduction changed
+> under it, and it silently became "fewer than step² pixels of ink". And a step
+> taken from a region's longer side alone leaves the shorter side with no grid:
+> past about twenty-four to one the search abandoned itself outright. Both were
+> unreachable while the region was clipped to the canvas and ordinary once it was
+> not. Any new correlation that reduces to a grid inherits both. See
+> [what a threshold meant before the thing under it changed](handover.md#what-a-threshold-meant-before-the-thing-under-it-changed).
+>
+> **A fill now carries the marks it was solved from and the shift they were read
+> through**, as `CtgFill::marks` and `CtgFill::carried_by`. So the third rule
+> below — everything that shows a mark has to be told where it went — is
+> satisfied by construction for anything reading a fill. `Document::ctgShiftAt`
+> is still there and is still what the Marks column reads, because showing the
+> scribbles does not go through a fill.
 
 Order of attack, cheapest first:
 
