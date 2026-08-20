@@ -103,15 +103,17 @@ InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& re
     return ink;
 }
 
-std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
-                                   int step) {
+}  // namespace
+
+std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
+                                  int step, InkReduce reduce_with) {
     step = std::max(1, step);
     const int width = (region.width + step - 1) / step;
     const int height = (region.height + step - 1) / step;
-    std::vector<float> intensity(static_cast<std::size_t>(std::max(0, width)) *
-                                     std::max(0, height),
-                                 1.0f);
-    if (width <= 0 || height <= 0 || sources.empty()) return intensity;
+    std::vector<float> coverage(static_cast<std::size_t>(std::max(0, width)) *
+                                    std::max(0, height),
+                                0.0f);
+    if (width <= 0 || height <= 0 || sources.empty()) return coverage;
 
     // Drawn plainly, at full strength. What the barrier asks of a source is
     // where its ink is, and a layer's opacity is about looking at it.
@@ -152,9 +154,12 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
     // A band does not have to line up with a coarse row, and that is what lets
     // the floor here be one image row rather than one coarse row -- `step` times
     // smaller, and the difference between a bound and a smaller unbounded thing.
-    // The reduction below accumulates with min() into an array that starts at
-    // 1.0, so a coarse row finished by two bands is the same answer as one
-    // finished by a single band.
+    // Both reductions decompose across bands, which is what the banding needs:
+    // `Most` accumulates with max() into an array of zeros and `Mean`
+    // accumulates a sum, divided at the end by the cell's own pixel count. So a
+    // coarse row finished by two bands is the same answer as one finished by a
+    // single band, and a cell no band touched stays at zero -- which is bare
+    // paper, and correct for both.
     constexpr long long kBandBytes = 4LL << 20;
     const long long row_bytes =
         static_cast<long long>(region.width) * static_cast<long long>(sizeof(Rgba));
@@ -177,7 +182,7 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
             // Which coarse row this image row falls in. One division is the
             // whole of what banding in image rows costs.
             float* out =
-                intensity.data() + static_cast<std::size_t>((y0 + row) / step) * width;
+                coverage.data() + static_cast<std::size_t>((y0 + row) / step) * width;
             const Rgba* source = band.row(row);
 
             for (int cell = first_cell; cell <= last_cell; ++cell) {
@@ -186,16 +191,18 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
                 const int from = std::max(from_x, region.x + cell * step);
                 const int to = std::min({to_x, region.x + (cell + 1) * step,
                                          from_x + band.width()});
-                float covered = 0.0f;
-                for (int i = from; i < to; ++i) {
-                    covered = std::max(covered, source[i - from_x].a);
+
+                if (reduce_with == InkReduce::Most) {
+                    float covered = 0.0f;
+                    for (int i = from; i < to; ++i) {
+                        covered = std::max(covered, source[i - from_x].a);
+                    }
+                    out[cell] = std::max(out[cell], covered);
+                } else {
+                    float summed = 0.0f;
+                    for (int i = from; i < to; ++i) summed += source[i - from_x].a;
+                    out[cell] += summed;
                 }
-                // Coverage is what stops a cut, so the barrier is one minus
-                // alpha: solid ink reads as 0, bare paper as 1, and the
-                // antialiased rim of a stroke reads as the grey between --
-                // which is the whole reason the boundary can be placed inside
-                // the line rather than beside it.
-                out[cell] = std::min(out[cell], std::clamp(1.0f - covered, 0.0f, 1.0f));
             }
         }
     };
@@ -208,11 +215,10 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
         // band's own tile rows.
         //
         // Exact rather than an approximation, and that is what makes it small:
-        // `intensity` starts at 1.0, which is bare paper, and a stretch with no
-        // tile under it composites to fully transparent, which reduces to
-        // exactly 1.0. Skipping it and compositing it produce the same array --
-        // including where a coarse cell straddles the end of a run, since the
-        // part left out contributes the value min() already holds.
+        // a stretch with no tile under it composites to fully transparent,
+        // which is a coverage of zero -- the identity for max() and for a sum
+        // alike. Skipping it and compositing it produce the same array,
+        // including where a coarse cell straddles the end of a run.
         //
         // In both directions and not only by band. A whole-band test alone buys
         // everything on two patches stacked one above the other and nothing at
@@ -237,14 +243,35 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
             column = end;
         }
     }
-    return intensity;
-}
 
-}  // namespace
+    // The mean's divisor is the cell's own pixel count, which is `step` squared
+    // everywhere but along the far edges, where the region can end partway
+    // through a cell. Dividing by the block a cell stands for rather than by
+    // the part of it inside the region would read those edge cells as emptier
+    // than they are.
+    if (reduce_with == InkReduce::Mean) {
+        for (int cy = 0; cy < height; ++cy) {
+            const float rows_in = static_cast<float>(std::min(step, region.height - cy * step));
+            for (int cx = 0; cx < width; ++cx) {
+                const float columns_in =
+                    static_cast<float>(std::min(step, region.width - cx * step));
+                float& value = coverage[static_cast<std::size_t>(cy) * width + cx];
+                value = std::clamp(value / (rows_in * columns_in), 0.0f, 1.0f);
+            }
+        }
+    }
+    return coverage;
+}
 
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step) {
-    return buildCtgBarrier(sources, region, step);
+    // Coverage is what stops a cut, so the barrier is one minus it: solid ink
+    // reads as 0, bare paper as 1, and the antialiased rim of a stroke reads as
+    // the grey between -- which is the whole reason the boundary can be placed
+    // inside the line rather than beside it.
+    std::vector<float> intensity = ctgInkCoverage(sources, region, step, InkReduce::Most);
+    for (float& value : intensity) value = std::clamp(1.0f - value, 0.0f, 1.0f);
+    return intensity;
 }
 
 namespace {
@@ -297,11 +324,10 @@ InkLevel halve(const InkLevel& fine) {
     coarse.height = std::max(1, fine.height / 2);
     coarse.ink.assign(static_cast<std::size_t>(coarse.width) * coarse.height, 0.0f);
 
-    // Averaged rather than maxed, which is the opposite of what the barrier
-    // does and right for the opposite reason. A barrier must not lose a thin
-    // line, because a hole in it is a fill pouring out; a correlation wants the
-    // ink to weigh what there is of it, so that half a line under a cell counts
-    // half.
+    // Averaged, the same way level zero is now built -- see InkReduce. This is
+    // where the argument for it was written down first, and for a while it was
+    // the only level that took it: a correlation wants the ink to weigh what
+    // there is of it, so that half a line under a cell counts half.
     for (int y = 0; y < coarse.height; ++y) {
         for (int x = 0; x < coarse.width; ++x) {
             float sum = 0.0f;
@@ -373,10 +399,13 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     a.height = b.height = (area.height + step - 1) / step;
     if (a.width < 4 || a.height < 4) return {};
 
-    a.ink = ctgBarrier(from, area, step);
-    b.ink = ctgBarrier(to, area, step);
-    for (float& value : a.ink) value = 1.0f - value;  // coverage, not intensity
-    for (float& value : b.ink) value = 1.0f - value;
+    // Averaged and not maxed, which is the opposite of what the barrier does
+    // and right for the opposite reason -- see InkReduce. `halve` below has
+    // always averaged, and said in its own comment why the barrier must not;
+    // level zero was the one level built the other way, and only because it was
+    // borrowing a function written for something else.
+    a.ink = ctgInkCoverage(from, area, step, InkReduce::Mean);
+    b.ink = ctgInkCoverage(to, area, step, InkReduce::Mean);
 
     // Nothing to match. Two blank drawings agree at every offset, and the
     // smallest shift is the honest answer.

@@ -146,21 +146,43 @@ struct CtgJob {
 CtgFill solveCtgJob(const CtgJob& job, bool want_labels,
                     const std::atomic<bool>* abandon = nullptr);
 
+// How much ink covers each cell: every source layer, flattened, where 0 is bare
+// paper and 1 is solid.
+//
+// The reduction is an argument because the two callers want opposite ones, and
+// that was the bug. A barrier must not lose a thin line -- a hole in it is a
+// fill pouring out -- so it takes the *most* covered pixel in a cell, and a
+// line passing anywhere through a cell still stops a cut there. A correlation
+// wants the ink to weigh what there is of it, so that half a line under a cell
+// counts half; taking the most makes any cell containing any ink read as solid,
+// which at a coarse step is most of the drawing.
+//
+// estimateCtgShift used to build its level zero out of the barrier and inherit
+// the barrier's reduction, while every level above it was built by averaging --
+// and the code said so, in a comment naming the barrier's rule as the opposite
+// one. Only one of them can be right for a correlation.
+//
+// Only where some source has a tile. That is exact and not a saving bought with
+// accuracy: bare paper composites to fully transparent, which is a coverage of
+// zero -- the identity for max() and for a sum alike. It matters because an
+// empty region used to cost the same as a drawn one, and the cost has to follow
+// the ink before the canvas stops bounding the region at all.
+enum class InkReduce {
+    Most,  // the most covered pixel in the cell
+    Mean,  // the average over the cell
+};
+
+std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
+                                  int step, InkReduce reduce_with);
+
 // Builds the barrier the scribbles are cut against: every source layer,
-// flattened, as intensity where 0 is solid line and 1 is bare paper.
+// flattened, as intensity where 0 is solid line and 1 is bare paper. One minus
+// the coverage above, reduced by the most.
 //
 // More than one source is allowed on purpose. TVPaint cuts against a single
 // line-art layer; combining a rough with a clean closes most of the gaps that
 // leak from either alone, which is the one improvement over it the design notes
 // ask for by name.
-//
-// Only where some source has a tile. That is exact and not a saving bought with
-// accuracy: bare paper composites to fully transparent and reduces to exactly
-// 1.0, which is what the array already holds, so the answer is the same array
-// either way -- see the implementation for why a coarse cell straddling the end
-// of a run is covered by the same argument. It matters because an empty region
-// used to cost the same as a drawn one, and the cost has to follow the ink
-// before the canvas stops bounding the region at all.
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step = 1);
 
