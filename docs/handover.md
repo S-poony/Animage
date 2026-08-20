@@ -3555,17 +3555,41 @@ already had. `CtgSolver::failedCount` is the only trace it leaves.
 **What is left is the time.** The band is 4 MB now and measures it: peak working
 set over a 16384-wide barrier at step 171 is 4 MB above where it started, where
 the formula for the old one says 1.4 GB. What that did not buy is speed. The
-barrier still composites every pixel of the region at full resolution whatever
-the step — and `compositeGrids` clears its framebuffer, so an empty region costs
-the same as a drawn one: about 0.4 s a call at that size, three calls a solve.
-That is not this bug and it is not fixed. The shift estimate does not need a
-full-resolution composite at all: it wants ink weighted by how much of it there
-is, which `halve` says in its own comment and the reduction on the way in then
-contradicts by taking the `max`. Read straight off the tiles it would cost what
-the ink costs rather than what the bounding box costs. Sharing `ctgBarrier` with
-the solve, whose reduction must be `max` or the fill pours out of its own
-outline, is what dragged a full-resolution composite into a job that never
-wanted one.
+barrier composited every pixel of the region at full resolution whatever the
+step, so an empty region cost the same as a drawn one — about 0.4 s a call at
+that size, three calls a solve. That was recorded here for a while as "not this
+bug and not fixed", and both halves of it are fixed now, in phase 2 of
+[colour without a canvas](colour-without-a-canvas.md). They are separate
+findings and each is worth having on its own.
+
+**The barrier composites only where some source has a tile.** Exact rather than
+an approximation, which is what makes it small: bare paper composites to fully
+transparent, which is a coverage of zero — the identity for the max the barrier
+reduces with and for the sum the correlation reduces with alike. Skipped in both
+directions and not only by band, because a band test alone buys everything on
+two patches stacked one above the other, nothing at all on two side by side, and
+nothing on a long diagonal. Measured: over four times as much paper as the
+drawing needs, compositing everywhere costs 3.5x and compositing where the ink is
+costs 1.3x.
+
+**And the correlation stopped borrowing the barrier's reducer.** The shift
+estimate built both level zeroes with `ctgBarrier` and inherited a reduction that
+takes the *most* covered pixel in a cell, while every level above it was built by
+averaging — and `halve` said why in its own comment, naming the barrier's rule as
+the opposite one. A barrier must not lose a thin line, because a hole in it is a
+fill pouring out. A correlation wants the ink to weigh what there is of it, so
+that half a line under a cell counts half; taking the most makes any cell holding
+any ink read as solid, which at the step the search uses is most of the drawing.
+The reduction is an argument now (`InkReduce`), and coverage rather than
+intensity is the quantity both share.
+
+That changed what the search finds, which was the point of it rather than a risk
+run by it. On `bench_carry` the answer moved on eight rows, always by exactly one
+cell of the search's own grid, six times towards the true shift and once away.
+The row it was for is a shape carried 400 px: matched at 252 before and losing
+both its regions outright, matched at 396 now with the left one fully coloured.
+Coverage, leak and spread are otherwise unchanged. The numbers are in
+[the colour benchmarks](colour-baseline.md).
 
 
 ### What made saving slow, and why skipping unchanged cels would not have helped
