@@ -741,9 +741,19 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     built.palette_colours.reserve(palette.size());
     for (const std::uint32_t key : palette) built.palette_colours.push_back(scribbleColour(key));
     built.palette = std::move(palette);
-    // Narrowed to two bytes on the way in. See CtgFill::labels for why 32767
-    // colours is not a cap anybody can reach.
-    built.labels.assign(solved.labels.begin(), solved.labels.end());
+    // Narrowed to two bytes on the way in, one label at a time and with the
+    // cast written down. See CtgFill::labels for why 32767 colours is not a cap
+    // anybody can reach.
+    //
+    // Not `assign` from the solver's vector<int>, which narrows *inside* the
+    // standard library: the compiler that minds then reports its own header as
+    // the error and names this line only as the instantiation that reached it.
+    // The conversion is the same one either way; the difference is whether it
+    // is written here or inferred there.
+    built.labels.reserve(solved.labels.size());
+    for (const int label : solved.labels) {
+        built.labels.push_back(static_cast<std::int16_t>(label));
+    }
     built.outside_is_clear = ringIsClear(solved.labels, problem.width, problem.height);
     return built;
 }
