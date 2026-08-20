@@ -517,9 +517,19 @@ is the reference and what tests read; `ctgFillSpan` is what the compositor
 calls, a run of a row at a time, and `ctgFillExtent` says which part of a row
 can hold an answer at all — which is how a fill gets back the shortcut an absent
 tile gives a grid, and it is not optional: without it a colour layer costs the
-area of the canvas rather than the area of the fill. All three are pure
+area of the viewport rather than the area of the fill. All three are pure
 functions of what the fill stores, because `compositeGrids` runs its bands on
 several threads over one pass list and every one of them reads the same fill.
+
+**Nothing bounds a fill.** Not the canvas, which used to: a shape running off
+the frame is coloured out there too, under the veil, and a ball animating
+off-screen keeps its colour instead of losing it at the frame line. What bounds
+a *solve* is the drawn bounds of the marks and the ink plus a tile of margin,
+and a cell budget that coarsens it until it fits; the labels are extended
+outwards from there by clamping, which is exact because there is no line art
+outside the drawn area for a cut to pass through. Export is unaffected and
+always was — it composites the canvas. The cost is that ink far off the frame
+coarsens the whole drawing, which is issue #61.
 
 The compositor draws whatever fill is in the cache and never starts a solve —
 `Document::ctgFillFor` is const for exactly that reason. A colour layer reaches
@@ -2990,7 +3000,7 @@ trap.
 | [Why regenerating the fill whenever it looks stale costs a max-flow per dab](#why-regenerating-the-fill-whenever-it-looks-stale-costs-a-max-flow-per-dab) | Solve the fill on pen-up, not on cache staleness |
 | [Where the fill solve runs, and the resolution that paid for it](#where-the-fill-solve-runs-and-the-resolution-that-paid-for-it) | A synchronous solve capped quality; it is threaded now |
 | [What a widget on a list row takes over, including the row's own tick](#what-a-widget-on-a-list-row-takes-over-including-the-rows-own-tick) | setItemWidget swallows presses and kills the visibility tick |
-| [What a fill with no absent tile stops getting for free](#what-a-fill-with-no-absent-tile-stops-getting-for-free) | A lazy fill costs the canvas, not the fill, unless it is told where to look |
+| [What a fill with no absent tile stops getting for free](#what-a-fill-with-no-absent-tile-stops-getting-for-free) | A lazy fill costs the viewport, not the fill, unless it is told where to look |
 | [What a stroke's dirty rectangle misses when the whole fill is resolved](#what-a-strokes-dirty-rectangle-misses-when-the-whole-fill-is-resolved) | A regenerated fill changes far from the pen; dirty everything |
 | [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
 | [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
@@ -3459,7 +3469,7 @@ area a layer left empty has no tile there, and the whole run is skipped on one
 pointer test before a channel is read — which is why a 66-tile drawing and a
 2425-tile one refresh in the same time. A fill that works its colour out per
 pixel has no absent tile to skip on, and the first version of one duly cost the
-area of the *canvas* where the tiles cost the area of the fill: the coloured
+area of the *viewport* where the tiles cost the area of the fill: the coloured
 frame went from 14.6 ms to 37.6 ms at HD, and four tracks from 96 frames shown
 to 89.
 

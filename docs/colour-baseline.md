@@ -856,3 +856,400 @@ of about the right size', which no flag catches.
 
 all of it in 14.5 s
 ```
+
+
+## Phase 3 -- the canvas leaves the job
+
+- **Recorded** 2026-08-20, same machine and same build type as above.
+
+The gate for this phase is behaviour rather than a number: a box running off the
+right-hand edge is coloured out there, a shape drawn entirely outside the frame
+is coloured entirely outside the frame, and resizing the canvas neither changes
+a fill nor re-solves one. `shots a-coloured-drawing-off-the-frame` is what it
+looks like.
+
+`bench_carry` improves on three rows, all of them the ones where the shape had
+run off the canvas at a shift of 400, and none of them by luck: the area the
+motion estimate matches over is no longer clipped either, so the answer is
+exactly 400 rather than 396.
+
+| | phase 2 | phase 3 |
+|---|---|---|
+| 300x300, radius 30, marks follow, shift 400 | spread 6.42, moved 396 | spread 7.70, moved **400** |
+| 300x300, radius 12, marks follow, shift 400 | 92.5 per cent, spread 16.93 | **100 per cent**, spread 21.88 |
+| two halves, marks follow, shift 400 | right blue 14.3 per cent, spread 1.14 | right blue **100 per cent**, spread 6.31 |
+
+Against the phase 0 baseline, the whole table is now at least as good on
+coverage, leak and spread on every row, and the one row where the shift estimate
+is a grid cell further from the truth is the one 2b records.
+
+`bench_composite` and `bench_playback` do not move. Fills are a little larger,
+because the solve region is the drawn bounds rather than the drawn bounds
+clipped to the frame: 4320 KB against 4050 at 1080p, and the four-track shot
+holds 107 fills of 192 rather than 127. That is still against 62 at the
+baseline.
+
+| | phase 0 | phase 3 |
+|---|---|---|
+| HD coloured frame | 14.63 ms | 14.98 ms |
+| 4K coloured frame | 68.10 ms | 62.78 ms |
+| four tracks, coloured | 18.23 ms | 18.62 ms |
+| 4K fills held | 20 of 48 | 41 of 48 |
+| four tracks, fills held | 62 of 192 | 107 of 192 |
+
+**What it costs, which is the part with no number in this file yet.** The box
+round the ink picks the solve's resolution and nothing clips that box any more,
+so two things drawn far apart are solved on one grid spanning both of them and
+everything between. `inkFarApartCoarsensTheWholeSolve` in `test_ctg` holds that
+still: both shapes still fill, blockily, and the step is larger than either
+needed alone. Time and memory do not run away -- the budget caps the cells and
+the barrier composites only where there are tiles, which is what phase 2a was
+for -- so what is lost is sharpness. That is issue #61 and phase 4, where the
+test above is the one that changes.
+
+### bench_carry
+
+```
+Carrying a mark unchanged, against a shape that moves.
+
+The mark is drawn on drawing 1 and inherited by the rest. Coverage is how
+much of the shape it fills there; leak is how much of the world outside
+the shape it fills as well. What is being asked is how much motion a mark
+survives with nothing moving it -- which is what decides whether anything
+past 'carry it unchanged' is worth building.
+
+  shape 300x300, gap 60, mark radius 30, moving 0 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2       0      100.0%     0.0%     7.70       0
+        3       0      100.0%     0.0%     7.70       0
+        4       0      100.0%     0.0%     7.70       0
+        5       0      100.0%     0.0%     7.70       0
+        6       0      100.0%     0.0%     7.70       0
+
+  shape 300x300, gap 60, mark radius 30, moving 20 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      20      100.0%     0.0%     7.70       0
+        3      40      100.0%     0.0%     7.70       0
+        4      60      100.0%     0.0%     7.75       0
+        5      80      100.0%     0.2%     7.85       0
+        6     100      100.0%     0.4%     7.95       0
+
+  shape 300x300, gap 60, mark radius 30, moving 40 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      40      100.0%     0.0%     7.70       0
+        3      80      100.0%     0.2%     7.85       0
+        4     120      100.0%     0.7%     8.05       0
+        5     160      100.0%     1.1%     8.26       0
+        6     200      100.0%     1.5%     8.46       0
+
+  shape 300x300, gap 60, mark radius 30, moving 80 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      80      100.0%     0.2%     7.85       0
+        3     160      100.0%     1.1%     8.26       0
+        4     240      100.0%     2.0%     8.67       0
+        5     320        0.0%     2.2%     1.00       0
+        6     400        0.0%     2.1%     1.00       0
+
+  shape 300x300, gap 60, mark radius 12, moving 0 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2       0      100.0%     0.0%    21.88       0
+        3       0      100.0%     0.0%    21.88       0
+        4       0      100.0%     0.0%    21.88       0
+        5       0      100.0%     0.0%    21.88       0
+        6       0      100.0%     0.0%    21.88       0
+
+  shape 300x300, gap 60, mark radius 12, moving 20 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      20      100.0%     0.0%    21.88       0
+        3      40      100.0%     0.0%    21.88       0
+        4      60      100.0%     0.0%    21.88       0
+        5      80      100.0%     0.0%    21.98       0
+        6     100      100.0%     0.1%    22.10       0
+
+  shape 300x300, gap 60, mark radius 12, moving 40 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      40      100.0%     0.0%    21.88       0
+        3      80      100.0%     0.0%    21.98       0
+        4     120      100.0%     0.2%    22.22       0
+        5     160      100.0%     0.4%    22.46       0
+        6     200      100.0%     0.6%    22.70       0
+
+  shape 300x300, gap 60, mark radius 12, moving 80 px a drawing, marks stay
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      80      100.0%     0.0%    21.98       0
+        3     160      100.0%     0.4%    22.46       0
+        4     240        0.0%     0.8%     1.03       0
+        5     320        0.0%     0.8%     1.00       0
+        6     400        0.0%     0.7%     1.00       0
+
+  shape 300x300, gap 60, mark radius 30, moving 0 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2       0      100.0%     0.0%     7.70       0
+        3       0      100.0%     0.0%     7.70       0
+        4       0      100.0%     0.0%     7.70       0
+        5       0      100.0%     0.0%     7.70       0
+        6       0      100.0%     0.0%     7.70       0
+
+  shape 300x300, gap 60, mark radius 30, moving 20 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      20      100.0%     0.0%     7.70      18
+        3      40      100.0%     0.0%     7.70      42
+        4      60      100.0%     0.0%     7.70      60
+        5      80      100.0%     0.0%     7.70      78
+        6     100      100.0%     0.0%     7.70      98
+
+  shape 300x300, gap 60, mark radius 30, moving 40 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      40      100.0%     0.0%     7.70      42
+        3      80      100.0%     0.0%     7.70      78
+        4     120      100.0%     0.0%     7.70     119
+        5     160      100.0%     0.0%     7.70     161
+        6     200      100.0%     0.0%     7.70     196
+
+  shape 300x300, gap 60, mark radius 30, moving 80 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%     7.70       0
+        2      80      100.0%     0.0%     7.70      78
+        3     160      100.0%     0.0%     7.70     161
+        4     240      100.0%     0.0%     7.70     240
+        5     320      100.0%     0.0%     7.70     320
+        6     400      100.0%     0.0%     7.70     400
+
+  shape 300x300, gap 60, mark radius 12, moving 0 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2       0      100.0%     0.0%    21.88       0
+        3       0      100.0%     0.0%    21.88       0
+        4       0      100.0%     0.0%    21.88       0
+        5       0      100.0%     0.0%    21.88       0
+        6       0      100.0%     0.0%    21.88       0
+
+  shape 300x300, gap 60, mark radius 12, moving 20 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      20      100.0%     0.0%    21.88      18
+        3      40      100.0%     0.0%    21.88      42
+        4      60      100.0%     0.0%    21.88      60
+        5      80      100.0%     0.0%    21.88      78
+        6     100      100.0%     0.0%    21.88      98
+
+  shape 300x300, gap 60, mark radius 12, moving 40 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      40      100.0%     0.0%    21.88      42
+        3      80      100.0%     0.0%    21.88      78
+        4     120      100.0%     0.0%    21.88     119
+        5     160      100.0%     0.0%    21.88     161
+        6     200      100.0%     0.0%    21.88     196
+
+  shape 300x300, gap 60, mark radius 12, moving 80 px a drawing, marks follow
+    drawing   shift   coverage    leak    spread   moved
+        1       0      100.0%     0.0%    21.88       0
+        2      80      100.0%     0.0%    21.88      78
+        3     160      100.0%     0.0%    21.88     161
+        4     240      100.0%     0.0%    21.88     240
+        5     320      100.0%     0.0%    21.88     320
+        6     400      100.0%     0.0%    21.88     400
+
+
+And with a neighbour to be wrong about: two halves, a mark in each.
+Left red and right blue are the fill being right; right red is the
+colour of one region landing in the other, which is the failure the
+single-shape table above cannot show.
+
+  two 150x300 halves, a mark in each, radius 30, moving 20 px a drawing, marks stay
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      20        99.8%       100.0%        0.0%     6.32       0
+        3      40        96.5%       100.0%        0.0%     6.28       0
+        4      60        93.3%       100.0%        0.0%     6.28       0
+        5      80         6.9%       100.0%        0.0%     1.00       0
+        6     100         3.7%       100.0%        0.0%     1.00       0
+
+  two 150x300 halves, a mark in each, radius 30, moving 40 px a drawing, marks stay
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      40        96.5%       100.0%        0.0%     6.28       0
+        3      80         6.9%       100.0%        0.0%     1.00       0
+        4     120         0.7%       100.0%        0.0%     1.00       0
+        5     160         0.0%         0.0%        0.0%     1.22       0
+        6     200         0.0%         0.0%        0.0%     1.00       0
+
+  two 150x300 halves, a mark in each, radius 30, moving 80 px a drawing, marks stay
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      80         6.9%       100.0%        0.0%     1.00       0
+        3     160         0.0%         0.0%        0.0%     1.22       0
+        4     240         0.0%         0.0%        0.0%     1.00       0
+        5     320         0.0%         0.0%        0.0%     1.00       0
+        6     400         0.0%         0.0%        0.0%     1.00       0
+
+  two 150x300 halves, a mark in each, radius 30, moving 20 px a drawing, marks follow
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      20       100.0%       100.0%        0.0%     6.31      18
+        3      40       100.0%       100.0%        0.0%     6.31      42
+        4      60       100.0%       100.0%        0.0%     6.31      60
+        5      80       100.0%       100.0%        0.0%     6.31      78
+        6     100       100.0%       100.0%        0.0%     6.31      98
+
+  two 150x300 halves, a mark in each, radius 30, moving 40 px a drawing, marks follow
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      40       100.0%       100.0%        0.0%     6.31      42
+        3      80       100.0%       100.0%        0.0%     6.31      78
+        4     120       100.0%       100.0%        0.0%     6.31     119
+        5     160       100.0%       100.0%        0.0%     6.31     161
+        6     200       100.0%       100.0%        0.0%     6.31     203
+
+  two 150x300 halves, a mark in each, radius 30, moving 80 px a drawing, marks follow
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%       100.0%        0.0%     6.31       0
+        2      80       100.0%       100.0%        0.0%     6.31      78
+        3     160       100.0%       100.0%        0.0%     6.31     161
+        4     240       100.0%       100.0%        0.0%     6.31     240
+        5     320       100.0%       100.0%        0.0%     6.31     320
+        6     400       100.0%       100.0%        0.0%     6.31     400
+
+
+And the same with nothing defending the neighbouring region: only the
+left half is marked. Right red is then the colour landing in a region it
+was never meant for -- the failure the design note calls 'the wrong region
+of about the right size', which no flag catches.
+
+  two 150x300 halves, a mark in the left half only, radius 30, moving -20 px a drawing, marks stay
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%         0.0%        0.0%     6.31       0
+        2     -20       100.0%         0.0%      100.0%    12.78       0
+        3     -40       100.0%         0.0%      100.0%    12.78       0
+        4     -60       100.0%         0.0%      100.0%    12.78       0
+        5     -80       100.0%         0.0%      100.0%    12.78       0
+        6    -100       100.0%         0.0%      100.0%    12.78       0
+
+  two 150x300 halves, a mark in the left half only, radius 30, moving -40 px a drawing, marks stay
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%         0.0%        0.0%     6.31       0
+        2     -40       100.0%         0.0%      100.0%    12.78       0
+        3     -80       100.0%         0.0%      100.0%    12.78       0
+        4    -120       100.0%         0.0%      100.0%    12.78       0
+        5    -160         0.0%         0.0%      100.0%     6.31       0
+        6    -200         0.0%         0.0%      100.0%     6.60       0
+
+  two 150x300 halves, a mark in the left half only, radius 30, moving -20 px a drawing, marks follow
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%         0.0%        0.0%     6.31       0
+        2     -20       100.0%         0.0%        0.0%     6.31     -18
+        3     -40       100.0%         0.0%        0.0%     6.31     -42
+        4     -60       100.0%         0.0%        0.0%     6.31     -60
+        5     -80       100.0%         0.0%        0.0%     6.31     -78
+        6    -100       100.0%         0.0%        0.0%     6.31    -102
+
+  two 150x300 halves, a mark in the left half only, radius 30, moving -40 px a drawing, marks follow
+    drawing   shift    left red   right blue   right red   spread   moved
+        1       0       100.0%         0.0%        0.0%     6.31       0
+        2     -40       100.0%         0.0%        0.0%     6.31     -42
+        3     -80       100.0%         0.0%        0.0%     6.31     -78
+        4    -120       100.0%         0.0%        0.0%     6.31    -120
+        5    -160       100.0%         0.0%        0.0%     6.31    -161
+        6    -200       100.0%         0.0%        0.0%     6.31    -203
+
+all of it in 15.2 s
+```
+
+### bench_composite
+
+```
+compositing a 1150x640 viewport
+
+1 layer       77 tiles
+    no margin           2.00 ms
+    margin  64 px       2.87 ms   (1.43x)
+    margin 192 px       4.48 ms   (2.24x)
+2 layers     154 tiles
+    no margin           2.84 ms
+    margin  64 px       4.05 ms   (1.42x)
+    margin 192 px       6.59 ms   (2.32x)
+3 layers     234 tiles
+    no margin           3.59 ms
+    margin  64 px       5.38 ms   (1.50x)
+    margin 192 px       8.18 ms   (2.28x)
+4 layers     309 tiles
+    no margin           4.55 ms
+    margin  64 px       6.52 ms   (1.43x)
+    margin 192 px       9.67 ms   (2.12x)
+
+zoomed out, 4 layers over a wide drawing
+    zoom  1.00 ( 1.00 image px an entry, read every 1)     2.11 ms
+    zoom  0.70 ( 1.43 image px an entry, read every 1)     4.31 ms
+    zoom  0.50 ( 2.00 image px an entry, read every 1)     5.34 ms
+    zoom  0.20 ( 5.00 image px an entry, read every 2)    14.98 ms
+    zoom  0.10 (10.00 image px an entry, read every 4)    13.96 ms
+    zoom  0.05 (20.00 image px an entry, read every 7)    16.67 ms
+
+LazyBrush: three boxed regions on a background, each wall gapped
+     128x128         7.0 ms   (4 cuts)
+     256x256        26.3 ms   (4 cuts)
+     512x512       114.6 ms   (4 cuts)
+    1024x1024      604.9 ms   (4 cuts)
+
+A CTG solve on a 1920x1080 drawing, coarse then full:
+    motion estimate, paid once per solve         7.2 ms  (0, 0)
+    barrier over the drawing                 7.3 ms  (2.1 Mpx)
+    barrier over four times the paper       11.3 ms  (8.3 Mpx)
+    first    budget   262144  step 3       96.4 ms  (3 colours, 480 KB)
+    refined  budget  4194304  step 1     1551.0 ms  (3 colours, 4320 KB)
+
+A frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.
+```
+
+### bench_playback
+
+```
+What playback costs, and what it drops. A frame at 24 fps is 41.7 ms.
+
+a shot you would review
+  1920x1080 canvas, 2 tracks, 24 drawings on 2s = 48 frames, canvas widget 1640x870 at 81%
+                  1612 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.04 /  12.24 /  0.69 ms           12.97 /  14.43 /  14.82       48 of 48          47 of 47 (48 painted)
+  coloured       0.04 /  14.98 /  0.80 ms           15.84 /  17.07 /  18.96       48 of 48          47 of 47 (48 painted)
+                fill covers 26% of the canvas when solved
+                48 drawings, 48 fills held (129 MB), 0 solves during 2 s of playback
+
+the same at 4K
+  3840x2160 canvas, 2 tracks, 24 drawings on 2s = 48 frames, canvas widget 3560x1950 at 90%
+                  3727 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.05 /  52.28 /  0.95 ms           53.27 /  64.51 /  68.10       37 of 48          37 of 48 (38 painted)
+  coloured       0.05 /  62.78 /  1.01 ms           63.58 / 106.61 / 119.68       30 of 48          29 of 48 (30 painted)
+                fill covers 27% of the canvas when solved
+                48 drawings, 41 fills held (249 MB), 2 solves during 2 s of playback
+
+four tracks, 96 frames
+  1920x1080 canvas, 4 tracks, 48 drawings on 2s = 96 frames, canvas widget 1640x870 at 81%
+                  6452 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.08 /  14.13 /  2.25 ms           16.57 /  21.29 /  21.77       96 of 96          47 of 47 (48 painted)
+  coloured       0.08 /  18.62 /  2.56 ms           21.26 /  22.56 /  25.81       96 of 96          47 of 47 (63 painted)
+                fill covers 16% of the canvas when solved
+                192 drawings, 107 fills held (254 MB), 15 solves during 2 s of playback
+
+The two right-hand columns have to agree on slots. The deterministic one is
+what to optimise against; the real timer is the cross-check, and it is the
+one that caught this file's own drop model counting 53 frames out of 48.
+
+The painted count is what reached the screen, and it agrees with the slot
+count here. A shortfall between them would mean two slot changes collapsed
+into one paint, which is what overrunning looks like from the inside.
+```

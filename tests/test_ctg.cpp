@@ -161,17 +161,19 @@ Rgba fillAt(const CtgFill& fill, int x, int y) { return ctgFillPixel(fill, x, y)
 // coarse row, works in runs and skips a clear row outright -- so nothing but a
 // test makes them stay the same function.
 void theSpanAgreesWithTheReference(const CtgFill& fill, const char* what) {
-    const PixelRect canvas = fill.canvas;
-    // Out past whatever bounds the fill, where it has to answer nothing at all.
+    // The solve, and two tiles of the world beyond it in every direction --
+    // which is where the labels are extended to and where a fill can be asked
+    // about anything at all, since nothing bounds one any more.
+    const PixelRect solved = fill.solved;
     const int margin = 2 * kTileSize;
-    const int x0 = canvas.x - margin;
-    const int x1 = canvas.x + canvas.width + margin;
+    const int x0 = solved.x - margin;
+    const int x1 = solved.x + solved.width + margin;
 
     std::size_t wrong = 0;
     std::size_t missed = 0;
     std::vector<Rgba> span;
 
-    for (int y = canvas.y - margin; y < canvas.y + canvas.height + margin; ++y) {
+    for (int y = solved.y - margin; y < solved.y + solved.height + margin; ++y) {
         // Every stride, because the reducing path reads a lattice rather than
         // every pixel and the run-lengths fall differently on each.
         for (const int stride : {1, 2, 3, 7}) {
@@ -583,12 +585,17 @@ void theSolveStaysBoundedOnALargeDrawing() {
     CHECK_NEAR(fillAt(fill, 1200, 70).b, 1.0, 0.02);
 }
 
-// The region solved is the canvas. It used to be the bounding box of every tile
-// anyone had touched, which was wrong at both ends: colour reached out past the
-// frame after a stray stroke, and the colour *around* a shape stopped a tile
-// from the outermost stroke instead of running to the edge of the picture.
-void theFillCoversTheCanvasAndStopsThere() {
-    TEST("the fill covers the canvas and stops at its edge");
+// Colour goes past the frame, and this test used to say the opposite.
+//
+// It was "the fill covers the canvas and stops at its edge", and the reasoning
+// was that colour reaching out past the frame after a stray stroke was wrong.
+// It was wrong for the reason a *stray* stroke is wrong and not for the reason
+// the frame is there: a drawing runs off the edge on purpose -- roughs do, and
+// the surface has no edges at all -- so a shape crossing the frame line was
+// being coloured up to it and cut dead. The frame says what gets exported, and
+// an export still composites exactly it.
+void theFillRunsPastTheCanvasEdge() {
+    TEST("colour carries on past the frame, because the drawing does");
     Fixture f;
     f.doc.setCanvasSize(400, 400);
 
@@ -601,32 +608,110 @@ void theFillCoversTheCanvasAndStopsThere() {
     const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(fill.valid);
 
-    // Exactly the canvas: nothing outside it, and nothing short of it.
-    CHECK_EQ(fill.canvas.x, 0);
-    CHECK_EQ(fill.canvas.y, 0);
-    CHECK_EQ(fill.canvas.width, 400);
-    CHECK_EQ(fill.canvas.height, 400);
+    // The solve reaches the whole box and not the frame, which is the change:
+    // it used to stop at 400.
+    CHECK(fill.solved.x + fill.solved.width > 700);
 
-    // Inside the box takes the inside colour.
+    // Inside the box takes the inside colour, on both sides of the frame line.
     CHECK_NEAR(fillAt(fill, 200, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 500, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 690, 200).r, 1.0, 0.02);
 
-    // The far corners of the canvas take the background, which is now what a
-    // scribble outside a shape leaves them: the rim cannot be bought, so the
-    // outside colour keeps roughly its own pixels rather than spreading. What
-    // this test still pins is that the *region* is the canvas and the extension
-    // reaches its corners -- whatever label is there is carried all the way out.
+    // And it stops where the drawing says, not where the frame does: past the
+    // box's right-hand wall there is nothing, inside the canvas or outside it.
+    CHECK_NEAR(fillAt(fill, 750, 200).a, 0.0, 0.001);
     CHECK_NEAR(fillAt(fill, 380, 380).a, 0.0, 0.001);
     CHECK_NEAR(fillAt(fill, 10, 390).a, 0.0, 0.001);
 
-    // And nothing beyond the frame, even though the box carries on out there.
-    CHECK_NEAR(fillAt(fill, 500, 200).a, 0.0, 0.001);
-
-    // Growing the canvas re-solves rather than serving the old answer from the
-    // cache: the canvas is one of the fill's inputs.
+    // Resizing the canvas does not touch the fill and does not re-solve it. The
+    // canvas used to be mixed into the hash because it bounded the solve, so
+    // every resize threw away every fill in the document; nothing a fill
+    // depends on moves when the frame does.
+    const std::uint64_t solves = f.doc.ctgCache().storeCount();
     f.doc.setCanvasSize(800, 400);
     const CtgFill& wider = ctgFill(f.doc, f.track, f.image, f.colour);
-    CHECK_EQ(wider.canvas.width, 800);
+    CHECK_EQ(f.doc.ctgCache().storeCount(), solves);
     CHECK_NEAR(fillAt(wider, 500, 200).r, 1.0, 0.02);
+}
+
+// A drawing made entirely off the frame is coloured entirely off the frame.
+//
+// The case that used to do nothing at all: the solve region was clipped to the
+// canvas, so a shape and its mark out beyond the edge intersected it in
+// nothing, the region came back empty and the fill was blank. Nobody would draw
+// a whole shape out there deliberately, but a ball animating off-screen is
+// exactly this on its last few drawings, and it used to lose its colour.
+void aShapeOffTheCanvasIsColouredToo() {
+    TEST("a shape drawn entirely outside the frame is coloured out there");
+    Fixture f;
+    f.doc.setCanvasSize(400, 400);
+
+    // Well past the right-hand edge, and past the bottom too.
+    f.drawGappedBox(f.ink, 900, 900, 1200, 1150, 1000, 1040);
+    f.stroke(f.colour, 950, 1000, 1150, 1000, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(fill.valid);
+    CHECK_EQ(fill.colours, 1);
+
+    // The shape is filled, away from where the mark was drawn.
+    CHECK_NEAR(fillAt(fill, 1050, 1100).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 950, 1120).r, 1.0, 0.02);
+
+    // And nothing leaked back over the frame, which is the other half: the
+    // extension outside the solve is one label, and here it is the background.
+    CHECK_NEAR(fillAt(fill, 200, 200).a, 0.0, 0.001);
+    CHECK_NEAR(fillAt(fill, 1050, 700).a, 0.0, 0.001);
+}
+
+// What the canvas leaving the job costs, held still so phase 4 can beat it.
+//
+// The box round the ink picks the solve's resolution, and nothing clips that box
+// any more -- so two things drawn far apart are solved on one grid spanning both
+// of them and everything between, and the budget then coarsens the lot. Time and
+// memory do not run away, which is the part that makes this a cost rather than a
+// bug: the budget caps the cells and the barrier composites only where there are
+// tiles, so what is lost is sharpness and nothing else.
+//
+// This asserts the cost rather than complaining about it. It is issue #61 and
+// phase 4 of docs/colour-without-a-canvas.md, where a grid with uneven spacing
+// solves both patches at full resolution and this test is the one that changes.
+void inkFarApartCoarsensTheWholeSolve() {
+    TEST("two shapes far apart are solved on one coarse grid, and still fill");
+    Fixture f;
+    f.doc.setCanvasSize(600, 600);
+
+    // Two shapes of the same size, one on the frame and one a long way off it.
+    f.drawGappedBox(f.ink, 60, 60, 560, 560, 260, 320);
+    f.stroke(f.colour, 200, 300, 400, 300, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& near = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(near.valid);
+    const int alone = near.step;
+
+    f.drawGappedBox(f.ink, 4060, 4060, 4560, 4560, 4260, 4320);
+    f.stroke(f.colour, 4200, 4300, 4400, 4300, 10.0f, 0.0f, 0.0f, 1.0f);
+
+    const CtgFill& both = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(both.valid);
+    CHECK_EQ(both.colours, 2);
+
+    // One grid over both of them and the paper between, so the solve is a good
+    // deal coarser than either shape needed on its own.
+    CHECK(both.solved.width > 4000);
+    CHECK(both.step > alone);
+
+    // And both shapes still take their colour, blockily. That is what makes
+    // this a loss of sharpness rather than a loss of the feature.
+    CHECK_NEAR(fillAt(both, 300, 200).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 300, 200).b, 0.0, 0.02);
+    CHECK_NEAR(fillAt(both, 4300, 4200).b, 1.0, 0.02);
+    CHECK_NEAR(fillAt(both, 4300, 4200).r, 0.0, 0.02);
+
+    // Nothing in the gulf between them takes either colour: the two shapes are
+    // separate regions on one grid, which is exactly what a clustering radius
+    // would have thrown away.
+    CHECK_NEAR(fillAt(both, 2200, 2200).a, 0.0, 0.001);
 }
 
 // The solve is over what has been drawn on, and the labels are extended from
@@ -684,9 +769,6 @@ std::size_t scribblePixelsNotHonoured(const Cel& scribbles, const CtgFill& fill,
             for (int x = 0; x < kTileSize; ++x) {
                 const int px = coord.x * kTileSize + x;
                 const int py = coord.y * kTileSize + y;
-                if (px < fill.canvas.x || px >= fill.canvas.x + fill.canvas.width) continue;
-                if (py < fill.canvas.y || py >= fill.canvas.y + fill.canvas.height) continue;
-
                 const Rgba mark = scribbles.pixel(px, py);
                 if (mark.a < 0.5f) continue;  // the same threshold the seeding uses
                 ++total;
@@ -2312,7 +2394,9 @@ int main() {
     std::printf("ctg:\n");
     theSpanIsTheSameFillAsThePixel();
     theSolveStaysBoundedOnALargeDrawing();
-    theFillCoversTheCanvasAndStopsThere();
+    theFillRunsPastTheCanvasEdge();
+    aShapeOffTheCanvasIsColouredToo();
+    inkFarApartCoarsensTheWholeSolve();
     theCanvasSizeDoesNotChangeTheFill();
     oneScribbleFillsOneShape();
     aScribbleFillsItsRegion();

@@ -59,21 +59,15 @@ struct CtgFill {
     // it looks like. Written together, in solveCtgJob, and the same length.
     std::vector<Rgba> palette_colours;
 
-    // What bounds the fill, which today is the canvas.
+    // What was actually solved, and how coarsely.
     //
-    // Named for what it is rather than for what it does. The other rectangle
-    // here is `solved`, and "region" told the two apart by convention rather
-    // than by name -- which is fine while nothing but a test reads it, and not
-    // fine once the accessor does.
+    // The only rectangle here, and nothing bounds the fill outside it: the
+    // labels are extended outwards from this one and they run as far as
+    // anything asks. See ctgFillPixel for why that is exact, and
+    // docs/colour-without-a-canvas.md for what used to be here instead.
     //
-    // It goes when the canvas stops bounding a fill at all: see
-    // docs/colour-without-a-canvas.md, phase 3. Until then this is the thing
-    // that says the colour stops at the frame.
-    PixelRect canvas;
-
-    // What was actually solved, and how coarsely. Not the same as `canvas`:
-    // the solve covers only what has been drawn on and the labels are extended
-    // outwards from it, and it is reduced until it fits the budget.
+    // The solve covers what has been drawn on plus a tile of margin, and it is
+    // reduced until it fits the budget.
     //
     // Exposed because both are answers in their own right rather than internals
     // -- the step is the resolution of the result, and the rectangle is what
@@ -189,8 +183,8 @@ struct CtgFill {
 // is no line art, so everything out there is one connected stretch of blank
 // paper: a cut cannot pass through it and it can only take one label, so
 // whatever label reaches the border is the label of everything beyond it.
-// Nothing in that argument names a rectangle -- see `canvas` for the one that
-// is still here anyway, and why.
+// Nothing in that argument names a rectangle, and there is no longer one here:
+// a shape running off the frame is coloured out there too.
 //
 // A mark wins over the label wherever it was drawn, at full resolution however
 // coarse the solve was. That is what lets somebody scribble into a region too
@@ -225,8 +219,12 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
 // area a fill left empty had no tile, and the tile was skipped before a channel
 // was read; a fill has no absent tile, so the compositor asks where the answers
 // can be and leaves the rest of the row alone. Without it a colour layer costs
-// the area of the canvas rather than the area of the fill, which is what the
+// the area of the viewport rather than the area of the fill, which is what the
 // tiles never did.
+//
+// It can also come back covering the whole span, and that is an answer and not
+// a failure: when a label on the ring is a colour, everything outside the solve
+// takes it, in every direction and for ever.
 struct CtgFillExtent {
     int first = 0;
     int count = 0;

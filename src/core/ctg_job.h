@@ -76,9 +76,10 @@ inline constexpr long long kInteractiveSolveBudget = 512 * 512;
 // forty million would be absurd.
 //
 // Four million is 2048x2048, which means a 1080p drawing is solved at full
-// resolution and a 4K one at half. It is the drawn area that is bounded and not
-// the canvas -- see solveCtgJob -- so a figure in the corner of a big canvas
-// gets full resolution whatever the canvas is.
+// resolution and a 4K one at half. It is the drawn area that is bounded, and
+// the canvas has nothing to do with it -- so a figure in the corner of a big
+// canvas gets full resolution whatever the canvas is, and a drawing with ink far
+// off the frame is coarsened by the box round the ink and not by the frame.
 inline constexpr long long kFullSolveBudget = 2048LL * 2048;
 
 // Everything a solve reads. No pointer in here names anything the document can
@@ -86,8 +87,9 @@ inline constexpr long long kFullSolveBudget = 2048LL * 2048;
 struct CtgJob {
     bool valid = false;
 
-    // The area the fill covers: the canvas, the picture that gets exported.
-    PixelRect canvas;
+    // No canvas. What a fill covers is the drawing and whatever the labels
+    // extend to, and the picture that gets exported is somebody else's
+    // rectangle -- see docs/colour-without-a-canvas.md, phase 3.
 
     // Marks and ink, as tiles: shared handles, and a tile is immutable while it
     // is shared.

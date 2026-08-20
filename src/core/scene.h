@@ -10,9 +10,13 @@
 namespace animage {
 
 // Bounds on the canvas. The upper one is not a format limit, it is a sanity
-// limit: the CTG solve and the composite are both bounded by the canvas, and
-// a mistyped resolution should not be able to ask for either at a size that
-// stops the program.
+// limit: an export composites the canvas and writes a file of it, and a
+// mistyped resolution should not be able to ask for either at a size that stops
+// the program.
+//
+// It used to bound the colour solve as well and no longer does -- see
+// docs/colour-without-a-canvas.md. What bounds a solve is the drawing and a
+// cell budget, neither of which this number can reach.
 constexpr int kMinCanvasSide = 16;
 constexpr int kMaxCanvasSide = 16384;
 
@@ -30,9 +34,15 @@ struct Scene {
     // coordinates are signed, so the surface you draw on has no edges at all --
     // deliberately, because roughs run off the edge and a drawing should not be
     // clipped while it is being made. But something has to say what "the
-    // picture" is: what the frame line shows, what a colour fill is bounded by,
-    // and what M5 writes to a file. Without it every exported frame would be its
-    // own bounding box and no two would be the same size.
+    // picture" is: what the frame line shows and what an export writes to a
+    // file. Without it every exported frame would be its own bounding box and no
+    // two would be the same size.
+    //
+    // It is not what a colour fill is bounded by. It was, and the last thing
+    // derived from a drawing that was still a rectangle was the fill; a shape
+    // running off the frame is coloured out there too now, and a ball animating
+    // off-screen keeps its colour instead of losing it at the frame line. Export
+    // is unaffected, because it composites this rectangle and always did.
     int width = 1920;
     int height = 1080;
 

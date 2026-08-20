@@ -55,9 +55,11 @@ CtgInputs ctgInputsFor(const Document& doc, TrackId track, ImageId image, LayerI
         }
     }
     inputs = inputs * 31 + static_cast<std::uint64_t>(settings.downscale);
-    // The canvas bounds the solve, so resizing it changes the answer.
-    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().width);
-    inputs = inputs * 31 + static_cast<std::uint64_t>(doc.scene().height);
+
+    // And not the canvas. It used to be mixed in here because it bounded the
+    // solve, so resizing it threw away every fill in the document -- which was
+    // right while it was true and is now a re-solve of everything for a number
+    // no fill depends on.
 
     out.hash = inputs;
     out.valid = true;
@@ -95,7 +97,6 @@ CtgJob ctgJobFor(const Document& doc, TrackId track, ImageId image, LayerId laye
     const CtgInputs depends = ctgInputsFor(doc, track, image, layer_id, settings);
     if (!depends.valid) return job;
 
-    job.canvas = doc.scene().canvas();
     job.scribbles = depends.scribbles->tiles();
     for (LayerId source : layer->ctg_sources) {
         if (!line->findLayer(source)) continue;  // a source that has been deleted

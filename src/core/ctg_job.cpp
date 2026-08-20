@@ -472,33 +472,29 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
 
-    // Two rectangles, and the difference between them is where the resolution
-    // comes from.
+    // One rectangle now, and nothing clips it.
     //
-    // `filled` is the canvas: the whole picture takes a colour, and nothing
-    // outside the picture does. `region` is only the part worth solving -- what
-    // has been drawn on, plus a tile of margin -- and the labels are extended
-    // outwards from it to cover the rest.
+    // `region` is what is worth solving -- what has been drawn on, plus a tile
+    // of margin -- and the labels are extended outwards from it to cover
+    // everything else, which is to say the rest of the world.
     //
     // The extension is exact rather than an approximation. Outside the drawn
     // area there is, by definition, no line art, so everything out there is one
     // connected stretch of blank paper: a cut cannot pass through it and it can
     // only take one label. Whatever label reaches the edge of the solved region
     // is therefore the label of everything beyond that edge, and clamping the
-    // lookup at the region's border is exactly that answer.
+    // lookup at the region's border is exactly that answer. Nothing in that
+    // argument names a rectangle -- the canvas was only ever where somebody
+    // stopped writing.
     //
-    // Solving the canvas directly instead was correct and wasteful: the budget
-    // below is on the number of cells, so paying for empty paper is paid for in
-    // resolution over the drawing. A small drawing on a 1080p canvas was solved
-    // at a third of full size when it could be solved at full size.
-    const PixelRect filled = job.canvas;
-    if (filled.isEmpty()) {
-        CtgFill empty;
-        empty.inputs = job.inputs;
-        empty.budget = job.budget;
-        empty.valid = true;
-        return empty;
-    }
+    // It used to be clipped to the canvas, and that clip is the one this whole
+    // change is about: a shape running off the frame was coloured up to the
+    // frame and no further, and a ball animating off-screen lost its colour at
+    // the frame line. What the clip was quietly also doing was protecting the
+    // solve's resolution, since the budget below is on the number of cells --
+    // so ink far off the frame now coarsens the whole drawing. Time and memory
+    // do not run away, because the budget still caps both and the barrier costs
+    // what the ink costs; what is lost is sharpness, and that is issue #61.
 
     // Where the drawing has got to since the marks were made on it.
     //
@@ -512,18 +508,9 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     // drawing's own, or the layer is set to leave them where they were put.
     CtgShift shift;
     if (!job.origin_sources.empty()) {
-        PixelRect ink = intersect(
-            [&] {
-                PixelRect all;
-                for (const TileGrid& source : job.sources) {
-                    all = unite(all, drawnBounds(source));
-                }
-                for (const TileGrid& source : job.origin_sources) {
-                    all = unite(all, drawnBounds(source));
-                }
-                return all;
-            }(),
-            filled);
+        PixelRect ink;
+        for (const TileGrid& source : job.sources) ink = unite(ink, drawnBounds(source));
+        for (const TileGrid& source : job.origin_sources) ink = unite(ink, drawnBounds(source));
         shift = estimateCtgShift(job.origin_sources, job.sources, ink);
         if (abandoned(abandon)) return kNothing;
     }
@@ -535,17 +522,19 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     for (const TileGrid& source : job.sources) {
         region = unite(region, drawnBounds(source));
     }
-    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
-              region.height + 2 * kTileSize};
-    region = intersect(region, filled);
     if (region.isEmpty()) {
+        // Nothing drawn is still an empty fill. The margin is added below
+        // rather than here so that this stays reachable: a tile of margin round
+        // nothing is a rectangle, and solving one would be solving a square of
+        // blank paper to find out it is blank.
         CtgFill empty;
-        empty.canvas = filled;
         empty.inputs = job.inputs;
         empty.budget = job.budget;
         empty.valid = true;
         return empty;
     }
+    region = {region.x - kTileSize, region.y - kTileSize, region.width + 2 * kTileSize,
+              region.height + 2 * kTileSize};
 
     // The solve is bounded by whatever the caller can afford to wait for. Where
     // the interface is waiting that is a few hundred thousand cells, because a
@@ -602,7 +591,6 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     }
 
     CtgFill built;
-    built.canvas = filled;
     built.solved = region;
     built.step = step;
     built.inputs = job.inputs;

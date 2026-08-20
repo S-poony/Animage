@@ -57,15 +57,10 @@ bool labelsAreUsable(const CtgFill& fill, int& width, int& height) {
            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
 }
 
-bool insideCanvas(const CtgFill& fill, int x, int y) {
-    return x >= fill.canvas.x && x < fill.canvas.x + fill.canvas.width && y >= fill.canvas.y &&
-           y < fill.canvas.y + fill.canvas.height;
-}
-
 }  // namespace
 
 Rgba ctgFillPixel(const CtgFill& fill, int x, int y) {
-    if (!fill.valid || !insideCanvas(fill, x, y)) return {};
+    if (!fill.valid) return {};
 
     // The mark first, because it wins: a scribble is a statement about the
     // pixels it covers, and the solver's job is only the pixels nobody said
@@ -88,7 +83,7 @@ Rgba ctgFillPixel(const CtgFill& fill, int x, int y) {
 
 namespace {
 
-// The half-open range of samples inside whatever bounds the fill.
+// The half-open range of samples covering a stretch of image pixels.
 //
 // Worked out as a range of indices rather than tested per sample, so the loops
 // below walk indices and nothing checks a rectangle twice.
@@ -103,20 +98,22 @@ CtgFillExtent samplesWithin(int from, int to, int first_x, int stride, int count
     return {static_cast<int>(begin), static_cast<int>(end - begin)};
 }
 
-// Where along a row the labels can say anything but "nothing reached".
-//
-// Inside the solve, anywhere. Outside it every answer comes from the ring, so
-// when the ring is clear the answer out there is transparent and the range is
-// the solve's own -- which is the whole of what `outside_is_clear` buys.
+// Whether a colour reaches everywhere, which is what a ring holding one means:
+// outside the solve every answer comes from that ring, so if any of it is a
+// label then everything out there takes a colour, in every direction and with
+// nothing to stop it. There is then no rectangle to skip on.
+bool answersEverywhere(const CtgFill& fill) {
+    return !fill.labels.empty() && !fill.outside_is_clear;
+}
+
+// Where along a row the labels can say anything but "nothing reached", when the
+// ring is clear and so the world outside the solve is transparent.
 PixelRect labelledPart(const CtgFill& fill) {
-    if (fill.labels.empty()) return {};
-    if (!fill.outside_is_clear) return fill.canvas;
-    return intersect(fill.solved, fill.canvas);
+    return fill.labels.empty() ? PixelRect{} : fill.solved;
 }
 
 PixelRect markedPart(const CtgFill& fill) {
-    if (fill.marks.empty() || fill.marks_drawn.isEmpty()) return {};
-    return intersect(fill.marks_drawn, fill.canvas);
+    return fill.marks.empty() ? PixelRect{} : fill.marks_drawn;
 }
 
 }  // namespace
@@ -125,7 +122,9 @@ CtgFillExtent ctgFillExtent(const CtgFill& fill, int y, int first_x, int stride,
     if (count <= 0 || !fill.valid) return {};
     stride = std::max(1, stride);
 
-    PixelRect answers = unite(labelledPart(fill), markedPart(fill));
+    if (answersEverywhere(fill)) return {0, count};
+
+    const PixelRect answers = unite(labelledPart(fill), markedPart(fill));
     if (answers.isEmpty()) return {};
     if (y < answers.y || y >= answers.y + answers.height) return {};
 
@@ -136,14 +135,10 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
     if (count <= 0 || out == nullptr) return;
     stride = std::max(1, stride);
     std::fill(out, out + count, Rgba{});
-    if (!fill.valid || fill.canvas.isEmpty()) return;
-    if (y < fill.canvas.y || y >= fill.canvas.y + fill.canvas.height) return;
+    if (!fill.valid) return;
 
-    const CtgFillExtent inside =
-        samplesWithin(fill.canvas.x, fill.canvas.x + fill.canvas.width, first_x, stride, count);
-    if (inside.count <= 0) return;
-    const long long begin = inside.first;
-    const long long end = inside.first + inside.count;
+    const long long begin = 0;
+    const long long end = count;
 
     int width = 0;
     int height = 0;
@@ -217,9 +212,7 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
     if (marked.isEmpty() || y < marked.y || y >= marked.y + marked.height) return;
 
     const CtgFillExtent over =
-        samplesWithin(std::max(marked.x, fill.canvas.x),
-                      std::min(marked.x + marked.width, fill.canvas.x + fill.canvas.width),
-                      first_x, stride, count);
+        samplesWithin(marked.x, marked.x + marked.width, first_x, stride, count);
     if (over.count <= 0) return;
 
     const int mark_y = y - fill.carried_by.y;
