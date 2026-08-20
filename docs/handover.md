@@ -2259,10 +2259,11 @@ without being told.
   deliberately *not* applied — a corner of a box squashed flat still points
   nearly sideways and still scales both axes, and a cursor describing the
   drawing's own axes would be describing the wrong thing.
-- *Drawn cursors* for the three things the system has no glyph for: rotation,
-  the eyedropper on Alt, and the eraser. The first bitmap cursors in the
-  program. Light under dark, the rule the transform box already follows, because
-  a cursor crosses paper and ink by definition.
+- *Drawn cursors* for the things the system has no glyph for: rotation, the
+  eyedropper on Alt, and the eraser. The first bitmap cursors in the program.
+  Light under dark, the rule the transform box already follows, because a cursor
+  crosses paper and ink by definition. The crosshair joined them later for a
+  different reason — see [the crosshair](#the-crosshair-is-drawn-here-too).
 - *A ring the canvas draws itself*, at the tool's radius, while a drag is
   setting that radius. Not a cursor and it could not be one: a brush here goes
   up to 400 pixels across and a cursor is a 32-pixel bitmap.
@@ -2357,6 +2358,41 @@ and wrong for hit-testing.** Clicking past the end still means the last frame,
 because there is always a frame you are standing on — but "what is under the
 pointer" has to be able to answer *nothing*, and a function that cannot say so
 will invent something plausible instead.
+
+### The crosshair is drawn here too
+
+Added after the rest, and it breaks the rule the other three were chosen by:
+**the system has a crosshair, and it is drawn here anyway.** The reason given
+was that `Qt::CrossCursor` is too big and too thick to draw under — on Windows
+it is a thirty-two pixel cross of three-pixel line, and what it covers is the
+line art you are aiming at. `buildCrossCursor` is eleven pixels across and one
+thick.
+
+**One pixel wide cannot be stroked.** A one-pixel pen through antialiasing lands
+as two grey ones wherever it is not exactly on a pixel boundary, so the glyph is
+set a pixel at a time and the pale edge grown around what was marked, rather
+than painted underneath it the way the rotate, eraser and eyedropper glyphs are.
+That difference is the method, not a preference: at eleven pixels the
+antialiasing *is* the glyph. Curved glyphs drawn the same way were tried
+alongside it — a rope loop for the lasso, a rubber for the eraser — and rejected
+as looking worse than the stroked versions they would have replaced. Straight
+lines on the pixel grid survive that treatment; curves do not.
+
+**What it cost elsewhere: the shape assertions stopped discriminating.** Every
+drawn cursor answers `Qt::BitmapCursor`, so every test that named
+`Qt::CrossCursor` names `BitmapCursor` now — and where a test used the shape to
+tell the brush from the eraser, it no longer can. The `pointingOf` check beside
+each one is what separates them, which is why those were always asserted in
+pairs.
+
+**`LatencyCanvas` still sets `Qt::CrossCursor`** and is deliberately untouched:
+it is the M0 latency harness, where the pointer is the thing being measured
+against a crosshair the widget paints itself.
+
+The eraser and the lasso were left alone. Showing the eraser's rubber *and* a
+crosshair together was drawn up and set aside, not refused — it is a bigger
+bitmap than any cursor here uses, and whether Windows draws a 44-pixel cursor at
+44 pixels is unverified.
 
 ## Looking at the interface
 

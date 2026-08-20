@@ -6013,7 +6013,7 @@ void thePointerSaysWhereTheBrushWillNotDraw() {
     f.draw(300.0f, 300.0f, 420.0f, 360.0f);
     hover(&f.canvas, QPointF(340, 320));
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
     const auto setLayer = [&](bool locked, bool visible) {
         Layer settings = *f.doc.scene().findTrack(f.track)->findLayer(f.layer);
@@ -6036,7 +6036,7 @@ void thePointerSaysWhereTheBrushWillNotDraw() {
     // And back, which is the half a flag that is only ever set would not catch.
     setLayer(false, true);
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
 // The answer has to be re-asked wherever what a press would do changes, and
@@ -6158,7 +6158,7 @@ void thePointerSaysWhatAPressOnTheBoxWillDo() {
     hover(&canvas, centre);
     CHECK_EQ(shapeOf(&canvas), shape(Qt::SizeAllCursor));
     canvas.cancelTransform();
-    CHECK_EQ(shapeOf(&canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&canvas), shape(Qt::BitmapCursor));
 }
 
 // Reported: a drag that started outside the box did nothing, so the only way to
@@ -6232,7 +6232,11 @@ void theEraserSaysSoBeforeYouDraw() {
 
     hover(&f.canvas, QPointF(400.0, 300.0));
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    // Bitmap and not Cross: the crosshair is drawn here too now. Which means
+    // the shape no longer tells the brush from the eraser -- both are drawn, so
+    // both answer Qt::BitmapCursor -- and the decision beside it is the whole
+    // of what separates them.
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
     // Picking the tool is enough: the pointer does not have to move for the
     // canvas to say which tool is now under it.
@@ -6247,7 +6251,7 @@ void theEraserSaysSoBeforeYouDraw() {
     CHECK(!f.canvas.toolRing().has_value());
 
     f.canvas.setTool(CanvasWidget::Tool::Brush);
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
 void turningThePenOverShowsTheEraser() {
@@ -6276,7 +6280,7 @@ void turningThePenOverShowsTheEraser() {
     waitMs(300);
     hover(&f.canvas, QPointF(480.0, 300.0));
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
 // Issue #5. The gesture already worked and the only feedback was a number in
@@ -6321,7 +6325,7 @@ void theResizeGestureShowsWhatItIsSetting() {
 
     hover(&f.canvas, anchor);
     CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::Draw));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
 // An old bug, reported while the canvas's pointer was being built: the timeline
@@ -7632,7 +7636,7 @@ void theHandDoesNotGetStuckClosed() {
     TEST("the hand opens again after a pan and goes away with the key");
     Fixture f;
     hover(&f.canvas, QPointF(400.0, 300.0));
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
     QKeyEvent space_down(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
     QCoreApplication::sendEvent(&f.canvas, &space_down);
@@ -7651,7 +7655,7 @@ void theHandDoesNotGetStuckClosed() {
 
     QKeyEvent space_up(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
     QCoreApplication::sendEvent(&f.canvas, &space_up);
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 
     // And a held zoom key underneath it comes back rather than being forgotten.
     QKeyEvent zoom_down(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier);
@@ -7662,7 +7666,7 @@ void theHandDoesNotGetStuckClosed() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::SizeHorCursor));
     QKeyEvent zoom_up(QEvent::KeyRelease, Qt::Key_Z, Qt::NoModifier);
     QCoreApplication::sendEvent(&f.canvas, &zoom_up);
-    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::CrossCursor));
+    CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
 // --- straight lines -------------------------------------------------------

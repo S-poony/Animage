@@ -1092,8 +1092,8 @@ const std::vector<Situation>& situations() {
          }},
 
         {"the-drawn-cursors",
-         "the three glyphs the system has none for, read off the widget after hovering "
-         "what raises them -- grab() renders the widget and never the pointer",
+         "the glyphs this program draws rather than the system, read off the widget after "
+         "hovering what raises them -- grab() renders the widget and never the pointer",
          [](Stage& s) {
              std::vector<CursorRow> rows;
              s.circle(s.centre(), 150.0);

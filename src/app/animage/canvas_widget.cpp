@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QCursor>
 #include <QGuiApplication>
+#include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -77,17 +78,58 @@ constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
 // view is at 20%.
 constexpr double kSmallestToolRing = 2.0;
 
-// Cursors this program draws, because the system has none for what they mean.
+// Cursors this program draws: either the system has no glyph for what they
+// mean, or the one it has is the wrong size for drawing under.
 //
-// Both are built once, on first use, and deliberately never destroyed: a static
+// Each is built once, on first use, and deliberately never destroyed: a static
 // QPixmap outlives QGuiApplication and destroying one after it has gone is
 // undefined on some platforms. A cursor's worth of pixels is not a leak worth
 // arguing about.
 //
-// Light under dark in both, the rule the transform box already follows: a
+// Light under dark in all of them, the rule the transform box already follows: a
 // cursor crosses paper and ink by definition, and a one-colour glyph disappears
 // against one of them.
 constexpr int kDrawnCursorSize = 32;
+
+// The crosshair, which is the one drawn here that the system also has. It was
+// `Qt::CrossCursor` until it was reported as too big and too thick to draw
+// under: on Windows that is a thirty-two pixel cross of three-pixel line, and
+// it covers the line art you are aiming at.
+//
+// Eleven pixels across and one thick, which is why it is set a pixel at a time
+// rather than stroked. A one-pixel pen put through antialiasing lands as two
+// grey ones wherever it is not exactly on a pixel boundary, and two grey lines
+// are the opposite of thin. The pale edge is grown around what was marked for
+// the same reason it is painted under the other glyphs -- light under dark,
+// because a cursor crosses paper and ink by definition -- and the system's own
+// cross does not need it only because it inverts what is beneath it, which a
+// bitmap cursor cannot do.
+constexpr int kCrossReach = 5;  // out from the middle, so eleven across
+
+QCursor buildCrossCursor() {
+    constexpr int kMiddle = kDrawnCursorSize / 2;
+    const auto arm = [](int x, int y) {
+        return (y == kMiddle && std::abs(x - kMiddle) <= kCrossReach) ||
+               (x == kMiddle && std::abs(y - kMiddle) <= kCrossReach);
+    };
+
+    QImage picture(kDrawnCursorSize, kDrawnCursorSize, QImage::Format_ARGB32);
+    picture.fill(Qt::transparent);
+    for (int y = 0; y < kDrawnCursorSize; ++y) {
+        for (int x = 0; x < kDrawnCursorSize; ++x) {
+            if (arm(x, y)) continue;
+            bool touching = false;
+            for (int dy = -1; dy <= 1 && !touching; ++dy)
+                for (int dx = -1; dx <= 1 && !touching; ++dx) touching = arm(x + dx, y + dy);
+            if (touching) picture.setPixelColor(x, y, QColor(255, 255, 255));
+        }
+    }
+    for (int y = 0; y < kDrawnCursorSize; ++y)
+        for (int x = 0; x < kDrawnCursorSize; ++x)
+            if (arm(x, y)) picture.setPixelColor(x, y, QColor(20, 20, 24));
+
+    return QCursor(QPixmap::fromImage(picture), kMiddle, kMiddle);
+}
 
 // Rotation has no standard cursor anywhere -- every system cursor is a size, a
 // hand or an arrow -- so the circular arrow every program that turns things has
@@ -217,6 +259,11 @@ QCursor buildPickCursor() {
     return QCursor(pixmap, 9, 23);
 }
 
+const QCursor& crossCursor() {
+    static const QCursor* cursor = new QCursor(buildCrossCursor());
+    return *cursor;
+}
+
 const QCursor& rotateCursor() {
     static const QCursor* cursor = new QCursor(buildRotateCursor());
     return *cursor;
@@ -238,7 +285,7 @@ QCursor cursorFor(CanvasWidget::Pointing pointing) {
         // The brush and the lasso both place a point, and a cross is what says
         // where it will land.
         case Pointing::Draw:
-        case Pointing::Lasso: return QCursor(Qt::CrossCursor);
+        case Pointing::Lasso: return crossCursor();
         // The eraser puts its own glyph *in place of* the cross rather than
         // beside it. A ring at its radius was the first version and it was
         // wrong twice over: it trailed the pointer, and two marks under one
@@ -261,7 +308,7 @@ QCursor cursorFor(CanvasWidget::Pointing pointing) {
         // the rest of the interface uses for "this is not a place to draw".
         case Pointing::Nothing: return QCursor(Qt::ArrowCursor);
     }
-    return QCursor(Qt::CrossCursor);
+    return crossCursor();
 }
 
 // Which way a handle stretches the drawing, on screen.
