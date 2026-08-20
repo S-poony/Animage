@@ -2,7 +2,6 @@
 #include "ctg_job.h"
 
 #include <algorithm>
-#include <memory>
 #include <unordered_map>
 
 #include "compositor.h"
@@ -337,7 +336,7 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     return {best.x * step, best.y * step};
 }
 
-CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>* abandon) {
+CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>* abandon) {
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
 
@@ -546,133 +545,26 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     }
 
     // A caller that only wants the verdict stops here, and that is most of why
-    // the verdict is affordable for a whole track. Everything above is a
-    // max-flow over a grid the size of the solve; everything below is a write
-    // per pixel of the canvas, which on a 1080p frame is two million of them
-    // and does not get cheaper when the solve is made coarse.
-    if (!want_tiles) {
+    // the verdict is affordable for a whole track: everything above is a
+    // max-flow over a grid the size of the solve, and what it keeps below is
+    // the labelling itself, which on a large sparse sheet is the larger half of
+    // what a fill weighs.
+    if (!want_labels) {
         return built;
     }
     if (abandoned(abandon)) return kNothing;
 
-    // Paint the labels back into tiles, over the whole canvas and at full
-    // resolution even when the solve was coarse: a blocky fill is better than
-    // none while a finer one is still being worked out.
+    // The answer, kept as the answer.
     //
-    // Outside the solved region the lookup is clamped inwards, which extends the
-    // labels across the rest of the picture. See above for why that is the same
-    // answer solving the whole canvas would have given.
+    // There is no paint-out any more: the labels and the palette are the fill,
+    // and ctgFillPixel works a colour out per pixel asked for -- extending the
+    // labels outwards from the solve by clamping, exactly as the paint-out used
+    // to, and letting a mark win in its own pixels at full resolution however
+    // coarse the solve was. See docs/colour-without-a-canvas.md, phase 1.
     //
-    // Clamped to one cell *inside* the grid rather than to its edge, because the
-    // outermost ring is the background seed. It is scaffolding, not an answer:
-    // sampling it would paint the whole picture beyond the drawing as background
-    // even where a colour had filled right up to it, and would leave a one-cell
-    // seam at the region's edge.
-    const auto solvedIndex = [&](int value, int origin, int extent, int limit) {
-        const int clamped = std::clamp(value, origin, origin + extent - 1);
-        const int cell = std::min((clamped - origin) / step, limit - 1);
-        return (limit >= 3) ? std::clamp(cell, 1, limit - 2) : cell;
-    };
-
-    std::unordered_map<std::uint64_t, std::shared_ptr<Tile>> tiles;
-
-    // Transparency is a label like any other, and paints nothing. Over a tile
-    // that already holds something it punches a hole; over one that does not
-    // exist it is simply the canvas, so no tile is made to hold a square of
-    // nothing.
-    const auto paint = [&](int px, int py, const Rgba& colour) {
-        const TileCoord coord = tileCoordFor(px, py);
-        const std::uint64_t key =
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x)) << 32) |
-            static_cast<std::uint32_t>(coord.y);
-        auto found = tiles.find(key);
-        if (found == tiles.end()) {
-            if (colour.a <= 0.0f) return;
-            found = tiles.emplace(key, std::make_shared<Tile>()).first;
-        }
-        found->second->setPixel(tileLocal(px), tileLocal(py), colour);
-    };
-
-    if (!solved.labels.empty()) {
-        for (int y = 0; y < filled.height; ++y) {
-            const int py = filled.y + y;
-            const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
-            for (int x = 0; x < filled.width; ++x) {
-                const int px = filled.x + x;
-                const int solved_x = solvedIndex(px, region.x, region.width, problem.width);
-
-                const int label =
-                    solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
-                if (label < 0) continue;  // nothing reached this pixel
-
-                paint(px, py, scribbleColour(palette[static_cast<std::size_t>(label)]));
-            }
-        }
-    }
-
-    // And then the scribble wins wherever it was drawn.
-    //
-    // A scribble is a statement about the pixels it covers -- this is the
-    // colour here -- and the solver's job is only the pixels nobody said
-    // anything about. So where the two disagree the scribble is what was meant,
-    // and a mark becomes a manual touch-up for whatever the min-cut missed, at
-    // no cost to the solver at all.
-    //
-    // It has to be the scribble over the fill rather than under it, and a
-    // transparent scribble is what settles that: under the fill it would be the
-    // one thing hidden, so scribbling "nothing here" would do nothing. The rule
-    // that lets a transparent scribble mean anything is the rule that makes an
-    // opaque one an override.
-    //
-    // The marks are self-effacing, which is what stops this looking like scrawl
-    // over the artwork: a scribble carries the colour of the label it produces,
-    // so wherever the fill agreed with it the override paints the colour that
-    // was already there. What you see is exactly the disagreement.
-    //
-    // Painted from the marks at full resolution rather than from the solved
-    // grid, because the solve may be coarse and a mark you made should not be.
-    // And painted as the quantised label colour rather than the pixel's own, for
-    // the same reason the seeding thresholds: a scribble is a label, so its
-    // antialiased rim must not leave a stripe of some colour between.
-    //
-    // Through the same shift as the seeding, and that is not a detail. The two
-    // are the same statement about the same mark -- what colour is here -- so a
-    // seed read from one place and an override painted in another would put the
-    // mark's own pixels somewhere the solver never saw it, which is a stripe of
-    // colour across a region that has every reason to be a different one.
-    for (const auto& [coord, tile] : job.scribbles.tiles()) {
-        const PixelRect whole{coord.x * kTileSize + shift.x, coord.y * kTileSize + shift.y,
-                              kTileSize, kTileSize};
-        const PixelRect part = intersect(whole, filled);
-        if (part.isEmpty()) continue;
-
-        for (int py = part.y; py < part.y + part.height; ++py) {
-            for (int px = part.x; px < part.x + part.width; ++px) {
-                const Rgba pixel = job.scribbles.pixel(px - shift.x, py - shift.y);
-                if (pixel.a < job.settings.scribble_alpha_threshold) continue;  // not a label
-                paint(px, py, scribbleColour(scribbleLabel(pixel)));
-            }
-        }
-    }
-
-    for (auto& [key, tile] : tiles) {
-        // A tile every one of whose pixels was punched back out by a
-        // transparent scribble is a tile of nothing, and the grid says nothing
-        // by not holding it.
-        if (tile->isFullyTransparent()) continue;
-        const TileCoord coord{static_cast<int>(static_cast<std::int32_t>(key >> 32)),
-                              static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
-        built.tiles.set(coord, std::move(tile));
-    }
-
-    // And the answer itself, which is what a fill is read from once the tiles
-    // above are gone -- see docs/colour-without-a-canvas.md, phase 1. The two
-    // are kept side by side for exactly one commit, so that ctgFillPixel can be
-    // asserted equal to the picture it replaces.
-    //
-    // The marks travel with it, and the shift with them, because reading a fill
-    // then needs nothing but the fill. Copying a grid copies handles, and a run
-    // of drawings inheriting one scribble cel shares one set of pixels.
+    // The marks travel with the fill, and the shift with them, so that reading
+    // a fill needs nothing but the fill. Copying a grid copies handles, and a
+    // run of drawings inheriting one scribble cel shares one set of pixels.
     built.marks = job.scribbles;
     built.mark_threshold = job.settings.scribble_alpha_threshold;
     built.palette = std::move(palette);

@@ -133,14 +133,17 @@ struct CtgJob {
 // Runs one. Touches nothing but the job, so it may run anywhere -- and it takes
 // no document, which is not a convenience but the guarantee.
 //
-// `want_tiles` false stops after the labelling and the verdict, skipping a
-// write per pixel of the canvas -- two million of them at 1080p, and they do
-// not get cheaper when the solve is coarse.
+// `want_labels` false keeps only the verdict: the max-flow still runs, and what
+// is thrown away is the labelling it produced. That used to be a saving on a
+// write per pixel of the canvas as well, and is not any more -- there is no
+// paint-out, and the labels the solve already holds *are* the fill. What is
+// left is memory, which is what a whole-track audit needs: a judgement is a few
+// floats, and a 1080p labelling is 4 MB per drawing.
 //
 // `abandon`, if given, is read as the solve runs: set it and the solve stops as
 // soon as it notices and returns an invalid fill. A superseded solve is worth
 // nothing, and the pen does not wait.
-CtgFill solveCtgJob(const CtgJob& job, bool want_tiles,
+CtgFill solveCtgJob(const CtgJob& job, bool want_labels,
                     const std::atomic<bool>* abandon = nullptr);
 
 // Builds the barrier the scribbles are cut against: every source layer,

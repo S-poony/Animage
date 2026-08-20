@@ -95,14 +95,14 @@ void aSolveComesBackWithTheAnswer() {
     if (done.empty()) return;
 
     CHECK(done[0].key == shot.key(0));
-    CHECK(done[0].wanted_tiles);
+    CHECK(done[0].wanted_labels);
     CHECK(done[0].fill.valid);
 
     // The same answer solving in place would have given.
     const CtgFill here = solveCtgFill(shot.doc, shot.track, shot.images[0], shot.colour,
                                       CtgSettings{}, true);
     CHECK_EQ(done[0].fill.inputs, here.inputs);
-    CHECK_NEAR(done[0].fill.tiles.pixel(300, 150).r, here.tiles.pixel(300, 150).r, 0.001);
+    CHECK_NEAR(ctgFillPixel(done[0].fill, 300, 150).r, ctgFillPixel(here, 300, 150).r, 0.001);
 }
 
 void theNewestQuestionWins() {
@@ -148,14 +148,14 @@ void aFillAndAVerdictAreDifferentQuestions() {
     int pictures = 0;
     int judgements = 0;
     for (const CtgSolver::Result& result : done) {
-        if (result.wanted_tiles) {
+        if (result.wanted_labels) {
             ++pictures;
-            CHECK(result.fill.tiles.tileCount() > 0);
+            CHECK(result.fill.labels.size() > 0);
         } else {
             ++judgements;
-            // The whole point of not asking for tiles: the verdict is a few
-            // bytes and the picture is megabytes.
-            CHECK_EQ(result.fill.tiles.tileCount(), std::size_t{0});
+            // The whole point of not asking for the labels: the verdict is a
+            // few bytes and the labelling is megabytes.
+            CHECK_EQ(result.fill.labels.size(), std::size_t{0});
         }
     }
     CHECK_EQ(pictures, 1);

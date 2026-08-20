@@ -2259,7 +2259,7 @@ bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flat
     // is the whole of "export does not solve on the interface thread" -- the
     // thread waits, but it waits somewhere it can still draw.
     const auto solve = [&](const CtgKey& key, const CtgJob& job, CtgFill& out) {
-        solver.request(key, job, /*want_tiles=*/true);
+        solver.request(key, job, /*want_labels=*/true);
 
         QEventLoop loop;
         QTimer poll;

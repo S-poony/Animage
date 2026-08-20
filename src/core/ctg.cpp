@@ -125,8 +125,8 @@ CtgJob ctgJobFor(const Document& doc, TrackId track, ImageId image, LayerId laye
 }
 
 CtgFill solveCtgFill(const Document& doc, TrackId track, ImageId image, LayerId layer_id,
-                     const CtgSettings& settings, bool want_tiles) {
-    return solveCtgJob(ctgJobFor(doc, track, image, layer_id, settings), want_tiles);
+                     const CtgSettings& settings, bool want_labels) {
+    return solveCtgJob(ctgJobFor(doc, track, image, layer_id, settings), want_labels);
 }
 
 const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId layer_id,

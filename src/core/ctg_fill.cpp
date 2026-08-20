@@ -7,17 +7,26 @@
 namespace animage {
 namespace {
 
-// How many tiles of fill are worth keeping. A tile is 128x128 half-float RGBA,
-// so 128 KB; two thousand of them is a quarter of a gigabyte, and a 1920x1080
-// canvas spends 135 on one drawing. That is about fifteen coloured drawings
-// held at once, which covers scrubbing around a scene and an export walking it
-// in order, and refuses to cover playing the whole shot and keeping all of it.
+// How much fill is worth keeping. A quarter of a gigabyte, which is what the
+// tile budget it replaces worked out at -- the budget has not moved, only the
+// unit it is counted in, and the unit is now the one that was meant.
+//
+// A 1080p fill is about 2.07M labels and a palette, so 4 MB; a 4K one solved at
+// half is 8 MB. That is about sixty-four coloured drawings held at once against
+// the fifteen a picture of the same fill allowed, which is aimed straight at
+// what bench_playback reports.
 //
 // It is a budget, so by the rule this codebase learned the hard way it will
 // express itself as a threshold somewhere else: the somewhere is "how far back
 // along the timeline you can jump before the fill has to be solved again", and
 // solving again is the ordinary cost of arriving at a drawing.
-constexpr std::size_t kFillTileBudget = 2048;
+constexpr std::size_t kFillByteBudget = 256u << 20;
+
+// What one fill weighs. The marks are not counted -- see CtgFillCache::bytes.
+std::size_t footprint(const CtgFill& fill) {
+    return fill.labels.size() * sizeof(std::int16_t) +
+           fill.palette.size() * sizeof(std::uint32_t);
+}
 
 // Which cell a coordinate reads from.
 //
@@ -191,13 +200,13 @@ CtgFill& CtgFillCache::store(const CtgKey& key, CtgFill fill) {
     ++stores_;
     auto found = entries_.find(key);
     if (found != entries_.end()) {
-        tiles_ -= found->second.fill.tiles.tileCount();
+        bytes_ -= footprint(found->second.fill);
         found->second.fill = std::move(fill);
     } else {
         found = entries_.emplace(key, Entry{std::move(fill), 0}).first;
     }
     found->second.used = ++clock_;
-    tiles_ += found->second.fill.tiles.tileCount();
+    bytes_ += footprint(found->second.fill);
 
     evictDownToBudget(key);
     return found->second.fill;
@@ -205,7 +214,7 @@ CtgFill& CtgFillCache::store(const CtgKey& key, CtgFill fill) {
 
 void CtgFillCache::clear() {
     entries_.clear();
-    tiles_ = 0;
+    bytes_ = 0;
     ++generation_;
 }
 
@@ -214,7 +223,7 @@ void CtgFillCache::clear() {
 // canvas, and that is the case this rule quietly handles -- the budget is
 // exceeded rather than the answer thrown away before it is read.
 void CtgFillCache::evictDownToBudget(const CtgKey& keep) {
-    if (tiles_ <= kFillTileBudget) return;
+    if (bytes_ <= kFillByteBudget) return;
 
     std::vector<std::pair<std::uint64_t, CtgKey>> by_age;
     by_age.reserve(entries_.size());
@@ -226,10 +235,10 @@ void CtgFillCache::evictDownToBudget(const CtgKey& keep) {
               [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (const auto& [used, key] : by_age) {
-        if (tiles_ <= kFillTileBudget) break;
+        if (bytes_ <= kFillByteBudget) break;
         auto found = entries_.find(key);
         if (found == entries_.end()) continue;
-        tiles_ -= found->second.fill.tiles.tileCount();
+        bytes_ -= footprint(found->second.fill);
         entries_.erase(found);
     }
 }

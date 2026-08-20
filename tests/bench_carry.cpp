@@ -112,7 +112,7 @@ Landing measure(const CtgFill& fill, const PixelRect& box) {
                                  y < box.y - kInset || y > box.y + box.height + kInset;
             if (!inside && !outside) continue;
 
-            const Rgba pixel = fill.tiles.pixel(x, y);
+            const Rgba pixel = ctgFillPixel(fill, x, y);
             const bool red = pixel.a > 0.5f && pixel.r > 0.5f && pixel.g < 0.3f;
             if (inside) {
                 ++inside_total;
@@ -223,7 +223,7 @@ double fractionOf(const CtgFill& fill, const PixelRect& area, bool red) {
     for (int y = area.y; y < area.y + area.height; y += 2) {
         for (int x = area.x; x < area.x + area.width; x += 2) {
             ++total;
-            const Rgba pixel = fill.tiles.pixel(x, y);
+            const Rgba pixel = ctgFillPixel(fill, x, y);
             if (pixel.a <= 0.5f) continue;
             const bool is_red = pixel.r > 0.5f && pixel.b < 0.3f;
             const bool is_blue = pixel.b > 0.5f && pixel.r < 0.3f;

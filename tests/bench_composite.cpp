@@ -252,9 +252,11 @@ int main() {
             const auto start = Clock::now();
             const CtgFill fill = solveCtgJob(job, true);
             const double timed = milliseconds(start, Clock::now());
-            std::printf("    %s  budget %8lld  step %d  %9.1f ms  (%d colours, %zu tiles)\n",
+            std::printf("    %s  budget %8lld  step %d  %9.1f ms  (%d colours, %zu KB)\n",
                         name, budget, fill.step, timed, fill.colours,
-                        fill.tiles.tileCount());
+                        (fill.labels.size() * sizeof(std::int16_t) +
+                         fill.palette.size() * sizeof(std::uint32_t)) /
+                            1024);
         }
     }
 

@@ -34,11 +34,6 @@ struct CtgShift {
 // else, which is the property that lets the layer store scribbles rather than
 // pixels in the first place.
 struct CtgFill {
-    // The picture, which is on its way out: docs/colour-without-a-canvas.md
-    // keeps it for exactly one commit so that the accessor below can be
-    // asserted equal to it, and then deletes it.
-    TileGrid tiles;
-
     // The answer, rather than a picture of the answer.
     //
     // One label per solved cell, row-major over `solved` at `step`, and -1
@@ -229,11 +224,15 @@ struct CtgKeyHash {
 
 // A bounded store of fills, keeping the ones looked at most recently.
 //
-// Bounded because a fill covers the canvas at full resolution: 1920x1080 is 135
-// tiles, about 17 MB, for every drawing that has been looked at. Keeping them
-// all is how playing a coloured shot through once becomes a gigabyte -- which
+// Bounded because a fill is one label per solved cell for every drawing that
+// has been looked at -- 4 MB at 1080p, 8 MB at 4K solved at half. Keeping them
+// all is how playing a coloured shot through once becomes a gigabyte, which
 // only became easy to do when a drawing stopped needing scribbles of its own to
 // have a fill.
+//
+// Counted in bytes, which is the quantity that was meant. It budgeted in tiles
+// while a fill was a picture, and there is no picture now; the same lesson as
+// "what a band counted in coarse rows really costs" in docs/handover.md.
 //
 // Eviction costs a recompute and nothing else. That is not a consolation, it is
 // the reason this is allowed to be a cache at all: the fill is derived, and the
@@ -266,7 +265,12 @@ public:
     std::uint64_t generation() const { return generation_; }
 
     std::size_t size() const { return entries_.size(); }
-    std::size_t tileCount() const { return tiles_; }
+
+    // What the fills held weigh. The labels and the palette, and not the marks:
+    // those are handles shared with the cel and with every other drawing
+    // inheriting it, so charging the cache for them would charge it for memory
+    // it usually does not cause.
+    std::size_t bytes() const { return bytes_; }
 
     // How many fills have been put in, which is how many solves have happened:
     // ctgFill stores exactly once per solve and returns from the cache
@@ -288,7 +292,7 @@ private:
 
     std::unordered_map<CtgKey, Entry, CtgKeyHash> entries_;
     mutable std::uint64_t clock_ = 0;
-    std::size_t tiles_ = 0;
+    std::size_t bytes_ = 0;
     std::uint64_t stores_ = 0;
     std::uint64_t generation_ = 0;
 };

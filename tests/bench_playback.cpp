@@ -351,7 +351,7 @@ double fillCoverage(const Document& doc, const Built& built, std::size_t slot) {
                 const CtgFill* fill =
                     doc.ctgFillFor(built.tracks[t], image, built.colour[t]);
                 if (!fill) continue;
-                any = fill->tiles.pixel(x, y).a > 0.5f;
+                any = ctgFillPixel(*fill, x, y).a > 0.5f;
             }
             covered += any ? 1 : 0;
         }
@@ -606,10 +606,10 @@ void run(const Case& shot, bool coloured, bool print_header) {
                     (coverage < 0.05 || coverage > 0.90)
                         ? "  <-- the shapes are not filling as intended; this row means nothing"
                         : "");
-        std::printf("  %-12s  %llu drawings, %zu fills held (%zu tiles), "
+        std::printf("  %-12s  %llu drawings, %zu fills held (%zu MB), "
                     "%llu solves during 2 s of playback\n",
                     "", static_cast<unsigned long long>(shot.drawings * shot.tracks),
-                    doc.ctgCache().size(), doc.ctgCache().tileCount(),
+                    doc.ctgCache().size(), doc.ctgCache().bytes() >> 20,
                     static_cast<unsigned long long>(solves_after - solves_before));
     }
 }

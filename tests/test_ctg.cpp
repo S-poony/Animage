@@ -146,68 +146,52 @@ struct Sequence {
     ImageId at(int drawing) const { return images[static_cast<std::size_t>(drawing)]; }
 };
 
-Rgba fillAt(const CtgFill& fill, int x, int y) { return fill.tiles.pixel(x, y); }
+Rgba fillAt(const CtgFill& fill, int x, int y) { return ctgFillPixel(fill, x, y); }
 
-// --- the phase 1 gate ----------------------------------------------------
+// --- the two ways of reading a fill agree ---------------------------------
 //
-// docs/colour-without-a-canvas.md replaces the fill's tiles with two functions
-// that work the colour out per pixel asked for. The two are kept side by side
-// for exactly one commit so that this can run: the accessor has to answer
-// *exactly* what the picture answered, and that is checkable against the thing
-// it replaces. Once the tiles are gone there is nothing to check against.
+// This began as the gate for phase 1 of docs/colour-without-a-canvas.md, where
+// the fill's baked tiles and the accessor that replaces them lived side by side
+// for one commit and every pixel of both was compared. It ran green over the
+// situations below, and then the tiles went.
 //
-// Compared through Half, which is what a tile stores: the accessor computes a
-// colour in float and the tile kept sixteen bits of it, so quantising both is
-// an exact comparison rather than a tolerance somebody chose.
-bool sameThroughAHalf(const Rgba& a, const Rgba& b) {
-    return Half(a.r).bits == Half(b.r).bits && Half(a.g).bits == Half(b.g).bits &&
-           Half(a.b).bits == Half(b.b).bits && Half(a.a).bits == Half(b.a).bits;
-}
-
-// Every pixel of the canvas, and a margin of tiles beyond it where both have to
-// answer nothing at all. The margin is the half that would catch the accessor
-// forgetting what bounds it, which is the one thing the tiles never had to be
-// told.
-void theAccessorMatchesTheTiles(const CtgFill& fill, const char* what) {
+// What is left is the half that is worth keeping for good: ctgFillPixel is the
+// reference and the thing every other test here reads, and ctgFillSpan is what
+// the compositor actually calls. They are separate code -- the span hoists the
+// coarse row, works in runs and skips a clear row outright -- so nothing but a
+// test makes them stay the same function.
+void theSpanAgreesWithTheReference(const CtgFill& fill, const char* what) {
     const PixelRect canvas = fill.canvas;
+    // Out past whatever bounds the fill, where it has to answer nothing at all.
     const int margin = 2 * kTileSize;
     const int x0 = canvas.x - margin;
     const int x1 = canvas.x + canvas.width + margin;
 
-    std::size_t wrong_pixels = 0;
-    std::size_t wrong_spans = 0;
+    std::size_t wrong = 0;
     std::vector<Rgba> span;
 
     for (int y = canvas.y - margin; y < canvas.y + canvas.height + margin; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            if (!sameThroughAHalf(ctgFillPixel(fill, x, y), fill.tiles.pixel(x, y))) {
-                ++wrong_pixels;
-            }
-        }
-
-        // And the span, which is what the compositor will actually call: it has
-        // to agree with the reference at every stride, since the reducing path
-        // reads a lattice rather than every pixel.
+        // Every stride, because the reducing path reads a lattice rather than
+        // every pixel and the run-lengths fall differently on each.
         for (const int stride : {1, 2, 3, 7}) {
             const int count = (x1 - x0 + stride - 1) / stride;
+            // Filled with something that is not an answer, so a span that
+            // writes nothing where it should write transparency is caught.
             span.assign(static_cast<std::size_t>(count), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
             ctgFillSpan(fill, y, x0, stride, count, span.data());
             for (int i = 0; i < count; ++i) {
-                if (!sameThroughAHalf(span[static_cast<std::size_t>(i)],
-                                      ctgFillPixel(fill, x0 + i * stride, y))) {
-                    ++wrong_spans;
+                if (!(span[static_cast<std::size_t>(i)] ==
+                      ctgFillPixel(fill, x0 + i * stride, y))) {
+                    ++wrong;
                 }
             }
         }
     }
 
-    if (wrong_pixels != 0 || wrong_spans != 0) {
-        std::printf("    %s: %zu pixels differ from the tiles, %zu span samples differ from "
-                    "the reference\n",
-                    what, wrong_pixels, wrong_spans);
+    if (wrong != 0) {
+        std::printf("    %s: %zu span samples differ from the reference\n", what, wrong);
     }
-    CHECK_EQ(wrong_pixels, std::size_t{0});
-    CHECK_EQ(wrong_spans, std::size_t{0});
+    CHECK_EQ(wrong, std::size_t{0});
 }
 
 // A stroke on a CTG layer exactly as the canvas makes one. Defined further
@@ -215,8 +199,8 @@ void theAccessorMatchesTheTiles(const CtgFill& fill, const char* what) {
 void ctgStroke(Document& doc, TrackId track, ImageId image, LayerId layer, float x0, float y0,
                float x1, float y1, float radius, float r, float g, float b, bool erase);
 
-void theLazyFillIsTheSameFill() {
-    TEST("the fill worked out per pixel is the fill that was painted into tiles");
+void theSpanIsTheSameFillAsThePixel() {
+    TEST("a run of the fill is the same fill as one pixel of it at a time");
 
     {
         // The ordinary case: a gapped box, one mark inside and one outside.
@@ -225,7 +209,7 @@ void theLazyFillIsTheSameFill() {
         f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
         f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
         f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour), "a gapped box");
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour), "a gapped box");
     }
     {
         // Ink running off the frame, which is where the extension outside the
@@ -234,7 +218,7 @@ void theLazyFillIsTheSameFill() {
         f.doc.setCanvasSize(400, 400);
         f.drawGappedBox(f.ink, 100, 100, 700, 300, 380, 420);
         f.stroke(f.colour, 150, 200, 250, 200, 8.0f, 1.0f, 0.0f, 0.0f);
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour),
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
                                    "a box off the edge");
     }
     {
@@ -247,7 +231,7 @@ void theLazyFillIsTheSameFill() {
         f.stroke(f.colour, 125, 125, 125, 125, 2.0f, 0.0f, 1.0f, 0.0f);
         CtgSettings coarse;
         coarse.downscale = 8;
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour, coarse),
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour, coarse),
                                    "a coarse solve");
     }
     {
@@ -260,7 +244,7 @@ void theLazyFillIsTheSameFill() {
         ctgStroke(f.doc, f.track, f.image, f.colour, 85, 150, 175, 150, 12.0f,
                   kTransparentScribble.r, kTransparentScribble.g, kTransparentScribble.b,
                   false);
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour),
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
                                    "a transparent mark");
     }
     {
@@ -269,7 +253,7 @@ void theLazyFillIsTheSameFill() {
         Fixture f;
         f.doc.setCanvasSize(300, 260);
         f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour),
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour),
                                    "marks with no line art");
     }
     {
@@ -278,7 +262,7 @@ void theLazyFillIsTheSameFill() {
         Fixture f;
         f.doc.setCanvasSize(300, 260);
         f.drawGappedBox(f.ink, 60, 60, 200, 180, 120, 140);
-        theAccessorMatchesTheTiles(ctgFill(f.doc, f.track, f.image, f.colour), "no marks");
+        theSpanAgreesWithTheReference(ctgFill(f.doc, f.track, f.image, f.colour), "no marks");
     }
     {
         // And a carried mark, which is the only case with a non-zero shift: the
@@ -293,7 +277,7 @@ void theLazyFillIsTheSameFill() {
 
         const CtgFill& carried = s.fillOf(1);
         CHECK(carried.carried_by.x != 0);
-        theAccessorMatchesTheTiles(carried, "a carried mark");
+        theSpanAgreesWithTheReference(carried, "a carried mark");
     }
 }
 
@@ -339,14 +323,24 @@ void theLayerStoresScribblesNotTheFill() {
     f.stroke(f.colour, 20, 20, 240, 20, 6.0f, 0.0f, 0.0f, 1.0f);
 
     const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
-    const std::size_t filled_tiles = fill.tiles.tileCount();
 
     const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
     CHECK(scribbles != nullptr);
 
     // The cel holds only the marks, which cover far less than the fill does.
-    CHECK(scribbles->tiles().tileCount() < filled_tiles);
-    CHECK(filled_tiles > 0);
+    // Counted in pixels over the drawn part of the canvas rather than in tiles,
+    // because the fill has no tiles: it is the labels, and what it covers is
+    // what it answers.
+    std::size_t scribbled = 0;
+    std::size_t coloured = 0;
+    for (int y = 0; y < 250; ++y) {
+        for (int x = 0; x < 300; ++x) {
+            if (scribbles->pixel(x, y).a >= kScribbleAlphaThreshold) ++scribbled;
+            if (fillAt(fill, x, y).a > 0.0f) ++coloured;
+        }
+    }
+    CHECK(coloured > 0);
+    CHECK(scribbled * 4 < coloured);
 
     // Nothing at all where the scribble was not drawn but the fill reaches.
     CHECK_NEAR(scribbles->pixel(130, 160).a, 0.0, 1e-3);
@@ -438,7 +432,7 @@ void noScribblesMeansNoFill() {
     // No cel at all on the colour layer yet.
     const CtgFill& nothing = ctgFill(f.doc, f.track, f.image, f.colour);
     CHECK(!nothing.valid);
-    CHECK_EQ(nothing.tiles.tileCount(), std::size_t{0});
+    CHECK_EQ(nothing.labels.size(), std::size_t{0});
 }
 
 // Solving coarse while the pen moves is the plan's answer to interactivity. The
@@ -688,7 +682,7 @@ std::size_t scribblePixelsNotHonoured(const Cel& scribbles, const CtgFill& fill,
                 ++total;
 
                 // Both premultiplied; the mark is opaque, so this is its colour.
-                const Rgba got = fill.tiles.pixel(px, py);
+                const Rgba got = ctgFillPixel(fill, px, py);
                 if (std::fabs(got.r - mark.r / mark.a) > 0.02f ||
                     std::fabs(got.g - mark.g / mark.a) > 0.02f ||
                     std::fabs(got.b - mark.b / mark.a) > 0.02f) {
@@ -730,6 +724,78 @@ void aScribbleWinsInThePixelsItCovers() {
     // disagreement and nothing else.
     CHECK_NEAR(fillAt(fill, 130, 110).r, 1.0, 0.02);
     CHECK_NEAR(fillAt(fill, 130, 170).r, 1.0, 0.02);
+}
+
+// The same invariant with nothing at all for the solver to work with.
+//
+// A ball that vanishes mid-canvas takes the fill with it and leaves the
+// scribble: the line art the mark was cut against has gone, so there is no
+// region to win and nothing to be cut from, and what is left is what somebody
+// drew. It used to hold because the override was baked last, at full
+// resolution, into the tiles; it now has to hold because the accessor asks the
+// marks before it asks the labels, which is exactly the change that could have
+// lost it.
+void aMarkOnADrawingWithNoLineArtStillShows() {
+    TEST("a mark shows its own pixels on a drawing with no line art at all");
+    Fixture f;
+    f.stroke(f.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour);
+    CHECK(fill.valid);
+
+    // On the mark, its own colour, at full resolution.
+    CHECK_NEAR(fillAt(fill, 125, 110).r, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 125, 110).a, 1.0, 0.02);
+
+    // Every pixel of it, and not only the one this test picked.
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(scribbles != nullptr);
+    std::size_t counted = 0;
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, &counted), std::size_t{0});
+    CHECK(counted > 500);
+
+    // And nothing beyond it: with no barrier anywhere the rim is unseverable,
+    // so the mark keeps roughly its own pixels rather than flooding the sheet.
+    CHECK_NEAR(fillAt(fill, 600, 600).a, 0.0, 0.001);
+}
+
+// And a mark in a region the solve is too coarse to spread through.
+//
+// A corridor eight pixels wide solved at a step of eight is a region the cut
+// cannot represent: whatever the solver decides in there, it decides about a
+// cell that also contains both walls. The mark is what somebody asked for, so
+// the mark is what shows -- at full resolution, inside a region that has none.
+void aMarkInARegionNarrowerThanTheStepStillShows() {
+    TEST("a mark shows its own pixels in a region narrower than the solve grid");
+    Fixture f;
+    f.doc.setCanvasSize(600, 400);
+
+    // A box with a narrow corridor down the middle of it, and a mark in the
+    // corridor. The corridor is six pixels of paper between two walls.
+    f.drawGappedBox(f.ink, 60, 60, 400, 340, 200, 220);
+    f.stroke(f.ink, 200, 70, 200, 330, 2.5f, 0, 0, 0);
+    f.stroke(f.ink, 208, 70, 208, 330, 2.5f, 0, 0, 0);
+    f.stroke(f.colour, 204, 150, 204, 250, 1.5f, 0.0f, 1.0f, 0.0f);
+    f.stroke(f.colour, 100, 100, 160, 100, 8.0f, 1.0f, 0.0f, 0.0f);
+
+    CtgSettings coarse;
+    coarse.downscale = 8;
+    const CtgFill& fill = ctgFill(f.doc, f.track, f.image, f.colour, coarse);
+    CHECK(fill.valid);
+    CHECK(fill.step >= 8);  // the solve really is coarser than the corridor
+
+    // Whatever the cut did with a cell that spans both walls, the mark's own
+    // pixels are the colour that was asked for.
+    const Cel* scribbles = f.doc.celAt(f.track, f.image, f.colour);
+    CHECK(scribbles != nullptr);
+    std::size_t counted = 0;
+    CHECK_EQ(scribblePixelsNotHonoured(*scribbles, fill, &counted), std::size_t{0});
+    CHECK(counted > 100);
+
+    // Named explicitly as well, because a helper reporting zero of zero would
+    // pass this test without it.
+    CHECK_NEAR(fillAt(fill, 204, 200).g, 1.0, 0.02);
+    CHECK_NEAR(fillAt(fill, 204, 200).r, 0.0, 0.02);
 }
 
 // The disagreement that matters, and the one this exists for.
@@ -1058,8 +1124,8 @@ std::size_t differingPixels(const CtgFill& a, const CtgFill& b, const PixelRect&
     std::size_t differing = 0;
     for (int y = over.y; y < over.y + over.height; ++y) {
         for (int x = over.x; x < over.x + over.width; ++x) {
-            const Rgba p = a.tiles.pixel(x, y);
-            const Rgba q = b.tiles.pixel(x, y);
+            const Rgba p = ctgFillPixel(a, x, y);
+            const Rgba q = ctgFillPixel(b, x, y);
             if (std::fabs(p.r - q.r) > 0.01f || std::fabs(p.g - q.g) > 0.01f ||
                 std::fabs(p.b - q.b) > 0.01f || std::fabs(p.a - q.a) > 0.01f) {
                 ++differing;
@@ -1879,7 +1945,7 @@ void anAbandonedSolveReturnsNothing() {
     // Not a partial fill, because a partial fill is indistinguishable from a
     // finished one and would be cached, drawn and believed.
     CHECK(!given_up.valid);
-    CHECK_EQ(given_up.tiles.tileCount(), std::size_t{0});
+    CHECK_EQ(given_up.labels.size(), std::size_t{0});
 }
 
 void anUnboundedSolveIsFinerThanABoundedOne() {
@@ -2081,7 +2147,7 @@ void theBarrierDoesNotDependOnHowItWasBanded() {
 
 int main() {
     std::printf("ctg:\n");
-    theLazyFillIsTheSameFill();
+    theSpanIsTheSameFillAsThePixel();
     theSolveStaysBoundedOnALargeDrawing();
     theFillCoversTheCanvasAndStopsThere();
     theCanvasSizeDoesNotChangeTheFill();
@@ -2096,6 +2162,8 @@ int main() {
     theCompositorShowsTheFillNotTheScribbles();
     aScribbleWinsInThePixelsItCovers();
     aMarkFinerThanTheSolveGridStillShows();
+    aMarkOnADrawingWithNoLineArtStillShows();
+    aMarkInARegionNarrowerThanTheStepStillShows();
 
     aDrawingWithNoScribblesInheritsTheEarlierOnes();
     editingADrawingDetachesItAndTheOnesAfterFollow();
