@@ -124,11 +124,18 @@ void blendFillRows(const CtgFill& fill, const Layer& layer, const PixelRect& reg
     scratch.resize(static_cast<std::size_t>(columns));
 
     for (int y = y_begin; y < y_end; ++y) {
-        ctgFillSpan(fill, region.y + y, region.x, 1, columns, scratch.data());
+        // Only the part of the row that can hold an answer: the rest is
+        // transparent by construction, and skipping it is what an absent tile
+        // does for a grid.
+        const CtgFillExtent extent = ctgFillExtent(fill, region.y + y, region.x, 1, columns);
+        if (extent.count <= 0) continue;
+        ctgFillSpan(fill, region.y + y, region.x + extent.first, 1, extent.count,
+                    scratch.data());
         Rgba* destination = out.row(y);
 
-        for (int x = 0; x < columns; ++x) {
-            Rgba source = scratch[static_cast<std::size_t>(x)];
+        for (int i = 0; i < extent.count; ++i) {
+            const int x = extent.first + i;
+            Rgba source = scratch[static_cast<std::size_t>(i)];
             if (source.a <= 0.0f) continue;  // nothing here
             if (faded) {
                 source.r *= layer_opacity;
@@ -401,11 +408,14 @@ void blendFillRowsBoxed(const CtgFill& fill, const Layer& layer, const PixelRect
                 static_cast<float>(upper - lower) / static_cast<float>(SampleStep::kOne);
             rows_weight += row_weight;
 
-            ctgFillSpan(fill, image_y, first_x, stride, samples, scratch.data());
+            const CtgFillExtent extent = ctgFillExtent(fill, image_y, first_x, stride, samples);
+            if (extent.count <= 0) continue;
+            ctgFillSpan(fill, image_y, first_x + extent.first * stride, stride, extent.count,
+                        scratch.data());
 
-            for (int sample = 0; sample < samples; ++sample) {
-                const auto index = static_cast<std::size_t>(sample);
-                const Rgba& source = scratch[index];
+            for (int j = 0; j < extent.count; ++j) {
+                const auto index = static_cast<std::size_t>(extent.first + j);
+                const Rgba& source = scratch[static_cast<std::size_t>(j)];
                 if (source.a <= 0.0f) continue;  // nothing here
 
                 const int column = plan.column[index];

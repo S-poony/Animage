@@ -52,6 +52,13 @@ struct CtgFill {
     std::vector<std::int16_t> labels;
     std::vector<std::uint32_t> palette;
 
+    // The palette decoded once, so that reading a label is a table lookup
+    // rather than three divisions. Kept beside the keys rather than instead of
+    // them: a key is what identifies a colour -- it is what the seeding
+    // compared and what a future recolour would name -- and this is only what
+    // it looks like. Written together, in solveCtgJob, and the same length.
+    std::vector<Rgba> palette_colours;
+
     // What bounds the fill, which today is the canvas.
     //
     // Named for what it is rather than for what it does. The other rectangle
@@ -107,6 +114,16 @@ struct CtgFill {
     // place and an override painted in another would put the mark's own pixels
     // somewhere the solver never saw it.
     TileGrid marks;
+
+    // Where those marks are drawn: their own bounds, moved by `carried_by`, to
+    // the nearest tile. Derived from the two above and cached here because it
+    // is asked per row -- and working it out costs a scan of every pixel of
+    // every mark tile, which is a per-gesture price and not a per-row one.
+    //
+    // Conservative rather than tight: a row inside it may still have no mark on
+    // it, and one outside it certainly has none. That is the direction that
+    // makes it safe to skip on.
+    PixelRect marks_drawn;
 
     // Below this a pixel is not a mark. Carried rather than assumed, so the
     // accessor is a pure function of what the fill stores -- CtgSettings can
@@ -197,6 +214,24 @@ Rgba ctgFillPixel(const CtgFill& fill, int x, int y);
 // out materialising tiles on first touch and keeping them, which would need a
 // lock on the path this exists to make faster.
 void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count, Rgba* out);
+
+// Which samples of that span can be anything but transparent.
+//
+// `[first, first + count)` of the span the same arguments would fill, and
+// everything outside it is transparent -- exactly, not probably. Cheap: three
+// rectangles and no per-sample work.
+//
+// This is what gives a fill back the shortcut the compositor is built on. An
+// area a fill left empty had no tile, and the tile was skipped before a channel
+// was read; a fill has no absent tile, so the compositor asks where the answers
+// can be and leaves the rest of the row alone. Without it a colour layer costs
+// the area of the canvas rather than the area of the fill, which is what the
+// tiles never did.
+struct CtgFillExtent {
+    int first = 0;
+    int count = 0;
+};
+CtgFillExtent ctgFillExtent(const CtgFill& fill, int y, int first_x, int stride, int count);
 
 // What a fill belongs to: one drawing, one layer.
 //

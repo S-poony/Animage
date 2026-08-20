@@ -41,8 +41,9 @@ int cellAt(int value, int origin, int extent, int step, int limit) {
     return (limit >= 3) ? std::clamp(cell, 1, limit - 2) : cell;
 }
 
-// The highest cell index the clamp can produce. A coordinate right of `solved`
-// lands on it, and one left of `solved` lands on its opposite.
+// The two cell indices the clamp can produce at the ends. A coordinate left of
+// `solved` lands on the first and one right of it on the second.
+int lowestCell(int limit) { return (limit >= 3) ? 1 : 0; }
 int highestCell(int limit) { return (limit >= 3) ? limit - 2 : limit - 1; }
 
 // Whether the labels are the shape `solved` and `step` say they are. One
@@ -82,7 +83,53 @@ Rgba ctgFillPixel(const CtgFill& fill, int x, int y) {
     const int cy = cellAt(y, fill.solved.y, fill.solved.height, fill.step, height);
     const std::int16_t label = fill.labels[static_cast<std::size_t>(cy) * width + cx];
     if (label < 0) return {};  // nothing reached here
-    return scribbleColour(fill.palette[static_cast<std::size_t>(label)]);
+    return fill.palette_colours[static_cast<std::size_t>(label)];
+}
+
+namespace {
+
+// The half-open range of samples inside whatever bounds the fill.
+//
+// Worked out as a range of indices rather than tested per sample, so the loops
+// below walk indices and nothing checks a rectangle twice.
+CtgFillExtent samplesWithin(int from, int to, int first_x, int stride, int count) {
+    const long long begin =
+        (first_x >= from) ? 0 : (static_cast<long long>(from) - first_x + stride - 1) / stride;
+    const long long end =
+        (first_x >= to) ? 0
+                        : std::min<long long>(count, (static_cast<long long>(to) - first_x +
+                                                      stride - 1) / stride);
+    if (begin >= end) return {};
+    return {static_cast<int>(begin), static_cast<int>(end - begin)};
+}
+
+// Where along a row the labels can say anything but "nothing reached".
+//
+// Inside the solve, anywhere. Outside it every answer comes from the ring, so
+// when the ring is clear the answer out there is transparent and the range is
+// the solve's own -- which is the whole of what `outside_is_clear` buys.
+PixelRect labelledPart(const CtgFill& fill) {
+    if (fill.labels.empty()) return {};
+    if (!fill.outside_is_clear) return fill.canvas;
+    return intersect(fill.solved, fill.canvas);
+}
+
+PixelRect markedPart(const CtgFill& fill) {
+    if (fill.marks.empty() || fill.marks_drawn.isEmpty()) return {};
+    return intersect(fill.marks_drawn, fill.canvas);
+}
+
+}  // namespace
+
+CtgFillExtent ctgFillExtent(const CtgFill& fill, int y, int first_x, int stride, int count) {
+    if (count <= 0 || !fill.valid) return {};
+    stride = std::max(1, stride);
+
+    PixelRect answers = unite(labelledPart(fill), markedPart(fill));
+    if (answers.isEmpty()) return {};
+    if (y < answers.y || y >= answers.y + answers.height) return {};
+
+    return samplesWithin(answers.x, answers.x + answers.width, first_x, stride, count);
 }
 
 void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count, Rgba* out) {
@@ -92,19 +139,11 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
     if (!fill.valid || fill.canvas.isEmpty()) return;
     if (y < fill.canvas.y || y >= fill.canvas.y + fill.canvas.height) return;
 
-    const int left = fill.canvas.x;
-    const int right = fill.canvas.x + fill.canvas.width;
-
-    // Which samples fall inside the bound, as a range of indices, so everything
-    // below walks indices rather than testing each one against the rectangle.
-    const long long begin =
-        (first_x >= left) ? 0 : (static_cast<long long>(left) - first_x + stride - 1) / stride;
-    const long long end =
-        (first_x >= right)
-            ? 0
-            : std::min<long long>(
-                  count, (static_cast<long long>(right) - first_x + stride - 1) / stride);
-    if (begin >= end) return;
+    const CtgFillExtent inside =
+        samplesWithin(fill.canvas.x, fill.canvas.x + fill.canvas.width, first_x, stride, count);
+    if (inside.count <= 0) return;
+    const long long begin = inside.first;
+    const long long end = inside.first + inside.count;
 
     int width = 0;
     int height = 0;
@@ -118,49 +157,80 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
     if (have_labels && !(row_outside && fill.outside_is_clear)) {
         const int cy = cellAt(y, fill.solved.y, fill.solved.height, fill.step, height);
         const std::int16_t* row = fill.labels.data() + static_cast<std::size_t>(cy) * width;
-        const int last_cell = highestCell(width);
+        const Rgba* colours = fill.palette_colours.data();
+        const int low = lowestCell(width);
+        const int high = highestCell(width);
+        const int step = fill.step;
+        const int origin = fill.solved.x;
 
-        // A run of samples inside one cell is one label and therefore one
-        // colour, which is where the constant is won: at full resolution that
-        // is `step` pixels for one lookup, and outside the solve it is the rest
-        // of the row for one.
-        for (long long i = begin; i < end;) {
-            const int x = first_x + static_cast<int>(i) * stride;
-            const int cx = cellAt(x, fill.solved.x, fill.solved.width, fill.step, width);
+        // Three stretches, and the middle one is the drawing. Left of `from`
+        // every sample clamps to the same cell, right of `to` every sample
+        // clamps to the other, and between them the cell is a division -- so
+        // the clamps are paid twice per row instead of twice per sample.
+        const long long from = static_cast<long long>(origin) + static_cast<long long>(low) * step;
+        const long long to =
+            std::min(static_cast<long long>(origin) + fill.solved.width,
+                     static_cast<long long>(origin) + static_cast<long long>(high + 1) * step);
 
-            const long long cell_end =
-                (cx >= last_cell)
-                    ? std::numeric_limits<int>::max()
-                    : static_cast<long long>(fill.solved.x) +
-                          static_cast<long long>(cx + 1) * fill.step;
-            const long long run =
-                std::min<long long>(end - i, (cell_end - x + stride - 1) / stride);
+        const auto index_of = [&](long long x) {
+            return (x <= first_x) ? 0LL : (x - first_x + stride - 1) / stride;
+        };
+        const long long middle_begin = std::clamp(index_of(from), begin, end);
+        const long long middle_end = std::clamp(index_of(to), begin, end);
 
-            const std::int16_t label = row[cx];
-            if (label >= 0) {
-                const Rgba colour =
-                    scribbleColour(fill.palette[static_cast<std::size_t>(label)]);
-                std::fill(out + i, out + i + run, colour);
+        const auto paint = [&](long long i0, long long i1, int cell) {
+            if (i0 >= i1) return;
+            const std::int16_t label = row[cell];
+            if (label < 0) return;  // nothing reached here
+            std::fill(out + i0, out + i1, colours[static_cast<std::size_t>(label)]);
+        };
+        paint(begin, middle_begin, low);
+        paint(middle_end, end, high);
+
+        // The interior. One label per cell, so a run of `step` samples is one
+        // colour -- and at full resolution with the compositor reading every
+        // pixel the run is one sample and the cell simply walks alongside it,
+        // which is the case worth being fast at.
+        if (step == 1 && stride == 1) {
+            int cell = static_cast<int>(first_x + middle_begin - origin);
+            for (long long i = middle_begin; i < middle_end; ++i, ++cell) {
+                const std::int16_t label = row[cell];
+                if (label >= 0) out[i] = colours[static_cast<std::size_t>(label)];
             }
-            i += run;
+        } else {
+            for (long long i = middle_begin; i < middle_end;) {
+                const long long x = first_x + i * stride;
+                const int cell = static_cast<int>((x - origin) / step);
+                const long long cell_end =
+                    static_cast<long long>(origin) + static_cast<long long>(cell + 1) * step;
+                const long long run = std::min(middle_end - i, (cell_end - x + stride - 1) / stride);
+                paint(i, i + run, cell);
+                i += run;
+            }
         }
     }
 
     // And then the mark wins wherever it was drawn, at full resolution however
     // coarse the solve was. A tile at a time, so the lookup is hoisted across
     // the run exactly as it is at full resolution.
-    if (fill.marks.empty()) return;
+    const PixelRect marked = markedPart(fill);
+    if (marked.isEmpty() || y < marked.y || y >= marked.y + marked.height) return;
+
+    const CtgFillExtent over =
+        samplesWithin(std::max(marked.x, fill.canvas.x),
+                      std::min(marked.x + marked.width, fill.canvas.x + fill.canvas.width),
+                      first_x, stride, count);
+    if (over.count <= 0) return;
 
     const int mark_y = y - fill.carried_by.y;
     const int tile_y = tileCoordFor(0, mark_y).y;
     const int local_y = tileLocal(mark_y);
 
-    for (long long i = begin; i < end;) {
+    for (long long i = over.first, stop = over.first + over.count; i < stop;) {
         const int mark_x = first_x + static_cast<int>(i) * stride - fill.carried_by.x;
         const int tile_x = tileCoordFor(mark_x, 0).x;
         const long long tile_end = static_cast<long long>(tile_x + 1) * kTileSize;
-        const long long run =
-            std::min<long long>(end - i, (tile_end - mark_x + stride - 1) / stride);
+        const long long run = std::min(stop - i, (tile_end - mark_x + stride - 1) / stride);
 
         // findSlot borrows the handle. find() would copy the shared_ptr, and an
         // atomic increment per lookup is not free at this rate.
@@ -177,9 +247,9 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
             const Half* p =
                 row + (static_cast<std::size_t>(local_x) + static_cast<std::size_t>(j) * stride) *
                           4;
-            const Rgba mark{p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat()};
-            if (mark.a < fill.mark_threshold) continue;  // not a label
+            if (p[3].toFloat() < fill.mark_threshold) continue;  // not a label
 
+            const Rgba mark{p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat()};
             // The quantised label colour and not the pixel's own, for the same
             // reason the seeding thresholds: a scribble is a label, so its
             // antialiased rim must not leave a stripe of some colour between.

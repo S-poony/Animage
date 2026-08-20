@@ -566,7 +566,15 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     // a fill needs nothing but the fill. Copying a grid copies handles, and a
     // run of drawings inheriting one scribble cel shares one set of pixels.
     built.marks = job.scribbles;
+    built.marks_drawn = [&] {
+        const PixelRect drawn = drawnBounds(job.scribbles);
+        return drawn.isEmpty() ? drawn
+                               : PixelRect{drawn.x + shift.x, drawn.y + shift.y, drawn.width,
+                                           drawn.height};
+    }();
     built.mark_threshold = job.settings.scribble_alpha_threshold;
+    built.palette_colours.reserve(palette.size());
+    for (const std::uint32_t key : palette) built.palette_colours.push_back(scribbleColour(key));
     built.palette = std::move(palette);
     // Narrowed to two bytes on the way in. See CtgFill::labels for why 32767
     // colours is not a cap anybody can reach.

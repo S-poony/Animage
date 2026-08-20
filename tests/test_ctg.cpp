@@ -168,6 +168,7 @@ void theSpanAgreesWithTheReference(const CtgFill& fill, const char* what) {
     const int x1 = canvas.x + canvas.width + margin;
 
     std::size_t wrong = 0;
+    std::size_t missed = 0;
     std::vector<Rgba> span;
 
     for (int y = canvas.y - margin; y < canvas.y + canvas.height + margin; ++y) {
@@ -179,19 +180,28 @@ void theSpanAgreesWithTheReference(const CtgFill& fill, const char* what) {
             // writes nothing where it should write transparency is caught.
             span.assign(static_cast<std::size_t>(count), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
             ctgFillSpan(fill, y, x0, stride, count, span.data());
+
+            // And the extent the compositor skips on has to be honest in the
+            // one direction that matters: it may be too big, and it may never
+            // leave an answer outside itself. Too small is a colour that does
+            // not appear, which is the failure a coverage number would hide.
+            const CtgFillExtent extent = ctgFillExtent(fill, y, x0, stride, count);
             for (int i = 0; i < count; ++i) {
-                if (!(span[static_cast<std::size_t>(i)] ==
-                      ctgFillPixel(fill, x0 + i * stride, y))) {
-                    ++wrong;
-                }
+                const Rgba here = ctgFillPixel(fill, x0 + i * stride, y);
+                if (!(span[static_cast<std::size_t>(i)] == here)) ++wrong;
+                const bool covered = i >= extent.first && i < extent.first + extent.count;
+                if (!covered && here.a > 0.0f) ++missed;
             }
         }
     }
 
-    if (wrong != 0) {
-        std::printf("    %s: %zu span samples differ from the reference\n", what, wrong);
+    if (wrong != 0 || missed != 0) {
+        std::printf("    %s: %zu span samples differ from the reference, %zu answers fall "
+                    "outside the extent\n",
+                    what, wrong, missed);
     }
     CHECK_EQ(wrong, std::size_t{0});
+    CHECK_EQ(missed, std::size_t{0});
 }
 
 // A stroke on a CTG layer exactly as the canvas makes one. Defined further
