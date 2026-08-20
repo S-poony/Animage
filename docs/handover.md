@@ -504,14 +504,27 @@ finishes with whatever fill is in the cache, which is the last answer.
 
 A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
 marks were made (`estimateCtgShift`), flatten the ink into a barrier
-(`ctgBarrier`), read the marks through that shift into seeds, run the max-flow
-(`solveLazyBrush` over `GridFlow`), and paint the labels back into tiles. A 16 ms
-poll on the canvas collects the result, puts it in the cache, marks everything
-dirty and emits `colourChanged`; `MainWindow` refreshes the timeline, the layer
-panel and the status bar from that one signal.
+(`ctgBarrier`), read the marks through that shift into seeds, and run the
+max-flow (`solveLazyBrush` over `GridFlow`). What it keeps is the labelling
+itself — one label per solved cell, the palette, and the marks it was solved
+from — and not a picture of it. A 16 ms poll on the canvas collects the result,
+puts it in the cache, marks everything dirty and emits `colourChanged`;
+`MainWindow` refreshes the timeline, the layer panel and the status bar from
+that one signal.
+
+**The fill has no pixels, so somebody has to work them out.** `ctgFillPixel`
+is the reference and what tests read; `ctgFillSpan` is what the compositor
+calls, a run of a row at a time, and `ctgFillExtent` says which part of a row
+can hold an answer at all — which is how a fill gets back the shortcut an absent
+tile gives a grid, and it is not optional: without it a colour layer costs the
+area of the canvas rather than the area of the fill. All three are pure
+functions of what the fill stores, because `compositeGrids` runs its bands on
+several threads over one pass list and every one of them reads the same fill.
 
 The compositor draws whatever fill is in the cache and never starts a solve —
-`Document::ctgFillFor` is const for exactly that reason.
+`Document::ctgFillFor` is const for exactly that reason. A colour layer reaches
+it as a `LayerPass` carrying a fill rather than a grid, which is the only pass
+that is not a picture.
 
 ### Where a transform's pixels go, in order
 
@@ -2923,6 +2936,12 @@ three different answers:
   the interface thread on a 16 ms poll. A worker never touches a widget, and the
   solver's own wake-up callback is deliberately unused by the canvas for that
   reason.
+- **Reading a fill has to be a pure function of what the fill stores.** The
+  compositor's bands all read the same `CtgFill` at once, and a fill has no
+  pixels — so `ctgFillPixel`, `ctgFillSpan` and `ctgFillExtent` work the answer
+  out rather than looking it up. That rules out the obvious first design,
+  materialising a tile on first touch and keeping it, which would want a lock on
+  the path the whole thing exists to make faster.
 - An export does the same, through its own `CtgSolver` and a nested event loop
   rather than a poll — it is a thing the user is waiting for, so it waits, and
   the loop is what keeps the progress dialog painting while it does. Every write
@@ -2971,6 +2990,7 @@ trap.
 | [Why regenerating the fill whenever it looks stale costs a max-flow per dab](#why-regenerating-the-fill-whenever-it-looks-stale-costs-a-max-flow-per-dab) | Solve the fill on pen-up, not on cache staleness |
 | [Where the fill solve runs, and the resolution that paid for it](#where-the-fill-solve-runs-and-the-resolution-that-paid-for-it) | A synchronous solve capped quality; it is threaded now |
 | [What a widget on a list row takes over, including the row's own tick](#what-a-widget-on-a-list-row-takes-over-including-the-rows-own-tick) | setItemWidget swallows presses and kills the visibility tick |
+| [What a fill with no absent tile stops getting for free](#what-a-fill-with-no-absent-tile-stops-getting-for-free) | A lazy fill costs the canvas, not the fill, unless it is told where to look |
 | [What a stroke's dirty rectangle misses when the whole fill is resolved](#what-a-strokes-dirty-rectangle-misses-when-the-whole-fill-is-resolved) | A regenerated fill changes far from the pen; dirty everything |
 | [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
 | [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
@@ -3431,6 +3451,34 @@ before-and-after: "the dock before the shot got long" is a reading on the far
 side of the thing that goes wrong, and see
 [where the first dock-width reading was taken](#where-the-first-dock-width-reading-was-taken-and-why-the-fix-shipped-twice)
 for what that costs.
+
+
+### What a fill with no absent tile stops getting for free
+**The compositor's oldest shortcut is a property of tiles, not of layers.** An
+area a layer left empty has no tile there, and the whole run is skipped on one
+pointer test before a channel is read — which is why a 66-tile drawing and a
+2425-tile one refresh in the same time. A fill that works its colour out per
+pixel has no absent tile to skip on, and the first version of one duly cost the
+area of the *canvas* where the tiles cost the area of the fill: the coloured
+frame went from 14.6 ms to 37.6 ms at HD, and four tracks from 96 frames shown
+to 89.
+
+The fix is not a faster loop, it is giving the shortcut back. `ctgFillExtent`
+answers which samples of a row can be anything but transparent — three
+rectangles, no per-sample work — and the compositor asks it before it asks for
+anything else. Two facts make it exact rather than a guess: `outside_is_clear`,
+which is a fact about the labels that were computed and not an estimate of them,
+and the marks' own drawn bounds, cached on the fill because working them out is
+a scan of every mark pixel and it is wanted per row.
+
+**And a run-length is worth nothing at the resolution that matters.** The other
+half of the same regression: a run of pixels sharing one solved cell is `step`
+long, and a 1080p drawing solves at `step` 1, so the run is one pixel and what
+is left is a clamp, two divisions and a colour decoded from a key, per pixel.
+The row is cut into its two clamped ends and the interior between them, so the
+clamps are paid twice a row rather than twice a pixel, and the palette is
+decoded once at solve time. Both were found by running `bench_playback`, which
+is the whole reason the plan measures before it changes anything.
 
 
 ### What a stroke's dirty rectangle misses when the whole fill is resolved
@@ -4437,16 +4485,19 @@ hold cannot help, composite fewer entries while playing, earn the reduction from
 measurement rather than applying it unconditionally, and decide it at a loop
 boundary so the picture never changes sharpness mid-take.
 
-**And the colour cache cannot hold a shot.** A fill covers the canvas at full
-resolution, so the bound works out at about 2000 tiles: 48 of 48 fills survive an
-HD shot of 24 drawings, 62 of 192 survive four tracks of 48, and **20 of 48**
-survive at 4K. What playback then shows is whichever fills are still there. The
-solves it provokes are counted rather than timed, and the count is 6 in two
-seconds at HD against **0 at 4K** — where the same mechanism demonstrably works,
-so a 4K fill either never finishes or is superseded before it can. Either way the
-colour does not arrive. That is worth knowing before item 4 is read as the answer
-to it: the max-flow is staying on the CPU, so a GPU compositor does not touch
-this.
+**And the colour cache holds about half a shot.** It used to hold a good deal
+less: a fill was a picture of the canvas at full resolution, the budget worked
+out at about 2000 tiles, and 62 of 192 fills survived four tracks of 48 against
+**20 of 48** at 4K. A fill is now the labelling rather than a picture of it —
+about a quarter of the memory — so on the same budget the four-track shot keeps
+127 of 192 and the 4K one 40 of 48. What playback shows is still whichever fills
+are there, and the shortfall is still real. The solves it provokes are counted
+rather than timed. Worth knowing before item 4 is read as the answer to it: the
+max-flow is staying on the CPU, so a GPU compositor does not touch this.
+
+The numbers, run by run, are in
+[the colour benchmarks](colour-baseline.md), which is where the plan below
+gates itself.
 
 `bench_zoom` drives the real `CanvasWidget` across the zoom range and reports,
 per zoom, the step and margin it chose, what a full refresh costs against the

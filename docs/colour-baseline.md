@@ -1,13 +1,20 @@
-# The colour benchmarks before any of it
+# The colour benchmarks, phase by phase
 
-Phase 0 of [colour without a canvas](colour-without-a-canvas.md), which is a
-measurement rather than a change: every gate in that plan reads against these,
-so they are kept verbatim rather than summarised. A summary is what would let a
-later run be compared against what somebody remembered.
+The measurements [colour without a canvas](colour-without-a-canvas.md) gates
+itself on. Phase 0 of that plan is a measurement rather than a change, and every
+later gate reads against it -- so the output is kept verbatim rather than
+summarised. A summary is what would let a later run be compared against what
+somebody remembered.
+
+Each phase adds a section. Nothing here is edited afterwards: a number that was
+measured stays as it was measured, and a number that moved is a section further
+down.
 
 Read the differences between rows and not the digits. The millisecond columns
 move by a few per cent between runs on the same build, and `bench_carry`'s
 coverage and leak are the only numbers here that are exact.
+
+## Phase 0 -- before any of it
 
 - **Recorded** 2026-08-20, at commit `a0c63d0`, before phase 1.
 - **Where** Intel Core i7-10700 at 2.90 GHz, 8 cores, 16 GB, Windows 11.
@@ -19,7 +26,7 @@ coverage and leak are the only numbers here that are exact.
 ./build/tests/bench_playback -platform offscreen
 ```
 
-## bench_carry
+### bench_carry
 
 ```
 Carrying a mark unchanged, against a shape that moves.
@@ -279,7 +286,7 @@ of about the right size', which no flag catches.
 all of it in 15.3 s
 ```
 
-## bench_composite
+### bench_composite
 
 ```
 compositing a 1150x640 viewport
@@ -323,7 +330,7 @@ A CTG solve on a 1920x1080 drawing, coarse then full:
 A frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.
 ```
 
-## bench_playback
+### bench_playback
 
 ```
 What playback costs, and what it drops. A frame at 24 fps is 41.7 ms.
@@ -362,4 +369,118 @@ one that caught this file's own drop model counting 53 frames out of 48.
 The painted count is what reached the screen, and it agrees with the slot
 count here. A shortfall between them would mean two slot changes collapsed
 into one paint, which is what overrunning looks like from the inside.
+```
+
+
+## Phase 1 -- the fill stops being a picture
+
+- **Recorded** 2026-08-20, at commit `4e01aff`, same machine and same build
+  type as above.
+
+The gate for this phase was not a benchmark: `ctgFillPixel` was asserted equal
+to the tiles it replaces, at every pixel of the canvas and two tiles beyond it,
+over seven situations, and then the tiles were deleted. What is below is the
+second half of the gate -- read the coloured rows.
+
+| | phase 0 | phase 1 |
+|---|---|---|
+| HD coloured frame | 14.63 ms | 15.52 ms |
+| 4K coloured frame | 68.10 ms | 64.16 ms |
+| four tracks, coloured | 18.23 ms | 19.06 ms |
+| HD fills held | 48 of 48 | 48 of 48 |
+| 4K fills held | **20 of 48** | **40 of 48** |
+| four tracks, fills held | **62 of 192** | **127 of 192** |
+| a 1080p fill | 84 tiles, ~10.5 MB | 4050 KB |
+| coarse solve, 1080p | 127.1 ms | 93.9 ms |
+
+The frame times are the same to within the few per cent a run moves by; the
+cache holds about twice as much of a shot, which is what the change was for.
+The coarse solve is 33 ms quicker because there is no paint-out loop in it any
+more.
+
+The line-art rows are untouched, which is the other half of what wants
+checking: a colour layer that got faster by making everything else slower would
+not show up in the coloured column alone.
+
+### bench_carry
+
+Identical to phase 0, byte for byte, every coverage, leak, spread and shift on
+every row. Only the wall-clock line at the bottom differs (14.9 s against
+15.3 s). That is the strongest statement available that the fill's *answer* did
+not change, and it is why it is recorded as an identity rather than pasted
+again.
+
+### bench_composite
+
+```
+compositing a 1150x640 viewport
+
+1 layer       77 tiles
+    no margin           1.94 ms
+    margin  64 px       2.97 ms   (1.53x)
+    margin 192 px       4.64 ms   (2.39x)
+2 layers     154 tiles
+    no margin           2.89 ms
+    margin  64 px       4.07 ms   (1.41x)
+    margin 192 px       6.33 ms   (2.19x)
+3 layers     234 tiles
+    no margin           3.64 ms
+    margin  64 px       5.38 ms   (1.48x)
+    margin 192 px       8.08 ms   (2.22x)
+4 layers     309 tiles
+    no margin           4.61 ms
+    margin  64 px       6.47 ms   (1.40x)
+    margin 192 px       9.45 ms   (2.05x)
+
+zoomed out, 4 layers over a wide drawing
+    zoom  1.00 ( 1.00 image px an entry, read every 1)     2.15 ms
+    zoom  0.70 ( 1.43 image px an entry, read every 1)     4.38 ms
+    zoom  0.50 ( 2.00 image px an entry, read every 1)     5.40 ms
+    zoom  0.20 ( 5.00 image px an entry, read every 2)    15.08 ms
+    zoom  0.10 (10.00 image px an entry, read every 4)    13.81 ms
+    zoom  0.05 (20.00 image px an entry, read every 7)    16.64 ms
+
+LazyBrush: three boxed regions on a background, each wall gapped
+     128x128         7.1 ms   (4 cuts)
+     256x256        26.2 ms   (4 cuts)
+     512x512       112.5 ms   (4 cuts)
+    1024x1024      601.0 ms   (4 cuts)
+
+A CTG solve on a 1920x1080 drawing, coarse then full:
+    motion estimate, paid once per solve         9.8 ms  (0, 0)
+    first    budget   262144  step 3       93.9 ms  (3 colours, 450 KB)
+    refined  budget  4194304  step 1     1624.4 ms  (3 colours, 4050 KB)
+
+A frame at 60 Hz is 16.7 ms. Scrubbing wants one of these per frame.
+```
+
+### bench_playback
+
+```
+What playback costs, and what it drops. A frame at 24 fps is 41.7 ms.
+
+a shot you would review
+  1920x1080 canvas, 2 tracks, 24 drawings on 2s = 48 frames, canvas widget 1640x870 at 81%
+                  1612 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.04 /  12.10 /  0.69 ms           12.82 /  14.85 /  15.66       48 of 48          47 of 47 (48 painted)
+  coloured       0.04 /  15.52 /  0.81 ms           16.40 /  17.74 /  19.36       48 of 48          47 of 47 (48 painted)
+                fill covers 26% of the canvas when solved
+                48 drawings, 48 fills held (117 MB), 0 solves during 2 s of playback
+
+the same at 4K
+  3840x2160 canvas, 2 tracks, 24 drawings on 2s = 48 frames, canvas widget 3560x1950 at 90%
+                  3727 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.05 /  52.38 /  0.94 ms           53.44 /  57.64 /  58.75       38 of 48          38 of 48 (39 painted)
+  coloured       0.05 /  64.16 /  1.05 ms           64.91 / 105.10 / 107.76       30 of 48          27 of 48 (28 painted)
+                fill covers 24% of the canvas when solved
+                48 drawings, 40 fills held (252 MB), 2 solves during 2 s of playback
+
+four tracks, 96 frames
+  1920x1080 canvas, 4 tracks, 48 drawings on 2s = 96 frames, canvas widget 1640x870 at 81%
+                  6452 tiles
+                per frame: slot / canvas / timeline      frame: med / p95 / worst      shown at 24 fps    real timer
+  line art       0.09 /  14.39 /  2.46 ms           16.94 /  18.26 /  19.71       96 of 96          47 of 47 (48 painted)
+  coloured       0.09 /  19.06 /  2.56 ms           21.73 /  23.56 /  26.72       96 of 96          47 of 47 (65 painted)
 ```
