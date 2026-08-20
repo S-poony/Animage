@@ -104,7 +104,7 @@ InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& re
 }
 
 std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
-                                   int step, bool skip_bare_paper) {
+                                   int step) {
     step = std::max(1, step);
     const int width = (region.width + step - 1) / step;
     const int height = (region.height + step - 1) / step;
@@ -204,11 +204,6 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
         const int band_top = region.y + y0;
         const int band_height = std::min(band_rows, region.height - y0);
 
-        if (!skip_bare_paper) {
-            reduce(region.x, region.x + region.width, band_top, band_height, y0);
-            continue;
-        }
-
         // Only the runs of tile columns that have something under them, in this
         // band's own tile rows.
         //
@@ -249,12 +244,7 @@ std::vector<float> buildCtgBarrier(const std::vector<TileGrid>& sources, const P
 
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step) {
-    return buildCtgBarrier(sources, region, step, /*skip_bare_paper=*/true);
-}
-
-std::vector<float> ctgBarrierEverywhere(const std::vector<TileGrid>& sources,
-                                        const PixelRect& region, int step) {
-    return buildCtgBarrier(sources, region, step, /*skip_bare_paper=*/false);
+    return buildCtgBarrier(sources, region, step);
 }
 
 namespace {

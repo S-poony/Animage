@@ -164,14 +164,6 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels,
 std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelRect& region,
                               int step = 1);
 
-// The same with nothing skipped, which is the only thing the skipping can be
-// checked against.
-//
-// Exists for one commit -- see the gate for phase 2a in
-// docs/colour-without-a-canvas.md -- and then goes, exactly as the fill's tiles
-// did. Nothing but a test may call it.
-std::vector<float> ctgBarrierEverywhere(const std::vector<TileGrid>& sources,
-                                        const PixelRect& region, int step = 1);
 
 // How far the ink moved between one drawing and another.
 //

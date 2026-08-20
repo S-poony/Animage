@@ -2125,27 +2125,34 @@ TileGrid inkedRect(int x0, int y0, int x1, int y1) {
     return pad.grid();
 }
 
-// Skipping bare paper must not change the barrier, at all.
+// Paper the drawing does not reach costs nothing and changes nothing.
 //
-// The gate for phase 2a of docs/colour-without-a-canvas.md, and what it checks
-// is an identity rather than an approximation: bare paper composites to fully
-// transparent and reduces to exactly 1.0, which is what the array already
-// holds. So this is byte for byte and not nearly -- a tolerance here would be
-// admitting the argument might be wrong.
+// The barrier composites only the runs of tile columns with something under
+// them, which is exact rather than an approximation: bare paper composites to
+// fully transparent and reduces to exactly 1.0, which is what the array already
+// holds. This is that claim, stated in a way that survives the unskipped
+// implementation it was first checked against.
 //
-// The shapes are chosen for what a whole-band test alone would miss. Two
-// patches side by side put ink in every row, so banding buys nothing and only
-// the column runs can; a diagonal puts ink in every row *and* every column, so
-// neither buys anything and the answer still has to be identical; and a patch
-// crossing a coarse cell boundary is what would break if the part of a cell
-// left out of a run were not already the identity for min().
-void skippingBarePaperDoesNotChangeTheBarrier() {
-    TEST("skipping where nothing is drawn gives exactly the same barrier");
+// Every case is read twice: over a region that fits the drawing, and over one
+// grown by a whole number of steps on every side so the two coarse grids line
+// up cell for cell. Where they overlap they must agree exactly -- not nearly,
+// since both are a minimum over the same alphas -- and the paper added around
+// them must come back at exactly 1.0.
+//
+// The shapes are chosen for what skipping by band alone would miss, because
+// that is the version of this change that looks right and is not. Two patches
+// side by side put ink in every row, so a band test buys nothing and only the
+// column runs can. A long diagonal puts ink in every row *and* every column, so
+// neither buys anything and the answer still has to be identical. And a patch
+// that straddles a coarse cell is what would break if the part of a cell left
+// out of a run were not already the identity for min().
+void theBarrierFollowsTheInkAndNotTheBox() {
+    TEST("paper the drawing does not reach changes nothing about the barrier");
 
     struct Case {
         const char* what;
         std::vector<TileGrid> sources;
-        PixelRect region;
+        PixelRect region;  // width and height are whole numbers of steps
         int step;
     };
 
@@ -2163,13 +2170,13 @@ void skippingBarePaperDoesNotChangeTheBarrier() {
                      {inkedRect(40, 300, 100, 360), inkedRect(700, 300, 760, 360)},
                      {0, 0, 900, 700}, 1});
     cases.push_back({"a long diagonal", {slope.grid()}, {0, 0, 900, 700}, 1});
-    cases.push_back({"a patch across a coarse cell", {inkedRect(250, 250, 262, 262)},
-                     {0, 0, 900, 700}, 7});
+    cases.push_back({"a patch straddling a coarse cell", {inkedRect(250, 250, 262, 262)},
+                     {0, 0, 896, 700}, 7});
     cases.push_back({"a coarse step over a sparse sheet",
                      {inkedRect(40, 40, 90, 90), inkedRect(760, 600, 810, 650)},
-                     {0, 0, 900, 700}, 64});
+                     {0, 0, 896, 704}, 64});
     cases.push_back({"a region that does not start at the origin",
-                     {inkedRect(300, 300, 360, 360)}, {137, 91, 640, 480}, 3});
+                     {inkedRect(300, 300, 360, 360)}, {137, 91, 639, 480}, 3});
     cases.push_back({"a region left of and above the origin",
                      {inkedRect(-300, -300, -240, -240)}, {-500, -500, 900, 700}, 5});
     cases.push_back({"two sources over the same paper",
@@ -2177,22 +2184,47 @@ void skippingBarePaperDoesNotChangeTheBarrier() {
                      {0, 0, 900, 700}, 1});
 
     for (const Case& one : cases) {
-        const std::vector<float> skipped = ctgBarrier(one.sources, one.region, one.step);
-        const std::vector<float> everywhere =
-            ctgBarrierEverywhere(one.sources, one.region, one.step);
+        const int step = one.step;
+        // A couple of tiles of paper, rounded up to a whole number of steps so
+        // that the two grids stay in phase with each other.
+        const int pad = step * ((2 * kTileSize + step - 1) / step);
+        const PixelRect wide{one.region.x - pad, one.region.y - pad, one.region.width + 2 * pad,
+                             one.region.height + 2 * pad};
 
-        CHECK_EQ(skipped.size(), everywhere.size());
-        if (skipped.size() != everywhere.size()) continue;
+        const std::vector<float> tight = ctgBarrier(one.sources, one.region, step);
+        const std::vector<float> loose = ctgBarrier(one.sources, wide, step);
+
+        const int width = one.region.width / step;
+        const int height = one.region.height / step;
+        const int wide_width = wide.width / step;
+        const int wide_height = wide.height / step;
+        const int offset = pad / step;
+        CHECK_EQ(tight.size(), static_cast<std::size_t>(width) * height);
+        CHECK_EQ(loose.size(), static_cast<std::size_t>(wide_width) * wide_height);
 
         std::size_t differing = 0;
-        for (std::size_t i = 0; i < skipped.size(); ++i) {
-            if (skipped[i] != everywhere[i]) ++differing;
+        std::size_t not_bare = 0;
+        for (int y = 0; y < wide_height; ++y) {
+            for (int x = 0; x < wide_width; ++x) {
+                const float there = loose[static_cast<std::size_t>(y) * wide_width + x];
+                const bool overlaps = x >= offset && x < offset + width && y >= offset &&
+                                      y < offset + height;
+                if (!overlaps) {
+                    if (there != 1.0f) ++not_bare;  // paper nothing was drawn on
+                    continue;
+                }
+                const float here =
+                    tight[static_cast<std::size_t>(y - offset) * width + (x - offset)];
+                if (here != there) ++differing;
+            }
         }
-        if (differing != 0) {
-            std::printf("    %s: %zu of %zu cells differ\n", one.what, differing,
-                        skipped.size());
+
+        if (differing != 0 || not_bare != 0) {
+            std::printf("    %s: %zu cells differ, %zu cells of bare paper are not 1.0\n",
+                        one.what, differing, not_bare);
         }
         CHECK_EQ(differing, std::size_t{0});
+        CHECK_EQ(not_bare, std::size_t{0});
     }
 
     // And there was ink to lose. A barrier of bare paper is all 1.0, and two of
@@ -2342,6 +2374,6 @@ int main() {
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
     theBarrierDoesNotDependOnHowItWasBanded();
-    skippingBarePaperDoesNotChangeTheBarrier();
+    theBarrierFollowsTheInkAndNotTheBox();
     return testing::summarise("ctg");
 }
