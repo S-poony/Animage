@@ -16,6 +16,40 @@ bool abandoned(const std::atomic<bool>* abandon) {
     return abandon != nullptr && abandon->load(std::memory_order_relaxed);
 }
 
+// Whether every label on the ring the lookup clamps to is -1.
+//
+// The ring is the border of the grid one cell in, because that is what the
+// clamp produces: a coordinate outside the solved rectangle lands on it in at
+// least one axis and ranges over it in the other. So this is exactly the set of
+// labels anything outside the solve can read, and when none of them is a colour
+// the whole world out there is transparent.
+//
+// A fact about the labels that were computed, not an estimate of them. It is
+// what lets ctgFillSpan answer an empty row in one test, which is the shortcut
+// an absent tile used to give the compositor for nothing.
+bool ringIsClear(const std::vector<int>& labels, int width, int height) {
+    if (width <= 0 || height <= 0) return true;
+    if (labels.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        return false;
+    }
+
+    const int low_x = (width >= 3) ? 1 : 0;
+    const int high_x = (width >= 3) ? width - 2 : width - 1;
+    const int low_y = (height >= 3) ? 1 : 0;
+    const int high_y = (height >= 3) ? height - 2 : height - 1;
+
+    const auto at = [&](int x, int y) {
+        return labels[static_cast<std::size_t>(y) * width + x];
+    };
+    for (int x = low_x; x <= high_x; ++x) {
+        if (at(x, low_y) >= 0 || at(x, high_y) >= 0) return false;
+    }
+    for (int y = low_y; y <= high_y; ++y) {
+        if (at(low_x, y) >= 0 || at(high_x, y) >= 0) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 // drawnBounds lives in tile.h now: it is a property of a grid, and the box a
@@ -375,6 +409,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     region = intersect(region, filled);
     if (region.isEmpty()) {
         CtgFill empty;
+        empty.canvas = filled;
         empty.inputs = job.inputs;
         empty.budget = job.budget;
         empty.valid = true;
@@ -445,13 +480,24 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
     built.inherited = job.inherited;
     built.carried_by = shift;
     built.colours = static_cast<int>(palette.size());
-    if (palette.empty()) return built;
 
-    problem.colour_count = static_cast<int>(palette.size());
-    problem.hard.assign(palette.size(), 0);
+    // No mark landed on the sampling lattice, so there is nothing to cut and
+    // the labelling is empty -- but the marks are still shown at the bottom of
+    // this function, at full resolution. This used to return from here instead,
+    // which made a mark too small for the solve's own lattice invisible: the
+    // one case where the rule that a mark shows its own pixels whatever the
+    // solver decided was not kept.
+    //
+    // The verdict below is a no-op on an empty palette: every loop in it runs
+    // over the colours there are.
+    LazyBrushResult solved;
+    if (!palette.empty()) {
+        problem.colour_count = static_cast<int>(palette.size());
+        problem.hard.assign(palette.size(), 0);
 
-    const LazyBrushResult solved = solveLazyBrush(problem, job.settings.lazybrush, abandon);
-    if (solved.abandoned) return kNothing;
+        solved = solveLazyBrush(problem, job.settings.lazybrush, abandon);
+        if (solved.abandoned) return kNothing;
+    }
 
     // Two numbers about how well each mark landed, both free at solve time and
     // both taken from the solver's labels rather than the finished fill. That
@@ -547,18 +593,20 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
         found->second->setPixel(tileLocal(px), tileLocal(py), colour);
     };
 
-    for (int y = 0; y < filled.height; ++y) {
-        const int py = filled.y + y;
-        const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
-        for (int x = 0; x < filled.width; ++x) {
-            const int px = filled.x + x;
-            const int solved_x = solvedIndex(px, region.x, region.width, problem.width);
+    if (!solved.labels.empty()) {
+        for (int y = 0; y < filled.height; ++y) {
+            const int py = filled.y + y;
+            const int solved_y = solvedIndex(py, region.y, region.height, problem.height);
+            for (int x = 0; x < filled.width; ++x) {
+                const int px = filled.x + x;
+                const int solved_x = solvedIndex(px, region.x, region.width, problem.width);
 
-            const int label =
-                solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
-            if (label < 0) continue;  // nothing reached this pixel
+                const int label =
+                    solved.labels[static_cast<std::size_t>(solved_y) * problem.width + solved_x];
+                if (label < 0) continue;  // nothing reached this pixel
 
-            paint(px, py, scribbleColour(palette[static_cast<std::size_t>(label)]));
+                paint(px, py, scribbleColour(palette[static_cast<std::size_t>(label)]));
+            }
         }
     }
 
@@ -616,6 +664,22 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_tiles, const std::atomic<bool>*
                               static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu))};
         built.tiles.set(coord, std::move(tile));
     }
+
+    // And the answer itself, which is what a fill is read from once the tiles
+    // above are gone -- see docs/colour-without-a-canvas.md, phase 1. The two
+    // are kept side by side for exactly one commit, so that ctgFillPixel can be
+    // asserted equal to the picture it replaces.
+    //
+    // The marks travel with it, and the shift with them, because reading a fill
+    // then needs nothing but the fill. Copying a grid copies handles, and a run
+    // of drawings inheriting one scribble cel shares one set of pixels.
+    built.marks = job.scribbles;
+    built.mark_threshold = job.settings.scribble_alpha_threshold;
+    built.palette = std::move(palette);
+    // Narrowed to two bytes on the way in. See CtgFill::labels for why 32767
+    // colours is not a cap anybody can reach.
+    built.labels.assign(solved.labels.begin(), solved.labels.end());
+    built.outside_is_clear = ringIsClear(solved.labels, problem.width, problem.height);
     return built;
 }
 

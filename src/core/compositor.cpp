@@ -107,6 +107,40 @@ void blendLayerRows(const TileGrid& grid, const Layer& layer, const PixelRect& r
     }
 }
 
+// The same, for a source that is an answer rather than a picture.
+//
+// A colour layer's fill has no tiles to walk, so a scratch row is filled from
+// the accessor and then blended -- and the accessor is where the run-length
+// lives, since a run of image pixels inside one solved cell is one colour. The
+// arithmetic below is blendLayerRows', layer opacity included.
+void blendFillRows(const CtgFill& fill, const Layer& layer, const PixelRect& region,
+                   int y_begin, int y_end, Framebuffer& out, std::vector<Rgba>& scratch) {
+    const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
+    if (layer_opacity <= 0.0f) return;
+
+    const bool faded = layer_opacity < 1.0f;
+    const int columns = out.width();
+    if (columns <= 0) return;
+    scratch.resize(static_cast<std::size_t>(columns));
+
+    for (int y = y_begin; y < y_end; ++y) {
+        ctgFillSpan(fill, region.y + y, region.x, 1, columns, scratch.data());
+        Rgba* destination = out.row(y);
+
+        for (int x = 0; x < columns; ++x) {
+            Rgba source = scratch[static_cast<std::size_t>(x)];
+            if (source.a <= 0.0f) continue;  // nothing here
+            if (faded) {
+                source.r *= layer_opacity;
+                source.g *= layer_opacity;
+                source.b *= layer_opacity;
+                source.a *= layer_opacity;
+            }
+            destination[x] = over(source, destination[x]);
+        }
+    }
+}
+
 // Which output columns each sample along a scanline lands in, and how much of
 // it each one gets. The same for every row and every layer, so it is worked out
 // once and then read.
@@ -319,6 +353,95 @@ void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const PixelRe
     }
 }
 
+// And the reducing twin, for a fill.
+//
+// blendLayerRowsBoxed with the tile walk replaced by one call per image row:
+// the accessor fills a row of samples on the same lattice, and the scatter into
+// the accumulator, the weights and the division are unchanged. A fill carries
+// no offset, so the plan it is handed is the ordinary one.
+void blendFillRowsBoxed(const CtgFill& fill, const Layer& layer, const PixelRect& region,
+                        const SampleStep& step, long long first_row, int stride,
+                        const ColumnPlan& plan, int y_begin, int y_end, Framebuffer& out,
+                        std::vector<Rgba>& accumulator, std::vector<Rgba>& scratch) {
+    const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
+    if (layer_opacity <= 0.0f) return;
+
+    const int columns = out.width();
+    const int x_end = region.x + region.width;
+    const int y_bottom = region.y + region.height;
+    const int first_x = plan.origin;
+    const int first_y = firstLatticePointAtOrAfter(region.y, stride);
+    const int samples = latticePointsIn(first_x, x_end, stride);
+    if (samples <= 0) return;
+    scratch.resize(static_cast<std::size_t>(samples));
+
+    for (int y = y_begin; y < y_end; ++y) {
+        const long long top = step.entryTop(first_row + y);
+        const long long bottom = step.entryTop(first_row + y + 1);
+
+        std::fill(accumulator.begin(), accumulator.end(), Rgba{});
+        float rows_weight = 0.0f;
+
+        const int row_start = std::max(
+            first_y, firstLatticePointAtOrAfter(
+                         static_cast<int>(top >> SampleStep::kFractionBits) - stride + 1,
+                         stride));
+        for (int image_y = row_start; image_y < y_bottom; image_y += stride) {
+            const int from = (image_y == first_y) ? region.y : image_y;
+            const int to = std::min(y_bottom, image_y + stride);
+            const long long lower =
+                std::max(static_cast<long long>(from) << SampleStep::kFractionBits, top);
+            const long long upper =
+                std::min(static_cast<long long>(to) << SampleStep::kFractionBits, bottom);
+            if (upper <= lower) {
+                if ((static_cast<long long>(from) << SampleStep::kFractionBits) >= bottom) break;
+                continue;
+            }
+            const float row_weight =
+                static_cast<float>(upper - lower) / static_cast<float>(SampleStep::kOne);
+            rows_weight += row_weight;
+
+            ctgFillSpan(fill, image_y, first_x, stride, samples, scratch.data());
+
+            for (int sample = 0; sample < samples; ++sample) {
+                const auto index = static_cast<std::size_t>(sample);
+                const Rgba& source = scratch[index];
+                if (source.a <= 0.0f) continue;  // nothing here
+
+                const int column = plan.column[index];
+                const float here = plan.first_share[index] * row_weight;
+                Rgba& sum = accumulator[static_cast<std::size_t>(column)];
+                sum.r += source.r * here;
+                sum.g += source.g * here;
+                sum.b += source.b * here;
+                sum.a += source.a * here;
+
+                const float spill = plan.second_share[index];
+                if (spill <= 0.0f || column + 1 >= columns) continue;
+                const float next = spill * row_weight;
+                Rgba& over_the_edge = accumulator[static_cast<std::size_t>(column) + 1];
+                over_the_edge.r += source.r * next;
+                over_the_edge.g += source.g * next;
+                over_the_edge.b += source.b * next;
+                over_the_edge.a += source.a * next;
+            }
+        }
+
+        if (rows_weight <= 0.0f) continue;
+        Rgba* destination = out.row(y);
+        for (int x = 0; x < columns; ++x) {
+            const Rgba& sum = accumulator[static_cast<std::size_t>(x)];
+            if (sum.a <= 0.0f) continue;  // the whole block was empty
+            const float covered = plan.column_weight[static_cast<std::size_t>(x)] * rows_weight;
+            if (covered <= 0.0f) continue;
+
+            const float scale = layer_opacity / covered;
+            const Rgba source{sum.r * scale, sum.g * scale, sum.b * scale, sum.a * scale};
+            destination[x] = over(source, destination[x]);
+        }
+    }
+}
+
 }  // namespace
 
 SampleStep SampleStep::fromRatio(double image_pixels_per_entry) {
@@ -449,7 +572,7 @@ static void collectPasses(const Document& doc, TrackId track_id, ImageId image_i
                     passes.push_back({&scribbles->tiles(), layer, offset});
                 }
             } else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it)) {
-                passes.push_back({&fill->tiles, layer});
+                passes.push_back({nullptr, layer, {}, fill});
             }
             continue;
         }
@@ -529,8 +652,23 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
     // other layer takes exactly the path it took before this existed.
     const auto run_band = [&](int y_begin, int y_end) {
         std::vector<Rgba> accumulator;
+        std::vector<Rgba> scratch;
         if (reducing) accumulator.resize(static_cast<std::size_t>(out.width()));
         for (const LayerPass& pass : passes) {
+            // A fill is an answer rather than a picture, and is read a row at a
+            // time. Every band reads the same fill at the same time, which is
+            // why the accessor is a pure function of what the fill stores.
+            if (pass.fill != nullptr) {
+                if (reducing) {
+                    blendFillRowsBoxed(*pass.fill, *pass.layer, region, step, first_row, stride,
+                                       plan, y_begin, y_end, out, accumulator, scratch);
+                } else {
+                    blendFillRows(*pass.fill, *pass.layer, region, y_begin, y_end, out, scratch);
+                }
+                continue;
+            }
+            if (pass.tiles == nullptr) continue;
+
             const bool moved = !pass.offset.isZero();
             const PixelRect from = moved ? PixelRect{region.x - pass.offset.x,
                                                      region.y - pass.offset.y, region.width,

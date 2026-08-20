@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ids.h"
+#include "scribble.h"
 #include "tile.h"
 
 namespace animage {
@@ -33,7 +34,28 @@ struct CtgShift {
 // else, which is the property that lets the layer store scribbles rather than
 // pixels in the first place.
 struct CtgFill {
+    // The picture, which is on its way out: docs/colour-without-a-canvas.md
+    // keeps it for exactly one commit so that the accessor below can be
+    // asserted equal to it, and then deletes it.
     TileGrid tiles;
+
+    // The answer, rather than a picture of the answer.
+    //
+    // One label per solved cell, row-major over `solved` at `step`, and -1
+    // where nothing reached. `palette` turns a label into a scribble key -- the
+    // same quantised thing the seeding compared -- so between them they are the
+    // whole fill, and the colour of any pixel can be worked out when it is
+    // asked for. See ctgFillPixel.
+    //
+    // Two bytes a label and not one. Two bytes is 32767 colours, which no
+    // drawing can reach: a mark is written hard, so each stroke lays one flat
+    // colour and a drawing would need thirty-two thousand distinct ones. One
+    // byte would be 127, and 128 would then need a rule -- a cap that fails is
+    // a cap somebody has to design a failure for, and the memory it saves is
+    // not needed. A 1080p fill is about 2.07M labels, which is 4 MB against the
+    // 17 MB the tiles cost.
+    std::vector<std::int16_t> labels;
+    std::vector<std::uint32_t> palette;
 
     // What bounds the fill, which today is the canvas.
     //
@@ -58,6 +80,44 @@ struct CtgFill {
     // it caused happens to move a pixel.
     PixelRect solved;
     int step = 1;
+
+    // How the labels are laid out, which is the one thing `solved` and `step`
+    // do not say twice.
+    int gridWidth() const { return step > 0 ? (solved.width + step - 1) / step : 0; }
+    int gridHeight() const { return step > 0 ? (solved.height + step - 1) / step : 0; }
+
+    // Whether every label on the ring the lookup clamps to is -1.
+    //
+    // Outside `solved` every answer comes from that ring, so when this is true
+    // everything out there is transparent and a span can say so in one test
+    // rather than per pixel. That is what buys back the shortcut the compositor
+    // is built on -- an area the fill left empty had no tile and was skipped
+    // before a channel was read, and a fill with no tiles has no absent one.
+    //
+    // Exact and not an approximation: it is a fact about the labels that were
+    // computed, and on an ordinary drawing the ring is the background.
+    bool outside_is_clear = true;
+
+    // The marks this was solved from, travelling with the fill.
+    //
+    // Handles, so this is nearly free -- and a run of drawings inheriting one
+    // scribble cel shares one set of pixels. It is here because reading a fill
+    // then needs nothing but the fill: no document, no lookup, nothing for a
+    // fourth reader to forget. A mark shows its own pixels whatever the solver
+    // decided, and that guarantee now belongs to the same object as the labels
+    // it overrules rather than to whoever remembers to ask.
+    //
+    // Read through `carried_by`, which is the same shift the seeding used. The
+    // two are the same statement about the same mark, so a seed read in one
+    // place and an override painted in another would put the mark's own pixels
+    // somewhere the solver never saw it.
+    TileGrid marks;
+
+    // Below this a pixel is not a mark. Carried rather than assumed, so the
+    // accessor is a pure function of what the fill stores -- CtgSettings can
+    // set it, and a fill answering by a different threshold from the one it was
+    // solved with would disagree with its own seeding.
+    float mark_threshold = kScribbleAlphaThreshold;
 
     // How many cells this solve was allowed. Kept beside what it achieved,
     // because the two answer different questions: `step` is how good this
@@ -105,6 +165,43 @@ struct CtgFill {
     std::uint64_t inputs = 0;
 
 };
+
+// What colour the fill has at one pixel, worked out when it is asked for.
+//
+// The reference, and the thing tests read. Everything the answer needs is in
+// the fill: the labels over `solved`, the palette, the marks and the shift they
+// were read through.
+//
+// Outside `solved` the label is the one on the ring, clamped inwards, and that
+// extension is exact rather than an approximation. Outside the drawn area there
+// is no line art, so everything out there is one connected stretch of blank
+// paper: a cut cannot pass through it and it can only take one label, so
+// whatever label reaches the border is the label of everything beyond it.
+// Nothing in that argument names a rectangle -- see `canvas` for the one that
+// is still here anyway, and why.
+//
+// A mark wins over the label wherever it was drawn, at full resolution however
+// coarse the solve was. That is what lets somebody scribble into a region too
+// narrow for the solve to spread through and still see the colour they asked
+// for, and it is what leaves a mark visible on a drawing whose line art has
+// gone.
+Rgba ctgFillPixel(const CtgFill& fill, int x, int y);
+
+// A run of pixels along one row: `count` of them, starting at `first_x` and
+// every `stride` image pixels after it. Answers exactly what ctgFillPixel
+// would, one call instead of `count` of them.
+//
+// This is what the compositor uses and where the constant is won. The coarse
+// row is worked out once; a run of samples inside one cell is one label and
+// therefore one colour; and the marks are then overwritten a tile at a time
+// with the tile lookup hoisted across the run -- the same shape blendLayerRows
+// already uses, and for the same reason.
+//
+// Pure, and it has to be: compositeGrids runs its bands on several threads over
+// one pass list, so one fill is read concurrently by all of them. That rules
+// out materialising tiles on first touch and keeping them, which would need a
+// lock on the path this exists to make faster.
+void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count, Rgba* out);
 
 // What a fill belongs to: one drawing, one layer.
 //
