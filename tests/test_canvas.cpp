@@ -928,6 +928,16 @@ void sendMouse(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseB
     QCoreApplication::sendEvent(widget, &event);
 }
 
+// The same, with keys held. Up here beside it rather than beside its first user
+// because a held modifier is now part of what a drag *means* on this canvas, and
+// two of them are tested from either end of this file.
+void sendMouseWith(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
+                   Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
+    QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, modifiers);
+    QCoreApplication::sendEvent(widget, &event);
+    QCoreApplication::processEvents();
+}
+
 // A tap: press and release, at a stated moment.
 //
 // The moment is the point of it. What a pen produces is two ordinary presses
@@ -4835,6 +4845,83 @@ void theTransformKeysFollowTheirBindings() {
     fixture.window.adoptShortcuts(shortcuts::Bindings());
 }
 
+// Reported: letting Alt go part way through a handle drag ended the drag.
+//
+// The mechanism is the menu bar, and it is worth writing down because nothing
+// about it is visible from this file. `QMenuBar::eventFilter` sits on the
+// window; a bare Alt press that the canvas has not accepted propagates up to it,
+// and it answers by setting `altPressed` and installing a filter *on the
+// application*. The matching release is then seen by that filter before any
+// widget gets it, and the menu bar takes the keyboard -- so the canvas gets a
+// focus-out, `abandonGesture` does exactly what it is for, and the drag under
+// the still-held button is over.
+//
+// So the symmetrical scale arrived on the way in and the whole gesture left on
+// the way out. The canvas takes the keyboard straight back while a drag is in
+// progress, which also puts the menu bar back out of keyboard mode -- losing the
+// focus is what took it in.
+//
+// Three things this test needs to be the real thing rather than a shape like it.
+// It needs the real window, because a bare CanvasWidget has no menu bar under it
+// and cannot show this. It needs a genuine Alt *press* and not only a release,
+// because the press is what arms the filter -- an earlier version of this test
+// sent the release alone and passed against the broken code. And it needs no
+// mouse event between the two, because a mouse event is one of the things that
+// disarms it, which is also why the bug wants the hand held still and why it is
+// this change that exposed it: answering the key without waiting for a move is
+// exactly what makes holding still the natural thing to do.
+void lettingAltGoDoesNotEndTheDrag() {
+    TEST("Alt taken up and let go part way through a handle drag leaves the drag running");
+    WindowWithInk fixture;
+    CHECK(fixture.canvas != nullptr);
+    if (!fixture.canvas) return;
+    CanvasWidget& canvas = *fixture.canvas;
+
+    fixture.action(shortcuts::Id::Transform)->trigger();
+    QCoreApplication::processEvents();
+    CHECK(canvas.transformIsLive());
+
+    const QPointF centre = canvas.transformCentreForTesting();
+    const QPointF corner = canvas.transformHandlesForTesting()[0];
+    // Out along the arm the corner is already on. Measured from the corner
+    // opposite this is 1.25 and from the middle it is 1.5, which is what lets
+    // one number say which pivot the drag is using.
+    const QPointF half = centre + (corner - centre) * 1.5;
+    // And further, where the two disagree again: three times from the middle,
+    // twice from the corner opposite. A nearer point would read the same either
+    // way and the last check would pass on a drag that had stopped.
+    const QPointF full = centre + (corner - centre) * 3.0;
+
+    sendMouse(&canvas, QEvent::MouseButtonPress, corner, Qt::LeftButton, Qt::LeftButton);
+    sendMouseWith(&canvas, QEvent::MouseMove, half, Qt::NoButton, Qt::LeftButton,
+                  Qt::NoModifier);
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.25, 0.02);
+
+    // Alt down, with the hand held still: the box answers at once.
+    QKeyEvent down(QEvent::KeyPress, Qt::Key_Alt, Qt::AltModifier);
+    QCoreApplication::sendEvent(&canvas, &down);
+    QCoreApplication::processEvents();
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.5, 0.02);
+
+    // And up again, still held still. This is the half that was reported.
+    QKeyEvent up(QEvent::KeyRelease, Qt::Key_Alt, Qt::NoModifier);
+    QCoreApplication::sendEvent(&canvas, &up);
+    QCoreApplication::processEvents();
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.25, 0.02);
+
+    // The gesture is still a gesture, which is the claim. Dragging further has
+    // to still scale: with the focus gone `grab_` was cleared and this move does
+    // nothing at all, which is what the box did on screen -- stuck, mid-drag,
+    // with the button still down.
+    sendMouseWith(&canvas, QEvent::MouseMove, full, Qt::NoButton, Qt::LeftButton,
+                  Qt::NoModifier);
+    CHECK_NEAR(canvas.transformValues().scale_x, 2.0, 0.02);
+
+    sendMouseWith(&canvas, QEvent::MouseButtonRelease, full, Qt::LeftButton, Qt::NoButton,
+                  Qt::NoModifier);
+    canvas.cancelTransform();
+}
+
 // --- flipping (#24) -------------------------------------------------------
 
 QPushButton* buttonCalled(const MainWindow& window, const QString& text) {
@@ -5977,13 +6064,6 @@ void hover(QWidget* canvas, const QPointF& at) {
     QCoreApplication::processEvents();
 }
 
-void sendMouseWith(QWidget* widget, QEvent::Type type, const QPointF& at, Qt::MouseButton button,
-                   Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
-    QMouseEvent event(type, at, widget->mapToGlobal(at), button, buttons, modifiers);
-    QCoreApplication::sendEvent(widget, &event);
-    QCoreApplication::processEvents();
-}
-
 // A live transform on a widget with nothing else attached to it. The tool is
 // the button, so entering it is the whole of starting one.
 struct BoxFixture {
@@ -6195,6 +6275,66 @@ void aDragOutsideTheBoxMovesIt() {
     CHECK_NEAR(canvas.transformValues().scale_y, 1.0, 1e-6);
     CHECK_NEAR(canvas.transformValues().rotation, 0.0, 1e-9);
 
+    canvas.cancelTransform();
+}
+
+// Alt on a handle scales about the middle of the box instead of about the
+// handle opposite, which is the gesture every drawing program has: the box grows
+// both ways at once and whatever the drawing was lined up against stays where it
+// is.
+//
+// The middle in widget coordinates is the midpoint of the diagonal whatever the
+// pivot is, so "did the middle hold still" is the one question that separates
+// the two gestures without going anywhere near the pivot arithmetic being
+// tested.
+void altScalesAHandleAboutTheMiddle() {
+    TEST("Alt on a corner grows the box both ways and leaves the middle where it was");
+    BoxFixture box;
+    CanvasWidget& canvas = box.f.canvas;
+    CHECK(canvas.transformIsLive());
+
+    const QPointF centre = canvas.transformCentreForTesting();
+    const std::array<QPointF, 8> before = canvas.transformHandlesForTesting();
+    const QPointF corner = before[0];
+    // Half again as far out along the arm it is already on, so the factor is
+    // 1.5 measured from the middle and 1.25 measured from the corner opposite --
+    // two numbers, which is what makes this drag say which pivot was used.
+    const QPointF to = centre + (corner - centre) * 1.5;
+
+    // Alt is still the eyedropper everywhere else, and while a transform is live
+    // it is not offered at all: a pipette over a box that will not pick anything
+    // up is exactly the promise the pointer exists to keep, broken.
+    sendMouseWith(&canvas, QEvent::MouseMove, corner, Qt::NoButton, Qt::NoButton,
+                  Qt::AltModifier);
+    CHECK_EQ(pointingOf(canvas), pointing(CanvasWidget::Pointing::ScaleFalling));
+
+    sendMouseWith(&canvas, QEvent::MouseButtonPress, corner, Qt::LeftButton, Qt::LeftButton,
+                  Qt::AltModifier);
+    sendMouseWith(&canvas, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.5, 0.02);
+    CHECK_NEAR(canvas.transformValues().scale_y, 1.5, 0.02);
+    const QPointF held = canvas.transformCentreForTesting();
+    CHECK_NEAR(held.x(), centre.x(), 0.5);
+    CHECK_NEAR(held.y(), centre.y(), 0.5);
+    // And the far corner went the other way by as much as this one came, which
+    // is the half a check on the middle alone could not tell from nothing
+    // happening.
+    const std::array<QPointF, 8> grown = canvas.transformHandlesForTesting();
+    CHECK(QLineF(centre, grown[4]).length() > QLineF(centre, before[4]).length() * 1.4);
+
+    // Letting go of the key part way through hands the drag back to the corner
+    // opposite, from the same press: the pivot is read afresh on every move, so
+    // the box follows the key rather than whatever it was when the button went
+    // down.
+    sendMouseWith(&canvas, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    CHECK_NEAR(canvas.transformValues().scale_x, 1.25, 0.02);
+    const std::array<QPointF, 8> asymmetric = canvas.transformHandlesForTesting();
+    CHECK_NEAR(asymmetric[4].x(), before[4].x(), 0.5);
+    CHECK_NEAR(asymmetric[4].y(), before[4].y(), 0.5);
+
+    sendMouseWith(&canvas, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton,
+                  Qt::NoModifier);
     canvas.cancelTransform();
 }
 
@@ -7911,6 +8051,7 @@ int main(int argc, char** argv) {
     alockedLayerStillPansZoomsAndLassos();
     thePointerSaysWhatAPressOnTheBoxWillDo();
     aDragOutsideTheBoxMovesIt();
+    altScalesAHandleAboutTheMiddle();
     theBoxCursorsTurnWithTheBox();
     theEraserSaysSoBeforeYouDraw();
     turningThePenOverShowsTheEraser();
@@ -7944,6 +8085,7 @@ int main(int argc, char** argv) {
     theTooltipsFollowTheKeys();
     theShortcutsPanelWillNotApplyACollision();
     theTransformKeysFollowTheirBindings();
+    lettingAltGoDoesNotEndTheDrag();
     theFlipButtonsMirrorTheDrawing();
     aFlippedBoxStillScalesTheRightWay();
     theTransformToolTakesTheWholeDrawing();

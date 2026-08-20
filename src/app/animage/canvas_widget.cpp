@@ -1654,10 +1654,16 @@ void CanvasWidget::buildTransformPicture() {
     }
 }
 
+animage::Vec2 CanvasWidget::transformBoxCentre() const {
+    if (!transform_) return {};
+    const PixelRect& bounds = transform_->bounds;
+    return {bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0};
+}
+
 void CanvasWidget::centreTransformPivot() {
     if (!transform_) return;
-    const PixelRect& bounds = transform_->bounds;
-    repivot(transform_->values, bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0);
+    const Vec2 middle = transformBoxCentre();
+    repivot(transform_->values, middle.x, middle.y);
 }
 
 Transform CanvasWidget::transformValues() const {
@@ -1666,13 +1672,13 @@ Transform CanvasWidget::transformValues() const {
 
 void CanvasWidget::setTransformValues(const Transform& values) {
     if (!transform_) return;
-    const PixelRect& bounds = transform_->bounds;
     Transform wanted = values;
     // The fields are always about the middle of what was picked up, whatever
     // the last handle drag pivoted on. Assigned rather than repivoted: these
     // five numbers are the whole state, so there is nothing to preserve.
-    wanted.pivot_x = bounds.x + bounds.width / 2.0;
-    wanted.pivot_y = bounds.y + bounds.height / 2.0;
+    const Vec2 middle = transformBoxCentre();
+    wanted.pivot_x = middle.x;
+    wanted.pivot_y = middle.y;
     transform_->values = wanted;
     update();
     Q_EMIT transformNumbersChanged();
@@ -1977,6 +1983,21 @@ bool CanvasWidget::continueTransformDrag(const QPointF& widget_point) {
         }
 
         case Grab::Handle: {
+            // Alt scales about the middle instead of about the handle opposite,
+            // so the box grows both ways at once and whatever it was registered
+            // against stays where it is. Every drawing program does this and a
+            // hand reaching for it expects it.
+            //
+            // It is one repivot and nothing else, which is the point of the
+            // pivot being a number rather than a case in the arithmetic: `arm`
+            // is measured from the pivot, so from the middle it is half as long
+            // and the same maths asks for half the factor. Read from
+            // `grab_values_` afresh on every move, so the key can be taken up
+            // and let go of part way through a drag and the box follows.
+            if (alt_held_) {
+                const Vec2 middle = transformBoxCentre();
+                repivot(values, middle.x, middle.y);
+            }
             const Vec2 handle = handleInImage(transform_->bounds, grabbed_handle_);
             // The arm carries the flip's sign, because the handle's position
             // does: a mirrored box has its top-left handle over on the right,
@@ -2064,7 +2085,11 @@ CanvasWidget::Pointing CanvasWidget::pointingAt(const QPointF& widget_point) con
     // every tool and the box would otherwise appear to swallow it.
     if (space_held_) return Pointing::PanReady;
     if (zoom_key_held_) return Pointing::Zoom;
-    if (alt_held_) return Pointing::Pick;
+    // And Alt only where it is still the eyedropper. During a transform it is
+    // the symmetrical scale, which the handle cursors already describe -- a
+    // pipette over a box that will not pick anything up is the promise this
+    // whole function exists to keep, broken.
+    if (alt_held_ && !transform_) return Pointing::Pick;
 
     if (transform_) {
         // Mid-drag the answer is what was grabbed and not what is underneath:
@@ -2694,7 +2719,12 @@ void CanvasWidget::pressAt(const QPointF& widget_point, Qt::KeyboardModifiers mo
     // This used to be a bare return when a press arrived while picking, which
     // swallowed it: the first tap after coming back from the window switcher did
     // nothing at all, having changed the colour on its way in.
-    picking_ = (modifiers & Qt::AltModifier) != 0;
+    //
+    // Not while a transform is live: there Alt is the symmetrical scale, and the
+    // two cannot both have the key. The eyedropper is what gives way because a
+    // transform has no colour in it -- nothing you could be about to paint with
+    // is reachable without ending it first.
+    picking_ = !transform_ && (modifiers & Qt::AltModifier) != 0;
     if (picking_) {
         pickColourAt(imageFromWidget(widget_point));
         return;
@@ -2789,8 +2819,40 @@ void CanvasWidget::abandonGesture() {
     update();
 }
 
+// A transform drag keeps the keyboard, and everything else gives it up.
+//
+// The keyboard leaving is normally the end of a gesture and `abandonGesture` is
+// what that means. The exception is the menu bar, and it is not an exotic one:
+// `QMenuBar` watches for a bare Alt, arms itself on the press and takes the
+// keyboard for itself on the release. Alt is this canvas's own key -- the
+// eyedropper, the brush resize, and now the symmetrical scale -- so a drag with
+// Alt taken up and let go of half way through ended the moment the key came back
+// up, under a button that was still down. That is what was reported.
+//
+// Taking it straight back is the whole fix, and it is smaller than it looks:
+// losing the focus is what puts the menu bar into keyboard mode and losing it
+// again is what takes it back out, so the menu bar undoes itself and the key
+// release still arrives here in the same delivery -- which is what lets the box
+// go back to scaling about the corner at once rather than at the next move.
+//
+// Accepting the key instead does not work and was tried: the menu bar sees the
+// press through a filter that runs before this widget does, so there is nothing
+// here to withhold from it.
+//
+// The condition is a drag and not a live transform: `grab_` is set by a press
+// and cleared by the release, so what it says is "a button is down and the
+// release is coming here". A transform merely sitting there has no gesture to
+// protect and should let the keyboard go like anything else.
+//
+// The window going away is a different question and `changeEvent` still answers
+// it with the whole of `abandonGesture` -- there the release genuinely is not
+// coming, and a drag left running would scale with no button held.
 void CanvasWidget::focusOutEvent(QFocusEvent* event) {
     QWidget::focusOutEvent(event);
+    if (grab_ != Grab::None) {
+        setFocus(Qt::OtherFocusReason);
+        return;
+    }
     abandonGesture();
 }
 
@@ -2998,8 +3060,20 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
             // Watched and deliberately not accepted. Alt is the eyedropper here
             // and the menu bar's own key on Windows, and taking it would be
             // buying a cursor with the menus.
+            //
+            // Accepting it would not buy the transform anything either, and that
+            // was measured rather than assumed: the menu bar arms itself off
+            // this press through a filter that runs before this widget is
+            // reached at all, so an accept here changes nothing about what the
+            // release then does. See focusOutEvent, which is where that is
+            // answered.
             alt_held_ = true;
             refreshPointer();
+            // And a handle drag already under way answers the key now rather
+            // than at the next move. What this changes is the pivot the drag
+            // scales about, so nothing on screen would move until the hand did
+            // -- which reads as the key not having worked.
+            if (grab_ == Grab::Handle) continueTransformDrag(pointer_at_);
             break;
         default: break;
     }
@@ -3025,6 +3099,7 @@ void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
         case Qt::Key_Alt:
             alt_held_ = false;
             refreshPointer();
+            if (grab_ == Grab::Handle) continueTransformDrag(pointer_at_);
             break;
         default: break;
     }

@@ -478,6 +478,10 @@ private:
     std::array<QPointF, 8> transformHandles() const;
     void drawTransformPreview(QPainter& painter);
     void buildTransformPicture();
+    // The middle of what was picked up, in image coordinates. Two things want
+    // it: the pivot between gestures, and the pivot a symmetrical handle drag
+    // scales about.
+    animage::Vec2 transformBoxCentre() const;
     // Puts the pivot back in the middle of what was picked up, at the end of
     // every gesture. See repivot.
     void centreTransformPivot();

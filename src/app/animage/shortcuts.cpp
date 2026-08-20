@@ -184,6 +184,24 @@ const std::vector<Entry>& built() {
          QKeyCombination(Qt::Key_Down).toCombined(), kTransform, Group::Transforming,
          Kind::Canvas},
 
+        // The two modifiers a live transform redefines. Held rather than
+        // pressed, so they sit in this group with the keys above them and not
+        // with the other held keys: the group is what says *when* they mean
+        // this, and "while a transform is live" is the whole of the answer.
+        // Neither can be rebound, for the reason none of the held keys can -- a
+        // QAction fires and these last as long as the drag does.
+        //
+        // Both keys already have a row for what they do the rest of the time,
+        // and the two rows cannot collide because they are never live together:
+        // that is what `shareAMode` is for, and it is why Alt can be the
+        // eyedropper on one line and the symmetrical scale on another.
+        {Id::TransformSymmetrical, "transform-symmetrical", "Scale about the middle",
+         kSpelledOut, QKeyCombination(Qt::Key_Alt).toCombined(), kTransform,
+         Group::Transforming, Kind::Held},
+        {Id::TransformConstrain, "transform-constrain", "Constrain the turn or the move",
+         kSpelledOut, QKeyCombination(Qt::Key_Shift).toCombined(), kTransform,
+         Group::Transforming, Kind::Held},
+
         // Held rather than pressed, which is why they cannot be rebound: a
         // QAction fires and these last as long as the click or the drag does.
         //
@@ -201,9 +219,14 @@ const std::vector<Entry>& built() {
          QKeyCombination(Qt::Key_Space).toCombined(), kAlways, Group::Held, Kind::Held},
         {Id::ZoomView, "zoom-view", "Zoom the view", kSpelledOut,
          QKeyCombination(Qt::Key_Z).toCombined(), kAlways, Group::Held, Kind::Held},
-        // Alt+click on the drawing: the eyedropper.
+        // Alt+click on the drawing: the eyedropper. kNormal and not kAlways for
+        // the reason the straight line below is, and it is the same reason: a
+        // handle dragged with Alt down scales about the middle of the box
+        // instead of about the corner opposite, so during a transform this key
+        // means that instead. A transform has no colour in it to pick up, which
+        // is why the eyedropper is the one that gives way.
         {Id::PickColour, "pick-colour", "Pick up a colour", kSpelledOut,
-         QKeyCombination(Qt::Key_Alt).toCombined(), kAlways, Group::Held, Kind::Held},
+         QKeyCombination(Qt::Key_Alt).toCombined(), kNormal, Group::Held, Kind::Held},
         // Shift held while the pen goes down: the stroke is a straight line from
         // where it landed to where it lifts, at whatever angle the hand chose.
         //

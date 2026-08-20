@@ -1908,6 +1908,93 @@ more steps. Phases 3 and 4 were not built when this was written and are now:
 [copy, cut and paste](#copy-cut-and-paste) and
 [what a transform costs](#what-a-transform-costs).
 
+### Alt scales about the middle, and takes the key off the eyedropper
+
+Asked for later, and it is the gesture every drawing program has: hold Alt while
+dragging a handle and the box grows both ways at once instead of pinning the
+handle opposite. What it is for is registration — a drawing lined up on
+something underneath it stays lined up while it is made bigger, which a scale
+about the far corner does not do.
+
+**It is one `repivot` and nothing else in the arithmetic.** The pivot was already
+a number on `Transform` rather than a case in the maths, so the whole of
+"symmetrical" is that the pivot is the middle of the box instead of the handle
+opposite: `arm` is measured from the pivot, so from the middle it is half as long
+and the same expression asks for half the factor. Nothing about corners against
+edges, flips or rotation had to be touched, which is the pivot-as-a-number
+decision paying for itself.
+
+**Read afresh on every move, not decided at the press.** `continueTransformDrag`
+rebuilds from `grab_values_` each time, so taking the key up or letting it go
+part way through a drag changes the box under the same press — which is how the
+key behaves everywhere else it does this. It costs the drag nothing to allow,
+and a modifier you have to have thought of before pressing the button is one
+nobody discovers.
+
+**And it does not wait for the pointer to move.** What the key changes is the
+pivot, so nothing on screen would move until the hand did, and a key whose effect
+arrives on the next jog of the mouse reads as a key that did not work. The
+key-down and key-up handlers re-run the drag from where the pointer already is.
+Shift, which constrains a rotation to fifteen degrees, still waits for the next
+move; it is the older of the two and nobody has complained, but it is the same
+question and would be answered the same way.
+
+**And that is what found the menu bar.** Reported straight away: Alt made the
+box symmetrical on the way down and *ended the drag* on the way up. `QMenuBar`
+watches for a bare Alt — it arms on the press and takes the keyboard on the
+release — and the keyboard leaving this widget is a focus-out, which is
+`abandonGesture`, which ends every gesture in progress including the one under
+the button that is still held down.
+
+The fix is in `focusOutEvent`: **a drag keeps the keyboard, and takes it back if
+something helps itself to it.** Losing the focus is what puts the menu bar into
+keyboard mode and losing it again is what takes it back out, so one `setFocus`
+undoes the whole thing, and the key release still arrives here in the same
+delivery — which is what lets the box go back to scaling about the corner at
+once rather than at the next move.
+
+Two things about it are worth having written down. **Accepting the key instead
+does not work**, and that was measured rather than reasoned about: the menu bar
+sees the press through a filter that runs before this widget is reached, so
+there is nothing here to withhold from it. And **the condition is `grab_` and
+not `transform_`** — `grab_` is set by a press and cleared by the release, so
+what it says is "a button is down and the release is coming here". A transform
+merely sitting on screen has no gesture to protect and lets the keyboard go like
+anything else, and the window going away is still the whole of `abandonGesture`
+through `changeEvent`, because there the release genuinely is not coming and a
+drag left running would scale with no button held.
+
+**The test for it needs three things that are each easy to leave out**, and the
+first version had two of them wrong and passed against the broken code. It needs
+the real window, because a bare `CanvasWidget` has no menu bar under it. It needs
+a genuine Alt *press* and not only a release, because the press is what arms the
+filter. And it needs no mouse event between the two, because a mouse event is one
+of the things that disarms it — which is also why the bug wants the hand held
+still, and why answering the key without waiting for a move is exactly what made
+holding still the natural thing to do.
+
+**The eyedropper gives the key up during a transform**, which was the user's
+call and the right one: there is no colour in a transform to pick up, so nothing
+is lost, and `Alt` cannot mean two things at once. Two places had to agree about
+that — `pressAt`, so a press with Alt down starts the drag rather than sampling a
+pixel, and `pointingAt`, so the pointer does not offer a pipette over a box that
+would not use it. That is the rule the pointer exists for, and it is exactly the
+sort of pair that goes out of step: they are the same order of tests in the same
+order for that reason, and the handle cursor over an Alt-held box is what says
+so.
+
+**And the shortcut table stopped saying otherwise.** `PickColour` was `kAlways`
+and is `kNormal` now, for the reason the straight line already was: one key, two
+modes, two meanings, and the row is about the one the brush is under.
+
+The panel had never listed the other meaning of either key — Shift's constraint
+was as missing as Alt's symmetry — and it lists both now, as two `Kind::Held`
+rows in the transform group rather than with the other held keys. The group
+heading is what says *when* they mean this, which is the whole reason a second
+row on the same key is not a contradiction: `shareAMode` is what keeps the pair
+from reading as a collision, and it is the same mechanism that lets Return be
+Play and also be Apply.
+
 ## The lasso
 
 Phase 2. A loop drawn with the pen, in image coordinates, rasterised to a

@@ -163,6 +163,26 @@ void theTransformModeGivesUpTheRightKeys() {
         CHECK(!shortcuts::liveIn(entry.modes, Mode::Normal));
     }
 
+    // And the two modifiers a live transform redefines. They are rows for the
+    // reason the eyedropper is one -- the panel is where somebody goes to find
+    // out what the keyboard does -- and they are in the transform group rather
+    // than with the other held keys because the group heading is what says when
+    // they mean this. Held, so neither can be rebound.
+    const Id redefined[] = {Id::TransformSymmetrical, Id::TransformConstrain};
+    for (const Id id : redefined) {
+        const Entry& entry = shortcuts::entryFor(id);
+        CHECK(entry.kind == Kind::Held);
+        CHECK(entry.group == shortcuts::Group::Transforming);
+        CHECK(shortcuts::liveIn(entry.modes, Mode::Transform));
+        // Normal too and they would be claiming the eyedropper's key and the
+        // straight line's, which are the rows about what these same two keys do
+        // the rest of the time. Never live together is the whole of why one key
+        // can carry both.
+        CHECK(!shortcuts::liveIn(entry.modes, Mode::Normal));
+    }
+    CHECK(!shortcuts::liveIn(shortcuts::entryFor(Id::PickColour).modes, Mode::Transform));
+    CHECK(!shortcuts::liveIn(shortcuts::entryFor(Id::StraightLine).modes, Mode::Transform));
+
     // The held keys, which are in the table for two reasons. Space and Z consume
     // their key, so an action rebound onto Space would take the pan away
     // silently. Alt consumes nothing and could not collide with anything -- it

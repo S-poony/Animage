@@ -139,6 +139,8 @@ enum class Id {
     NudgeRight,
     NudgeUp,
     NudgeDown,
+    TransformSymmetrical,
+    TransformConstrain,
     PanView,
     ZoomView,
     PickColour,
