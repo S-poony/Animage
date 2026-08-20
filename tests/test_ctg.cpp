@@ -2258,11 +2258,7 @@ void theShiftGuardCountsInkAndNotCells() {
     const TileGrid from = inkedBox(100, 100, 300);
     const TileGrid to = inkedBox(500, 100, 300);
 
-    // Up to about twenty-four times wider than it is tall, and no further: past
-    // that the search's own grid has fewer than four cells on the short axis
-    // and a different guard takes over, which is its own question and not this
-    // one.
-    for (const int width : {1024, 4096, 10240}) {
+    for (const int width : {1024, 4096, 10240, 16384, 24576}) {
         const PixelRect area{0, 0, width, 512};
         const CtgShift found = estimateCtgShift({from}, {to}, area);
 
@@ -2291,6 +2287,13 @@ void theShiftGuardCountsInkAndNotCells() {
     faint.at(2000, 2000, 0.4f);  // four tenths of a pixel of coverage, in total
     const TileGrid barely = faint.grid();
     CHECK(estimateCtgShift({barely}, {barely}, wide).isZero());
+
+    // And a region with no shape at all to search over is still nothing. A
+    // sliver is the one case where the step cannot both leave the short axis a
+    // grid and keep the long axis affordable, and giving up is then the honest
+    // answer rather than the accidental one it used to be at twenty-four to
+    // one.
+    CHECK(estimateCtgShift({from}, {to}, PixelRect{0, 0, 100000, 100}).isZero());
 }
 
 // Paper the drawing does not reach costs nothing and changes nothing.

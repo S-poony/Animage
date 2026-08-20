@@ -3628,6 +3628,19 @@ threshold is in image pixels of ink, which is the same quantity at every step.
 The rule generalises: a threshold on a reduced quantity has to name the unit it
 is counted in, or the next change to the reduction moves it.
 
+**The same function had the same shape of bug twice**, and the second one is not
+about a reduction at all. The step was taken from the region's *longer* side
+alone, so a region much wider than it is tall left the short axis with fewer
+than the four cells the guard demands, and the estimate was abandoned outright
+-- at twenty-four to one, which the canvas clip had made unreachable and the
+drawn bounds of a sheet make ordinary. The step is now the coarsest of what the
+long side asks for and what leaves the short side a grid, with a floor so the
+long axis cannot grow without bound in exchange: paying for the short axis in
+step is paying for the long one in cells, and the top-level search is offsets
+times cells, which is about the fourth power of the grid. A sliver is the one
+shape where both cannot be had, and giving up there is the honest answer rather
+than the accidental one.
+
 **And two wrong attributions before the right one**, which is worth as much as
 the bug. The first reproduction used a small shift, which the search quantises
 to zero at a large step whatever the reduction does -- so the guard looked

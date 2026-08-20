@@ -391,13 +391,38 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     // keeps an exhaustive search affordable: the cost is offsets times cells,
     // and both scale with this.
     constexpr int kAcross = 96;
-    const int step = std::max(1, (std::max(area.width, area.height) + kAcross - 1) / kAcross);
+
+    // But the step has to leave the *short* axis a grid too, and it was taken
+    // from the long one alone. A region much wider than it is tall therefore
+    // collapsed the short axis below the minimum below and the whole estimate
+    // was abandoned -- silently, and back to carrying marks unchanged. Twenty-
+    // four to one was enough, which was unreachable while the region was
+    // clipped to the canvas and is ordinary now that it is the drawn bounds of
+    // a whole sheet.
+    constexpr int kLeastAcross = 4;
+
+    // And a ceiling on the long axis, because paying for the short one in step
+    // is paying for the long one in cells: the exhaustive search at the top is
+    // offsets times cells, which is roughly the fourth power of the grid. A
+    // sliver is the one shape where the two cannot both be had, and that is
+    // what the minimum below is then for.
+    constexpr int kMostAcross = 4 * kAcross;
+
+    const int longest = std::max(area.width, area.height);
+    const int shortest = std::min(area.width, area.height);
+    const int wanted = std::max(1, (longest + kAcross - 1) / kAcross);
+    const int coarsest = std::max(1, shortest / kLeastAcross);
+    const int finest = std::max(1, (longest + kMostAcross - 1) / kMostAcross);
+    const int step = std::max(finest, std::min(wanted, coarsest));
 
     InkLevel a;
     InkLevel b;
     a.width = b.width = (area.width + step - 1) / step;
     a.height = b.height = (area.height + step - 1) / step;
-    if (a.width < 4 || a.height < 4) return {};
+
+    // Now this means what it says: not enough region to search over, rather
+    // than enough region in one direction and none in the other.
+    if (a.width < kLeastAcross || a.height < kLeastAcross) return {};
 
     // Averaged and not maxed, which is the opposite of what the barrier does
     // and right for the opposite reason -- see InkReduce. `halve` below has
