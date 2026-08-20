@@ -409,12 +409,32 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
 
     // Nothing to match. Two blank drawings agree at every offset, and the
     // smallest shift is the honest answer.
-    const auto ink_total = [](const InkLevel& level) {
+    //
+    // Counted in image pixels of ink and not in cells, because a threshold has
+    // to mean the same thing at every step and this one stopped when the
+    // reduction changed under it. `Most` gave a cell holding any ink a value
+    // near 1, so a sum over cells was "how many cells have ink in them" and a
+    // threshold of one meant "none of them". `Mean` gives that same cell
+    // `ink / step^2`, so the same sum is the ink divided by a cell's area --
+    // and the same threshold silently became "fewer than step^2 pixels of ink",
+    // which at a step of 107 is four hundred times stricter than it reads.
+    //
+    // That step is not hypothetical. The region is the drawn bounds of the
+    // whole sheet now rather than the canvas, so two things drawn ten thousand
+    // pixels apart give exactly it -- and the drawing then had no shift
+    // estimated at all, silently, falling back to carrying marks unchanged.
+    // Measured: 428 px found for a true 400 before, 0 after.
+    //
+    // Multiplying by the cell's area restores what was meant and says it in a
+    // unit that does not move: fewer than one opaque pixel of ink in the whole
+    // drawing is nothing to match.
+    const double cell_pixels = static_cast<double>(step) * static_cast<double>(step);
+    const auto ink_pixels = [&](const InkLevel& level) {
         double sum = 0.0;
         for (float value : level.ink) sum += value;
-        return sum;
+        return sum * cell_pixels;
     };
-    if (ink_total(a) < 1.0 || ink_total(b) < 1.0) return {};
+    if (ink_pixels(a) < 1.0 || ink_pixels(b) < 1.0) return {};
 
     blur(a);
     blur(b);

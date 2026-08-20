@@ -2172,11 +2172,15 @@ void inkAt(TileGrid& grid, int px, int py) {
 // a hundred and twenty-eight kilobytes three thousand times.
 class InkPad {
 public:
-    void at(int px, int py) {
+    // Premultiplied, so the colour goes down with the alpha. Only the alpha is
+    // ever read out here -- ink is where the coverage is -- but writing a
+    // premultiplied pixel that could not exist would be a trap for the next
+    // thing that looks at one.
+    void at(int px, int py, float alpha = 1.0f) {
         const TileCoord coord = tileCoordFor(px, py);
         auto& tile = tiles_[coord];
         if (!tile) tile = std::make_shared<Tile>();
-        tile->setPixel(tileLocal(px), tileLocal(py), Rgba{1.0f, 1.0f, 1.0f, 1.0f});
+        tile->setPixel(tileLocal(px), tileLocal(py), Rgba{alpha, alpha, alpha, alpha});
     }
 
     void rect(int x0, int y0, int x1, int y1) {
@@ -2205,6 +2209,88 @@ TileGrid inkedRect(int x0, int y0, int x1, int y1) {
     InkPad pad;
     pad.rect(x0, y0, x1, y1);
     return pad.grid();
+}
+
+// A hollow square of ink, three pixels thick, without going through the brush.
+TileGrid inkedBox(int x0, int y0, int size) {
+    InkPad pad;
+    for (int t = 0; t < 3; ++t) {
+        pad.rect(x0, y0 + t, x0 + size, y0 + t + 1);
+        pad.rect(x0, y0 + size - t, x0 + size, y0 + size - t + 1);
+        pad.rect(x0 + t, y0, x0 + t + 1, y0 + size);
+        pad.rect(x0 + size - t, y0, x0 + size - t + 1, y0 + size);
+    }
+    return pad.grid();
+}
+
+// The guard that means "nothing to match" has to mean it at every step.
+//
+// It is a threshold on the level-zero ink, and level zero used to be built by
+// the barrier's `Most` reduction: a cell holding any ink read about 1, so the
+// sum was the number of inked cells and a threshold of one meant none of them.
+// Level zero is averaged now -- which is right, and is what every level above
+// it has always done -- so that same cell reads `ink / step^2` and the sum is
+// the ink divided by a cell's area. The threshold did not move with it, and
+// quietly became "fewer than step^2 pixels of ink".
+//
+// Nothing noticed while the region was clipped to the canvas, because `step` is
+// the region's longer side over ninety-six and a 1920-wide canvas caps it at
+// twenty. Unclipped, two things drawn ten thousand pixels apart give a step of
+// a hundred and seven, and a whole drawing's worth of line art then counts as
+// nothing at all: no shift is estimated, marks stop following the line art, and
+// there is nothing on screen to say so. Measured at that separation: 428 px
+// found for a true 400 before the reduction changed, and 0 after.
+//
+// Both halves are asserted, because the cheap way to pass the first is to
+// delete the guard.
+void theShiftGuardCountsInkAndNotCells() {
+    TEST("a shift is still found when the same ink sits in a much wider region");
+
+    // One box, moved 400 px, matched over regions of increasing width. The ink
+    // is identical in every case and only the region round it grows -- which is
+    // the whole of what the threshold was accidentally sensitive to, since
+    // `step` is the region's longer side over ninety-six.
+    //
+    // The region is passed rather than derived, so that nothing else about the
+    // drawings changes with it. A second shape further away would widen the
+    // region too, but it would also be ink in the correlation, and then a
+    // failure could be either this or the search preferring it.
+    const TileGrid from = inkedBox(100, 100, 300);
+    const TileGrid to = inkedBox(500, 100, 300);
+
+    // Up to about twenty-four times wider than it is tall, and no further: past
+    // that the search's own grid has fewer than four cells on the short axis
+    // and a different guard takes over, which is its own question and not this
+    // one.
+    for (const int width : {1024, 4096, 10240}) {
+        const PixelRect area{0, 0, width, 512};
+        const CtgShift found = estimateCtgShift({from}, {to}, area);
+
+        // Within two cells of the search's own grid, which is all a translation
+        // quantised to that grid can promise. What is pinned is that an answer
+        // comes back at all: the wide cases returned exactly zero while the
+        // threshold was counted in cells, because a whole box of line art is
+        // less than one cell's worth of coverage once a cell is large.
+        const int step = std::max(1, (std::max(area.width, area.height) + 95) / 96);
+        if (std::abs(found.x - 400) > 2 * step || std::abs(found.y) > 2 * step) {
+            std::printf("    region %5d wide, step %3d: found (%d, %d), wanted (400, 0)\n",
+                        width, step, found.x, found.y);
+        }
+        CHECK(std::abs(found.x - 400) <= 2 * step);
+        CHECK(std::abs(found.y) <= 2 * step);
+    }
+
+    // And the guard still guards. Two drawings with nothing on them agree at
+    // every offset, so the smallest shift is the honest answer -- and less than
+    // one pixel's worth of ink between them is still nothing, however large the
+    // region it is spread over.
+    const PixelRect wide{0, 0, 4096, 4096};
+    CHECK(estimateCtgShift({TileGrid{}}, {TileGrid{}}, wide).isZero());
+
+    InkPad faint;
+    faint.at(2000, 2000, 0.4f);  // four tenths of a pixel of coverage, in total
+    const TileGrid barely = faint.grid();
+    CHECK(estimateCtgShift({barely}, {barely}, wide).isZero());
 }
 
 // Paper the drawing does not reach costs nothing and changes nothing.
@@ -2446,6 +2532,7 @@ int main() {
     movingMarksCanBeTurnedOff();
     redrawingTheOriginMovesTheMarkAgain();
     theShiftIsMeasuredFromTheInkAlone();
+    theShiftGuardCountsInkAndNotCells();
     aShapeRedrawnInPlaceHasNotMoved();
     whatIsShownAgreesWithWhatWasSolved();
 

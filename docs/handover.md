@@ -3005,6 +3005,7 @@ trap.
 | [Which strokes count as drawing, and the one the solve guard missed](#which-strokes-count-as-drawing-and-the-one-the-solve-guard-missed) | Inking the line art must defer the fill solve too |
 | [What point-sampling the barrier does to a two-pixel line](#what-point-sampling-the-barrier-does-to-a-two-pixel-line) | A coarse step perforates line art and the fill escapes |
 | [What a band counted in coarse rows really costs](#what-a-band-counted-in-coarse-rows-really-costs) | Coarse rows times step is image rows; band the barrier in bytes |
+| [What a threshold meant before the thing under it changed](#what-a-threshold-meant-before-the-thing-under-it-changed) | A constant calibrated against one reduction survives the reduction changing |
 | [What made saving slow, and why skipping unchanged cels would not have helped](#what-made-saving-slow-and-why-skipping-unchanged-cels-would-not-have-helped) | Tiles were 92.6% zeros; store each row's occupied span |
 | [Why an ever-true tablet flag leaves the mouse unable to draw](#why-an-ever-true-tablet-flag-leaves-the-mouse-unable-to-draw) | Pen-seen must be a time window, not a permanent flag |
 | [What was never timed, and what the benchmark stopped anyone timing](#what-was-never-timed-and-what-the-benchmark-stopped-anyone-timing) | Compositing was tuned unmeasured; the benchmark hid the larger loop |
@@ -3600,6 +3601,44 @@ The row it was for is a shape carried 400 px: matched at 252 before and losing
 both its regions outright, matched at 396 now with the left one fully coloured.
 Coverage, leak and spread are otherwise unchanged. The numbers are in
 [the colour benchmarks](colour-baseline.md).
+
+
+### What a threshold meant before the thing under it changed
+**A constant is calibrated against the code it reads, and changing that code
+silently recalibrates it.** `estimateCtgShift` guards itself with "nothing to
+match": sum the level-zero ink and give up below one. Level zero used to be
+built by the barrier's reduction, which takes the *most* covered pixel in a
+cell -- so a cell holding any ink read about 1, the sum was the number of inked
+cells, and a threshold of one meant "no cell has ink in it". Level zero is
+averaged now, which is right and is what every level above it always did. The
+same cell then reads `ink / step^2`, the same sum is the ink divided by a cell's
+area, and the same constant quietly became **"fewer than step² pixels of ink"**
+-- eleven thousand of them at a step of 107.
+
+Nothing noticed, because `step` is the region's longer side over ninety-six and
+the region was clipped to the canvas: 1920 wide caps it at twenty, where the
+old meaning and the new one differ by a factor nobody could see. Unclipping the
+region for [colour without a canvas](colour-without-a-canvas.md) removed the
+cap, and a whole drawing's worth of line art in a ten-thousand-pixel-wide region
+then counted as nothing: no shift estimated, marks silently stopped following
+the line art, and there was nothing on screen to say so.
+
+**The fix is a unit, not a number.** Multiply back by the cell's area and the
+threshold is in image pixels of ink, which is the same quantity at every step.
+The rule generalises: a threshold on a reduced quantity has to name the unit it
+is counted in, or the next change to the reduction moves it.
+
+**And two wrong attributions before the right one**, which is worth as much as
+the bug. The first reproduction used a small shift, which the search quantises
+to zero at a large step whatever the reduction does -- so the guard looked
+guilty and was not being reached. The second used two shapes far apart, where
+the answer really does change with the reduction, but because the averaged
+correlation weighs a small dense shape against a large sparse one differently --
+not because of the guard at all. Only a case with one shape, a shift large
+enough to survive quantisation, and a region widened by nothing but its own
+argument isolates it. See
+[how many wrong theories a bug is worth](#how-many-wrong-theories-a-bug-is-worth):
+each theory was tested and each was wrong in a way that looked like the answer.
 
 
 ### What made saving slow, and why skipping unchanged cels would not have helped
