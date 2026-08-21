@@ -134,6 +134,19 @@ if(TARGET animage_ui)
   add_executable(bench_zoom bench_zoom.cpp)
   target_link_libraries(bench_zoom PRIVATE animage_ui)
 
+  # Whether the canvas gets slower the longer a session runs, and what makes it
+  # come back. bench_zoom times a pan on a document that was just built; this
+  # one times the same pan on a document that has been drawn on for a while,
+  # which is the only difference the report describes.
+  add_executable(bench_session bench_session.cpp)
+  target_link_libraries(bench_session PRIVATE animage_ui)
+  target_include_directories(bench_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(WIN32)
+    # For GetProcessMemoryInfo: what the process is holding is half the
+    # question, and historyBytes() only answers for the tiles.
+    target_link_libraries(bench_session PRIVATE psapi)
+  endif()
+
   # What playback costs and what it drops. Drives the whole window rather than
   # the canvas alone, because a frame change is a slot change, a layer-flag
   # refresh, a full-cache repaint and a playhead -- and timing only the canvas
