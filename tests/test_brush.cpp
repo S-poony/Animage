@@ -375,6 +375,35 @@ void sampledCompositingAveragesTheBlockItStandsFor() {
     CHECK(worst > 0.05);
 }
 
+// The arithmetic the reduction leans on and cannot check for itself.
+//
+// A block of image pixels is placed in the entry it starts in and in the one
+// after, and that is exact only while a block cannot reach a third -- which
+// holds because the sample budget keeps a block no longer than an entry. It is
+// one constant deciding something three loops depend on, and the failure would
+// be silent: a block reaching a third entry would drop the weight that fell
+// there, giving a slightly wrong average rather than a crash or a red test.
+//
+// So the property is asserted directly, across the whole range of zooms and
+// well past it. `boxSampleStride` clamps to make it true; this is what says the
+// clamp is doing the job, and it would fail if the budget were ever raised
+// without it.
+void aSampleBlockIsNeverLongerThanAnEntry() {
+    TEST("a sample block is never longer than the entry it is read for");
+    for (int thousandths = 1000; thousandths <= 200000; thousandths += 7) {
+        const double ratio = thousandths / 1000.0;
+        const SampleStep step = SampleStep::fromRatio(ratio);
+        // The step it settled on, not the one asked for: fromRatio quantises.
+        if (static_cast<double>(boxSampleStride(step)) > step.ratio()) {
+            testing::fail(__FILE__, __LINE__,
+                          "block of " + std::to_string(boxSampleStride(step)) +
+                              " px for an entry of " + std::to_string(step.ratio()) + " px");
+            return;  // one report is enough; the rest would say the same thing
+        }
+        CHECK(static_cast<double>(boxSampleStride(step)) <= step.ratio());
+    }
+}
+
 // An entry is the same entry whatever rectangle it was asked for. The reduction
 // used to widen its first sample block back to the edge of the region and clip
 // its last one to the far edge, and normalise by the weight that produced -- so
@@ -541,6 +570,7 @@ void halfLookupMatchesTheComputation() {
 int main() {
     std::printf("brush:\n");
     sampledCompositingAveragesTheBlockItStandsFor();
+    aSampleBlockIsNeverLongerThanAnEntry();
     aReducedEntryDoesNotDependOnTheRegionAskedFor();
     aFractionalStepSplitsThePixelsItLandsInside();
     halfLookupMatchesTheComputation();

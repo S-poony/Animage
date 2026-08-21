@@ -4583,13 +4583,22 @@ the mistake `planColumns` had already been fixed for on the columns: `entryAt`
 floors, so the read grid and the drawn grid do not step together. The rows carry
 `offset.y` now and re-anchor to nothing, which is what the columns already do.
 
-Two tests pin it, both sweeping dab-sized bands and requiring every entry to
-equal what the whole-region composite produced, exactly:
-`aReducedEntryDoesNotDependOnTheRegionAskedFor` in `test_brush.cpp` for an
-ordinary layer, over the origin and left of and above it, and
-`aMovedLayerIsTheSameWhateverRectangleAsksForIt` in `test_ctg.cpp` for the moved
-one, at offsets that are deliberately not whole entries. Both were built against
-the reduction they replace and both went red there.
+What pins it is one assertion made against every kind of source the reduction
+has: sweep dab-sized bands over the picture and require each entry to equal what
+the whole-region composite produced, exactly. `test_brush.cpp` does it for an
+ordinary layer, over the origin and left of and above it; `test_ctg.cpp` does it
+for the two the first fix nearly missed — the moved pass, at offsets that are
+deliberately not whole entries, and the fill, which is a different reading of the
+same idea and so a separate piece of code that can rot on its own. Each was built
+against the reduction it replaces and each went red there.
+
+`aSampleBlockIsNeverLongerThanAnEntry` is the odd one out and is the only guard
+here that passes on the code it was written against. It asserts the arithmetic
+the three loops assume and cannot check — that a block of pixels never reaches a
+third entry — because that one is a constant away from being false and would fail
+by quietly averaging slightly wrong rather than by going red. Confirmed by
+raising the budget and removing the clamp, where it does go red, and says which
+block and which entry.
 
 **What the second door says about the first.** The eraser fault was found,
 diagnosed and fixed, and that fix was measured clean across forty-five zooms

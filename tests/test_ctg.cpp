@@ -2219,6 +2219,76 @@ void aMovedLayerIsTheSameWhateverRectangleAsksForIt() {
     CHECK(checked > 10000);
 }
 
+// The other half of the same property, on the other kind of source. Issue #64
+// was in the reduction, and the reduction is written twice: once for a grid,
+// which reads stored pixels, and once for a fill, which reads the solver's
+// answer and turns it into pixels as it goes. The two are close enough that a
+// fault in one is very likely a fault in the other and far enough apart that
+// "very likely" is not an argument -- which is exactly the reasoning that let
+// the moved pass keep the bug through the first fix.
+//
+// If this broke, the coloured regions would be what quivered while somebody drew
+// near them and settled when the pen lifted, instead of the line art.
+void aFillIsTheSameWhateverRectangleAsksForIt() {
+    TEST("a fill reduced onto a coarse grid does not depend on the rectangle");
+    Fixture f;
+
+    // A closed shape with something to colour, and a second region so the fill
+    // has an edge inside the swept area rather than only around the outside.
+    f.drawGappedBox(f.ink, 40, 40, 300, 260, 150, 170);
+    f.stroke(f.ink, 170, 40, 170, 260, 3.0f, 0.0f, 0.0f, 0.0f);
+    f.stroke(f.colour, 80, 90, 130, 200, 8.0f, 0.9f, 0.2f, 0.1f);
+    f.stroke(f.colour, 210, 90, 270, 200, 8.0f, 0.1f, 0.3f, 0.9f);
+
+    const CtgFill fill = solveCtgJob(ctgJobFor(f.doc, f.track, f.image, f.colour), true);
+    CHECK(fill.valid);
+    if (!fill.valid) return;
+
+    Compositor compositor;
+    Layer layer;
+    layer.visible = true;
+    layer.opacity = 1.0f;
+    LayerPass pass;
+    pass.fill = &fill;
+    pass.layer = &layer;
+
+    int checked = 0;
+    for (const double ratio : {1.005, 1.43, 2.5, 3.03, 5.0, 7.7, 20.0}) {
+        const SampleStep step = SampleStep::fromRatio(ratio);
+        const PixelRect whole = snapToSampleGrid(step, PixelRect{0, 0, 360, 320});
+        Framebuffer full;
+        compositor.compositeGrids({pass}, whole, full, step);
+
+        const long long whole_x = step.entryAt(whole.x);
+        const long long whole_y = step.entryAt(whole.y);
+
+        for (int y = whole.y; y < whole.y + whole.height; y += 23) {
+            for (int x = whole.x; x < whole.x + whole.width; x += 19) {
+                const PixelRect band =
+                    intersect(snapToSampleGrid(step, PixelRect{x, y, 44, 36}), whole);
+                if (band.isEmpty()) continue;
+                Framebuffer part;
+                compositor.compositeGrids({pass}, band, part, step);
+
+                const int column_base = static_cast<int>(step.entryAt(band.x) - whole_x);
+                const int row_base = static_cast<int>(step.entryAt(band.y) - whole_y);
+                for (int j = 0; j < part.height(); ++j) {
+                    for (int i = 0; i < part.width(); ++i) {
+                        const Rgba got = part.pixel(i, j);
+                        const Rgba want = full.pixel(column_base + i, row_base + j);
+                        CHECK_NEAR(got.a, want.a, 1e-5);
+                        CHECK_NEAR(got.r, want.r, 1e-5);
+                        CHECK_NEAR(got.b, want.b, 1e-5);
+                        ++checked;
+                    }
+                }
+            }
+        }
+    }
+    // The sweep is the test; an empty one would pass by doing nothing.
+    CHECK(checked > 10000);
+}
+
 void ahiddenSourceIsStillABarrier() {
     TEST("hiding a source layer does not take the barrier away with it");
     Fixture f;
@@ -2628,6 +2698,7 @@ int main() {
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
     aMovedLayerIsTheSameWhateverRectangleAsksForIt();
+    aFillIsTheSameWhateverRectangleAsksForIt();
     theBarrierDoesNotDependOnHowItWasBanded();
     theBarrierFollowsTheInkAndNotTheBox();
     return testing::summarise("ctg");
