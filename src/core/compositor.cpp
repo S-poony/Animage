@@ -509,6 +509,12 @@ int chooseWorkerCount(int rows, std::size_t layers) {
 void Framebuffer::resize(int width, int height) {
     width_ = std::max(0, width);
     height_ = std::max(0, height);
+    pixels_.resize(static_cast<std::size_t>(width_) * height_);
+}
+
+void Framebuffer::resizeCleared(int width, int height) {
+    width_ = std::max(0, width);
+    height_ = std::max(0, height);
     pixels_.assign(static_cast<std::size_t>(width_) * height_, Rgba{});
 }
 

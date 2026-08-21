@@ -87,9 +87,21 @@ int boxSampleStride(const SampleStep& step);
 class Framebuffer {
 public:
     Framebuffer() = default;
-    Framebuffer(int width, int height) { resize(width, height); }
+    Framebuffer(int width, int height) { resizeCleared(width, height); }
 
+    // Grows or shrinks, and says nothing about what is in it afterwards.
+    //
+    // It used to empty the buffer as well, and `compositeGrids` calls `clear()`
+    // straight after it -- so every composite wrote a viewport-sized buffer to
+    // zero twice before compositing anything into it. At 1642x777 entries that
+    // is 20 MB written twice, and the onion skin pays it once per neighbouring
+    // drawing on every pan step.
     void resize(int width, int height);
+
+    // Both at once, in one pass rather than two, for the callers that need an
+    // empty buffer of a given size. What `resize` used to be.
+    void resizeCleared(int width, int height);
+
     void clear();
 
     int width() const { return width_; }
