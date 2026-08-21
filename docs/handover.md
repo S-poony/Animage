@@ -4535,6 +4535,72 @@ disappears is for, and this is the one failure where the project is not at its
 path at all. Left as it is rather than changed quietly; it is a decision about
 interrupting somebody who is drawing, and it belongs to whoever owns that.
 
+### Why an eraser passing a stroke chewed it, and a pan left the damage behind
+**A box filter whose answer depends on the rectangle it was asked for is not a
+filter, it is a function of the caller.** That is
+[#64](https://github.com/S-poony/Animage/issues/64), which has the repro, the
+measurements and the zoom table; what is here is what they taught.
+
+`planColumns` widened its first sample's block back to the edge of the region it
+was handed and clipped the last one to the far edge, normalising by the weight
+that produced, and the boxed row loops did the same down the rows. Snapping to
+the sample grid — which the cache does, and which its comments lean on — makes a
+partial refresh land on the same entry *indices* as a full one; it does not make
+it read the same *samples*. That was the gap, and it is the kind that hides
+behind a true statement.
+
+The canvas composites one dirty rectangle per dab while the pen is down and the
+whole cached region when it lifts, so every dab wrote a line of wrong entries
+around itself and the lift wiped the lot. **The eraser is where it is visible and
+not because the eraser is special**: it is three times the brush's radius and it
+changes nothing underneath, so what you see move is unambiguously the renderer.
+Drawing does the same around its own new ink, where nobody was looking — and a
+pan does it with no lift to follow, which is the more serious half and the one
+nobody reported.
+
+**The zoom signature was the whole diagnosis.** Below 100% the cache is reduced;
+at 100% and above the ratio clamps to 1 and the reducing path is never entered,
+so there is nothing to be wrong. The report said "strongest at 100%, stops at
+120%", which sounds like it contradicts that and does not: **the status bar prints
+zoom to no decimal places**, so anything from 99.5% to 100.4% says "100%", and
+the wheel steps by 1.2, so the next stop above is 120%. A reported zoom is a
+range and a reported *step* is a ratio; read a symptom that names a percentage
+with both in mind.
+
+The fix is that a block reaching past either end of the region is read past
+either end, and whatever lands in an entry nobody asked for is dropped rather
+than folded into the entry that is there. `blendLayerRowsBoxed` and
+`blendFillRowsBoxed` no longer take a region at all, which is the part worth
+keeping: the invariant is structural now rather than a rule someone has to
+remember. `boxSampleStride` clamps to one entry for the same reason — it changes
+nothing today, and it is what the three loops that assume it cannot check.
+
+**And the same fault had a second door, which only looking for it found.** A
+moved pass — the one kind there is, a colour layer showing carried marks — took
+its rows from `entryAt(region.y - offset.y)`, the read row of the region's
+corner, indexed as though it were the drawn one. That is the row half of exactly
+the mistake `planColumns` had already been fixed for on the columns: `entryAt`
+floors, so the read grid and the drawn grid do not step together. The rows carry
+`offset.y` now and re-anchor to nothing, which is what the columns already do.
+
+Two tests pin it, both sweeping dab-sized bands and requiring every entry to
+equal what the whole-region composite produced, exactly:
+`aReducedEntryDoesNotDependOnTheRegionAskedFor` in `test_brush.cpp` for an
+ordinary layer, over the origin and left of and above it, and
+`aMovedLayerIsTheSameWhateverRectangleAsksForIt` in `test_ctg.cpp` for the moved
+one, at offsets that are deliberately not whole entries. Both were built against
+the reduction they replace and both went red there.
+
+**What the second door says about the first.** The eraser fault was found,
+diagnosed and fixed, and that fix was measured clean across forty-five zooms
+before anything looked at the pass with an offset in it — which had the same
+fault, a worse version of it, and was not covered by the sweep that said the fix
+worked, because the sweep only ever composited what its own fixture drew. **A
+measurement that says a fault is gone has said it about the paths it exercised
+and about nothing else**, and the path most likely to be missed is the one with
+an extra parameter, because that is the one a straightforward fixture does not
+build.
+
 ## How to work on it
 
 Everything in `src/core/` is free of Qt and can be tested headlessly. Everything

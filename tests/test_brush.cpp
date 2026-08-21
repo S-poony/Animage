@@ -375,6 +375,87 @@ void sampledCompositingAveragesTheBlockItStandsFor() {
     CHECK(worst > 0.05);
 }
 
+// An entry is the same entry whatever rectangle it was asked for. The reduction
+// used to widen its first sample block back to the edge of the region and clip
+// its last one to the far edge, and normalise by the weight that produced -- so
+// the entries around the boundary of a rectangle came out different from the
+// same entries inside a larger one.
+//
+// That is not an academic difference, and it is issue #64. The canvas composites
+// one dirty rectangle per dab while the pen is down and the whole cache when it
+// lifts, so every dab laid a line of wrong entries around itself: dragging
+// the eraser past a stroke without touching it chewed the stroke until you let
+// go, worst just under 100% zoom and gone at 100% where nothing is reduced. A
+// pan left the same line along every strip it exposed and nothing wiped that.
+//
+// Asserted as exact agreement rather than a tolerance, because that is what the
+// property is. The strokes run diagonally so that the bands cut ink at every
+// angle, and the steps are the awkward ones: an integer ratio has nothing to
+// split and would pass whatever the weighting did.
+void aReducedEntryDoesNotDependOnTheRegionAskedFor() {
+    TEST("a reduced entry does not depend on the region it was asked for");
+    Fixture f;
+    BrushSettings settings = opaqueBlack();
+    settings.radius = 5.0f;
+    settings.r = 1.0f;
+    Brush brush(settings);
+
+    // Twice over, and the second one is left of and above the origin. Every
+    // division in this path has to round towards negative infinity, and a
+    // rectangle that never crosses zero would not notice one that does not --
+    // which is the same reason `compositorWorksLeftOfTheOrigin` exists.
+    for (const PixelRect& at : {PixelRect{40, 40, 0, 0}, PixelRect{-300, -280, 0, 0}}) {
+        ScopedCommand command(f.doc, "Strokes");
+        for (int line = 0; line < 3; ++line) {
+            const float x0 = static_cast<float>(at.x);
+            const float y0 = static_cast<float>(at.y) + static_cast<float>(line) * 90.0f;
+            brush.begin(f.doc, f.track, f.image, f.layer, {x0, y0, 1.0f});
+            for (int i = 1; i <= 260; ++i) {
+                brush.extend({x0 + static_cast<float>(i),
+                              y0 + static_cast<float>(i) * 0.55f, 1.0f});
+            }
+            brush.end();
+        }
+    }
+
+    Compositor compositor;
+    for (double ratio : {1.005, 1.43, 2.5, 3.03, 5.0, 20.0}) {
+        const SampleStep step = SampleStep::fromRatio(ratio);
+        for (const PixelRect& asked :
+             {PixelRect{0, 0, 360, 340}, PixelRect{-340, -320, 360, 340}}) {
+            const PixelRect whole = snapToSampleGrid(step, asked);
+            Framebuffer full;
+            compositor.composite(f.doc, f.track, f.image, whole, full, step);
+
+            const long long whole_x = step.entryAt(whole.x);
+            const long long whole_y = step.entryAt(whole.y);
+
+            // Bands the size and shape of a dab's dirty rectangle, walked across
+            // the ink at a stride that is not a multiple of anything.
+            for (int y = whole.y; y < whole.y + whole.height; y += 37) {
+                for (int x = whole.x; x < whole.x + whole.width; x += 29) {
+                    const PixelRect band =
+                        intersect(snapToSampleGrid(step, PixelRect{x, y, 40, 40}), whole);
+                    if (band.isEmpty()) continue;
+                    Framebuffer part;
+                    compositor.composite(f.doc, f.track, f.image, band, part, step);
+
+                    const int column_base = static_cast<int>(step.entryAt(band.x) - whole_x);
+                    const int row_base = static_cast<int>(step.entryAt(band.y) - whole_y);
+                    for (int j = 0; j < part.height(); ++j) {
+                        for (int i = 0; i < part.width(); ++i) {
+                            const Rgba got = part.pixel(i, j);
+                            const Rgba want = full.pixel(column_base + i, row_base + j);
+                            CHECK_NEAR(got.a, want.a, 1e-5);
+                            CHECK_NEAR(got.r, want.r, 1e-5);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Between one and two image pixels an entry -- the band from 100% zoom down to
 // 50% -- an entry boundary lands inside a pixel rather than between two, and
 // what the pixel contributes has to be split in proportion. Rounding the
@@ -460,6 +541,7 @@ void halfLookupMatchesTheComputation() {
 int main() {
     std::printf("brush:\n");
     sampledCompositingAveragesTheBlockItStandsFor();
+    aReducedEntryDoesNotDependOnTheRegionAskedFor();
     aFractionalStepSplitsThePixelsItLandsInside();
     halfLookupMatchesTheComputation();
     strokeLaysDownInk();

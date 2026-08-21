@@ -162,15 +162,16 @@ void blendFillRows(const CtgFill& fill, const Layer& layer, const PixelRect& reg
 // the split gives 2.4.
 struct ColumnPlan {
     int origin = 0;                     // image x of the first sample
+    int end = 0;                        // one past the last sample's block
     std::vector<int> column;            // output column the sample mostly lands in
     std::vector<float> first_share;     // its weight there
     std::vector<float> second_share;    // and in the next column, 0 if it does not reach
     std::vector<float> column_weight;   // total weight arriving in each column
 };
 
-// `region` is where the samples are *read* from and `shift` is how far the layer
-// is drawn from there, so `read + shift` is where a sample lands. The columns
-// are worked out in that drawn space and not in the read space.
+// `first_read_x` is where the samples are *read* from and `shift` is how far the
+// layer is drawn from there, so `read + shift` is where a sample lands. The
+// columns are worked out in that drawn space and not in the read space.
 //
 // They used to be worked out in the read space, and the two are not the same
 // grid: the sample lattice is anchored at the image origin, so a rectangle of
@@ -182,51 +183,86 @@ struct ColumnPlan {
 // every repaint, for a colour layer showing carried marks at any zoom below
 // 100%. Computing it here in the drawn space bounds `column` to [0, columns) by
 // construction rather than by a check that can be forgotten.
-ColumnPlan planColumns(const SampleStep& step, const PixelRect& region, int stride, int columns,
+//
+// **The samples are the ones the entries want, not the ones the region holds.**
+// That is issue #64. The plan used to widen its first sample's block back to
+// the edge of the region and clip its last one to the far edge, and normalise by
+// the weight that produced -- so an entry on the boundary of the rectangle it
+// was asked for was averaged from a different set of image pixels than the same
+// entry got inside a larger rectangle. The canvas refreshes one dirty rectangle
+// per dab while the pen is down and the whole cache when it lifts, so every dab
+// left a line of wrong entries around itself that the lift then wiped: dragging
+// the eraser past a stroke without touching it visibly chewed the stroke until
+// you let go. A pan left the same thing along the strips it exposed, and nothing
+// wiped that at all.
+//
+// So a block that reaches past either end is read past either end -- an entry is
+// the average of its whole block wherever it is asked about -- and whatever
+// lands in an entry nobody asked for is dropped rather than folded into the one
+// that is there. `origin` and `end` are the samples the *entries* need, which is
+// why they are worked out from the entry span and not from a rectangle.
+ColumnPlan planColumns(const SampleStep& step, int first_read_x, int stride, int columns,
                        int shift) {
     ColumnPlan plan;
-    plan.origin = firstLatticePointAtOrAfter(region.x, stride);
+    if (columns <= 0) return plan;
     plan.column_weight.assign(static_cast<std::size_t>(columns), 0.0f);
 
-    const int x_end = region.x + region.width;
-    const long long first_column = step.entryAt(region.x + shift);
-    const int count =
-        (x_end > plan.origin) ? (x_end - plan.origin + stride - 1) / stride : 0;
-    plan.column.resize(static_cast<std::size_t>(count));
+    const long long first_column = step.entryAt(first_read_x + shift);
+
+    // The span the asked-for columns cover, brought back into read space.
+    const long long carried = static_cast<long long>(shift) << SampleStep::kFractionBits;
+    const long long span_begin = step.entryTop(first_column) - carried;
+    const long long span_end = step.entryTop(first_column + columns) - carried;
+
+    // The block holding the first pixel the span touches, and one past the last
+    // block that starts inside it. A block is [p, p + stride) on a lattice
+    // anchored at the image origin, so this is a property of the span alone.
+    const int first_pixel = static_cast<int>(floorDiv(span_begin, SampleStep::kOne));
+    plan.origin = firstLatticePointAtOrAfter(first_pixel - stride + 1, stride);
+    const int count = latticePointsIn(
+        plan.origin, static_cast<int>(ceilDiv(span_end, SampleStep::kOne)), stride);
+    plan.end = plan.origin + count * stride;
+
+    plan.column.assign(static_cast<std::size_t>(count), 0);
     plan.first_share.assign(static_cast<std::size_t>(count), 0.0f);
     plan.second_share.assign(static_cast<std::size_t>(count), 0.0f);
 
     for (int j = 0; j < count; ++j) {
         const int at = plan.origin + j * stride;
-        // The first sample's block is widened back to the edge of the region,
-        // so that the samples tile it exactly however the lattice falls.
-        const int from = (j == 0) ? region.x : at;
-        const int to = std::min(x_end, at + stride);
 
         // In drawn coordinates, which is what the columns are counted in.
-        long long lower = static_cast<long long>(from + shift) << SampleStep::kFractionBits;
-        const long long upper = static_cast<long long>(to + shift) << SampleStep::kFractionBits;
-        const int column = static_cast<int>(step.entryAt(from + shift) - first_column);
-        plan.column[static_cast<std::size_t>(j)] = column;
+        const long long lower = static_cast<long long>(at + shift) << SampleStep::kFractionBits;
+        const long long upper =
+            static_cast<long long>(at + stride + shift) << SampleStep::kFractionBits;
+        const int column = static_cast<int>(step.entryAt(at + shift) - first_column);
 
-        for (int k = 0; k < 2 && lower < upper; ++k) {
-            // The last entry can end a fraction of a pixel before the region
-            // does; anything past it stays in the column that is there rather
-            // than being dropped or written off the end.
-            const bool last = column + k + 1 >= columns;
-            const long long edge =
-                last ? upper : std::min(upper, step.entryTop(first_column + column + k + 1));
-            const float weight =
-                static_cast<float>(edge - lower) / static_cast<float>(SampleStep::kOne);
-            const int lands_in = (k == 0 || last) ? column : column + 1;
+        // Two entries and never three: `boxSampleStride` keeps a block no longer
+        // than an entry, so a block that starts in one entry ends in it or in
+        // the next.
+        const long long edge = std::min(upper, step.entryTop(first_column + column + 1));
+        const float here = static_cast<float>(edge - lower) / static_cast<float>(SampleStep::kOne);
+        const float next = static_cast<float>(upper - edge) / static_cast<float>(SampleStep::kOne);
 
-            if (lands_in == column) {
-                plan.first_share[static_cast<std::size_t>(j)] += weight;
+        // Where the consumers index from. `column` is clamped into range so the
+        // scatter needs no test of its own; the shares carry which parts of the
+        // block are actually wanted, and a part that fell outside is zero.
+        const bool first_wanted = column >= 0 && column < columns;
+        const bool next_wanted = column + 1 >= 0 && column + 1 < columns;
+        plan.column[static_cast<std::size_t>(j)] = std::clamp(column, 0, columns - 1);
+        if (first_wanted) {
+            plan.first_share[static_cast<std::size_t>(j)] = here;
+            plan.column_weight[static_cast<std::size_t>(column)] += here;
+        }
+        if (next_wanted && next > 0.0f) {
+            // Held as the share of the column after `plan.column`, so a block
+            // whose first entry was not wanted puts its remainder in column 0
+            // through `first_share` instead.
+            if (first_wanted) {
+                plan.second_share[static_cast<std::size_t>(j)] = next;
             } else {
-                plan.second_share[static_cast<std::size_t>(j)] += weight;
+                plan.first_share[static_cast<std::size_t>(j)] = next;
             }
-            plan.column_weight[static_cast<std::size_t>(lands_in)] += weight;
-            lower = edge;
+            plan.column_weight[static_cast<std::size_t>(column + 1)] += next;
         }
     }
     return plan;
@@ -248,23 +284,39 @@ ColumnPlan planColumns(const SampleStep& step, const PixelRect& region, int stri
 // where two layers overlap inside one block. It is the trade a mipmap makes,
 // and the alternative is flattening at full resolution, which is the cost the
 // step exists to avoid.
-void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const PixelRect& region,
-                         const SampleStep& step, long long first_row, int stride,
-                         const ColumnPlan& plan, int y_begin, int y_end, Framebuffer& out,
+//
+// **It takes no region.** That is the fix and not a tidy-up: an entry has to come
+// out the same whatever rectangle it was asked for, and the surest way to say so
+// is to leave the rectangle out of the arithmetic. What is left -- the entry
+// span, the lattice, and the plan -- is the same for a dab's dirty rectangle as
+// for the whole cache. See planColumns for what was going wrong.
+// `first_row` counts the *drawn* rows and `row_shift` is how far the layer is
+// drawn from where its pixels are, exactly as the plan does across columns. The
+// rows used to be re-anchored instead -- `entryAt(region.y - offset.y)`, the
+// read row of the region's corner, indexed as though it were the drawn one --
+// and that is the row half of the mistake planColumns describes: entryAt floors,
+// so `entryAt(band.y - offset.y) - entryAt(whole.y - offset.y)` and
+// `entryAt(band.y) - entryAt(whole.y)` differ by one at some phases. A carried
+// mark therefore came out a whole entry up or down depending on which rectangle
+// was being refreshed, which is the same fault this function exists to remove,
+// reaching the one pass that has an offset.
+void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const SampleStep& step,
+                         long long first_row, int row_shift, int stride, const ColumnPlan& plan,
+                         int y_begin, int y_end, Framebuffer& out,
                          std::vector<Rgba>& accumulator) {
     const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
     if (layer_opacity <= 0.0f) return;
     if (grid.empty()) return;
 
     const int columns = out.width();
-    const int x_end = region.x + region.width;
-    const int y_bottom = region.y + region.height;
     const int first_x = plan.origin;
-    const int first_y = firstLatticePointAtOrAfter(region.y, stride);
+    const int sample_end = plan.end;
+    // The drawn span brought back to where the pixels are read from.
+    const long long carried = static_cast<long long>(row_shift) << SampleStep::kFractionBits;
 
     for (int y = y_begin; y < y_end; ++y) {
-        const long long top = step.entryTop(first_row + y);
-        const long long bottom = step.entryTop(first_row + y + 1);
+        const long long top = step.entryTop(first_row + y) - carried;
+        const long long bottom = step.entryTop(first_row + y + 1) - carried;
 
         std::fill(accumulator.begin(), accumulator.end(), Rgba{});
         float rows_weight = 0.0f;
@@ -272,21 +324,17 @@ void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const PixelRe
         // The rows whose blocks reach into this entry: one before the entry's
         // own first row can overlap it, and one after, which is the y half of
         // the same split the plan does across columns.
-        const int row_start = std::max(
-            first_y, firstLatticePointAtOrAfter(
-                         static_cast<int>(top >> SampleStep::kFractionBits) - stride + 1,
-                         stride));
-        for (int image_y = row_start; image_y < y_bottom; image_y += stride) {
-            const int from = (image_y == first_y) ? region.y : image_y;
-            const int to = std::min(y_bottom, image_y + stride);
+        const int row_start = firstLatticePointAtOrAfter(
+            static_cast<int>(top >> SampleStep::kFractionBits) - stride + 1, stride);
+        for (int image_y = row_start;
+             (static_cast<long long>(image_y) << SampleStep::kFractionBits) < bottom;
+             image_y += stride) {
             const long long lower =
-                std::max(static_cast<long long>(from) << SampleStep::kFractionBits, top);
+                std::max(static_cast<long long>(image_y) << SampleStep::kFractionBits, top);
             const long long upper =
-                std::min(static_cast<long long>(to) << SampleStep::kFractionBits, bottom);
-            if (upper <= lower) {
-                if ((static_cast<long long>(from) << SampleStep::kFractionBits) >= bottom) break;
-                continue;
-            }
+                std::min(static_cast<long long>(image_y + stride) << SampleStep::kFractionBits,
+                         bottom);
+            if (upper <= lower) continue;
             const float row_weight =
                 static_cast<float>(upper - lower) / static_cast<float>(SampleStep::kOne);
             rows_weight += row_weight;
@@ -295,10 +343,10 @@ void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const PixelRe
             const int local_y = tileLocal(image_y);
 
             int image_x = first_x;
-            while (image_x < x_end) {
+            while (image_x < sample_end) {
                 const int tile_x = tileCoordFor(image_x, 0).x;
                 const int local_x = tileLocal(image_x);
-                const int tile_end = std::min(x_end, (tile_x + 1) * kTileSize);
+                const int tile_end = std::min(sample_end, (tile_x + 1) * kTileSize);
                 const int run = latticePointsIn(image_x, tile_end, stride);
 
                 const TileRef* held = grid.findSlot({tile_x, tile_y});
@@ -366,19 +414,16 @@ void blendLayerRowsBoxed(const TileGrid& grid, const Layer& layer, const PixelRe
 // the accessor fills a row of samples on the same lattice, and the scatter into
 // the accumulator, the weights and the division are unchanged. A fill carries
 // no offset, so the plan it is handed is the ordinary one.
-void blendFillRowsBoxed(const CtgFill& fill, const Layer& layer, const PixelRect& region,
-                        const SampleStep& step, long long first_row, int stride,
-                        const ColumnPlan& plan, int y_begin, int y_end, Framebuffer& out,
-                        std::vector<Rgba>& accumulator, std::vector<Rgba>& scratch) {
+void blendFillRowsBoxed(const CtgFill& fill, const Layer& layer, const SampleStep& step,
+                        long long first_row, int stride, const ColumnPlan& plan, int y_begin,
+                        int y_end, Framebuffer& out, std::vector<Rgba>& accumulator,
+                        std::vector<Rgba>& scratch) {
     const float layer_opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
     if (layer_opacity <= 0.0f) return;
 
     const int columns = out.width();
-    const int x_end = region.x + region.width;
-    const int y_bottom = region.y + region.height;
     const int first_x = plan.origin;
-    const int first_y = firstLatticePointAtOrAfter(region.y, stride);
-    const int samples = latticePointsIn(first_x, x_end, stride);
+    const int samples = static_cast<int>(plan.column.size());
     if (samples <= 0) return;
     scratch.resize(static_cast<std::size_t>(samples));
 
@@ -389,21 +434,17 @@ void blendFillRowsBoxed(const CtgFill& fill, const Layer& layer, const PixelRect
         std::fill(accumulator.begin(), accumulator.end(), Rgba{});
         float rows_weight = 0.0f;
 
-        const int row_start = std::max(
-            first_y, firstLatticePointAtOrAfter(
-                         static_cast<int>(top >> SampleStep::kFractionBits) - stride + 1,
-                         stride));
-        for (int image_y = row_start; image_y < y_bottom; image_y += stride) {
-            const int from = (image_y == first_y) ? region.y : image_y;
-            const int to = std::min(y_bottom, image_y + stride);
+        const int row_start = firstLatticePointAtOrAfter(
+            static_cast<int>(top >> SampleStep::kFractionBits) - stride + 1, stride);
+        for (int image_y = row_start;
+             (static_cast<long long>(image_y) << SampleStep::kFractionBits) < bottom;
+             image_y += stride) {
             const long long lower =
-                std::max(static_cast<long long>(from) << SampleStep::kFractionBits, top);
+                std::max(static_cast<long long>(image_y) << SampleStep::kFractionBits, top);
             const long long upper =
-                std::min(static_cast<long long>(to) << SampleStep::kFractionBits, bottom);
-            if (upper <= lower) {
-                if ((static_cast<long long>(from) << SampleStep::kFractionBits) >= bottom) break;
-                continue;
-            }
+                std::min(static_cast<long long>(image_y + stride) << SampleStep::kFractionBits,
+                         bottom);
+            if (upper <= lower) continue;
             const float row_weight =
                 static_cast<float>(upper - lower) / static_cast<float>(SampleStep::kOne);
             rows_weight += row_weight;
@@ -489,7 +530,18 @@ PixelRect snapToSampleGrid(const SampleStep& step, const PixelRect& region) {
 }
 
 int boxSampleStride(const SampleStep& step) {
-    return std::max(1, static_cast<int>(std::ceil(step.ratio() / kMaxBoxSamplesPerAxis)));
+    const int budget =
+        std::max(1, static_cast<int>(std::ceil(step.ratio() / kMaxBoxSamplesPerAxis)));
+
+    // Never longer than an entry. The reduction puts each block in the entry it
+    // starts in and in the one after, which is exact for as long as a block
+    // cannot reach a third -- and with the sample budget at three that is true
+    // of every ratio, so this clamp does nothing today. It is here because the
+    // arithmetic that makes it true lives in one constant and the code that
+    // depends on it lives in three loops, and a block that reached a third entry
+    // would not fail: it would quietly drop the weight that fell there.
+    const int longest = std::max(1, static_cast<int>(std::floor(step.ratio())));
+    return std::min(budget, longest);
 }
 
 namespace {
@@ -660,7 +712,7 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
     const int stride = reducing ? boxSampleStride(step) : 1;
     const long long first_row = step.entryAt(region.y);
     const ColumnPlan plan =
-        reducing ? planColumns(step, region, stride, out.width(), 0) : ColumnPlan{};
+        reducing ? planColumns(step, region.x, stride, out.width(), 0) : ColumnPlan{};
 
     // A layer drawn away from where its pixels are stored is read from a region
     // moved the other way and written to the same columns, which is the whole
@@ -676,8 +728,8 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
             // why the accessor is a pure function of what the fill stores.
             if (pass.fill != nullptr) {
                 if (reducing) {
-                    blendFillRowsBoxed(*pass.fill, *pass.layer, region, step, first_row, stride,
-                                       plan, y_begin, y_end, out, accumulator, scratch);
+                    blendFillRowsBoxed(*pass.fill, *pass.layer, step, first_row, stride, plan,
+                                       y_begin, y_end, out, accumulator, scratch);
                 } else {
                     blendFillRows(*pass.fill, *pass.layer, region, y_begin, y_end, out, scratch);
                 }
@@ -691,14 +743,15 @@ void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,
                                                      region.height}
                                          : region;
             if (reducing) {
-                const long long rows_from = moved ? step.entryAt(from.y) : first_row;
-                // Read from `from`, drawn `pass.offset.x` away from it -- which
-                // is back onto `region`, and that is the grid the columns count.
+                // Read from `from`, drawn `pass.offset` away from it -- which is
+                // back onto `region`, and that is the grid both axes count in.
+                // The rows say so with `pass.offset.y` and the columns with the
+                // plan; neither re-anchors to the read corner.
                 const ColumnPlan moved_plan =
-                    moved ? planColumns(step, from, stride, out.width(), pass.offset.x)
+                    moved ? planColumns(step, from.x, stride, out.width(), pass.offset.x)
                           : ColumnPlan{};
-                blendLayerRowsBoxed(*pass.tiles, *pass.layer, from, step, rows_from, stride,
-                                    moved ? moved_plan : plan, y_begin, y_end, out,
+                blendLayerRowsBoxed(*pass.tiles, *pass.layer, step, first_row, pass.offset.y,
+                                    stride, moved ? moved_plan : plan, y_begin, y_end, out,
                                     accumulator);
             } else {
                 blendLayerRows(*pass.tiles, *pass.layer, from, y_begin, y_end, out);

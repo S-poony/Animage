@@ -2139,6 +2139,86 @@ void aMovedLayerLosesNoColumnOffItsEnd() {
     CHECK(checked > 200);
 }
 
+// And the same layer has to come out the same whatever rectangle it was asked
+// for. That is the property `test_brush.cpp` pins for an ordinary layer -- the
+// canvas composites one dirty rectangle per dab while the pen is down and the
+// whole cache when it lifts, so an entry that depends on the rectangle is an
+// entry that changes while somebody is drawing.
+//
+// A moved layer is the one pass with an offset, and it broke the property twice
+// over: through the plan, like every other pass, and through the rows, which
+// used to re-anchor to `entryAt(region.y - offset.y)` and so could name a
+// different drawn entry for the same marks depending on where the rectangle
+// started. Reduced onto a coarse grid, that put a carried mark a whole entry out.
+//
+// The offsets are deliberately not multiples of anything: at a whole number of
+// entries both spellings agree and the test would pass on the code it is here
+// to fail on.
+void aMovedLayerIsTheSameWhateverRectangleAsksForIt() {
+    TEST("a moved layer reduced onto a coarse grid does not depend on the rectangle");
+
+    Compositor compositor;
+    Layer layer;
+    layer.visible = true;
+    layer.opacity = 1.0f;
+
+    // A diagonal of single pixels, so every entry boundary has something to cut.
+    TileGrid grid;
+    const Rgba ink{1.0f, 0.6f, 0.2f, 1.0f};
+    for (int i = 0; i < 200; ++i) {
+        const int x = 40 + i;
+        const int y = 60 + (i * 2) / 3;
+        const TileCoord coord = tileCoordFor(x, y);
+        const TileRef held = grid.find(coord);
+        auto tile = held ? std::make_shared<Tile>(*held) : std::make_shared<Tile>();
+        tile->setPixel(tileLocal(x), tileLocal(y), ink);
+        grid.set(coord, tile);
+    }
+
+    int checked = 0;
+    for (const double ratio : {1.43, 2.5, 3.03, 5.0, 7.7}) {
+        const SampleStep step = SampleStep::fromRatio(ratio);
+        const PixelRect whole = snapToSampleGrid(step, PixelRect{0, 20, 300, 220});
+
+        for (const CtgShift offset : {CtgShift{0, 0}, CtgShift{-37, -11}, CtgShift{1, 3},
+                                      CtgShift{5, 40}, CtgShift{129, -1}}) {
+            LayerPass pass;
+            pass.tiles = &grid;
+            pass.layer = &layer;
+            pass.offset = offset;
+
+            Framebuffer full;
+            compositor.compositeGrids({pass}, whole, full, step);
+            const long long whole_x = step.entryAt(whole.x);
+            const long long whole_y = step.entryAt(whole.y);
+
+            for (int y = whole.y; y < whole.y + whole.height; y += 29) {
+                for (int x = whole.x; x < whole.x + whole.width; x += 23) {
+                    const PixelRect band =
+                        intersect(snapToSampleGrid(step, PixelRect{x, y, 44, 36}), whole);
+                    if (band.isEmpty()) continue;
+                    Framebuffer part;
+                    compositor.compositeGrids({pass}, band, part, step);
+
+                    const int column_base = static_cast<int>(step.entryAt(band.x) - whole_x);
+                    const int row_base = static_cast<int>(step.entryAt(band.y) - whole_y);
+                    for (int j = 0; j < part.height(); ++j) {
+                        for (int i = 0; i < part.width(); ++i) {
+                            const Rgba got = part.pixel(i, j);
+                            const Rgba want = full.pixel(column_base + i, row_base + j);
+                            CHECK_NEAR(got.a, want.a, 1e-5);
+                            CHECK_NEAR(got.r, want.r, 1e-5);
+                            ++checked;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The sweep is the test; an empty one would pass by doing nothing.
+    CHECK(checked > 10000);
+}
+
 void ahiddenSourceIsStillABarrier() {
     TEST("hiding a source layer does not take the barrier away with it");
     Fixture f;
@@ -2547,6 +2627,7 @@ int main() {
     anUnboundedSolveIsFinerThanABoundedOne();
     ahiddenSourceIsStillABarrier();
     aMovedLayerLosesNoColumnOffItsEnd();
+    aMovedLayerIsTheSameWhateverRectangleAsksForIt();
     theBarrierDoesNotDependOnHowItWasBanded();
     theBarrierFollowsTheInkAndNotTheBox();
     return testing::summarise("ctg");
