@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -839,26 +840,18 @@ void CanvasWidget::setScribblePreview(LayerId layer_id, bool previewing) {
     }
 }
 
-// Flattens the neighbouring drawings into one tinted, faded layer. Previous
-// drawings go warm and later ones cool, which is the convention every animator
-// already reads without being told.
-void CanvasWidget::rebuildOnion() {
-    onion_.resize(0, 0);
-    if (playing_ || track_ == kNoId) return;
-    if (onion_settings_.before <= 0 && onion_settings_.after <= 0) return;
+// Which neighbouring drawings the onion shows, and in what colour.
+//
+// Separated from painting them because a pan repaints a strip of the buffer
+// rather than the whole of it, and the list is the same either way: it depends
+// on the frame and the settings, neither of which a pan moves.
+std::vector<CanvasWidget::Ghost> CanvasWidget::collectGhosts() const {
+    std::vector<Ghost> ghosts;
+    if (playing_ || track_ == kNoId) return ghosts;
+    if (onion_settings_.before <= 0 && onion_settings_.after <= 0) return ghosts;
 
     const Track* track = doc_.scene().findTrack(track_);
-    if (!track || cached_region_.isEmpty()) return;
-
-    onion_.resize(cache_step_.entriesAcross(cached_region_.x, cached_region_.width),
-                  cache_step_.entriesAcross(cached_region_.y, cached_region_.height));
-
-    struct Ghost {
-        ImageId image;
-        float weight;
-        float r, g, b;
-    };
-    std::vector<Ghost> ghosts;
+    if (!track) return ghosts;
 
     const auto collect = [&](int count, int direction, float r, float g, float b) {
         if (count <= 0) return;
@@ -876,22 +869,106 @@ void CanvasWidget::rebuildOnion() {
     // Furthest first, so the nearest drawing ends up on top.
     std::stable_sort(ghosts.begin(), ghosts.end(),
                      [](const Ghost& a, const Ghost& b) { return a.weight < b.weight; });
+    return ghosts;
+}
+
+// Flattens the neighbouring drawings into one tinted, faded layer. Previous
+// drawings go warm and later ones cool, which is the convention every animator
+// already reads without being told.
+void CanvasWidget::rebuildOnion() {
+    onion_.resize(0, 0);
+    if (cached_region_.isEmpty() || collectGhosts().empty()) return;
+
+    // Not cleared here: paintOnion empties the region it is about to paint,
+    // and this asks it for the whole buffer.
+    onion_.resize(cache_step_.entriesAcross(cached_region_.x, cached_region_.width),
+                  cache_step_.entriesAcross(cached_region_.y, cached_region_.height));
+    paintOnion(cached_region_);
+}
+
+// The ghosts over one region of an onion buffer that already exists and is
+// already empty there.
+//
+// A region rather than the whole buffer, because a pan moves the cached region
+// by a strip and the rest of the buffer is still right about the pixels it
+// holds -- see ensureCacheCoversView. Whole-buffer is then just the case where
+// the region is the whole of it, which is what rebuildOnion asks for.
+void CanvasWidget::paintOnion(const PixelRect& region) {
+    if (onion_.isEmpty()) return;
+
+    PixelRect area = intersect(snapToSampleGrid(cache_step_, intersect(region, cached_region_)),
+                               cached_region_);
+    if (area.isEmpty()) return;
+
+    const std::vector<Ghost> ghosts = collectGhosts();
+    if (ghosts.empty()) return;
+
+    // Where this patch of entries sits in the buffer, worked out exactly as
+    // refreshRegion works it out for the display cache -- the sampling grid is
+    // anchored at the image origin, so an entry means the same thing in both.
+    const int column_base =
+        static_cast<int>(cache_step_.entryAt(area.x) - cache_step_.entryAt(cached_region_.x));
+    const int row_base =
+        static_cast<int>(cache_step_.entryAt(area.y) - cache_step_.entryAt(cached_region_.y));
+
+    // Emptied here, and only this much of it. The ghosts blend over what they
+    // find, so the region has to start at nothing -- but clearing the whole
+    // buffer for a strip down one side was the largest thing left in an onion
+    // rebuild once the composite had stopped covering the viewport.
+    const int width = cache_step_.entriesAcross(area.x, area.width);
+    const int height = cache_step_.entriesAcross(area.y, area.height);
+    for (int y = 0; y < height; ++y) {
+        const int row = row_base + y;
+        if (row < 0 || row >= onion_.height()) continue;
+        const int first = std::max(0, column_base);
+        const int last = std::min(onion_.width(), column_base + width);
+        if (last > first) std::fill(onion_.row(row) + first, onion_.row(row) + last, Rgba{});
+    }
 
     Framebuffer ghost_frame;
     for (const Ghost& ghost : ghosts) {
-        compositor_.composite(doc_, track_, ghost.image, cached_region_, ghost_frame,
-                              cache_step_);
-        for (int y = 0; y < onion_.height(); ++y) {
-            const Rgba* source = ghost_frame.row(y);
-            Rgba* destination = onion_.row(y);
-            for (int x = 0; x < onion_.width(); ++x) {
-                const float alpha = std::clamp(source[x].a, 0.0f, 1.0f) * ghost.weight;
-                if (alpha <= 0.0f) continue;
-                // Tinted silhouette: the shape is what matters, not the colour
-                // the neighbouring drawing happens to be.
-                const Rgba tinted{ghost.r * alpha, ghost.g * alpha, ghost.b * alpha, alpha};
-                destination[x] = over(tinted, destination[x]);
+        compositor_.composite(doc_, track_, ghost.image, area, ghost_frame, cache_step_);
+
+        // One band of rows, and split across threads for the reason the sRGB
+        // conversion beside it is: rows are independent, each reads one row of
+        // the ghost and writes one row of the buffer, and this was the last
+        // loop in the display path still running on one thread while the
+        // compositor either side of it used eight.
+        const auto tint_rows = [&](int y_begin, int y_end) {
+            for (int y = y_begin; y < y_end; ++y) {
+                const int row = row_base + y;
+                if (row < 0 || row >= onion_.height()) continue;
+                const Rgba* source = ghost_frame.row(y);
+                Rgba* destination = onion_.row(row);
+                for (int x = 0; x < ghost_frame.width(); ++x) {
+                    const int column = column_base + x;
+                    if (column < 0 || column >= onion_.width()) continue;
+                    const float alpha = std::clamp(source[x].a, 0.0f, 1.0f) * ghost.weight;
+                    if (alpha <= 0.0f) continue;
+                    // Tinted silhouette: the shape is what matters, not the
+                    // colour the neighbouring drawing happens to be.
+                    const Rgba tinted{ghost.r * alpha, ghost.g * alpha, ghost.b * alpha, alpha};
+                    destination[column] = over(tinted, destination[column]);
+                }
             }
+        };
+
+        const int rows = ghost_frame.height();
+        const int workers = chooseWorkerCount(rows, ghost_frame.width());
+        if (workers <= 1) {
+            tint_rows(0, rows);
+        } else {
+            const int band = (rows + workers - 1) / workers;
+            std::vector<std::thread> pool;
+            pool.reserve(static_cast<std::size_t>(workers) - 1);
+            for (int w = 1; w < workers; ++w) {
+                const int y_begin = std::min(rows, w * band);
+                const int y_end = std::min(rows, y_begin + band);
+                if (y_begin >= y_end) break;
+                pool.emplace_back(tint_rows, y_begin, y_end);
+            }
+            tint_rows(0, std::min(rows, band));  // this thread takes the first band
+            for (std::thread& worker : pool) worker.join();
         }
     }
 }
@@ -980,14 +1057,114 @@ void CanvasWidget::ensureCacheCoversView() {
         if (cached_area <= wanted_area * 4) return;
     }
 
+    // The cache moved rather than changed shape, in the overwhelming majority
+    // of cases: a pan leaves the margin, the new region overlaps the old one
+    // nearly everywhere, and only a strip down one side and along one edge has
+    // never been composited.
+    //
+    // That strip is all this needs to composite, because **an entry means the
+    // same thing wherever the view has panned to**. The sampling grid is
+    // anchored at the image origin -- not at the cached region -- so entry `e`
+    // covers image pixels `entryBegin(e)` to `entryBegin(e + 1)` whatever
+    // rectangle happens to be cached, and refreshRegion already leans on that
+    // to make a partial refresh land on the entries a full one would produce.
+    // So the entries the two regions share can be copied across as bytes, and
+    // the result is exactly what recompositing them would have written.
+    //
+    // The onion buffer moves in lockstep, and has to: the sRGB conversion reads
+    // one onion entry per cache entry, so a display entry copied without its
+    // ghost would be paired with a neighbouring drawing from the wrong place.
+    //
+    // Only when the step is the same. A zoom changes how much drawing an entry
+    // covers, so nothing in either buffer means what it used to and the whole
+    // thing is composited again -- which is what this always did.
+    // Whether the two regions have entries in common, decided *before* anything
+    // is moved out of. It used to move the buffers first and work this out
+    // afterwards, which left a Framebuffer that had been moved from -- an empty
+    // pixel vector, and a width and height that are plain ints and so survive
+    // the move saying it is not empty. The next call along would believe it and
+    // read from it. See `a second view change before the paint` in
+    // tests/test_render.cpp: two view changes reach here before one paint
+    // routinely, because update() only schedules a repaint and Qt coalesces the
+    // burst.
+    const bool same_step = (step == cache_step_) && !display_.isNull();
+    const int columns = step.entriesAcross(padded.x, padded.width);
+    const int rows = step.entriesAcross(padded.y, padded.height);
+    const long long new_x0 = step.entryAt(padded.x);
+    const long long new_y0 = step.entryAt(padded.y);
+
+    const long long old_x0 = same_step ? cache_step_.entryAt(cached_region_.x) : 0;
+    const long long old_y0 = same_step ? cache_step_.entryAt(cached_region_.y) : 0;
+    const long long shared_x0 = std::max(old_x0, new_x0);
+    const long long shared_x1 = std::min(old_x0 + display_.width(), new_x0 + columns);
+    const long long shared_y0 = std::max(old_y0, new_y0);
+    const long long shared_y1 = std::min(old_y0 + display_.height(), new_y0 + rows);
+    const bool carrying =
+        same_step && shared_x1 > shared_x0 && shared_y1 > shared_y0;
+
+    if (!carrying) {
+        cache_step_ = step;
+        cached_region_ = padded;
+        display_ = QImage(columns, rows, QImage::Format_RGB32);
+        onion_dirty_ = true;
+        dirty_everything_ = true;
+        return;
+    }
+
+    const QImage old_display = std::move(display_);
+    const Framebuffer old_onion = std::move(onion_);
     cache_step_ = step;
     cached_region_ = padded;
+    display_ = QImage(columns, rows, QImage::Format_RGB32);
 
-    display_ = QImage(step.entriesAcross(padded.x, padded.width),
-                      step.entriesAcross(padded.y, padded.height), QImage::Format_RGB32);
-    onion_dirty_ = true;
-    dirty_everything_ = true;
+    // The onion comes with it, or is put back to a defined empty if there was
+    // none -- `onion_` has just been moved from, and leaving it that way is the
+    // fault above.
+    const bool carrying_onion = !old_onion.isEmpty();
+    onion_.resize(carrying_onion ? columns : 0, carrying_onion ? rows : 0);
+
+    const int shared_columns = static_cast<int>(shared_x1 - shared_x0);
+    for (long long y = shared_y0; y < shared_y1; ++y) {
+        const uchar* from = old_display.constScanLine(static_cast<int>(y - old_y0));
+        uchar* to = display_.scanLine(static_cast<int>(y - new_y0));
+        std::memcpy(to + (shared_x0 - new_x0) * 4, from + (shared_x0 - old_x0) * 4,
+                    static_cast<std::size_t>(shared_columns) * 4);
+        if (!carrying_onion) continue;
+        const Rgba* ghost_from = old_onion.row(static_cast<int>(y - old_y0));
+        Rgba* ghost_to = onion_.row(static_cast<int>(y - new_y0));
+        std::memcpy(ghost_to + (shared_x0 - new_x0), ghost_from + (shared_x0 - old_x0),
+                    static_cast<std::size_t>(shared_columns) * sizeof(Rgba));
+    }
+
+    // What is left: up to four strips, and two of them for an ordinary pan.
+    // Handed over as image rectangles covering exactly those entries, so that
+    // refreshRegion's own snapping is a no-op on them.
+    const auto expose = [&](long long x0, long long x1, long long y0, long long y1) {
+        if (x1 <= x0 || y1 <= y0) return;
+        const int left = step.entryBegin(x0);
+        const int top = step.entryBegin(y0);
+        const PixelRect strip{left, top, step.entryBegin(x1) - left, step.entryBegin(y1) - top};
+        markDirty(strip);
+        // Merged past a handful for the reason pending_dirty_ is, and it is the
+        // same handful: several scrolls can reach one paint, each adding up to
+        // four strips, and the ghosts are composited once per strip. Uncapped,
+        // a fast pan whose moves all coalesced into one repaint would end up
+        // paying more for the onion than the whole-buffer rebuild it replaced.
+        if (onion_pending_.size() >= kMaxDirtyRegions) {
+            PixelRect all;
+            for (const PixelRect& pending : onion_pending_) all = unite(all, pending);
+            onion_pending_.clear();
+            onion_pending_.push_back(unite(all, strip));
+            return;
+        }
+        onion_pending_.push_back(strip);
+    };
+    expose(new_x0, shared_x0, new_y0, new_y0 + rows);              // down the left
+    expose(shared_x1, new_x0 + columns, new_y0, new_y0 + rows);    // down the right
+    expose(shared_x0, shared_x1, new_y0, shared_y0);               // along the top
+    expose(shared_x0, shared_x1, shared_y1, new_y0 + rows);        // along the bottom
 }
+
 
 void CanvasWidget::refreshAll() {
     dirty_everything_ = true;
@@ -1002,7 +1179,15 @@ void CanvasWidget::refreshAll() {
 
 void CanvasWidget::markDirty(const PixelRect& region) {
     if (dirty_everything_) return;
-    pending_dirty_ = unite(pending_dirty_, region);
+    if (region.isEmpty()) return;
+    if (pending_dirty_.size() >= kMaxDirtyRegions) {
+        PixelRect all;
+        for (const PixelRect& pending : pending_dirty_) all = unite(all, pending);
+        pending_dirty_.clear();
+        pending_dirty_.push_back(unite(all, region));
+        return;
+    }
+    pending_dirty_.push_back(region);
 }
 
 // Composites `region` and writes it into the cached sRGB image. This is the
@@ -1031,6 +1216,7 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     const SubstitutedLayer substituted =
         transform_ ? SubstitutedLayer{transform_->layer, &transform_->remaining}
                    : SubstitutedLayer{};
+
     compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_, substituted);
 
     // Where this patch of entries sits in the cache.
@@ -1104,20 +1290,19 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
     const int workers = chooseWorkerCount(rows, scratch_.width());
     if (workers <= 1) {
         convert_rows(0, rows);
-        return;
+    } else {
+        const int band = (rows + workers - 1) / workers;
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<std::size_t>(workers) - 1);
+        for (int w = 1; w < workers; ++w) {
+            const int y_begin = std::min(rows, w * band);
+            const int y_end = std::min(rows, y_begin + band);
+            if (y_begin >= y_end) break;
+            pool.emplace_back(convert_rows, y_begin, y_end);
+        }
+        convert_rows(0, std::min(rows, band));  // this thread takes the first band
+        for (std::thread& worker : pool) worker.join();
     }
-
-    const int band = (rows + workers - 1) / workers;
-    std::vector<std::thread> pool;
-    pool.reserve(static_cast<std::size_t>(workers) - 1);
-    for (int w = 1; w < workers; ++w) {
-        const int y_begin = std::min(rows, w * band);
-        const int y_end = std::min(rows, y_begin + band);
-        if (y_begin >= y_end) break;
-        pool.emplace_back(convert_rows, y_begin, y_end);
-    }
-    convert_rows(0, std::min(rows, band));  // this thread takes the first band
-    for (std::thread& worker : pool) worker.join();
 }
 
 void CanvasWidget::repaintImageRect(const PixelRect& region) {
@@ -1138,6 +1323,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // Counted here and nowhere else, because this is the moment a frame is
     // shown. See paintCount.
     ++paint_count_;
+
     ensureCacheCoversView();
 
     // All the compositing for this frame happens here, once, however many
@@ -1150,15 +1336,22 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;
+        onion_pending_.clear();  // the whole buffer has just been done
         dirty_everything_ = true;
+    } else if (!onion_pending_.empty()) {
+        // The strips a scroll exposed. They are already dirty for the display
+        // cache; the ghosts have to land in them first, because the conversion
+        // reads the onion buffer as it goes.
+        for (const PixelRect& strip : onion_pending_) paintOnion(strip);
+        onion_pending_.clear();
     }
     if (dirty_everything_) {
         refreshRegion(cached_region_);
         dirty_everything_ = false;
-        pending_dirty_ = {};
-    } else if (!pending_dirty_.isEmpty()) {
-        refreshRegion(pending_dirty_);
-        pending_dirty_ = {};
+        pending_dirty_.clear();
+    } else {
+        for (const PixelRect& region : pending_dirty_) refreshRegion(region);
+        pending_dirty_.clear();
     }
 
     QPainter painter(this);

@@ -28,6 +28,7 @@ the shape of the program. Those five maps are.
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
+| [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
@@ -2243,6 +2244,73 @@ a way these numbers do not explain, that is where to look first.
 Those numbers are the ones the box filter ran at. What replaced it costs more,
 and [the next section](#what-a-commit-does-to-a-line) is why that was worth
 paying.
+
+## What a pan costs
+
+Reported as the program going heavy after a while at work — panning, with
+drawing still fine. It was the onion skin, and it read as "after a while"
+because onion skin costs nothing until there are neighbouring drawings to show.
+
+The cache reaches 64 screen pixels past the viewport, so a drag leaves it every
+64 pixels of travel. When it did, the whole cached region was composited again —
+and because a rebuild sets `onion_dirty_`, the onion buffer was rebuilt from
+nothing beside it: a composite of each neighbouring drawing over the whole
+region, then a pass over the whole buffer per ghost to tint it. The neighbouring
+drawings had not changed. Only the region had moved, by 64 pixels out of a
+viewport.
+
+| a pan step, two ghosts | before | after |
+|---|---|---|
+| the onion's composite | 9.65 ms | 1.42 ms |
+| the onion's tint | 4.69 ms | 1.18 ms |
+| the scene composite | 3.77 ms | 0.65 ms |
+| linear → sRGB | 6.98 ms | 2.66 ms |
+| Qt's blit and the overlays | 1.46 ms | 1.51 ms |
+| **the whole paint** | **29.28 ms** | **7.61 ms** |
+
+Three changes, and the third is the one that matters.
+
+**`Framebuffer::resize` stopped emptying the buffer.** `compositeGrids` calls
+`resize` and then `clear`, so every composite in the program wrote a
+viewport-sized buffer to zero *twice* before compositing anything into it — 20 MB
+written twice at 1642×777 entries, once per ghost as well as once for the scene.
+`resizeCleared` is the one that still does both, in a single pass, for the
+callers that want an empty buffer of a given size.
+
+**The tint loop is split across threads**, the way the sRGB conversion beside it
+and the compositor under it already were. It was the last loop in the display
+path still running on one.
+
+**And the cache scrolls rather than being rebuilt.** The sampling grid is
+anchored at the image origin and not at the cached region — `refreshRegion`
+already depended on that to make a partial refresh land on the entries a full
+one would produce — so entry *e* covers the same image pixels wherever the view
+has panned to. The entries the old cached region and the new one share are
+therefore copyable as bytes, and only the strips that are new have to be
+composited. The onion buffer is scrolled in lockstep, and has to be: the sRGB
+conversion reads one onion entry per cache entry, so a display entry carried
+across without its ghost would pair a drawing with a neighbour from the wrong
+place.
+
+Two things fell out of that. `pending_dirty_` is a short list rather than one
+rectangle, because a scroll exposes an L and the union of an L is very nearly
+the whole viewport — which is the cost the scroll exists to avoid; past six
+regions they are merged after all. And `rebuildOnion` split in two:
+`collectGhosts` decides which neighbours are shown, which a pan does not change,
+and `paintOnion` puts them into one region of a buffer that already exists,
+emptying that region and no more of it.
+
+**A zoom keeps the old path in full.** It changes the step, so an entry stops
+covering what it covered and nothing in either buffer means anything; there is
+nothing to carry and it all gets composited again.
+
+What pins it is `panning leaves the same pixels a full recomposite would` in
+`tests/test_render.cpp`, which pans through the scrolling path and compares the
+result to `refreshAll` on the same view, pixel for pixel, at three zooms and in
+both directions, with onion skin on. It is worth keeping honest: the way this
+fails is a drawing that looks right until you pan and then shows a band of
+somewhere else, and no stopwatch would notice. Moving the copy's source column
+by one pixel fails it on twelve checks.
 
 ## What a commit does to a line
 
@@ -4487,6 +4555,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/tests/bench_composite     # timings, not a test -- including a whole CTG solve
 ./build/tests/bench_zoom -platform offscreen [dir]   # the whole display path
+./build/tests/bench_session -platform offscreen [--project FOLDER]   # does a session get heavy?
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
@@ -4516,6 +4585,16 @@ nothing changed and one with a single drawing touched. The last is what autosave
 actually costs and is the number to watch: if it starts tracking the size of the
 shot rather than the size of the change, something has stopped carrying files
 forward.
+
+`bench_session` is the one that asks whether the program gets heavier the longer
+it is used, which is a question none of the others can ask: they all measure a
+document that was built a moment ago. It draws thousands of strokes, one command
+each, and re-times the same pan drag as it goes, then drops the history and
+times it once more — which is what closing and reopening a project does. Give it
+`--project` and it does all of that on a real folder rather than a synthetic
+scene, and `--onion`, `--lasso`, `--transforms` and `--zoom` to hold one of the
+other things a session accumulates while the pan is timed. It is the bench to
+reach for when something is slow *now* and was not an hour ago.
 
 `bench_playback` is the one that reports a **count rather than a time**, and the
 reason is the whole of why it exists. Playback works its slot out from a clock

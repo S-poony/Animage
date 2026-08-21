@@ -495,6 +495,145 @@ void theWritebackIsNotTheSlowHalfOfARefresh() {
     CHECK(ratio <= 6.0);
 }
 
+// A pan carries the entries the old cache and the new one share across as
+// bytes and composites only the strips that are new. That is a claim about
+// every pixel on screen, and the way it fails is the worst kind: a drawing that
+// looks right until you pan, and then shows a band of somewhere else. So it is
+// asserted the only way worth asserting -- against what a full recomposite of
+// the same view would have produced, pixel for pixel.
+//
+// Onion skin is on for it, because the onion buffer is scrolled in lockstep
+// with the display cache and a display entry carried across without its ghost
+// would pair a drawing with a neighbour from the wrong place.
+void aScrolledCacheHoldsWhatARecompositeWouldHave() {
+    TEST("panning leaves the same pixels a full recomposite would");
+    Fixture fixture(1645, 765);
+
+    // Three drawings, so the onion has something either side to show.
+    const ImageId before = fixture.doc.insertImage(fixture.track, 0);
+    const ImageId after = fixture.doc.insertImage(fixture.track, 2);
+    drawCurves(fixture.doc, fixture.track, before, fixture.layer, 4, 1920, 1080);
+    drawCurves(fixture.doc, fixture.track, after, fixture.layer, 4, 1920, 1080);
+    fixture.canvas.setFrame(1);
+    fixture.canvas.setOnion({2, 2, 0.45f});
+
+    // Zoomed in, at one image pixel an entry, and zoomed out, where an entry
+    // covers a block and the grid's anchoring is what the copy rests on.
+    for (double zoom : {1.00, 0.70, 0.35}) {
+        // Both directions, and a drag long enough to leave the margin several
+        // times over: the interesting moment is the one where the region moves.
+        for (double direction : {1.0, -1.0}) {
+            fixture.settleAt(zoom);
+
+            const QPointF start(fixture.canvas.width() / 2.0, fixture.canvas.height() / 2.0);
+            QMouseEvent press(QEvent::MouseButtonPress, start, start, Qt::MiddleButton,
+                              Qt::MiddleButton, Qt::NoModifier);
+            QApplication::sendEvent(&fixture.canvas, &press);
+
+            for (int i = 1; i <= 40; ++i) {
+                const QPointF at =
+                    start + QPointF(direction * i * 11.0, direction * i * 7.0);
+                QMouseEvent move(QEvent::MouseMove, at, at, Qt::NoButton, Qt::MiddleButton,
+                                 Qt::NoModifier);
+                QApplication::sendEvent(&fixture.canvas, &move);
+                fixture.canvas.grab();
+            }
+
+            QMouseEvent release(QEvent::MouseButtonRelease, start, start, Qt::MiddleButton,
+                                Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&fixture.canvas, &release);
+
+            // What the scrolling left, and then the same view composited from
+            // nothing. refreshAll is the only difference between the two.
+            const QImage scrolled = fixture.canvas.grab().toImage();
+            fixture.canvas.refreshAll();
+            const QImage rebuilt = fixture.canvas.grab().toImage();
+
+            if (scrolled != rebuilt) {
+                // Where, and how far out, because "they differ" is not enough
+                // to tell a stale strip from a rounding difference.
+                long long differing = 0;
+                int worst = 0;
+                int first_x = -1;
+                int first_y = -1;
+                for (int y = 0; y < scrolled.height(); ++y) {
+                    for (int x = 0; x < scrolled.width(); ++x) {
+                        const QRgb a = scrolled.pixel(x, y);
+                        const QRgb b = rebuilt.pixel(x, y);
+                        if (a == b) continue;
+                        ++differing;
+                        worst = std::max({worst, std::abs(qRed(a) - qRed(b)),
+                                          std::abs(qGreen(a) - qGreen(b)),
+                                          std::abs(qBlue(a) - qBlue(b))});
+                        if (first_x < 0) {
+                            first_x = x;
+                            first_y = y;
+                        }
+                    }
+                }
+                testing::fail(__FILE__, __LINE__,
+                              "a scrolled cache differs from a recomposited one at zoom " +
+                                  std::to_string(zoom) + ": " + std::to_string(differing) +
+                                  " pixels, worst channel " + std::to_string(worst) +
+                                  ", first at " + std::to_string(first_x) + "," +
+                                  std::to_string(first_y));
+            }
+            CHECK(scrolled == rebuilt);
+        }
+    }
+}
+
+// And a zoom must not take the copying path at all: the step changes, so an
+// entry stops meaning what it meant and nothing in either buffer can be kept.
+void aZoomCompositesFromNothing() {
+    TEST("a zoom rebuilds the cache rather than scrolling it");
+    Fixture fixture(1645, 765);
+    fixture.canvas.setOnion({2, 2, 0.45f});
+
+    const QPointF anchor(fixture.canvas.width() / 2.0, fixture.canvas.height() / 2.0);
+    fixture.settleAt(1.0);
+
+    // Out far enough that the step changes, which is what makes it the other
+    // path -- above 100% the step is pinned at one and a zoom is only a blit.
+    for (double zoom : {0.80, 0.55, 0.30, 0.65}) {
+        fixture.canvas.setZoom(zoom, anchor);
+        const QImage zoomed = fixture.canvas.grab().toImage();
+        fixture.canvas.refreshAll();
+        const QImage rebuilt = fixture.canvas.grab().toImage();
+        CHECK(zoomed == rebuilt);
+    }
+}
+
+// Two view changes before a single paint, which is the ordinary case and not a
+// contrived one: setZoom, resetView, fitTo, a pan move and a resize all call
+// ensureCacheCoversView and then update(), and update() only *schedules* a
+// paint -- Qt coalesces the burst into one. So the second call runs over
+// whatever the first one left behind.
+void twoViewChangesBeforeAPaint() {
+    TEST("a second view change before the paint does not read a moved-from buffer");
+    Fixture fixture(1645, 765);
+    const ImageId before = fixture.doc.insertImage(fixture.track, 0);
+    drawCurves(fixture.doc, fixture.track, before, fixture.layer, 4, 1920, 1080);
+    fixture.canvas.setFrame(1);
+    fixture.canvas.setOnion({2, 2, 0.45f});
+
+    const QPointF anchor(fixture.canvas.width() / 2.0, fixture.canvas.height() / 2.0);
+    fixture.settleAt(0.90);  // an onion buffer exists, at a step above one
+
+    // First: a zoom that changes the sampling step, so nothing can be carried.
+    // Second: a zoom that does not -- every zoom at or above 100% samples at
+    // one image pixel an entry -- and *outwards*, so the view leaves the
+    // cached region and the second call has to go and get more of it rather
+    // than finding what it needs already there. No paint between them.
+    fixture.canvas.setZoom(1.50, anchor);
+    fixture.canvas.setZoom(1.02, anchor);
+
+    const QImage shown = fixture.canvas.grab().toImage();
+    fixture.canvas.refreshAll();
+    const QImage rebuilt = fixture.canvas.grab().toImage();
+    CHECK(shown == rebuilt);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -508,5 +647,8 @@ int main(int argc, char** argv) {
     aScrubbyZoomHoldsItsAnchorAtEveryEventRate();
     theBlitInterpolatesUntilThePixelsAreWorthSeeing();
     theWritebackIsNotTheSlowHalfOfARefresh();
+    aScrolledCacheHoldsWhatARecompositeWouldHave();
+    aZoomCompositesFromNothing();
+    twoViewChangesBeforeAPaint();
     return testing::summarise("render");
 }

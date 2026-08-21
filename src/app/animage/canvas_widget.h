@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <utility>
+#include <vector>
 
 class QPainter;
 class QTimer;
@@ -469,7 +470,15 @@ private:
     void refreshRegion(const animage::PixelRect& region);
     void markDirty(const animage::PixelRect& region);
     void repaintImageRect(const animage::PixelRect& region);
+    // One neighbouring drawing, as the onion skin shows it.
+    struct Ghost {
+        animage::ImageId image = animage::kNoId;
+        float weight = 0.0f;
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+    };
+    std::vector<Ghost> collectGhosts() const;
     void rebuildOnion();
+    void paintOnion(const animage::PixelRect& region);
     void fitTo(const animage::PixelRect& bounds);
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
@@ -653,10 +662,25 @@ private:
     // window whatever the zoom, rather than the size of the visible image area.
     animage::SampleStep cache_step_;
 
-    // Accumulated between paints. Empty width means nothing is pending.
-    animage::PixelRect pending_dirty_;
+    // Accumulated between paints, and a short list rather than one rectangle.
+    //
+    // It was one, united as regions arrived. A pan exposes an L of newly
+    // visible cache -- a strip down one side and a strip along one edge -- and
+    // the union of an L is very nearly the whole viewport, which is precisely
+    // the cost the scrolling in ensureCacheCoversView exists to avoid. Past a
+    // handful they are merged after all: the point is to keep two or three
+    // disjoint strips apart, not to track a hundred separate dabs.
+    std::vector<animage::PixelRect> pending_dirty_;
+    static constexpr std::size_t kMaxDirtyRegions = 6;
+
+    // Where the onion buffer has to be painted before those regions are
+    // converted, which is only ever the strips a scroll exposed: everything
+    // else in the buffer is still right about the pixels it holds, and an edit
+    // to the drawing does not move a neighbouring one.
+    std::vector<animage::PixelRect> onion_pending_;
     bool dirty_everything_ = false;
     std::uint64_t paint_count_ = 0;
+
 
     // The onion skin flattened once, covering the same region. It only changes
     // when the frame, the view or the settings do, so a stroke does not pay to
