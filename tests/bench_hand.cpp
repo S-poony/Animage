@@ -45,8 +45,15 @@
 // has less to carry forward than one marked generously, and that is a property
 // of the source drawing rather than of the method reading it.
 //
-// Run it by hand:
-//   ./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]
+// Two shots are in the tree. The default is the coloured one, which is real
+// work and answers "is this better"; the other is two circles and answers "what
+// exactly is broken", which a real shot cannot:
+//
+//   ./build/tests/bench_hand -platform offscreen [--pictures DIR]
+//   ./build/tests/bench_hand -platform offscreen --project tests/projects/two-circles.animage
+//
+// A project with more than one colour layer is scored once per layer, which is
+// how the same drawings under two different ways of scribbling can be compared.
 
 #include <QApplication>
 #include <QDir>
@@ -406,8 +413,9 @@ int main(int argc, char** argv) {
 
                     if (!options.pictures.isEmpty()) {
                         writePicture(test, over,
-                                     QString("%1/%2-%3.png")
+                                     QString("%1/%2-%3-%4.png")
                                          .arg(options.pictures)
+                                         .arg(QString::fromStdString(layer.name))
                                          .arg(static_cast<int>(at + 1), 3, 10, QChar('0'))
                                          .arg(static_cast<int>(m) + 1));
                     }
@@ -415,8 +423,9 @@ int main(int argc, char** argv) {
 
                 if (!options.pictures.isEmpty()) {
                     writePicture(truth, judged(truth, truth),
-                                 QString("%1/%2-hand.png")
+                                 QString("%1/%2-%3-hand.png")
                                      .arg(options.pictures)
+                                     .arg(QString::fromStdString(layer.name))
                                      .arg(static_cast<int>(at + 1), 3, 10, QChar('0')));
                 }
 
@@ -466,7 +475,8 @@ int main(int argc, char** argv) {
     }
 
     if (!options.pictures.isEmpty()) {
-        std::printf("\npictures in %s: -hand is the colourist's, then 1, 2, 3 for the methods\n",
+        std::printf("\npictures in %s, named layer-drawing-method: -hand is the colourist's,\n"
+                    "then 1, 2, 3 for the methods in the order of the table\n",
                     qPrintable(options.pictures));
     }
     return 0;
