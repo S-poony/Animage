@@ -634,6 +634,72 @@ void twoViewChangesBeforeAPaint() {
     CHECK(shown == rebuilt);
 }
 
+// The ghosts are composited through the same layer flags as the drawing in
+// front of them, so switching a layer off has to reach them. Nothing was
+// telling them: `refreshAll` marks the cache dirty and the onion buffer is not
+// the cache, so the ghosts went on showing a layer that was no longer there
+// until something else -- a frame change -- happened to rebuild them.
+void aLayerSwitchedOffReachesTheOnion() {
+    TEST("switching a layer off reaches the onion skin");
+    Fixture fixture(1645, 765);
+
+    // A second layer with marks of its own on every drawing, so switching it
+    // off changes what a ghost looks like and not only what the front one does.
+    const LayerId second = fixture.doc.addLayer(fixture.track, "layer 2");
+    const ImageId before = fixture.doc.insertImage(fixture.track, 0);
+    const ImageId after = fixture.doc.insertImage(fixture.track, 2);
+    for (ImageId image : {before, fixture.image, after}) {
+        drawCurves(fixture.doc, fixture.track, image, second, 5, 1920, 1080);
+    }
+    fixture.canvas.setFrame(1);
+    fixture.canvas.setOnion({2, 2, 0.45f});
+    fixture.settleAt(1.0);
+    fixture.canvas.grab();
+
+    // Switched off the way the layer panel switches it off.
+    Track* track = fixture.doc.mutableScene().findTrack(fixture.track);
+    Layer updated = *track->findLayer(second);
+    updated.visible = false;
+    fixture.doc.updateLayer(fixture.track, second, updated);
+    fixture.canvas.refreshAll();
+    const QImage shown = fixture.canvas.grab().toImage();
+
+    // What it should be: the same view with the onion rebuilt from nothing.
+    // setFrame is what used to be needed by hand.
+    fixture.canvas.setFrame(1);
+    const QImage rebuilt = fixture.canvas.grab().toImage();
+    CHECK(shown == rebuilt);
+}
+
+// The other half of the same thing: the ghosts are drawn out of cels, so an
+// undo that moves a neighbouring drawing's pixels has to reach them too. You
+// are standing on one drawing and pressing Ctrl+Z takes back a stroke made on
+// the one before it, which is in front of you as a ghost.
+void anUndoOnANeighbourReachesTheOnion() {
+    TEST("undoing a stroke on a neighbouring drawing reaches the onion skin");
+    Fixture fixture(1645, 765);
+
+    const ImageId before = fixture.doc.insertImage(fixture.track, 0);
+    drawCurves(fixture.doc, fixture.track, before, fixture.layer, 4, 1920, 1080);
+    fixture.canvas.setFrame(1);
+    fixture.canvas.setOnion({2, 2, 0.45f});
+    fixture.settleAt(1.0);
+
+    // One more mark on the neighbour, as its own step, with the playhead left
+    // where it is -- undo does not move it.
+    drawCurves(fixture.doc, fixture.track, before, fixture.layer, 3, 1920, 1080);
+    fixture.canvas.setFrame(1);
+    fixture.canvas.grab();
+
+    CHECK(fixture.doc.undo());
+    fixture.canvas.refreshAll();
+    const QImage shown = fixture.canvas.grab().toImage();
+
+    fixture.canvas.setFrame(1);
+    const QImage rebuilt = fixture.canvas.grab().toImage();
+    CHECK(shown == rebuilt);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -650,5 +716,7 @@ int main(int argc, char** argv) {
     aScrolledCacheHoldsWhatARecompositeWouldHave();
     aZoomCompositesFromNothing();
     twoViewChangesBeforeAPaint();
+    aLayerSwitchedOffReachesTheOnion();
+    anUndoOnANeighbourReachesTheOnion();
     return testing::summarise("render");
 }

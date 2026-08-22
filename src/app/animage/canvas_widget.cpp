@@ -872,12 +872,37 @@ std::vector<CanvasWidget::Ghost> CanvasWidget::collectGhosts() const {
     return ghosts;
 }
 
+// Everything the buffer the ghosts are painted into depends on. See OnionState.
+CanvasWidget::OnionState CanvasWidget::onionState() const {
+    OnionState state;
+    state.ghosts = collectGhosts();
+
+    const Track* track = doc_.scene().findTrack(track_);
+    if (!track) return state;
+    state.layers = track->layers;
+
+    state.revisions.reserve(state.ghosts.size() * track->layers.size());
+    for (const Ghost& ghost : state.ghosts) {
+        const Image* image = track->findImage(ghost.image);
+        for (const Layer& layer : track->layers) {
+            const Cel* cel = image ? doc_.cel(image->celFor(layer.id)) : nullptr;
+            state.revisions.push_back(cel ? cel->revision() : 0);
+        }
+    }
+    return state;
+}
+
 // Flattens the neighbouring drawings into one tinted, faded layer. Previous
 // drawings go warm and later ones cool, which is the convention every animator
 // already reads without being told.
 void CanvasWidget::rebuildOnion() {
+    // Taken first and kept whatever route this takes out, including the ones
+    // that leave the buffer empty: what is recorded is what the buffer holds,
+    // and "nothing, because there are no ghosts" is a thing it can hold.
+    onion_state_ = onionState();
+
     onion_.resize(0, 0);
-    if (cached_region_.isEmpty() || collectGhosts().empty()) return;
+    if (cached_region_.isEmpty() || onion_state_.ghosts.empty()) return;
 
     // Not cleared here: paintOnion empties the region it is about to paint,
     // and this asks it for the whole buffer.
@@ -1333,6 +1358,15 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // whatever was solved by the time this ran; a fill landing later brings the
     // paint on itself.
     requestCtgFills();
+
+    // Asked only when the whole cache is being composited again, which is what
+    // every path that can change the ghosts does -- refreshAll is how a layer
+    // being switched off, an undo, and an opacity all arrive. A stroke marks a
+    // dirty rectangle instead and cannot have moved a neighbouring drawing, so
+    // the comparison stays off the per-dab path entirely.
+    if (dirty_everything_ && !onion_dirty_ && !(onionState() == onion_state_)) {
+        onion_dirty_ = true;
+    }
     if (onion_dirty_) {
         rebuildOnion();
         onion_dirty_ = false;

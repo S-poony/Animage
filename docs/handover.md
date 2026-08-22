@@ -3569,6 +3569,33 @@ repainted the lot — so the same operation appeared to have two behaviours. Any
 path that regenerates a fill has to mark everything dirty.
 
 
+### What refreshAll does not refresh, and the buffer nobody was invalidating
+**The onion buffer is derived state and nothing was deriving it again.** The
+ghosts are composited through the same layer flags as the drawing in front of
+them and out of the same cels, so switching a layer off, or undoing a stroke
+made on a neighbouring drawing, changes what they should look like. `refreshAll`
+marks the display cache dirty and the onion buffer is not the display cache, so
+the ghosts went on showing a layer that was no longer there until a frame change
+happened to rebuild them. Reported as "the onion doesn't update when you toggle
+a layer".
+
+It had been that way from the start and was hidden by an accident: every cache
+rebuild set `onion_dirty_`, so panning past the margin rebuilt the ghosts and
+cleared the staleness. Scrolling the cache took that away, and a latent fault
+became a visible one — which is the useful half of the story, because the
+accident was never the mechanism and the bug was never in the pan.
+
+Fixed by comparison rather than by signalling: `OnionState` holds the ghost
+list, the track's layer list and the cel revisions behind each ghost, and the
+buffer is rebuilt when it stops matching. There are twenty-six calls to
+`refreshAll`, and a rule that every future one has to remember to invalidate the
+onion is a rule that will be forgotten. The layer list is held whole and
+compared with a defaulted `operator==` for the same reason — a field added to
+`Layer` joins the comparison without anybody doing anything. Asked only when the
+whole cache is being composited again, which every path that can change the
+ghosts does, so it stays off the per-dab path entirely.
+
+
 ### Which strokes count as drawing, and the one the solve guard missed
 **The per-dab solve came back through the other door.** The guard was "is a
 scribble being drawn", which covers drawing on the colour layer and misses

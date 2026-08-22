@@ -92,6 +92,14 @@ struct Layer {
     // a property of the drawing: what is on the layer does not change, only
     // which of the two you are looking at.
     bool show_scribbles = false;
+
+    // Defaulted, so a field added above is compared without anybody having to
+    // remember. The canvas holds a copy of the layer list the onion skin was
+    // built from and rebuilds the ghosts when it stops matching -- they are
+    // composited through these same flags, so a layer switched off has to reach
+    // them, and a comparison that listed the fields by hand would go stale the
+    // first time one was added.
+    friend bool operator==(const Layer&, const Layer&) = default;
 };
 
 }  // namespace animage

@@ -475,8 +475,37 @@ private:
         animage::ImageId image = animage::kNoId;
         float weight = 0.0f;
         float r = 0.0f, g = 0.0f, b = 0.0f;
+
+        friend bool operator==(const Ghost&, const Ghost&) = default;
     };
     std::vector<Ghost> collectGhosts() const;
+
+    // Everything the onion buffer was built from.
+    //
+    // The ghosts are composited through the same layer flags as the drawing in
+    // front of them and out of the same cels, so switching a layer off or
+    // undoing a stroke made on a neighbouring drawing changes what they should
+    // look like -- and nothing was telling them. `refreshAll` marks the display
+    // cache dirty, and the onion buffer is not the display cache, so the
+    // ghosts went on showing a layer that was no longer there until a frame
+    // change happened to rebuild them.
+    //
+    // Compared rather than signalled, because there are twenty-six calls to
+    // `refreshAll` and a rule that every future one has to remember is a rule
+    // that will be forgotten. The layer list is held whole and compared with a
+    // defaulted `operator==` for the same reason: a field added to `Layer` is
+    // then part of the comparison without anybody doing anything.
+    struct OnionState {
+        std::vector<Ghost> ghosts;
+        std::vector<animage::Layer> layers;
+        // One per ghost per layer, in that order: what the ghosts are drawn
+        // from, so an undo that moves a neighbouring drawing's pixels counts.
+        std::vector<std::uint64_t> revisions;
+
+        friend bool operator==(const OnionState&, const OnionState&) = default;
+    };
+    OnionState onionState() const;
+
     void rebuildOnion();
     void paintOnion(const animage::PixelRect& region);
     void fitTo(const animage::PixelRect& bounds);
@@ -687,6 +716,8 @@ private:
     // recomposite the neighbouring drawings on every dab.
     animage::Framebuffer onion_;
     bool onion_dirty_ = false;
+    // What onion_ holds, for the comparison OnionState describes.
+    OnionState onion_state_;
     OnionSettings onion_settings_;
     std::size_t slot_ = 0;
     bool playing_ = false;
