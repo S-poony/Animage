@@ -34,6 +34,11 @@
 //   ./build/tests/bench_session -platform offscreen
 //   ./build/tests/bench_session -platform offscreen --project "C:/path/to/the.animage"
 //
+// With no --project it opens tests/projects/chatquimarche.animage, the shot
+// these numbers were taken on. Never point it at a project somebody is working
+// in: the document changes size under it and the machine is busy, and a pair of
+// readings taken that way looked exactly like a regression that was not there.
+//
 // Options: --project FOLDER, --blocks N, --strokes N (per block), --zoom Z,
 //          --onion N (drawings either side; 0, the default, is off),
 //          --transforms N (baked one after another, the pan timed either side
@@ -41,7 +46,9 @@
 //          --lasso N (a selection of N points left up while the pan is timed).
 
 #include <QApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QMouseEvent>
 #include <QPointF>
 #include <QString>
@@ -75,6 +82,22 @@
 using namespace animage;
 
 namespace {
+
+// The shot the pan work was measured on, copied into the tree so that the
+// numbers in the handover can be reproduced without it -- and, more to the
+// point, so that measuring never means opening somebody's live project again.
+// Reading a folder while its owner is drawing in it gives a document that
+// changes size between two runs of the same command and a machine that is busy
+// doing something else, and a pair of readings taken that way looked exactly
+// like a regression that was not there.
+//
+// Relative to this file, so it is found wherever the build tree is.
+constexpr const char* kDefaultProject = "projects/chatquimarche.animage";
+
+QString defaultProjectFolder() {
+    const QDir here(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath());
+    return QDir::cleanPath(here.absoluteFilePath(QString::fromUtf8(kDefaultProject)));
+}
 
 // The canvas widget in a maximised 1920x1080 window, measured off the
 // screenshots on issue #10: the layers dock and the timeline take the rest.
@@ -321,12 +344,18 @@ void printRow(const char* what, long long strokes, const Document& doc, const Dr
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    const Options options = parse(argc, argv);
+    Options options = parse(argc, argv);
 
     Document doc;
     TrackId track = kNoId;
     ImageId image = kNoId;
     LayerId layer = kNoId;
+
+    // Nothing named means the copy in the tree, not nothing: the interesting
+    // measurement is a real shot, and one that cannot move under the bench.
+    if (options.project.isEmpty() && QDir(defaultProjectFolder()).exists()) {
+        options.project = defaultProjectFolder();
+    }
 
     if (!options.project.isEmpty()) {
         QString error;

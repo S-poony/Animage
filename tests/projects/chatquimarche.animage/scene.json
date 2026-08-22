@@ -1,0 +1,303 @@
+{
+    "canvas": {
+        "height": 1080,
+        "width": 1920
+    },
+    "fixed_length": false,
+    "format": "animage-scene",
+    "framerate": 24,
+    "length": 100,
+    "tracks": [
+        {
+            "blend": "normal",
+            "end": "nothing",
+            "id": 1,
+            "images": [
+                {
+                    "cels": [
+                        {
+                            "cel": 96,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 83,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 143,
+                    "number": 15
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 108,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 91,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 151,
+                    "number": 6
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 111,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 157,
+                    "number": 10
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 101,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 92,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 152,
+                    "number": 7
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 105,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 156,
+                    "number": 8
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 100,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 85,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 145,
+                    "number": 1
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 113,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 158,
+                    "number": 11
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 97,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 86,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 146,
+                    "number": 2
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 109,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 89,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 149,
+                    "number": 5
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 99,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 88,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 148,
+                    "number": 4
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 110,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 95,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 155,
+                    "number": 9
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 98,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 87,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 147,
+                    "number": 3
+                }
+            ],
+            "layers": [
+                {
+                    "blend": "normal",
+                    "id": 5,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "TD",
+                    "opacity": 1,
+                    "visible": true
+                },
+                {
+                    "blend": "normal",
+                    "id": 1,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "Rough",
+                    "opacity": 0.12999999523162842,
+                    "visible": true
+                }
+            ],
+            "name": "track 1",
+            "opacity": 1,
+            "overwrite_drawings": true,
+            "slots": [
+                143,
+                143,
+                143,
+                143,
+                143,
+                151,
+                151,
+                157,
+                157,
+                152,
+                152,
+                156,
+                156,
+                145,
+                145,
+                145,
+                145,
+                145,
+                145,
+                145,
+                145,
+                158,
+                158,
+                146,
+                146,
+                146,
+                146,
+                146,
+                146,
+                146,
+                146,
+                146,
+                146,
+                149,
+                149,
+                149,
+                149,
+                149,
+                149,
+                149,
+                148,
+                148,
+                148,
+                155,
+                155,
+                155,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147,
+                147
+            ],
+            "time_offset": 0
+        },
+        {
+            "blend": "normal",
+            "end": "hold",
+            "id": 3,
+            "images": [
+                {
+                    "cels": [
+                        {
+                            "cel": 84,
+                            "layer": 4
+                        }
+                    ],
+                    "id": 144,
+                    "number": 1
+                }
+            ],
+            "layers": [
+                {
+                    "blend": "normal",
+                    "id": 4,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "layer 1",
+                    "opacity": 1,
+                    "visible": true
+                }
+            ],
+            "name": "track 2",
+            "opacity": 1,
+            "overwrite_drawings": true,
+            "slots": [
+                144
+            ],
+            "time_offset": 0
+        }
+    ],
+    "version": 1
+}
