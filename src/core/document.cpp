@@ -88,7 +88,8 @@ void Document::loadScene(Scene scene) {
     scene_ = std::move(scene);
     cels_.clear();
     ctg_cache_.clear();
-    ctg_shifts_.clear();
+    ctg_carries_.clear();
+    carried_marks_.clear();
     undo_stack_.clear();
     redo_stack_.clear();
     pending_ = Command{};
@@ -572,12 +573,16 @@ Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_i
         // no longer is, undo the fill you could see, and do it in response to a
         // stroke somewhere else entirely.
         const Cel* inherited = ctgScribblesAt(track_id, image_id, layer_id);
-        const CtgShift shift = ctgShiftAt(image_id, layer_id);
-        if (inherited && !shift.isZero()) {
+        const CarriedMarks carried = ctgCarriedMarksAt(track_id, image_id, layer_id);
+        const bool moved = carried.tiles != nullptr &&
+                           (!carried.offset.isZero() ||
+                            (inherited && carried.tiles != &inherited->tiles()));
+        if (moved) {
             cel_id = createCel();
             auto made = cels_.find(cel_id);
             if (made != cels_.end()) {
-                made->second->adoptTiles(translated(inherited->tiles(), shift.x, shift.y));
+                made->second->adoptTiles(
+                    translated(*carried.tiles, carried.offset.x, carried.offset.y));
             }
         } else {
             cel_id = inherited ? createCelCopy(*inherited) : createCel();
@@ -588,9 +593,9 @@ Cel* Document::celForWriting(TrackId track_id, ImageId image_id, LayerId layer_i
         addCelRef(cel_id);
 
         // The marks are this drawing's own now, and they are where they were
-        // being shown. Anything that goes on applying the shift to them applies
-        // it twice.
-        ctg_shifts_.erase(CtgKey{image_id, layer_id});
+        // being shown. Anything that goes on carrying them carries them twice.
+        ctg_carries_.erase(CtgKey{image_id, layer_id});
+        carried_marks_.erase(CtgKey{image_id, layer_id});
     }
 
     auto it = cels_.find(cel_id);
@@ -620,9 +625,48 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
     return (found && found->valid) ? found : nullptr;
 }
 
-CtgShift Document::ctgShiftAt(ImageId image_id, LayerId layer_id) const {
-    auto found = ctg_shifts_.find(CtgKey{image_id, layer_id});
-    return (found == ctg_shifts_.end()) ? CtgShift{} : found->second;
+void Document::setCtgCarry(const CtgKey& key, const CtgWarp& warp) {
+    ctg_carries_[key] = warp;
+    carried_marks_.erase(key);
+}
+
+const CtgWarp& Document::ctgCarryAt(ImageId image_id, LayerId layer_id) const {
+    static const CtgWarp kStayedPut;
+    auto found = ctg_carries_.find(CtgKey{image_id, layer_id});
+    return (found == ctg_carries_.end()) ? kStayedPut : found->second;
+}
+
+Document::CarriedMarks Document::ctgCarriedMarksAt(TrackId track_id, ImageId image_id,
+                                                   LayerId layer_id) const {
+    ImageId from = kNoId;
+    const Cel* scribbles = ctgScribblesAt(track_id, image_id, layer_id, &from);
+    if (!scribbles) return {};
+
+    // A drawing's own marks are where they are. Moving them again would move
+    // the stroke being made: a scribble in progress is shown through this path,
+    // and a warp left over from before the drawing took its marks over put the
+    // pen's own line half a screen away from the pen.
+    if (from == image_id) return {&scribbles->tiles(), {}};
+
+    const CtgWarp& warp = ctgCarryAt(image_id, layer_id);
+    if (warp.isUniform()) return {&scribbles->tiles(), warp.overall};
+
+    const CtgKey key{image_id, layer_id};
+    auto found = carried_marks_.find(key);
+    if (found != carried_marks_.end() &&
+        (found->second.cel != scribbles->id() ||
+         found->second.revision != scribbles->revision())) {
+        carried_marks_.erase(found);
+        found = carried_marks_.end();
+    }
+    if (found == carried_marks_.end()) {
+        if (carried_marks_.size() >= kCarriedMarksKept) carried_marks_.clear();
+        found = carried_marks_
+                    .emplace(key, CarriedMarksEntry{scribbles->id(), scribbles->revision(),
+                                                    ctgCarriedMarks(scribbles->tiles(), warp)})
+                    .first;
+    }
+    return {&found->second.tiles, {}};
 }
 
 std::size_t Document::totalTileCount() const {

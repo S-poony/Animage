@@ -26,6 +26,76 @@ struct CtgShift {
     friend bool operator==(const CtgShift&, const CtgShift&) = default;
 };
 
+// The same thing when the drawing did not move all in one piece: one shift per
+// region rather than one for the whole drawing.
+//
+// This is rung three of part 2 of docs/scribbles-through-time.md. Rung two
+// answered "how far did the drawing move" with a number, and a number is the
+// wrong shape of answer for an arm that went one way while the body went
+// another -- so the answer becomes a field, and everything that used to read
+// the number now asks it a question.
+//
+// Two properties, and both are load-bearing rather than tidy:
+//
+// **It is in the coordinates of the drawing the marks were made on**, not of
+// the drawing they are being used on. So the only thing it is ever asked is
+// "this mark pixel was drawn here; where does it go?", which is a question with
+// exactly one answer. Read the other way round -- "what lands on this target
+// pixel?" -- a field where regions have pulled apart has no answer in the space
+// between them and two answers where they overlap, and every reader would need
+// a rule for both.
+//
+// **Uniform is not a special case bolted on, it is the ordinary one.** A
+// drawing with one region, a drawing that did not move, and a layer told not to
+// carry all produce a warp with no field at all, which is `overall` everywhere
+// -- rung two exactly, down to the arithmetic. That is what keeps the cost of
+// this where the motion is, and it is what let the whole representation land
+// and be checked against rung two before anything estimated a region.
+struct CtgWarp {
+    // The whole drawing's translation, and the answer wherever the field has
+    // nothing to say: outside `area`, and in cells no region claimed.
+    //
+    // Rung two's estimate, kept as the fallback rather than thrown away.
+    // Nothing about a region search makes the global answer wrong where no
+    // region reaches; it makes it wrong only where a region disagrees.
+    CtgShift overall;
+
+    // And where they disagreed. Row-major over `area` at `step`, in the source
+    // drawing's pixels; empty when the answer is `overall` everywhere.
+    PixelRect area;
+    int step = 1;
+    std::vector<CtgShift> cells;
+
+    bool isUniform() const { return cells.empty(); }
+    bool isZero() const { return cells.empty() && overall.isZero(); }
+
+    // Where the mark pixel at (x, y) on the source drawing is used.
+    CtgShift at(int x, int y) const;
+
+    friend bool operator==(const CtgWarp&, const CtgWarp&) = default;
+};
+
+// The marks, moved to where they are being used.
+//
+// One function, and every reader goes through it: the seeding inside the solve,
+// the marks the fill shows over its own labels, the Marks column, and the copy
+// the first stroke on a carrying drawing takes. That is not tidiness either --
+// the handover records these same readers disagreeing three ways when the
+// answer was a number they each applied themselves ("three things have to agree
+// about where a mark ended up, and at first only one of them did"). A field is
+// harder to apply than a number, so it is applied once.
+//
+// Cheap in the case that is nearly all of them: a uniform warp is `translated`,
+// which re-keys tile handles outright when the shift is a whole number of tiles
+// and copies rows when it is not. A field costs a pass over the mark tiles,
+// which are the scribbles and not the drawing.
+//
+// Pixels below `threshold` are not marks and are not carried. They would land
+// as nothing anywhere they went; carrying them would cost the pass its
+// sparseness for pixels no reader looks at.
+TileGrid ctgCarriedMarks(const TileGrid& marks, const CtgWarp& warp,
+                         float threshold = kScribbleAlphaThreshold);
+
 // The regenerated fill of a CTG layer. Separated from ctg.h so that Document
 // can hold a cache of these without depending on the solver -- and so that the
 // solver can depend on Document, which it must.
@@ -94,23 +164,23 @@ struct CtgFill {
     // computed, and on an ordinary drawing the ring is the background.
     bool outside_is_clear = true;
 
-    // The marks this was solved from, travelling with the fill.
+    // The marks this was solved from, travelling with the fill -- and already
+    // where they are used rather than where they were drawn.
     //
-    // Handles, so this is nearly free -- and a run of drawings inheriting one
-    // scribble cel shares one set of pixels. It is here because reading a fill
-    // then needs nothing but the fill: no document, no lookup, nothing for a
-    // fourth reader to forget. A mark shows its own pixels whatever the solver
-    // decided, and that guarantee now belongs to the same object as the labels
-    // it overrules rather than to whoever remembers to ask.
+    // Handles when nothing moved them, so a run of drawings inheriting one
+    // scribble cel and standing still shares one set of pixels. It is here
+    // because reading a fill then needs nothing but the fill: no document, no
+    // lookup, nothing for a fourth reader to forget. A mark shows its own
+    // pixels whatever the solver decided, and that guarantee now belongs to the
+    // same object as the labels it overrules rather than to whoever remembers
+    // to ask.
     //
-    // Read through `carried_by`, which is the same shift the seeding used. The
-    // two are the same statement about the same mark, so a seed read in one
-    // place and an override painted in another would put the mark's own pixels
-    // somewhere the solver never saw it.
+    // Carried once, by ctgCarriedMarks, and these are the pixels the seeding
+    // read. Applying `carried_by` to them again would move them twice -- which
+    // is why the warp below is reported and never subtracted here.
     TileGrid marks;
 
-    // Where those marks are drawn: their own bounds, moved by `carried_by`, to
-    // the nearest tile. Derived from the two above and cached here because it
+    // Where those marks are drawn, to the nearest tile. Cached here because it
     // is asked per row -- and working it out costs a scan of every pixel of
     // every mark tile, which is a per-gesture price and not a per-row one.
     //
@@ -160,11 +230,15 @@ struct CtgFill {
     // carried to it. Nothing about the fill differs -- it is who to tell.
     bool inherited = false;
 
-    // And how far they were moved on the way, when the layer follows the
-    // motion. Zero means they were left where they were drawn, whether because
-    // nothing moved, because nothing could be matched, or because the layer was
-    // told not to.
-    CtgShift carried_by;
+    // And how they were moved on the way, when the layer follows the motion.
+    //
+    // Already applied to `marks`: this is what happened, kept so that a
+    // benchmark can report it and a test can check it, and so that anything
+    // outside the fill which has to place the same marks -- the Marks column,
+    // the copy the first stroke takes -- moves them the same way. Zero means
+    // they were left where they were drawn, whether because nothing moved,
+    // because nothing could be matched, or because the layer was told not to.
+    CtgWarp carried_by;
 
     // Mixed from the revisions of the scribble cel and every barrier cel. If
     // this still matches, nothing the fill depends on has moved.

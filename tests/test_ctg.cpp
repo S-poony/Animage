@@ -288,7 +288,7 @@ void theSpanIsTheSameFillAsThePixel() {
         s.stroke(0, s.colour, 100, 110, 150, 110, 6.0f, 1.0f, 0.0f, 0.0f);
 
         const CtgFill& carried = s.fillOf(1);
-        CHECK(carried.carried_by.x != 0);
+        CHECK(carried.carried_by.overall.x != 0);
         theSpanAgreesWithTheReference(carried, "a carried mark");
     }
 }
@@ -1703,8 +1703,8 @@ void aCarriedMarkFollowsTheDrawing() {
     // Found the shift, near enough. It is measured on a coarse grid because a
     // mark does not need to be placed accurately -- what it needs is most of
     // its pixels in the right region.
-    CHECK(std::abs(carried.carried_by.x - 260) <= 12);
-    CHECK(std::abs(carried.carried_by.y) <= 12);
+    CHECK(std::abs(carried.carried_by.overall.x - 260) <= 12);
+    CHECK(std::abs(carried.carried_by.overall.y) <= 12);
 
     // And the shape is filled, where carrying it unchanged fills nothing.
     CHECK_NEAR(fillAt(carried, 390, 160).r, 1.0, 0.02);
@@ -1837,8 +1837,8 @@ void aShapeRedrawnInPlaceHasNotMoved() {
     // Within a small part of the shape. It is not zero and should not be -- the
     // drawing did shift a little -- but a mark in the middle stays in the
     // middle.
-    CHECK(std::abs(carried.carried_by.x) < 60);
-    CHECK(std::abs(carried.carried_by.y) < 60);
+    CHECK(std::abs(carried.carried_by.overall.x) < 60);
+    CHECK(std::abs(carried.carried_by.overall.y) < 60);
     CHECK_NEAR(fillAt(carried, 350, 350).r, 1.0, 0.02);
     CHECK(carried.spread > 5.0f);
 }
@@ -1860,7 +1860,7 @@ void whatIsShownAgreesWithWhatWasSolved() {
     // 1. The Marks column, which shows the scribbles instead of the fill. It
     //    has to show them where they are being used, or it says the fill is
     //    built from marks that are not the ones it was built from.
-    const CtgShift moved = s.doc.ctgShiftAt(s.at(1), s.colour);
+    const CtgShift moved = s.doc.ctgCarryAt(s.at(1), s.colour).overall;
     CHECK(std::abs(moved.x - 260) <= 12);
 
     Compositor compositor;
@@ -1902,7 +1902,7 @@ void whatIsShownAgreesWithWhatWasSolved() {
     //    A stroke in progress is shown through the same path that draws the
     //    Marks column, so a shift left over from before the takeover put the
     //    pen's own line as far from the pen as the drawing had moved.
-    CHECK(s.doc.ctgShiftAt(s.at(1), s.colour).isZero());
+    CHECK(s.doc.ctgCarryAt(s.at(1), s.colour).isZero());
     {
         Layer marks = *s.doc.scene().findTrack(s.track)->findLayer(s.colour);
         marks.show_scribbles = true;
@@ -1918,7 +1918,7 @@ void whatIsShownAgreesWithWhatWasSolved() {
     // Taking the drawing over forgets the shift, and a solve that was already
     // running for the state before it can still land afterwards and put one
     // back. Own marks are where they are whatever the store says.
-    s.doc.ctgShifts()[CtgKey{s.at(1), s.colour}] = CtgShift{260, 0};
+    s.doc.setCtgCarry(CtgKey{s.at(1), s.colour}, CtgWarp{CtgShift{260, 0}, {}, 1, {}});
     Framebuffer late;
     compositor.compositeLayers(s.doc, s.track, s.at(1), {s.colour}, {0, 0, 700, 250}, late);
     CHECK(late.pixel(345, 170).a > 0.5f);

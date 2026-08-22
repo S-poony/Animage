@@ -174,7 +174,7 @@ void carryAcross(int count, int step, float mark, bool follow) {
         const Landing landed = measure(fill, shape.at(i * step));
         std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %5d\n", i + 1, i * step,
                     landed.coverage * 100.0, landed.leak * 100.0,
-                    static_cast<double>(landed.spread), fill.carried_by.x);
+                    static_cast<double>(landed.spread), fill.carried_by.overall.x);
     }
     std::printf("\n");
 }
@@ -292,7 +292,7 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
                     i + 1, i * step, fractionOf(fill, left_half, true) * 100.0,
                     fractionOf(fill, right_half, false) * 100.0,
                     fractionOf(fill, right_half, true) * 100.0,
-                    static_cast<double>(fill.spread), fill.carried_by.x);
+                    static_cast<double>(fill.spread), fill.carried_by.overall.x);
     }
     std::printf("\n");
 }

@@ -513,6 +513,21 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     return {best.x * step, best.y * step};
 }
 
+CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                        const TileGrid& marks, const CtgSettings& settings,
+                        const std::atomic<bool>* abandon) {
+    (void)marks;
+    (void)settings;
+    (void)abandon;
+
+    CtgWarp warp;
+    PixelRect ink;
+    for (const TileGrid& source : to) ink = unite(ink, drawnBounds(source));
+    for (const TileGrid& source : from) ink = unite(ink, drawnBounds(source));
+    warp.overall = estimateCtgShift(from, to, ink);
+    return warp;
+}
+
 CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>* abandon) {
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
@@ -551,19 +566,25 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     //
     // Empty origin_sources is how the job says not to: the marks are this
     // drawing's own, or the layer is set to leave them where they were put.
-    CtgShift shift;
+    CtgWarp warp;
     if (!job.origin_sources.empty()) {
-        PixelRect ink;
-        for (const TileGrid& source : job.sources) ink = unite(ink, drawnBounds(source));
-        for (const TileGrid& source : job.origin_sources) ink = unite(ink, drawnBounds(source));
-        shift = estimateCtgShift(job.origin_sources, job.sources, ink);
+        warp = estimateCtgWarp(job.origin_sources, job.sources, job.scribbles, job.settings,
+                               abandon);
         if (abandoned(abandon)) return kNothing;
     }
 
-    // The marks, where they are being read from: their own place plus wherever
-    // the drawing has taken them.
-    PixelRect region = drawnBounds(job.scribbles);
-    region = {region.x + shift.x, region.y + shift.y, region.width, region.height};
+    // Moved once, here, and read where they are from now on.
+    //
+    // Every other reader of the marks in this function -- the seeding, the
+    // region, the bounds the fill reports -- takes them from this grid, so
+    // there is one place where a mark's position is decided and no arithmetic
+    // anywhere else to get wrong. It also means a warp with a field costs the
+    // same to read as one without.
+    const TileGrid marks =
+        ctgCarriedMarks(job.scribbles, warp, job.settings.scribble_alpha_threshold);
+
+    // The marks, where they are being read from.
+    PixelRect region = drawnBounds(marks);
     for (const TileGrid& source : job.sources) {
         region = unite(region, drawnBounds(source));
     }
@@ -619,10 +640,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
 
     for (int y = 0; y < problem.height; ++y) {
         for (int x = 0; x < problem.width; ++x) {
-            // Read through the shift: the mark is where it was drawn, and this
-            // is the drawing having moved out from under it.
-            const Rgba pixel = job.scribbles.pixel(region.x + x * step - shift.x,
-                                                   region.y + y * step - shift.y);
+            const Rgba pixel = marks.pixel(region.x + x * step, region.y + y * step);
             if (pixel.a < job.settings.scribble_alpha_threshold) continue;
 
             const std::uint32_t key = scribbleLabel(pixel);
@@ -642,7 +660,7 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     built.budget = job.budget;
     built.valid = true;
     built.inherited = job.inherited;
-    built.carried_by = shift;
+    built.carried_by = warp;
     built.colours = static_cast<int>(palette.size());
 
     // No mark landed on the sampling lattice, so there is nothing to cut and
@@ -727,16 +745,12 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     // to, and letting a mark win in its own pixels at full resolution however
     // coarse the solve was. See docs/colour-without-a-canvas.md, phase 1.
     //
-    // The marks travel with the fill, and the shift with them, so that reading
-    // a fill needs nothing but the fill. Copying a grid copies handles, and a
-    // run of drawings inheriting one scribble cel shares one set of pixels.
-    built.marks = job.scribbles;
-    built.marks_drawn = [&] {
-        const PixelRect drawn = drawnBounds(job.scribbles);
-        return drawn.isEmpty() ? drawn
-                               : PixelRect{drawn.x + shift.x, drawn.y + shift.y, drawn.width,
-                                           drawn.height};
-    }();
+    // The marks travel with the fill, already carried, so that reading a fill
+    // needs nothing but the fill. Copying a grid copies handles, and a run of
+    // drawings inheriting one scribble cel and standing still shares one set of
+    // pixels.
+    built.marks = marks;
+    built.marks_drawn = drawnBounds(marks);
     built.mark_threshold = job.settings.scribble_alpha_threshold;
     built.palette_colours.reserve(palette.size());
     for (const std::uint32_t key : palette) built.palette_colours.push_back(scribbleColour(key));

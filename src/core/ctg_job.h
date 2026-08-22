@@ -211,4 +211,24 @@ std::vector<float> ctgBarrier(const std::vector<TileGrid>& sources, const PixelR
 CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
                           const PixelRect& area);
 
+// And how the ink moved when it did not all move together: rung three.
+//
+// One translation per region, where a region is a connected piece of what the
+// marks own on the drawing they were made on -- so the search is asked about
+// the arm and about the body separately, each over its own box and at its own
+// resolution, rather than once about the rectangle round both.
+//
+// This is what fixes the failure rung two was reported for: a global box is as
+// coarse as the furthest thing drawn in it, so something scribbled a long way
+// off changed how a mark somewhere else was carried. A region's box is small
+// however far apart the regions are.
+//
+// Falls back to rung two, deliberately and often. With no marks, one region, or
+// regions that all agree, the answer is a uniform warp and every reader takes
+// the path it took before rung three existed. A region whose own search finds
+// nothing keeps the whole drawing's answer rather than an answer of its own.
+CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                        const TileGrid& marks, const CtgSettings& settings,
+                        const std::atomic<bool>* abandon = nullptr);
+
 }  // namespace animage

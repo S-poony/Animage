@@ -770,8 +770,8 @@ void CanvasWidget::collectColour() {
         ctg_asked_.erase(asked);
         // Where the marks ended up. The Marks column and the first stroke on a
         // carrying drawing both have to agree with the fill about that. See
-        // Document::ctgShiftAt.
-        doc_.ctgShifts()[result.key] = result.fill.carried_by;
+        // Document::ctgCarriedMarksAt.
+        doc_.setCtgCarry(result.key, result.fill.carried_by);
         doc_.ctgCache().store(result.key, std::move(result.fill));
         filled = true;
     }

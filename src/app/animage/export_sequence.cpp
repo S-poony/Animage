@@ -430,7 +430,7 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
                 // The same two writes the canvas makes when a solve lands: the
                 // fill, and where the marks it was made from ended up. Anything
                 // that draws the marks reads the second one.
-                doc.ctgShifts()[{image, layer}] = fill.carried_by;
+                doc.setCtgCarry({image, layer}, fill.carried_by);
                 doc.ctgCache().store({image, layer}, std::move(fill));
             } else {
                 ctgFill(doc, track_id, image, layer, settings);

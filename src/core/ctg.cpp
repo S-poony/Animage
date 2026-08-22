@@ -144,8 +144,9 @@ const CtgFill& ctgFill(Document& doc, TrackId track, ImageId image, LayerId laye
     }
     CtgFill built = solveCtgFill(doc, track, image, layer_id, settings, true);
     // Where the marks ended up, for everything that has to agree with this fill
-    // about that and cannot afford to work it out. See Document::ctgShiftAt.
-    doc.ctgShifts()[key] = built.carried_by;
+    // about that and cannot afford to work it out. See
+    // Document::ctgCarriedMarksAt.
+    doc.setCtgCarry(key, built.carried_by);
     return cache.store(key, std::move(built));
 }
 

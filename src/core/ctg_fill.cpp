@@ -59,6 +59,74 @@ bool labelsAreUsable(const CtgFill& fill, int& width, int& height) {
 
 }  // namespace
 
+CtgShift CtgWarp::at(int x, int y) const {
+    if (cells.empty()) return overall;
+    if (x < area.x || y < area.y || x >= area.x + area.width || y >= area.y + area.height) {
+        return overall;
+    }
+    const int width = (area.width + step - 1) / step;
+    const int cx = (x - area.x) / step;
+    const int cy = (y - area.y) / step;
+    const std::size_t index = static_cast<std::size_t>(cy) * width + cx;
+    return (index < cells.size()) ? cells[index] : overall;
+}
+
+TileGrid ctgCarriedMarks(const TileGrid& marks, const CtgWarp& warp, float threshold) {
+    if (marks.empty() || warp.isZero()) return marks;
+    if (warp.isUniform()) return translated(marks, warp.overall.x, warp.overall.y);
+
+    // Scattered a pixel at a time, because a field is what makes this different
+    // from `translated`: two mark pixels a tile apart can land a hundred pixels
+    // apart, so there is no run of rows to copy. What keeps it affordable is
+    // that it walks the *marks* -- a few scribbles -- and not the drawing.
+    //
+    // The destination tile is remembered between pixels rather than looked up
+    // per pixel. Consecutive source pixels are in one region and one row, so
+    // they land in one destination tile, and the hash is then paid once per
+    // sixty-four instead of once each. The handover records what the other way
+    // costs on this exact shape of loop: 289 ms to nudge a 4K drawing by three
+    // pixels.
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+    TileCoord held{0, 0};
+    Tile* tile = nullptr;
+
+    for (const auto& [coord, source] : marks.tiles()) {
+        if (!source) continue;
+        const int base_x = coord.x * kTileSize;
+        const int base_y = coord.y * kTileSize;
+        for (int y = 0; y < kTileSize; ++y) {
+            const Half* row = source->rgba.data() + static_cast<std::size_t>(y) * kTileSize * 4;
+            for (int x = 0; x < kTileSize; ++x) {
+                const Half* pixel = row + static_cast<std::size_t>(x) * 4;
+                if (pixel[3].toFloat() < threshold) continue;
+
+                const CtgShift shift = warp.at(base_x + x, base_y + y);
+                const int to_x = base_x + x + shift.x;
+                const int to_y = base_y + y + shift.y;
+                const TileCoord want = tileCoordFor(to_x, to_y);
+                if (tile == nullptr || !(want == held)) {
+                    std::shared_ptr<Tile>& destination = built[want];
+                    if (!destination) destination = std::make_shared<Tile>();
+                    tile = destination.get();
+                    held = want;
+                }
+
+                Half* out = tile->rgba.data() +
+                            (static_cast<std::size_t>(tileLocal(to_y)) * kTileSize +
+                             static_cast<std::size_t>(tileLocal(to_x))) *
+                                4;
+                for (int c = 0; c < 4; ++c) out[c] = pixel[c];
+            }
+        }
+    }
+
+    TileGrid moved;
+    for (auto& [coord, made] : built) {
+        if (made && !made->isFullyTransparent()) moved.set(coord, std::move(made));
+    }
+    return moved;
+}
+
 Rgba ctgFillPixel(const CtgFill& fill, int x, int y) {
     if (!fill.valid) return {};
 
@@ -66,7 +134,7 @@ Rgba ctgFillPixel(const CtgFill& fill, int x, int y) {
     // pixels it covers, and the solver's job is only the pixels nobody said
     // anything about.
     if (!fill.marks.empty()) {
-        const Rgba mark = fill.marks.pixel(x - fill.carried_by.x, y - fill.carried_by.y);
+        const Rgba mark = fill.marks.pixel(x, y);
         if (mark.a >= fill.mark_threshold) return scribbleColour(scribbleLabel(mark));
     }
 
@@ -215,12 +283,14 @@ void ctgFillSpan(const CtgFill& fill, int y, int first_x, int stride, int count,
         samplesWithin(marked.x, marked.x + marked.width, first_x, stride, count);
     if (over.count <= 0) return;
 
-    const int mark_y = y - fill.carried_by.y;
+    // Read where they are, because they were carried on the way in. The shift
+    // used to be subtracted here, and doing both would move them twice.
+    const int mark_y = y;
     const int tile_y = tileCoordFor(0, mark_y).y;
     const int local_y = tileLocal(mark_y);
 
     for (long long i = over.first, stop = over.first + over.count; i < stop;) {
-        const int mark_x = first_x + static_cast<int>(i) * stride - fill.carried_by.x;
+        const int mark_x = first_x + static_cast<int>(i) * stride;
         const int tile_x = tileCoordFor(mark_x, 0).x;
         const long long tile_end = static_cast<long long>(tile_x + 1) * kTileSize;
         const long long run = std::min(stop - i, (tile_end - mark_x + stride - 1) / stride);

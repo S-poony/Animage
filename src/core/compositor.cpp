@@ -626,18 +626,14 @@ static void collectPasses(const Document& doc, TrackId track_id, ImageId image_i
                 // whose job is to show what the solver saw would be the one
                 // view that does not.
                 //
-                // Only marks that were carried here. A drawing's own marks are
-                // already where they are, and moving them again would move the
-                // stroke you are making: a scribble in progress is shown
-                // through this path, so a shift left over from before the
-                // drawing took its marks over put the pen's own line half a
-                // screen away from the pen.
-                ImageId from = kNoId;
-                const Cel* scribbles = doc.ctgScribblesAt(track_id, image_id, *it, &from);
-                if (scribbles) {
-                    const CtgShift offset =
-                        (from == image_id) ? CtgShift{} : doc.ctgShiftAt(image_id, *it);
-                    passes.push_back({&scribbles->tiles(), layer, offset});
+                // Which marks, and where, is Document::ctgCarriedMarksAt's
+                // question and not this one's: the same answer is owed to the
+                // first stroke on a carrying drawing, and the two disagreeing
+                // is the bug that was reported.
+                const Document::CarriedMarks carried =
+                    doc.ctgCarriedMarksAt(track_id, image_id, *it);
+                if (carried.tiles) {
+                    passes.push_back({carried.tiles, layer, carried.offset});
                 }
             } else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it)) {
                 passes.push_back({nullptr, layer, {}, fill});

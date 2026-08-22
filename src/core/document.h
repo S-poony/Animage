@@ -155,8 +155,8 @@ public:
     CtgFillCache& ctgCache() { return ctg_cache_; }
     const CtgFillCache& ctgCache() const { return ctg_cache_; }
 
-    // How far the marks a drawing is carrying were moved to get there, as the
-    // last solve of it worked out.
+    // How the marks a drawing is carrying were moved to get there, as the last
+    // solve of it worked out.
     //
     // Derived like everything else about a fill, and kept here because two
     // other things have to agree with the fill about where a mark ended up and
@@ -165,11 +165,40 @@ public:
     // what it was showing. Both would otherwise put the mark somewhere the fill
     // it produced says it is not.
     //
+    // The warp and not the marks it produced. A warp is a few hundred bytes and
+    // this map is unbounded -- one entry per drawing anybody has looked at --
+    // where a carried mark grid is pixels, and would make looking through a
+    // coloured shot cost the marks of every drawing in it twice over. What
+    // costs pixels is bounded instead: see ctgCarriedMarksAt.
+    //
     // Zero when nothing has solved this drawing yet, which is the same answer
     // as "it did not move" and is the behaviour it replaced.
-    using CtgShifts = std::unordered_map<CtgKey, CtgShift, CtgKeyHash>;
-    CtgShifts& ctgShifts() { return ctg_shifts_; }
-    CtgShift ctgShiftAt(ImageId image, LayerId layer) const;
+    // Written through a function rather than by handing the map out, because
+    // the pixels memoised below are derived from it and a warp replaced behind
+    // their back is a drawing showing the marks of a solve that has been
+    // superseded.
+    using CtgCarries = std::unordered_map<CtgKey, CtgWarp, CtgKeyHash>;
+    void setCtgCarry(const CtgKey& key, const CtgWarp& warp);
+    const CtgWarp& ctgCarryAt(ImageId image, LayerId layer) const;
+
+    // The marks of one drawing, where that drawing shows them.
+    //
+    // The one answer to "where is this mark", for everything that is not
+    // holding a fill. A fill carries its own marks already carried; this is
+    // for the Marks column, which is shown whether or not there is a fill, and
+    // for the copy the first stroke on a carrying drawing takes.
+    //
+    // Two shapes of answer, because the cheap one is the ordinary one. A
+    // uniform warp -- no motion, one region, or every region agreeing -- comes
+    // back as the cel's own tiles and an offset, which the compositor draws by
+    // reading a moved rectangle and costs nothing at all. Only a warp with a
+    // field materialises pixels, and those are memoised, because compositing
+    // happens per repaint and warping does not.
+    struct CarriedMarks {
+        const TileGrid* tiles = nullptr;
+        CtgShift offset;  // zero when `tiles` are already where they are drawn
+    };
+    CarriedMarks ctgCarriedMarksAt(TrackId track, ImageId image, LayerId layer) const;
 
     // The regenerated fill for a CTG layer, or null if it has not been built.
     // Const, so the compositor can draw one but never trigger a solve: the
@@ -306,7 +335,29 @@ private:
     std::size_t history_budget_ = kDefaultHistoryBudget;
 
     CtgFillCache ctg_cache_;
-    CtgShifts ctg_shifts_;
+    CtgCarries ctg_carries_;
+
+    // Warped mark grids, kept only for the drawings whose regions disagreed.
+    //
+    // Small on purpose and cleared rather than aged: what reads it is the
+    // handful of drawings on screen at once -- the one being worked on and
+    // whatever onion skin is showing -- and a miss costs a pass over a few mark
+    // tiles. The alternative is holding pixels for every drawing anybody
+    // scrubbed past, which is the memory the warp map above exists not to
+    // spend.
+    //
+    // Checked against the cel it was made from and not only against the warp.
+    // The warp is rewritten by a solve, and a mark drawn on the source drawing
+    // changes the pixels before any solve of *this* drawing has run -- so an
+    // entry that trusted the warp alone would go on showing marks that had been
+    // rubbed out, until something unrelated re-solved.
+    struct CarriedMarksEntry {
+        CelId cel = kNoId;
+        std::uint64_t revision = 0;
+        TileGrid tiles;
+    };
+    static constexpr std::size_t kCarriedMarksKept = 16;
+    mutable std::unordered_map<CtgKey, CarriedMarksEntry, CtgKeyHash> carried_marks_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.
