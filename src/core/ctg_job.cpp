@@ -366,6 +366,39 @@ InkLevel halve(const InkLevel& fine) {
 // scores zero, which is the worst score there is rather than the best. It is
 // also the right question to be asking -- what a translation is *for* is
 // putting ink on ink.
+// **Changing this will not fix the aliasing, and that has been measured.** Ink
+// landing on blank paper earns nothing here and costs nothing, so covering one
+// shape exactly and abandoning another looks better than covering both
+// partially -- which is the obvious thing to blame for a mark sliding onto the
+// wrong shape, and it is not the reason.
+//
+// On drawing 3 of tests/projects/two-circles.animage, where the estimate slides
+// the whole drawing 780 px sideways and puts the left circle's mark on the
+// right circle, the alias beats the honest small shift on *every* criterion
+// that was tried, not only on this one:
+//
+//     criterion            alias (780 px)   honest (-72 px)
+//     agreement                     5.181             4.606
+//     intersection over union       0.350             0.219
+//     normalised correlation        0.636             0.440
+//     the worse of the two
+//       coverages                   0.527             0.413
+//     source ink left unmatched      8.72             33.18
+//
+// It is not that the score is measuring the wrong thing. As a description of
+// two drawings by one translation, sliding everything sideways really is the
+// better answer: the circles move most of their own width between drawings, so
+// lining each up with itself overlaps badly, while lining one up with the other
+// is nearly exact. The data supports the alias.
+//
+// So what is wrong is the model and not the measure. One translation cannot
+// describe two shapes that moved differently, and when it is asked to, the
+// answer it gives is whichever single shape it can explain best -- which is a
+// coin toss between them and has nothing to do with which one the marks are on.
+// Getting past it needs one of: a prior that says drawings do not jump (a
+// scale nobody here has measured), a per-region search that does not start from
+// the global answer, or a deformation that never picks one translation at all,
+// which is the paper. See docs/scribbles-through-time.md.
 double agreement(const InkLevel& from, const InkLevel& to, int dx, int dy) {
     double total = 0.0;
     for (int y = 0; y < to.height; ++y) {
