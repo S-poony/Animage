@@ -757,6 +757,8 @@ CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<Til
     warp.overall = estimateCtgShift(from, to, ink);
     if (marks.empty() || abandoned(abandon)) return warp;
 
+    if (!settings.carry_per_region) return warp;
+
     // What the marks own on the drawing they were made on.
     const MarkRegions regions = markRegions(from, marks, settings, abandon);
     if (regions.count < 2 || abandoned(abandon)) return warp;

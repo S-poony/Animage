@@ -147,6 +147,14 @@ if(TARGET animage_ui)
     target_link_libraries(bench_session PRIVATE psapi)
   endif()
 
+  # Whether a carried mark agrees with a colourist. Needs Qt only to open a
+  # real project -- everything it measures is in core -- and that is the whole
+  # point of it: bench_carry moves a shape this repository drew, and two
+  # drawings by a person are never the same shape twice.
+  add_executable(bench_hand bench_hand.cpp)
+  target_link_libraries(bench_hand PRIVATE animage_ui)
+  target_include_directories(bench_hand PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
   # What playback costs and what it drops. Drives the whole window rather than
   # the canvas alone, because a frame change is a slot change, a layer-flag
   # refresh, a full-cache repaint and a playhead -- and timing only the canvas

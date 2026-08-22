@@ -40,6 +40,17 @@ struct CtgSettings {
     // shape the plan asks for.
     int downscale = 1;
 
+    // Whether a carried mark may move by its own region rather than by the
+    // whole drawing -- rung three of docs/scribbles-through-time.md against
+    // rung two.
+    //
+    // Nothing in the application sets this. It is here so that the two can be
+    // asked the same question about the same drawings: what a rung is worth is
+    // the difference between it and the one below it, and a benchmark that can
+    // only run the current one measures a level rather than a difference. See
+    // bench_hand, which scores both against a shot somebody coloured by hand.
+    bool carry_per_region = true;
+
     LazyBrushOptions lazybrush;
 };
 
