@@ -21,6 +21,8 @@ the shape of the program. Those five maps are.
 | [Naming a track or a layer](#naming-a-track-or-a-layer) | renaming a row where it is, and what a name is allowed to be |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
+| [Colour through time, part three](#colour-through-time-part-three) | one number became a field, and what three shots said about it |
+| [**Scoring a rung against a hand**](#scoring-a-rung-against-a-hand) | `bench_hand`: a shot somebody coloured, as the thing to beat |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
 | [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, the first mode, and changing a key |
 | [A straight line](#a-straight-line) | one key, and a stroke that writes nothing until it is let go |
@@ -1286,6 +1288,151 @@ that changes what is drawn has to be reachable by everything that draws it.**
 The shift lives in `Document::ctgShiftAt`, written by every solve, read by the
 compositor's marks pass and by `celForWriting`. Any fourth thing that shows
 marks must read it too.
+
+## Colour through time, part three
+
+**A carried mark's position stopped being a number and became a field.** Rung
+three of [scribbles-through-time.md](scribbles-through-time.md) — one
+translation per region rather than one per drawing — is built and is the
+default. Rung four, the paper's as-rigid-as-possible lattice, is built and is
+**off**. Both are `CtgSettings::carry`, which nothing in the application sets:
+it exists so that a benchmark can ask three rungs the same question about the
+same drawings.
+
+**The marks are carried once now, and that is the load-bearing part.** Part two
+records three readers each applying one shift their own way and two of them
+getting it wrong. A field is harder to apply than a number, so it is applied in
+one place — `ctgCarriedMarks` — and everything downstream reads pixels that are
+already where they are used. `CtgFill::marks` are carried marks; the warp beside
+them is reported and never subtracted. That change landed on its own, with
+`bench_carry` identical line for line, because the plumbing was the risk and the
+estimator was not.
+
+Two costs came with it. A warp is kept per drawing in a map nothing evicts, so
+it is cropped to the marks and stored no finer than 32 px — a seam between two
+regions that moved differently is that wide, and the majority rule is what makes
+that affordable. And the *pixels* a non-uniform warp produces are memoised in a
+small bounded store (`Document::ctgCarriedMarksAt`), because compositing happens
+per repaint and warping does not. That memo is checked against the source cel's
+**revision** and not only against the warp: a mark rubbed out on the drawing
+being carried *from* has to reach the screen before anything re-solves.
+
+**What rung three is, in one paragraph.** The drawing the marks were made on is
+cut coarsely — its own line art, its own marks, a max-flow inside the estimate
+because the job has no document and the fill of an unvisited drawing is not in
+the cache — and then split into connected pieces of one label. Two shapes
+scribbled the same colour are one label and must not be one region, or the box
+round both is the box round the drawing. Each piece is asked where it went, over
+its own box, starting from what the whole drawing did. It costs 41 ms against
+rung two's 7, beside a 97 ms first solve and a 1553 ms refined one.
+
+**The bound on a region's search is the whole of whether it works.** A region may
+depart from the drawing's answer by half its own *shorter* side, and both halves
+of that are measured. Half a region's width is where a carried mark stops
+holding its region — rung one's own measurement, and a property of the majority
+rule rather than of any estimator. The shorter side is where a region's ink
+starts repeating: given the longer one, the two halves of `bench_carry`'s
+divided box matched each other, 150 px out, and the right half took the left
+half's colour on every drawing.
+
+**And a bound that holds only at the top of a pyramid is not a bound.** See "what
+a coarse level decides that the fine levels never revisit" below.
+
+### What a hand says about a rung
+
+Three shots now disagree with each other, usefully, and the disagreement is the
+finding. **The way a shot is scribbled and the rung that carries it are one
+thing.** The same shot coloured twice — once with marks placed while rung two
+was running, once with marks placed for rung three — ranks the two rungs in
+opposite orders:
+
+| | agreed | wrong colour | no colour |
+|---|---|---|---|
+| coloured for rung two, carried by rung two | 91.5% | 0.6% | 8.0% |
+| coloured for rung two, carried by rung three | 85.7% | 0.5% | 13.8% |
+| coloured for rung three, carried by rung two | 92.9% | 2.6% | 4.5% |
+| coloured for rung three, carried by rung three | 89.9% | **0.7%** | 9.4% |
+
+Drawing by drawing on the second colouring rung three is better on nine, worse
+on four and level on two, and the column that moves most is the wrong one:
+pixels taking a colour that is not the right one go from 2.6% to 0.5%. That is
+the failure that costs a colourist time, because a missing colour announces
+itself and a wrong one has to be found. The person who coloured it estimates the
+second pass was about a fifth less work.
+
+So "which rung is better" is not a question with an answer until somebody says
+how they scribble, and a benchmark that scores a rung on marks placed for a
+different rung is measuring the marks. Both colourings are in the tree.
+
+**Neither of the two numbers settles it, and both are reported.** Pixels answer
+"how much of the picture is wrong", which is not what a colourist pays — a whole
+body that came back with no colour is one scribble to nudge, and three small
+areas each taking a neighbour's colour is three. So there is a count of regions
+that would have to be touched beside it. That one has its own cutoff and misses
+a drawing that was 9.4% wrong without any region's majority flipping. Two ways
+of being wrong about the question, kept side by side, and the pictures are
+better than either.
+
+### Rung four, and why it is off
+
+`estimateCtgLattice`, and it needed no plumbing at all: a rung is now an
+estimator and nothing else. The paper's, with three things taken verbatim — the
+closed-form rigid fit, rigidity decreasing from 256 rounds to 32 over the run,
+and a stopping rule that reads the distance from the rest pose rather than the
+match score — and one thing not: it matches blurred ink coverage on the reduced
+grid rather than pixels, because our drawings are line art.
+
+Embedding the lattice **on the drawing rather than on its bounding box** is the
+paper's too, and skipping it changes the answer rather than the cost: a blank
+node is never pushed, so a lattice over a sparse sheet is a rigid frame nailed
+round everything that moves.
+
+On two shapes that no single translation can describe it is decisive — 56.5% of
+a drawing in the wrong colour becomes none of it. On a real coloured shot it
+does not beat rung three, measured and confirmed by hand.
+
+**The reason has a number on it: registered against a drawing and itself, where
+the only honest answer is that nothing moved, the lattice drifts 146 px.** That
+is the aperture problem — a node sitting on a straight line matches equally well
+anywhere along it — and line art is mostly straight lines where the paper's
+examples are filled cartoon regions. `bench_composite` reports that drift in one
+line. Until it is smaller, nothing else about rung four is worth tuning, and
+that is [#66](https://github.com/S-poony/Animage/issues/66).
+
+## Scoring a rung against a hand
+
+`bench_hand` is the instrument the rungs above are argued with, and it is a
+different kind of measurement from everything else in `tests/`. Every other
+bench moves a shape this repository drew. Two drawings by a person are never the
+same shape twice, and the failure rung two was reported for — drawings that
+drift and change size — is one no fixture here can produce.
+
+So it opens a shot somebody coloured, and for each drawing that owns marks:
+solves it with them, which is the answer to beat; clears them so the drawing
+inherits from the one before it; solves again once per rung; and compares the
+two **fills**. Where a person put a mark is not a fact about anything — what
+they looked at and accepted is the picture. Then it puts the marks back, undoing
+to a recorded depth rather than counting undos, because an edit that changes
+nothing records no command and counting them is how a bench quietly pops
+somebody else's step.
+
+Three shots are in the tree, and they are for different questions:
+
+| | |
+|---|---|
+| `chatquimarche-coloured.animage` | a shot coloured drawing by drawing. Answers "is this better" |
+| `two-circles.animage` | two circles moving up either side of the frame. Answers "what exactly is broken" |
+| `chatquimarche.animage` | the same shot before it was coloured, for `bench_session` |
+
+The circles are the one to reach for first when something is wrong, and they
+were reported rather than constructed. Two shapes the same size means sliding
+the drawing sideways puts one on the other, which is the ambiguity every failure
+so far has turned out to be — and being five drawings of two circles, it runs in
+seconds and every number in it can be checked by eye.
+
+`--pictures DIR` writes the fills out, named `layer-drawing-method`, with the
+colourist's beside them. On a shot with two colour layers both are scored, which
+is how the same drawings under two different ways of scribbling are compared.
 
 ## What a track does past its last drawing
 
@@ -4383,6 +4530,60 @@ and `inputs` names the scribble *cel* and not only its revision, because
 reordering changes which cel is read and moves no revision anywhere.
 
 
+### What a coarse level decides that the fine levels never revisit
+
+A coarse-to-fine search picks its peak at the top of the pyramid and every level
+below only refines that choice. The top level is the one least able to make it:
+at a dozen cells across, two shapes a hundred pixels apart are one smudge.
+
+On drawing 2 of `tests/projects/two-circles.animage` it answered -84 px, which
+scores 3.73 at the finest level, while +84 px scores 4.08 and was never looked
+at. Not a near miss — the better answer was never a candidate. The top level
+keeps several of its peaks now, separated by more than the refinement window or
+they converge on the same place, and each is carried down separately; the one
+still best at the finest level wins. It cannot answer worse than before, because
+the peak the old search started from is always among the candidates.
+
+Two things this cost that are worth having straight. **A bound applied at the
+top of a pyramid is not a bound**: every level below refines by two of its own
+cells, which is 2^level of the finest ones, so a region allowed to depart 75 px
+departed 114. It has to be clamped at every level. And **a better search is not
+the same as better answers** — with the alias no longer missed by luck, one row
+of `bench_carry` got worse, because the search now finds the highest-scoring
+alignment and on that row the highest-scoring alignment is wrong. Which is the
+next entry.
+
+### Why the wrong alignment is sometimes the better answer
+
+The obvious thing to blame when a carried mark lands on the wrong shape is the
+score. `agreement` is a sum of ink times ink, so ink landing on blank paper
+earns nothing and *costs* nothing: covering one shape exactly and abandoning
+another ought to beat covering both partially for the wrong reason.
+
+It does beat it, and that is not why. On two-circles drawing 3, where the
+estimate slides 780 px sideways and puts one circle's mark on the other, the
+alias wins on every criterion tried:
+
+| | alias (780 px) | honest (−72 px) |
+|---|---|---|
+| agreement | **5.181** | 4.606 |
+| intersection over union | **0.350** | 0.219 |
+| normalised cross-correlation | **0.636** | 0.440 |
+| worse of the two coverages | **0.527** | 0.413 |
+| source ink left unmatched | **8.72** | 33.18 |
+
+A sweep over every shift picks it under each of them. The circles move most of
+their own width between drawings, so lining each up with itself overlaps badly
+and lining one up with the other is nearly exact — the data supports the alias.
+
+So the model is wrong and the measure is not. One translation cannot describe
+two things that moved differently, and asked to anyway it reports whichever
+single thing it can explain best, which has nothing to do with which thing the
+marks are on. A ratio test does not save it either: on the drawing before, the
+*right* answer wins by ×1.09, and here the wrong one wins by ×1.13. This is
+written above `agreement` in the source as well, because that is where somebody
+about to change it will be standing.
+
 ### Why an erased scribble left every later solve on that drawing coarser
 **A rectangle built from tile coordinates remembers what you erased.**
 The bounds a cel derives from its tiles — `drawnBounds`, in `tile.h`, and called
@@ -4660,6 +4861,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_session -platform offscreen [--project FOLDER]   # does a session get heavy?
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
+./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]  # against a hand
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
@@ -4681,6 +4883,15 @@ per drawing, marks only the first, and reports what the fill did on the rest:
 how much of the region took the colour, how much of the world outside it did,
 what `spread` said about it, and how far the solve decided the drawing had moved. Every case runs twice, with the marks left where they were drawn and with
 them following the line art, so the two are read side by side.
+
+`bench_hand` is the other measurement of carrying and it asks the question
+`bench_carry` cannot: not "how far does a mark survive being moved a known
+amount", but "does this agree with somebody who coloured the shot". Every rung
+is scored against the same hand on the same drawings, so what it reports is a
+difference between rungs rather than a level. Read
+[scoring a rung against a hand](#scoring-a-rung-against-a-hand) before reading
+its numbers — particularly the part about the marks and the rung being one
+thing, which is what stops the table meaning what it looks like it means.
 
 `bench_save` reports a full save, a full re-save, an incremental save with
 nothing changed and one with a single drawing touched. The last is what autosave
@@ -4856,6 +5067,7 @@ come off it since the first build, with where the reasoning went:
 | EXR export | "export writes 16-bit PNG and EXR", and the section after it |
 | Several tracks (#1), overwrite (#9), track ends (#20) | the two sections on tracks |
 | Carrying marks, and moving them (#3, #6, #7) | "colour through time", parts one and two |
+| Rung three, and rung four beside it | "colour through time", part three |
 | Freeing emptied tiles | "a rectangle built from tile coordinates remembers what you erased" |
 | Lasso and transform, all four phases | "moving a drawing" through "what a transform costs" |
 | The shortcut table, and all of #14 | "what the keyboard does, and when" |
@@ -4892,23 +5104,24 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **Rung three of scribbles that move**: one transform per *region* rather than
-   one per drawing, from the previous fill's regions. Read
-   [scribbles-through-time.md](scribbles-through-time.md) first — rungs one and
-   two are built and measured, and the note now records both what they buy and
-   the one way rung two fails, which is by locking onto the wrong alignment when
-   the ink repeats. Rung four is the paper written for this exact problem
-   (Sýkora, Dingliana & Collins, NPAR 2009) and is what to read before designing
-   anything past three.
+2. **The lattice slides along a line, and until it stops nothing else about rung
+   four is worth tuning.**
+   [#66](https://github.com/S-poony/Animage/issues/66). Rungs three and four are
+   both built — see "colour through time, part three" — and rung four is off
+   because on a real coloured shot it does not beat rung three. The one number
+   that says why is in `bench_composite`: registered against a drawing and
+   itself, the lattice drifts 146 px where the only honest answer is zero. That
+   is the aperture problem and it is a parameter question rather than a
+   construction one.
 3. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the
    drawing a mark came from, so it needs a correspondence between regions on two
-   drawings, which is what item 2 would produce. Every proxy tried on paper —
-   area ratio, region overlap — misfires on fast movement, which is exactly when
-   carrying is most likely to be wrong *and* most likely to be right. And it has
-   to be computed for drawings nobody has opened, which is what the audit did and
-   what `CtgSolver`'s second priority is still there for.
+   drawings. **Rung three now produces exactly that** — `markRegions` cuts the
+   source drawing into the pieces the marks own, and each piece is told where it
+   went — so the thing this was waiting for exists. It still has to be computed
+   for drawings nobody has opened, which is what the audit did and what
+   `CtgSolver`'s second priority is still there for.
 4. **GPU compositing**, if `bench_playback` says it is worth it — not
    `bench_composite`, which watches the half that is not the problem. What it
    says today is that HD is comfortable at any track count and 4K drops between

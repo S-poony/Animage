@@ -5,17 +5,29 @@ Design notes for two things, in this order:
 1. **A scribble stays** from one drawing to the next until the user changes it.
 2. **A scribble moves** to follow the animation.
 
-**Part 1 is built. Part 2 is built as far as its second rung** — one translation
-per drawing, estimated from the line art, on by default — and the rungs past it
-are still research. Rung 3 has moved since this was written, because the fill it
-would read has: see the note under
-[estimating the transform](#estimating-the-transform) before starting it. This document was written straight after the
-single-scribble change, while the solver was still in hand, because a good deal
-of it is a consequence of decisions already made rather than free choices. Where
-building either part contradicted it, the original text is kept and the
-correction is marked **Built:** or **Measured:** underneath — a design note that
-quietly agrees with whatever happened is no use to anybody reading it before
-doing the rest.
+**Part 1 is built. Part 2 is built to its fourth rung, and the third is the one
+that runs.** Rung 3 — one translation per region — is on by default. Rung 4 —
+the paper's as-rigid-as-possible lattice — is built, measured and **off**,
+because on a real coloured shot it does not beat rung 3. Rung 5 is still
+research.
+
+Rung 3 has moved since this was written, because the fill it would read has: see
+the note under [estimating the transform](#estimating-the-transform). This
+document was written straight after the single-scribble change, while the solver
+was still in hand, because a good deal of it is a consequence of decisions
+already made rather than free choices. Where building either part contradicted
+it, the original text is kept and the correction is marked **Built:** or
+**Measured:** underneath — a design note that quietly agrees with whatever
+happened is no use to anybody reading it before doing the rest.
+
+> **Since built, and it is the sentence to read before any of the rest.** Every
+> rung above the second failed the same way and it took three shots to see it:
+> **the way a shot is scribbled and the rung that carries it are one thing, not
+> two.** The same shot coloured twice, once with marks placed for rung 2 and
+> once for rung 3, ranks the two rungs in opposite orders. So a rung cannot be
+> scored on marks placed for a different one, and "which is better" is not a
+> question with an answer until somebody says which way they scribble. See
+> [what a hand says about a rung](handover.md#colour-through-time-part-three).
 
 The first was small, was not blocked by anything, and is most of the plan's
 "onion fill" hypothesis. The second is a research problem with a cheap first
@@ -390,9 +402,75 @@ Order of attack, cheapest first:
    > mode to fear in all of this: not a wrong answer, a confident one.
 3. **One transform per region**, from the previous fill's regions. Translation
    first; affine only if translation measurably is not enough.
+
+   > **Built, and it is the default.** Translation only; affine was never
+   > reached for, because what a region has to answer is where its marks go and
+   > that is whole pixels. `estimateCtgWarp`, and it costs 41 ms against rung
+   > two's 7.
+   >
+   > **The regions are solved here rather than looked up.** The design note
+   > above says to read them off the previous drawing's fill, and the job
+   > carries no document — so the source drawing's line art and its marks, both
+   > already in the job, are cut coarsely inside the estimate. That is a second
+   > max-flow per solve and it is most of the 41 ms. It also removes a
+   > dependency the note did not notice: the fill of a drawing nobody has
+   > visited is not in the cache to be read.
+   >
+   > **A region is a connected piece of one label and not a label.** Two shapes
+   > scribbled the same colour are one label, and the box round both is the box
+   > round the drawing — which is rung two again, on exactly the drawings rung
+   > three is for.
+   >
+   > **What bounds a region's search is the whole of whether it works**, and
+   > both halves of the bound are measured rather than chosen. It may depart
+   > from the whole drawing's answer by half its own *shorter* side: half a
+   > region's width is where a carried mark stops holding its region, which is
+   > rung one's own measurement, and the shorter side is where a region's ink
+   > starts repeating. Given the longer side instead, the two halves of
+   > `bench_carry`'s divided box matched each other and the right half took the
+   > left half's colour on every drawing.
+   >
+   > A confidence margin instead of a bound was measured and **not** built:
+   > wrong departures reached ×1.575 and the departures that are needed start at
+   > ×1.607, so any threshold between them is a constant fitted to a fixture.
+   >
+   > **What it buys and what it costs, on a shot somebody coloured.** On the
+   > drawings whose marks were placed with it running, nine better, four worse,
+   > two level, and pixels taking the *wrong* colour go from 2.6% to 0.5% —
+   > which is the failure that has to be hunted for, where a missing colour
+   > announces itself. On the same shot coloured for rung two it is a net loss.
+   > See the sentence at the top of this document.
 4. **As-rigid-as-possible registration** — Sýkora, Dingliana & Collins, NPAR
    2009, the direct sequel to LazyBrush and built for this. Read it before
    designing anything past 3.
+
+   > **Built, measured, and off by default.** `estimateCtgLattice`. Push every
+   > lattice node on its own to where its neighbourhood matches best, then pull
+   > the lattice back towards rigid, and repeat until it stops moving.
+   >
+   > It needed no plumbing, and that is worth knowing before the next rung:
+   > `CtgWarp` has been a displacement field since rung three, so a rung is now
+   > an estimator and nothing else. Everything that shows a mark reads pixels
+   > that were already carried.
+   >
+   > **On two shapes that a single translation cannot describe it is decisive.**
+   > `tests/projects/two-circles.animage`, which was reported rather than
+   > constructed: rung two and rung three both slide the whole drawing 780 px
+   > and put one circle's mark on the other, and rung four does not, because it
+   > never picks a translation to be wrong about. 56.5% of a drawing in the
+   > wrong colour becomes none of it.
+   >
+   > **On a real shot it does not beat rung three**, measured and confirmed by
+   > hand. It fixes rung three's worst drawing and loses more than it gains
+   > elsewhere.
+   >
+   > **And the reason has a number on it.** Registered against a drawing and
+   > *itself*, where the only honest answer is that nothing moved, the lattice
+   > drifts 146 px. That is the aperture problem: a node on a straight line
+   > matches equally well anywhere along that line, and line art is mostly
+   > straight lines where the paper's examples are filled cartoon regions. It is
+   > the first thing to fix, `bench_composite` reports it in one line, and until
+   > it is fixed nothing else about rung four is worth tuning.
 5. **Region-graph matching.** Regions with adjacency and area from *N*, matched
    against an over-segmentation of *N+1*. Robust to large motion, brittle to
    topology change — a limb crossing a body merges two regions and the match is
