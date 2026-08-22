@@ -288,6 +288,29 @@ int main() {
             }
         }
 
+        // And the lattice, which is rung four and a different cost class: it
+        // iterates push-and-regularise until the shape stops moving, where
+        // everything above answers in one pass.
+        {
+            const CtgJob job = ctgJobFor(doc, track, image, colour);
+            PixelRect ink;
+            for (const TileGrid& source : job.sources) ink = unite(ink, drawnBounds(source));
+            const auto start = Clock::now();
+            const CtgWarp warp = estimateCtgLattice(job.sources, job.sources, ink);
+            const double timed = milliseconds(start, Clock::now());
+            // Against the same drawing, so the honest answer is that nothing
+            // moved. What it reports instead is how far the lattice drifts on a
+            // pair it should have nothing to say about, which is the floor
+            // under every answer it gives.
+            int furthest = 0;
+            for (const CtgShift& cell : warp.cells) {
+                furthest = std::max({furthest, std::abs(cell.x), std::abs(cell.y)});
+            }
+            std::printf("    as-rigid-as-possible lattice            %9.1f ms  "
+                        "(drift on an unmoved drawing: %d px)\n",
+                        timed, furthest);
+        }
+
         for (const auto& [name, budget] :
              {std::pair<const char*, long long>{"first  ", kInteractiveSolveBudget},
               std::pair<const char*, long long>{"refined", kFullSolveBudget}}) {

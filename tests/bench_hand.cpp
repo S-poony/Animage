@@ -89,8 +89,8 @@ QString defaultProjectFolder() {
 // One way of carrying, and what to call it.
 struct Method {
     const char* name;
-    bool follow = false;        // move the marks at all
-    bool per_region = false;    // and by region rather than by drawing
+    bool follow = false;  // move the marks at all
+    CtgSettings::Carry carry = CtgSettings::Carry::WholeDrawing;
 };
 
 // How one fill answered where another one had a colour.
@@ -300,9 +300,10 @@ int main(int argc, char** argv) {
     std::printf("opened %s\n", qPrintable(options.project));
 
     const Method methods[] = {
-        {"left where drawn", false, false},
-        {"one shift  (rung 2)", true, false},
-        {"per region (rung 3)", true, true},
+        {"left where drawn", false, CtgSettings::Carry::WholeDrawing},
+        {"one shift  (rung 2)", true, CtgSettings::Carry::WholeDrawing},
+        {"per region (rung 3)", true, CtgSettings::Carry::PerRegion},
+        {"lattice    (rung 4)", true, CtgSettings::Carry::Lattice},
     };
 
     // Judged every other pixel in both directions. A quarter of the work, and
@@ -387,7 +388,7 @@ int main(int argc, char** argv) {
                 for (std::size_t m = 0; m < std::size(methods); ++m) {
                     CtgJob job = carried;
                     if (!methods[m].follow) job.origin_sources.clear();
-                    job.settings.carry_per_region = methods[m].per_region;
+                    job.settings.carry = methods[m].carry;
 
                     const CtgFill test = solveCtgJob(job, true);
                     const PixelRect over = judged(truth, test);

@@ -2,6 +2,7 @@
 #include "ctg_job.h"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 #include "compositor.h"
@@ -846,7 +847,408 @@ int snappedDown(int value, int origin, int step) {
     return origin + cells * step;
 }
 
+// --- rung four: a lattice that bends ------------------------------------
+//
+// Sykora, Dingliana & Collins, NPAR 2009, "As-Rigid-As-Possible Image
+// Registration for Hand-drawn Cartoon Animations" -- the direct sequel to
+// LazyBrush, by the same authors, written for this exact problem and
+// demonstrating it on this exact application (their figure 7 is scribble
+// transfer into LazyBrush).
+//
+// Everything measured on the rungs below it says the same thing from different
+// directions: one translation cannot describe two things that moved
+// differently, and asked to anyway it reports whichever single thing it can
+// explain best. Rung three tried to fix that by correcting per region *from*
+// the global answer, which fails when the global answer is an alias -- see
+// two-circles drawing 3, where every criterion prefers sliding the whole
+// drawing 780 px sideways. This never picks one translation at all.
+//
+// Two steps, repeated:
+//
+//   Push. Every lattice node moves, on its own, to wherever its own
+//   neighbourhood looks most like the target. Nothing keeps the lattice sane
+//   during this and it is not supposed to -- the paper's figure 2 shows it
+//   going visibly ragged.
+//
+//   Regularise. Each lattice square is fitted with the rigid motion that best
+//   explains where its corners have gone, and every node is then moved to the
+//   average of what the squares sharing it think it should be. Repeated a few
+//   times per push, which is what propagates rigidity across the whole shape.
+//
+// The reason this beats a better search is that the push step is allowed to be
+// wrong. A node can jump anywhere in its window, including onto the wrong
+// circle; what stops it staying there is that its neighbours disagree and the
+// rigid fit pulls it back. A global search has nothing to be pulled back by.
+//
+// Two departures from the paper, both because of what this is for:
+//
+//   It matches ink coverage rather than pixels, blurred, exactly as rungs two
+//   and three do. Their images are filled cartoons; ours are line art, and two
+//   thin lines either coincide or they do not -- the blur is what makes a
+//   drawing a shape, and it was load-bearing for rung two before this.
+//
+//   It runs on the reduced grid rather than at full resolution. A carried mark
+//   needs most of its pixels in the right region and nothing finer, so the
+//   lattice is measured in cells of that grid throughout, and the answer is
+//   whole pixels like every other answer here.
+
+// One node of the lattice: where it started, and where it has got to.
+struct Node {
+    float rest_x = 0.0f;
+    float rest_y = 0.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    bool anchored = false;  // no ink under it, so nothing to match; only smoothed
+};
+
+// Four nodes with a rest shape, which is what the rigid fit is fitted to.
+struct Square {
+    int corner[4] = {0, 0, 0, 0};
+};
+
+// The lattice's own numbers, in cells of the ink grid it matches on.
+//
+// Taken from the paper's ratios rather than its pixels: at PAL its blocks are
+// 16 px on a 720-wide image, which is a lattice about forty-five squares
+// across, and its search window is three times the block. Ours is a grid a
+// fixed number of cells wide however large the drawing is, so the same ratios
+// are these three numbers and they do not move with the drawing.
+constexpr int kNodeSpacing = 3;   // cells between lattice nodes
+constexpr int kBlockReach = 3;    // half-width of the neighbourhood matched
+constexpr int kSearchReach = 8;   // half-width of the window searched
+
+// How hard the shape is held together, and for how long.
+//
+// The paper decreases its inner count from 256 to 32 over the first fifty
+// steps: rigid to begin with, so that a limb cannot fly off while the pose is
+// still being found, and looser afterwards, so the drawing can bend where it
+// really bends. That is their "hierarchy of deformation models" without the
+// hierarchy, and it is the same shape as the reach bound rung three needed.
+constexpr int kSmoothingAtFirst = 256;
+constexpr int kSmoothingAtLast = 32;
+constexpr int kSteps = 40;
+constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
+
+// How much the neighbourhood of (x, y) in `a` looks like the neighbourhood of
+// (x + dx, y + dy) in `b`. Agreement, for the same reason everything else here
+// uses it -- see the note above `agreement`.
+double blockAgreement(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
+    double total = 0.0;
+    for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
+        const int ay = y + oy;
+        const int by = y + oy + dy;
+        if (ay < 0 || ay >= a.height || by < 0 || by >= b.height) continue;
+        for (int ox = -kBlockReach; ox <= kBlockReach; ++ox) {
+            const int ax = x + ox;
+            const int bx = x + ox + dx;
+            if (ax < 0 || ax >= a.width || bx < 0 || bx >= b.width) continue;
+            total += static_cast<double>(a.ink[static_cast<std::size_t>(ay) * a.width + ax]) *
+                     static_cast<double>(b.ink[static_cast<std::size_t>(by) * b.width + bx]);
+        }
+    }
+    return total;
+}
+
+// Whether there is anything under this node worth matching.
+bool inkNear(const InkLevel& a, int x, int y) {
+    for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
+        const int ay = y + oy;
+        if (ay < 0 || ay >= a.height) continue;
+        for (int ox = -kBlockReach; ox <= kBlockReach; ++ox) {
+            const int ax = x + ox;
+            if (ax < 0 || ax >= a.width) continue;
+            if (a.ink[static_cast<std::size_t>(ay) * a.width + ax] > 0.0f) return true;
+        }
+    }
+    return false;
+}
+
+// The rigid motion that best takes each square's rest corners to where its
+// corners have got to, applied to the rest corners.
+//
+// The closed form for two dimensions, which is what makes the whole method
+// cheap: no linear system, no decomposition. The angle that minimises the sum
+// of squared distances is the one whose tangent is the cross product over the
+// dot product of the two centred point sets -- Schaefer, McPhail & Warren 2006,
+// which the paper takes it from.
+void regularise(std::vector<Node>& nodes, const std::vector<Square>& squares, int rounds) {
+    std::vector<float> sum_x(nodes.size(), 0.0f);
+    std::vector<float> sum_y(nodes.size(), 0.0f);
+    std::vector<int> shared(nodes.size(), 0);
+
+    for (int round = 0; round < rounds; ++round) {
+        std::fill(sum_x.begin(), sum_x.end(), 0.0f);
+        std::fill(sum_y.begin(), sum_y.end(), 0.0f);
+        std::fill(shared.begin(), shared.end(), 0);
+
+        for (const Square& square : squares) {
+            double rest_cx = 0.0;
+            double rest_cy = 0.0;
+            double now_cx = 0.0;
+            double now_cy = 0.0;
+            for (int at : square.corner) {
+                rest_cx += nodes[static_cast<std::size_t>(at)].rest_x;
+                rest_cy += nodes[static_cast<std::size_t>(at)].rest_y;
+                now_cx += nodes[static_cast<std::size_t>(at)].x;
+                now_cy += nodes[static_cast<std::size_t>(at)].y;
+            }
+            rest_cx *= 0.25;
+            rest_cy *= 0.25;
+            now_cx *= 0.25;
+            now_cy *= 0.25;
+
+            double dot = 0.0;
+            double cross = 0.0;
+            for (int at : square.corner) {
+                const Node& node = nodes[static_cast<std::size_t>(at)];
+                const double px = node.rest_x - rest_cx;
+                const double py = node.rest_y - rest_cy;
+                const double qx = node.x - now_cx;
+                const double qy = node.y - now_cy;
+                dot += px * qx + py * qy;
+                cross += px * qy - py * qx;
+            }
+            const double length = std::sqrt(dot * dot + cross * cross);
+            const double cos_a = (length > 1e-9) ? dot / length : 1.0;
+            const double sin_a = (length > 1e-9) ? cross / length : 0.0;
+
+            for (int at : square.corner) {
+                const Node& node = nodes[static_cast<std::size_t>(at)];
+                const double px = node.rest_x - rest_cx;
+                const double py = node.rest_y - rest_cy;
+                sum_x[static_cast<std::size_t>(at)] +=
+                    static_cast<float>(now_cx + cos_a * px - sin_a * py);
+                sum_y[static_cast<std::size_t>(at)] +=
+                    static_cast<float>(now_cy + sin_a * px + cos_a * py);
+                ++shared[static_cast<std::size_t>(at)];
+            }
+        }
+
+        for (std::size_t at = 0; at < nodes.size(); ++at) {
+            if (shared[at] == 0) continue;
+            nodes[at].x = sum_x[at] / static_cast<float>(shared[at]);
+            nodes[at].y = sum_y[at] / static_cast<float>(shared[at]);
+        }
+    }
+}
+
 }  // namespace
+
+CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                           const PixelRect& area, const std::atomic<bool>* abandon) {
+    CtgWarp warp;
+    if (area.isEmpty() || from.empty() || to.empty()) return warp;
+
+    // The same grid rung two matches on, and for the same reasons: a fixed
+    // number of cells across however large the drawing is, averaged rather than
+    // maxed, and blurred so that a drawing is a shape rather than a line.
+    constexpr int kAcross = 128;
+    const int longest = std::max(area.width, area.height);
+    const int shortest = std::min(area.width, area.height);
+    const int step = std::max(1, std::min((longest + kAcross - 1) / kAcross,
+                                          std::max(1, shortest / (4 * kNodeSpacing))));
+
+    InkLevel a;
+    InkLevel b;
+    a.width = b.width = (area.width + step - 1) / step;
+    a.height = b.height = (area.height + step - 1) / step;
+    if (a.width < 4 * kNodeSpacing || a.height < 4 * kNodeSpacing) return warp;
+    a.ink = ctgInkCoverage(from, area, step, InkReduce::Mean);
+    b.ink = ctgInkCoverage(to, area, step, InkReduce::Mean);
+    blur(a);
+    blur(b);
+    if (abandoned(abandon)) return warp;
+
+    // The lattice, over the whole grid. Nodes with no ink under them are still
+    // nodes -- they are what carries rigidity across a gap -- but they are
+    // never pushed, because there is nothing under them to match and whatever a
+    // block match said about blank paper would be noise with a confident face.
+    const int across = (a.width - 1) / kNodeSpacing + 1;
+    const int down = (a.height - 1) / kNodeSpacing + 1;
+    if (across < 3 || down < 3) return warp;
+
+    std::vector<Node> nodes;
+    nodes.reserve(static_cast<std::size_t>(across) * down);
+    for (int ny = 0; ny < down; ++ny) {
+        for (int nx = 0; nx < across; ++nx) {
+            const int x = std::min(nx * kNodeSpacing, a.width - 1);
+            const int y = std::min(ny * kNodeSpacing, a.height - 1);
+            Node node;
+            node.rest_x = node.x = static_cast<float>(x);
+            node.rest_y = node.y = static_cast<float>(y);
+            node.anchored = !inkNear(a, x, y);
+            nodes.push_back(node);
+        }
+    }
+
+    // Only where the drawing is.
+    //
+    // The paper embeds the image in a lattice "respecting its articulated
+    // shape", and skipping that is not a shortcut -- it changes the answer. A
+    // lattice over the whole bounding box of a sparse drawing is mostly blank
+    // paper, and a blank node is never pushed, so those nodes are a rigid frame
+    // nailed round the outside of everything that moves. Measured on the
+    // coloured shot: with the frame, marks came back where the drawing no
+    // longer was and a tenth of the colour landed on nothing.
+    //
+    // A square is kept when any of its corners has ink under it, so the lattice
+    // reaches one square past the drawing and no further -- which is the margin
+    // that lets an outline pull the paper just outside it along.
+    std::vector<Square> squares;
+    squares.reserve(static_cast<std::size_t>(across - 1) * (down - 1));
+    std::vector<char> in_lattice(nodes.size(), 0);
+    for (int ny = 0; ny + 1 < down; ++ny) {
+        for (int nx = 0; nx + 1 < across; ++nx) {
+            const int at = ny * across + nx;
+            const Square square{{at, at + 1, at + across, at + across + 1}};
+            const bool any_ink = std::any_of(std::begin(square.corner), std::end(square.corner),
+                                             [&](int corner) {
+                                                 return !nodes[static_cast<std::size_t>(corner)]
+                                                             .anchored;
+                                             });
+            if (!any_ink) continue;
+            squares.push_back(square);
+            for (int corner : square.corner) in_lattice[static_cast<std::size_t>(corner)] = 1;
+        }
+    }
+    if (squares.empty()) return warp;
+
+    // Push, regularise, and stop when the lattice stops moving.
+    //
+    // The paper stops on the average distance from the rest pose rather than on
+    // the match score, and says why: while part of a shape is crossing ground
+    // that matches nothing, the score barely moves for several iterations and
+    // then falls sharply. A stopping rule reading the score gives up in the
+    // middle of that.
+    double settled_at = -1.0;
+    int settled_for = 0;
+
+    for (int stepped = 0; stepped < kSteps; ++stepped) {
+        if (abandoned(abandon)) return warp;
+
+        for (Node& node : nodes) {
+            if (node.anchored) continue;
+            const int x = static_cast<int>(std::lround(node.rest_x));
+            const int y = static_cast<int>(std::lround(node.rest_y));
+
+            // Where it is now, not where it started: the search is a window
+            // around the node's current guess, so the lattice walks towards the
+            // answer over several steps rather than having to reach it in one.
+            const int at_x = static_cast<int>(std::lround(node.x)) - x;
+            const int at_y = static_cast<int>(std::lround(node.y)) - y;
+
+            int best_x = at_x;
+            int best_y = at_y;
+            double best = blockAgreement(a, b, x, y, at_x, at_y);
+            for (int dy = at_y - kSearchReach; dy <= at_y + kSearchReach; ++dy) {
+                for (int dx = at_x - kSearchReach; dx <= at_x + kSearchReach; ++dx) {
+                    const double scored = blockAgreement(a, b, x, y, dx, dy);
+                    if (scored <= best) continue;
+                    best = scored;
+                    best_x = dx;
+                    best_y = dy;
+                }
+            }
+            node.x = static_cast<float>(x + best_x);
+            node.y = static_cast<float>(y + best_y);
+        }
+
+        // Rigid to begin with and looser later, so that nothing flies off while
+        // the pose is still being found.
+        const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
+        const int rounds = static_cast<int>(std::lround(
+            kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
+        regularise(nodes, squares, std::max(1, rounds));
+
+        double moved = 0.0;
+        for (const Node& node : nodes) {
+            moved += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
+        }
+        moved /= static_cast<double>(nodes.size());
+        if (settled_at >= 0.0 && std::abs(moved - settled_at) < 0.01) {
+            if (++settled_for >= kSettleAfter) break;
+        } else {
+            settled_for = 0;
+        }
+        settled_at = moved;
+    }
+
+    // The lattice, read back as the field a mark is carried through.
+    //
+    // In the source drawing's coordinates, because that is the only question a
+    // warp is ever asked: this mark pixel was drawn here, where does it go. A
+    // node's displacement is exactly that answer for the point it sits on, and
+    // the cells between nodes take the nearest one -- a warp cell is already
+    // coarser than a lattice square, so interpolating would be describing the
+    // field more precisely than it is stored.
+    warp.step = std::max(step * kNodeSpacing, kWarpCellFloor);
+    warp.area = area;
+    const int field_w = (area.width + warp.step - 1) / warp.step;
+    const int field_h = (area.height + warp.step - 1) / warp.step;
+    if (field_w <= 0 || field_h <= 0) return warp;
+    warp.cells.assign(static_cast<std::size_t>(field_w) * field_h, CtgShift{});
+
+    // What the drawing did on average, over the lattice that is really on it.
+    //
+    // Averaging over every node would average in the ones that were never
+    // pushed, which is dividing the motion by however much blank paper the
+    // drawing happens to sit on.
+    long long shifted_x = 0;
+    long long shifted_y = 0;
+    long long counted = 0;
+    for (std::size_t at = 0; at < nodes.size(); ++at) {
+        if (!in_lattice[at]) continue;
+        shifted_x += std::lround((nodes[at].x - nodes[at].rest_x) * step);
+        shifted_y += std::lround((nodes[at].y - nodes[at].rest_y) * step);
+        ++counted;
+    }
+    if (counted > 0) {
+        warp.overall = {static_cast<int>(shifted_x / counted),
+                        static_cast<int>(shifted_y / counted)};
+    }
+
+    // The nearest node that is part of the lattice, ring by ring outwards. A
+    // cell out on the blank paper takes whatever the nearest bit of drawing
+    // did, which is the same answer `overall` would give it on an ordinary
+    // drawing and a better one when the drawing is in two places.
+    const auto nearest = [&](int nx, int ny) -> const Node* {
+        for (int ring = 0; ring < std::max(across, down); ++ring) {
+            for (int dy = -ring; dy <= ring; ++dy) {
+                for (int dx = -ring; dx <= ring; ++dx) {
+                    if (ring > 0 && std::abs(dx) != ring && std::abs(dy) != ring) continue;
+                    const int x = nx + dx;
+                    const int y = ny + dy;
+                    if (x < 0 || y < 0 || x >= across || y >= down) continue;
+                    const std::size_t at = static_cast<std::size_t>(y) * across + x;
+                    if (in_lattice[at]) return &nodes[at];
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    for (int cy = 0; cy < field_h; ++cy) {
+        for (int cx = 0; cx < field_w; ++cx) {
+            const int gx = (cx * warp.step + warp.step / 2) / step;
+            const int gy = (cy * warp.step + warp.step / 2) / step;
+            const int nx = std::clamp((gx + kNodeSpacing / 2) / kNodeSpacing, 0, across - 1);
+            const int ny = std::clamp((gy + kNodeSpacing / 2) / kNodeSpacing, 0, down - 1);
+            const Node* node = nearest(nx, ny);
+            if (node == nullptr) continue;
+            warp.cells[static_cast<std::size_t>(cy) * field_w + cx] = {
+                static_cast<int>(std::lround((node->x - node->rest_x) * step)),
+                static_cast<int>(std::lround((node->y - node->rest_y) * step))};
+        }
+    }
+
+    // Every node agreeing is a uniform warp, and saying so is what puts the
+    // cheap path back: a field of identical shifts costs a lookup per mark
+    // pixel to answer what one number answers.
+    const bool same = std::all_of(warp.cells.begin(), warp.cells.end(),
+                                  [&](const CtgShift& cell) { return cell == warp.overall; });
+    if (same) warp.cells.clear();
+    return warp;
+}
 
 CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
                         const TileGrid& marks, const CtgSettings& settings,
@@ -856,10 +1258,18 @@ CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<Til
     PixelRect ink;
     for (const TileGrid& source : to) ink = unite(ink, drawnBounds(source));
     for (const TileGrid& source : from) ink = unite(ink, drawnBounds(source));
+
+    // Rung four does not begin from a whole-drawing answer, deliberately: what
+    // it is for is the case where there is no good whole-drawing answer to
+    // begin from.
+    if (settings.carry == CtgSettings::Carry::Lattice) {
+        return estimateCtgLattice(from, to, ink, abandon);
+    }
+
     warp.overall = estimateCtgShift(from, to, ink);
     if (marks.empty() || abandoned(abandon)) return warp;
 
-    if (!settings.carry_per_region) return warp;
+    if (settings.carry == CtgSettings::Carry::WholeDrawing) return warp;
 
     // What the marks own on the drawing they were made on.
     const MarkRegions regions = markRegions(from, marks, settings, abandon);

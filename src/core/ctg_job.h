@@ -40,16 +40,21 @@ struct CtgSettings {
     // shape the plan asks for.
     int downscale = 1;
 
-    // Whether a carried mark may move by its own region rather than by the
-    // whole drawing -- rung three of docs/scribbles-through-time.md against
-    // rung two.
+    // How a carried mark is allowed to move: by the whole drawing, by its own
+    // region, or by a lattice that bends. Rungs two, three and four of
+    // docs/scribbles-through-time.md.
     //
-    // Nothing in the application sets this. It is here so that the two can be
+    // Nothing in the application sets this. It is here so that they can be
     // asked the same question about the same drawings: what a rung is worth is
     // the difference between it and the one below it, and a benchmark that can
     // only run the current one measures a level rather than a difference. See
-    // bench_hand, which scores both against a shot somebody coloured by hand.
-    bool carry_per_region = true;
+    // bench_hand, which scores them against a shot somebody coloured by hand.
+    enum class Carry {
+        WholeDrawing,  // rung two: one translation
+        PerRegion,     // rung three: one per piece the marks own
+        Lattice,       // rung four: as-rigid-as-possible
+    };
+    Carry carry = Carry::PerRegion;
 
     LazyBrushOptions lazybrush;
 };
@@ -241,5 +246,21 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
 CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
                         const TileGrid& marks, const CtgSettings& settings,
                         const std::atomic<bool>* abandon = nullptr);
+
+// And how it moved when it did not move rigidly at all: rung four.
+//
+// Sykora, Dingliana & Collins, NPAR 2009 -- the sequel to LazyBrush, by the
+// same authors, written for this problem. The drawing is embedded in a lattice
+// and two steps are repeated: every node moves on its own to wherever its
+// neighbourhood matches best, and then the lattice is pulled back towards being
+// rigid. Neither step is trusted alone, and that is the point of it.
+//
+// It never chooses one translation, which is what everything below it fails on:
+// one translation cannot describe two things that moved differently, and asked
+// to anyway it reports whichever single thing it can explain best. See the note
+// above `agreement` for that measured, and tests/projects/two-circles.animage
+// for it in two shapes.
+CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
+                           const PixelRect& area, const std::atomic<bool>* abandon = nullptr);
 
 }  // namespace animage
