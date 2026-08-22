@@ -381,6 +381,125 @@ double agreement(const InkLevel& from, const InkLevel& to, int dx, int dy) {
     return total;
 }
 
+// The fewest cells a grid can have across and still be searched over.
+//
+// Hoisted out of estimateCtgShift because the search is shared now: a region's
+// slice can be smaller than a drawing, and "not enough grid to look at" has to
+// mean the same thing to both.
+constexpr int kLeastAcross = 4;
+
+// The search itself, on two grids that are already ink.
+//
+// Split out from estimateCtgShift because rung three asks it the same question
+// about a region that rung two asks about a drawing, and the two must not drift
+// apart: every lesson in the comments below -- agreement rather than
+// difference, blur before matching, ties to the answer in hand -- was paid for
+// once and applies to both.
+//
+// What a region adds is the two arguments. `prior` is where to start and what
+// to fall back to, which for a region is what the whole drawing did; `reach` is
+// how far from it to look, in cells, with a negative meaning the whole grid.
+// Together they are the only thing keeping regions from flying apart: a small
+// box has less ink in it than a drawing and therefore more alignments that look
+// good, and rung two already fails by answering confidently rather than by
+// answering vaguely.
+struct SearchResult {
+    bool found = false;
+    CtgShift shift;  // in cells of the level-0 grid
+};
+
+SearchResult searchShiftCells(InkLevel a, InkLevel b, CtgShift prior, int reach,
+                              const std::atomic<bool>* abandon) {
+    if (a.width != b.width || a.height != b.height) return {};
+    if (a.width < kLeastAcross || a.height < kLeastAcross) return {};
+
+    blur(a);
+    blur(b);
+
+    std::vector<InkLevel> pyramid_a{std::move(a)};
+    std::vector<InkLevel> pyramid_b{std::move(b)};
+    while (pyramid_a.back().width > 12 && pyramid_a.back().height > 12) {
+        pyramid_a.push_back(halve(pyramid_a.back()));
+        pyramid_b.push_back(halve(pyramid_b.back()));
+        blur(pyramid_a.back());
+        blur(pyramid_b.back());
+    }
+
+    // Exhaustive at the top, where the grid is a dozen cells across and every
+    // shift can simply be tried, then one refinement per level down. A
+    // translation found at the top is worth two cells at the next level, so the
+    // window below only has to cover the halving.
+    const int top = static_cast<int>(pyramid_a.size()) - 1;
+    const bool bounded = reach >= 0;
+
+    // The bound holds at *every* level, and not only where the search starts.
+    //
+    // Bounding the top alone is not a bound. Each level below refines by two of
+    // its own cells, which is 2^level of the finest ones, so the refinement
+    // walks several times as far again as the top level was ever allowed to
+    // look. It did: with the window applied at the top only, a region of
+    // bench_carry's divided box came back 114 px from where the drawing went,
+    // on a search allowed 75. A bound that holds only at the coarsest level is
+    // the kind that reads correct and is not.
+    const auto centre_at = [&](int level) {
+        return CtgShift{prior.x >> level, prior.y >> level};
+    };
+    const auto reach_at = [&](int level) { return std::max(1, reach >> level); };
+
+    CtgShift best = centre_at(top);
+    for (int level = top; level >= 0; --level) {
+        if (abandoned(abandon)) return {};
+        const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(level)];
+        const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(level)];
+        const bool at_top = level == top;
+
+        // Everything, at the top of an unbounded search -- and not half of it.
+        // The area covers both drawings, so a shape that moved by more than
+        // half of it, which is any shape that has moved most of its own width,
+        // sits outside a window of half the grid and the search then reports
+        // the best wrong answer with nothing to say it was looking in the wrong
+        // place. It is a few hundred thousand operations at this size either
+        // way. Below the top, two cells is what a halving can be out by.
+        int window_x = at_top ? coarse_b.width : 2;
+        int window_y = at_top ? coarse_b.height : 2;
+
+        CtgShift from_above{at_top ? best.x : best.x * 2, at_top ? best.y : best.y * 2};
+        int low_x = from_above.x - window_x;
+        int high_x = from_above.x + window_x;
+        int low_y = from_above.y - window_y;
+        int high_y = from_above.y + window_y;
+
+        if (bounded) {
+            const CtgShift centre = centre_at(level);
+            const int allowed = reach_at(level);
+            from_above.x = std::clamp(from_above.x, centre.x - allowed, centre.x + allowed);
+            from_above.y = std::clamp(from_above.y, centre.y - allowed, centre.y + allowed);
+            low_x = std::max(low_x, centre.x - allowed);
+            high_x = std::min(high_x, centre.x + allowed);
+            low_y = std::max(low_y, centre.y - allowed);
+            high_y = std::min(high_y, centre.y + allowed);
+        }
+
+        // Ties go to the shift already in hand, which at the top is the prior:
+        // nothing to choose between two alignments means this region did
+        // whatever the drawing did, and for a whole drawing that is not moving
+        // at all.
+        CtgShift found = from_above;
+        double score = agreement(coarse_a, coarse_b, found.x, found.y);
+        for (int dy = low_y; dy <= high_y; ++dy) {
+            for (int dx = low_x; dx <= high_x; ++dx) {
+                const double scored = agreement(coarse_a, coarse_b, dx, dy);
+                if (scored <= score) continue;
+                score = scored;
+                found = {dx, dy};
+            }
+        }
+        best = found;
+    }
+
+    return {true, best};
+}
+
 }  // namespace
 
 CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
@@ -394,12 +513,11 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
 
     // But the step has to leave the *short* axis a grid too, and it was taken
     // from the long one alone. A region much wider than it is tall therefore
-    // collapsed the short axis below the minimum below and the whole estimate
+    // collapsed the short axis below the minimum above and the whole estimate
     // was abandoned -- silently, and back to carrying marks unchanged. Twenty-
     // four to one was enough, which was unreachable while the region was
     // clipped to the canvas and is ordinary now that it is the drawn bounds of
     // a whole sheet.
-    constexpr int kLeastAcross = 4;
 
     // And a ceiling on the long axis, because paying for the short one in step
     // is paying for the long one in cells: the exhaustive search at the top is
@@ -461,70 +579,412 @@ CtgShift estimateCtgShift(const std::vector<TileGrid>& from, const std::vector<T
     };
     if (ink_pixels(a) < 1.0 || ink_pixels(b) < 1.0) return {};
 
-    blur(a);
-    blur(b);
-
-    std::vector<InkLevel> pyramid_a{a};
-    std::vector<InkLevel> pyramid_b{b};
-    while (pyramid_a.back().width > 12 && pyramid_a.back().height > 12) {
-        pyramid_a.push_back(halve(pyramid_a.back()));
-        pyramid_b.push_back(halve(pyramid_b.back()));
-        blur(pyramid_a.back());
-        blur(pyramid_b.back());
-    }
-
-    // Exhaustive at the top, where the grid is a dozen cells across and every
-    // shift can simply be tried, then one refinement per level down. A
-    // translation found at the top is worth two cells at the next level, so the
-    // window below only has to cover the halving.
-    //
-    // Every shift, and not half of them. The area covers both drawings, so a
-    // shape that moved by more than half of it -- which is any shape that has
-    // moved most of its own width -- sits outside a window of half the grid,
-    // and the search then reports the best wrong answer with no sign that it
-    // was looking in the wrong place. It is a few hundred thousand operations
-    // at this size either way.
-    CtgShift best;
-    for (int level = static_cast<int>(pyramid_a.size()) - 1; level >= 0; --level) {
-        const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(level)];
-        const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(level)];
-        const bool top = level == static_cast<int>(pyramid_a.size()) - 1;
-
-        const int reach_x = top ? coarse_b.width : 2;
-        const int reach_y = top ? coarse_b.height : 2;
-        const CtgShift from_above{best.x * (top ? 1 : 2), best.y * (top ? 1 : 2)};
-
-        // Ties go to the shift already in hand, which at the top is no shift at
-        // all. Nothing to choose between two alignments means the drawing did
-        // not move, and that is the answer that carries a mark unchanged.
-        CtgShift found = from_above;
-        double score = agreement(coarse_a, coarse_b, found.x, found.y);
-        for (int dy = from_above.y - reach_y; dy <= from_above.y + reach_y; ++dy) {
-            for (int dx = from_above.x - reach_x; dx <= from_above.x + reach_x; ++dx) {
-                const double here = agreement(coarse_a, coarse_b, dx, dy);
-                if (here <= score) continue;
-                score = here;
-                found = {dx, dy};
-            }
-        }
-        best = found;
-    }
-
-    return {best.x * step, best.y * step};
+    const SearchResult found = searchShiftCells(std::move(a), std::move(b), {}, -1, nullptr);
+    if (!found.found) return {};
+    return {found.shift.x * step, found.shift.y * step};
 }
+
+namespace {
+
+// How many cells the source drawing's labelling may cover.
+//
+// Coarse deliberately. What is wanted from it is which pieces of the drawing
+// the marks own and roughly where the boundary between two of them runs -- a
+// judgement about areas, which survives a blocky answer, exactly as the
+// whole-track audit's did. Solving it finely would be paying for a second full
+// solve inside every solve, and nothing downstream could tell the difference.
+constexpr long long kRegionSolveBudget = 256LL * 256;
+
+// How coarse the field a warp carries is allowed to be.
+//
+// The warp is stored per drawing in a map nothing evicts, so its size is a
+// budget and not a detail: at the labelling's own resolution, marks spread over
+// a 1080p drawing would be half a megabyte of shifts per drawing.
+//
+// What it costs is sharpness at the seam between two regions that moved
+// differently, and the majority rule is what makes that affordable. A mark
+// needs most of its pixels in the right region; a mark straddling a seam has a
+// strip of itself up to this wide carried with the neighbour, and it still wins
+// the region it was drawn in.
+constexpr int kWarpCellFloor = 32;
+
+// The drawing the marks were made on, cut into the pieces the marks own.
+//
+// This is the design note's "the previous drawing's solved fill already gives
+// regions for nothing", solved here rather than looked up. The job carries the
+// source drawing's line art and the marks made on it, which is everything the
+// cut needs -- and a job may not read the document, so the fill of the drawing
+// they came from is not something this could ask for even if it were certain to
+// still be in the cache, which on a drawing nobody has visited it is not.
+//
+// A component is a connected piece of one label and not the label itself. Two
+// shapes scribbled the same colour are one label, and a box round both is the
+// box round the drawing -- which is rung two again, on exactly the drawings
+// rung three is for.
+struct MarkRegions {
+    PixelRect area;
+    int step = 1;
+    int width = 0;
+    int height = 0;
+    std::vector<int> component;  // -1 where nothing reached, or where no mark owns it
+    int count = 0;
+};
+
+MarkRegions markRegions(const std::vector<TileGrid>& from, const TileGrid& marks,
+                        const CtgSettings& settings, const std::atomic<bool>* abandon) {
+    MarkRegions found;
+
+    PixelRect area = drawnBounds(marks);
+    for (const TileGrid& source : from) area = unite(area, drawnBounds(source));
+    if (area.isEmpty()) return found;
+    area = {area.x - kTileSize, area.y - kTileSize, area.width + 2 * kTileSize,
+            area.height + 2 * kTileSize};
+
+    int step = std::max(1, settings.downscale);
+    while (static_cast<long long>((area.width + step - 1) / step) *
+               ((area.height + step - 1) / step) >
+           kRegionSolveBudget) {
+        ++step;
+    }
+
+    LazyBrushProblem problem;
+    problem.width = (area.width + step - 1) / step;
+    problem.height = (area.height + step - 1) / step;
+    if (problem.width < kLeastAcross || problem.height < kLeastAcross) return found;
+    problem.intensity = ctgBarrier(from, area, step);
+    problem.seeds.assign(static_cast<std::size_t>(problem.width) * problem.height, -1);
+
+    // The marks where they were made, because this is the drawing they were
+    // made on. Nothing is carried yet -- what is being worked out is what would
+    // carry them.
+    std::unordered_map<std::uint32_t, int> index_of;
+    int colours = 0;
+    for (int y = 0; y < problem.height; ++y) {
+        for (int x = 0; x < problem.width; ++x) {
+            const Rgba pixel = marks.pixel(area.x + x * step, area.y + y * step);
+            if (pixel.a < settings.scribble_alpha_threshold) continue;
+            const std::uint32_t key = scribbleLabel(pixel);
+            auto at = index_of.find(key);
+            if (at == index_of.end()) at = index_of.emplace(key, colours++).first;
+            problem.seeds[static_cast<std::size_t>(y) * problem.width + x] = at->second;
+        }
+    }
+    if (colours == 0) return found;  // no mark landed on this lattice
+    problem.colour_count = colours;
+    problem.hard.assign(static_cast<std::size_t>(colours), 0);
+
+    const LazyBrushResult solved = solveLazyBrush(problem, settings.lazybrush, abandon);
+    if (solved.abandoned) return found;
+    if (solved.labels.size() != problem.seeds.size()) return found;
+
+    // Connected pieces of one label, then only the pieces a mark is in.
+    //
+    // A piece with no mark in it is a part of the drawing nothing is being
+    // carried into, so what it did with itself is not a question anybody is
+    // asking. Dropping them keeps the searches below to the number of marks
+    // rather than to the number of shapes.
+    const std::size_t cells = solved.labels.size();
+    std::vector<int> owner(cells, -1);
+    std::vector<char> owns_a_mark;
+    std::vector<int> stack;
+
+    for (std::size_t seed = 0; seed < cells; ++seed) {
+        if (solved.labels[seed] < 0 || owner[seed] >= 0) continue;
+        const int label = solved.labels[seed];
+        const int id = static_cast<int>(owns_a_mark.size());
+        owns_a_mark.push_back(0);
+
+        stack.clear();
+        stack.push_back(static_cast<int>(seed));
+        owner[seed] = id;
+        while (!stack.empty()) {
+            const int at = stack.back();
+            stack.pop_back();
+            if (problem.seeds[static_cast<std::size_t>(at)] >= 0) {
+                owns_a_mark[static_cast<std::size_t>(id)] = 1;
+            }
+            const int cx = at % problem.width;
+            const int cy = at / problem.width;
+            const auto visit = [&](int nx, int ny) {
+                if (nx < 0 || ny < 0 || nx >= problem.width || ny >= problem.height) return;
+                const std::size_t index = static_cast<std::size_t>(ny) * problem.width + nx;
+                if (owner[index] >= 0 || solved.labels[index] != label) return;
+                owner[index] = id;
+                stack.push_back(static_cast<int>(index));
+            };
+            visit(cx - 1, cy);
+            visit(cx + 1, cy);
+            visit(cx, cy - 1);
+            visit(cx, cy + 1);
+        }
+    }
+
+    std::vector<int> renumbered(owns_a_mark.size(), -1);
+    int count = 0;
+    for (std::size_t id = 0; id < owns_a_mark.size(); ++id) {
+        if (owns_a_mark[id]) renumbered[id] = count++;
+    }
+
+    found.area = area;
+    found.step = step;
+    found.width = problem.width;
+    found.height = problem.height;
+    found.count = count;
+    found.component.assign(cells, -1);
+    for (std::size_t i = 0; i < cells; ++i) {
+        if (owner[i] >= 0) found.component[i] = renumbered[static_cast<std::size_t>(owner[i])];
+    }
+    return found;
+}
+
+// The largest multiple of `step` from `origin` that is not past `value`.
+int snappedDown(int value, int origin, int step) {
+    const int delta = value - origin;
+    const int cells = (delta >= 0) ? delta / step : -((-delta + step - 1) / step);
+    return origin + cells * step;
+}
+
+}  // namespace
 
 CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
                         const TileGrid& marks, const CtgSettings& settings,
                         const std::atomic<bool>* abandon) {
-    (void)marks;
-    (void)settings;
-    (void)abandon;
-
     CtgWarp warp;
+
     PixelRect ink;
     for (const TileGrid& source : to) ink = unite(ink, drawnBounds(source));
     for (const TileGrid& source : from) ink = unite(ink, drawnBounds(source));
     warp.overall = estimateCtgShift(from, to, ink);
+    if (marks.empty() || abandoned(abandon)) return warp;
+
+    // What the marks own on the drawing they were made on.
+    const MarkRegions regions = markRegions(from, marks, settings, abandon);
+    if (regions.count < 2 || abandoned(abandon)) return warp;
+
+    // One pair of ink grids for every region, at the labelling's resolution and
+    // over everything either drawing touches.
+    //
+    // Built once and sliced, rather than measured per region. A region's search
+    // wants its own small box, but ctgInkCoverage pays for compositing the ink
+    // under that box at full resolution -- so asking it once per region would
+    // multiply the one genuinely expensive part of this by the number of marks,
+    // and the boxes overlap, so most of that would be the same pixels again.
+    //
+    // The origin is snapped to the labelling's grid so that a cell of one is a
+    // cell of the other and the two are related by a constant, which is what
+    // lets the mask below be a lookup rather than a rescale.
+    const int step = regions.step;
+    PixelRect field = unite(ink, regions.area);
+    const int snapped_x = snappedDown(field.x, regions.area.x, step);
+    const int snapped_y = snappedDown(field.y, regions.area.y, step);
+    field = {snapped_x, snapped_y, field.x + field.width - snapped_x,
+             field.y + field.height - snapped_y};
+
+    InkLevel whole_from;
+    InkLevel whole_to;
+    whole_from.width = whole_to.width = (field.width + step - 1) / step;
+    whole_from.height = whole_to.height = (field.height + step - 1) / step;
+    if (whole_from.width < kLeastAcross || whole_from.height < kLeastAcross) return warp;
+    whole_from.ink = ctgInkCoverage(from, field, step, InkReduce::Mean);
+    whole_to.ink = ctgInkCoverage(to, field, step, InkReduce::Mean);
+    if (abandoned(abandon)) return warp;
+
+    const int offset_x = (regions.area.x - field.x) / step;
+    const int offset_y = (regions.area.y - field.y) / step;
+
+    // Each region's own cells, as a box on the labelling's grid.
+    struct CellBox {
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = 0;  // half-open
+        int y1 = 0;
+        bool any = false;
+    };
+    std::vector<CellBox> boxes(static_cast<std::size_t>(regions.count));
+    for (int y = 0; y < regions.height; ++y) {
+        for (int x = 0; x < regions.width; ++x) {
+            const int id = regions.component[static_cast<std::size_t>(y) * regions.width + x];
+            if (id < 0) continue;
+            CellBox& box = boxes[static_cast<std::size_t>(id)];
+            if (!box.any) {
+                box = {x, y, x + 1, y + 1, true};
+                continue;
+            }
+            box.x0 = std::min(box.x0, x);
+            box.y0 = std::min(box.y0, y);
+            box.x1 = std::max(box.x1, x + 1);
+            box.y1 = std::max(box.y1, y + 1);
+        }
+    }
+
+    // And what each of them did, starting from what the drawing did.
+    std::vector<CtgShift> moved(static_cast<std::size_t>(regions.count), warp.overall);
+    bool anyone_disagreed = false;
+
+    const auto prior_cells = CtgShift{warp.overall.x / step, warp.overall.y / step};
+
+    for (int id = 0; id < regions.count; ++id) {
+        if (abandoned(abandon)) return CtgWarp{warp.overall, {}, 1, {}};
+        const CellBox& box = boxes[static_cast<std::size_t>(id)];
+        if (!box.any) continue;
+
+        // How far this region is allowed to have gone that the drawing did not.
+        //
+        // Half its own *shorter* side, and both halves of that are measured
+        // rather than chosen.
+        //
+        // Half a region's width is where a carried mark stops holding its
+        // region -- bench_carry's first table, and it is the majority rule
+        // rather than a property of any estimator. So beyond this the mark is
+        // lost whatever the search answers, and what a wider window buys is
+        // only the chance of a confident wrong answer.
+        //
+        // The shorter side and not the longer one because that is the distance
+        // at which a region's own ink starts repeating: a rectangle's outline
+        // matches the next rectangle's outline one width along, and with the
+        // longer side as the window the two halves of bench_carry's divided box
+        // did exactly that -- 150 px of "movement" on a box that had moved with
+        // everything else, and the right half took the left half's colour on
+        // every drawing. Measured before and after; the reach is the whole of
+        // the difference.
+        //
+        // A wider window and a confidence margin instead of this was measured
+        // and not built. Scoring a region's best alignment against its score at
+        // the prior does separate the two -- the divided box's wrong answers
+        // reached x1.003 to x1.575, and the departures the apart case genuinely
+        // needs ran x1.61 to x14.8 -- but the gap between 1.575 and 1.607 is a
+        // constant fitted to a fixture, and this codebase has been bitten by
+        // that shape of number before. What it would buy is the one case this
+        // cannot reach: a region that moved further than half its own width
+        // relative to the drawing, which is past where a carried mark holds its
+        // region anyway. A two-stage search -- this window unconditionally, and
+        // a wider one accepted only above about x2 -- is where to start if that
+        // case turns out to matter.
+        const int across = std::min(box.x1 - box.x0, box.y1 - box.y0);
+        const int reach = std::max(across / 2, kLeastAcross);
+
+        const int x0 = std::max(0, box.x0 + offset_x - reach);
+        const int y0 = std::max(0, box.y0 + offset_y - reach);
+        const int x1 = std::min(whole_from.width, box.x1 + offset_x + reach);
+        const int y1 = std::min(whole_from.height, box.y1 + offset_y + reach);
+        if (x1 - x0 < kLeastAcross || y1 - y0 < kLeastAcross) continue;
+
+        InkLevel mine;
+        InkLevel theirs;
+        mine.width = theirs.width = x1 - x0;
+        mine.height = theirs.height = y1 - y0;
+        mine.ink.assign(static_cast<std::size_t>(mine.width) * mine.height, 0.0f);
+        theirs.ink.assign(mine.ink.size(), 0.0f);
+
+        // The source side is masked to this region and the target side is not.
+        //
+        // That is the whole of what makes this a region's question rather than
+        // a box's: what is being asked is where *this* region's ink went, and
+        // the answer is allowed to be anywhere in the neighbourhood -- so the
+        // ink of the region next door must not be in the source or it drags the
+        // answer back towards what that neighbour did.
+        //
+        // Masked a cell out from the region's own cells, because the labelling
+        // is the region's inside and the ink is its outline: the cut runs
+        // through the line, so the line itself belongs to whichever side won it
+        // and a mask of the interior alone would throw away the only thing
+        // there is to match.
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const std::size_t at =
+                    static_cast<std::size_t>(y - y0) * mine.width + (x - x0);
+                const std::size_t whole =
+                    static_cast<std::size_t>(y) * whole_from.width + x;
+                theirs.ink[at] = whole_to.ink[whole];
+
+                bool near_region = false;
+                for (int dy = -1; dy <= 1 && !near_region; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int lx = x - offset_x + dx;
+                        const int ly = y - offset_y + dy;
+                        if (lx < 0 || ly < 0 || lx >= regions.width || ly >= regions.height) {
+                            continue;
+                        }
+                        if (regions.component[static_cast<std::size_t>(ly) * regions.width + lx] ==
+                            id) {
+                            near_region = true;
+                            break;
+                        }
+                    }
+                }
+                if (near_region) mine.ink[at] = whole_from.ink[whole];
+            }
+        }
+
+        // Nothing to match, in the unit the whole drawing's guard uses: fewer
+        // than one opaque pixel of ink. A region whose outline the mask kept
+        // none of has no question to answer, and the drawing's own answer is
+        // the honest one for it.
+        const double cell_pixels = static_cast<double>(step) * static_cast<double>(step);
+        const auto ink_pixels = [&](const InkLevel& level) {
+            double sum = 0.0;
+            for (float value : level.ink) sum += value;
+            return sum * cell_pixels;
+        };
+        if (ink_pixels(mine) < 1.0 || ink_pixels(theirs) < 1.0) continue;
+
+        const SearchResult found =
+            searchShiftCells(std::move(mine), std::move(theirs), prior_cells, reach, abandon);
+        if (!found.found) continue;
+
+        const CtgShift shift{found.shift.x * step, found.shift.y * step};
+        moved[static_cast<std::size_t>(id)] = shift;
+        if (!(shift == warp.overall)) anyone_disagreed = true;
+    }
+
+    // Every region did what the drawing did, so this is rung two and says so.
+    // Worth being exact about: a uniform warp is the cheap path everywhere that
+    // reads one, and a field of identical shifts would pay for a field and buy
+    // nothing.
+    if (!anyone_disagreed) return warp;
+
+    // The field, over the marks and no further.
+    //
+    // Nothing reads it anywhere else: the one thing a warp is ever asked is
+    // where a mark pixel goes, and outside the marks the answer is the
+    // drawing's. Cropping it here is what keeps a warp a few kilobytes on a
+    // drawing whose labelling was half a megabyte.
+    const PixelRect marked = drawnBounds(marks);
+    if (marked.isEmpty()) return warp;
+
+    warp.step = std::max(step, kWarpCellFloor);
+    warp.area = marked;
+    const int field_w = (marked.width + warp.step - 1) / warp.step;
+    const int field_h = (marked.height + warp.step - 1) / warp.step;
+    warp.cells.assign(static_cast<std::size_t>(field_w) * field_h, warp.overall);
+
+    for (int cy = 0; cy < field_h; ++cy) {
+        for (int cx = 0; cx < field_w; ++cx) {
+            // Whichever region covers most of this cell, since a warp cell is
+            // coarser than a labelling cell and a seam can run through it.
+            std::unordered_map<int, int> votes;
+            int winner = -1;
+            int best = 0;
+            for (int y = 0; y < warp.step; y += step) {
+                for (int x = 0; x < warp.step; x += step) {
+                    const int lx = (marked.x + cx * warp.step + x - regions.area.x) / step;
+                    const int ly = (marked.y + cy * warp.step + y - regions.area.y) / step;
+                    if (lx < 0 || ly < 0 || lx >= regions.width || ly >= regions.height) continue;
+                    const int id =
+                        regions.component[static_cast<std::size_t>(ly) * regions.width + lx];
+                    if (id < 0) continue;
+                    const int count = ++votes[id];
+                    if (count > best) {
+                        best = count;
+                        winner = id;
+                    }
+                }
+            }
+            if (winner < 0) continue;
+            warp.cells[static_cast<std::size_t>(cy) * field_w + cx] =
+                moved[static_cast<std::size_t>(winner)];
+        }
+    }
     return warp;
 }
 

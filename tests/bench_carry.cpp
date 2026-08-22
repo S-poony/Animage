@@ -22,6 +22,7 @@
 //
 // Run it by hand:  ./build/tests/bench_carry
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -36,6 +37,33 @@ using namespace animage;
 using Clock = std::chrono::steady_clock;
 
 namespace {
+
+// What the warp decided, in one column.
+//
+// Rung three's answer is a field, so "how far the drawing moved" stopped being
+// the whole of it: this is how many distinct shifts the field holds and how far
+// the furthest of them is from the drawing's own answer. A bare number is a
+// uniform warp, which is rung two -- and on a case where every region agrees
+// that is the right answer and not a failure to find one.
+std::string decided(const CtgWarp& warp) {
+    char text[64];
+    if (warp.isUniform()) {
+        std::snprintf(text, sizeof(text), "%d", warp.overall.x);
+        return text;
+    }
+    std::vector<CtgShift> distinct{warp.overall};
+    int furthest = 0;
+    for (const CtgShift& cell : warp.cells) {
+        if (std::find(distinct.begin(), distinct.end(), cell) == distinct.end()) {
+            distinct.push_back(cell);
+        }
+        furthest = std::max(furthest, std::abs(cell.x - warp.overall.x));
+        furthest = std::max(furthest, std::abs(cell.y - warp.overall.y));
+    }
+    std::snprintf(text, sizeof(text), "%d/%dx%d", warp.overall.x,
+                  static_cast<int>(distinct.size()), furthest);
+    return text;
+}
 
 constexpr int kCanvasWidth = 900;
 constexpr int kCanvasHeight = 700;
@@ -172,9 +200,9 @@ void carryAcross(int count, int step, float mark, bool follow) {
                                      CtgSettings{}, kFullSolveBudget);
         const CtgFill fill = solveCtgJob(job, true);
         const Landing landed = measure(fill, shape.at(i * step));
-        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %5d\n", i + 1, i * step,
+        std::printf("    %5d   %5d    %7.1f%%  %6.1f%%   %6.2f   %9s\n", i + 1, i * step,
                     landed.coverage * 100.0, landed.leak * 100.0,
-                    static_cast<double>(landed.spread), fill.carried_by.overall.x);
+                    static_cast<double>(landed.spread), decided(fill.carried_by).c_str());
     }
     std::printf("\n");
 }
@@ -233,6 +261,98 @@ double fractionOf(const CtgFill& fill, const PixelRect& area, bool red) {
     return total ? static_cast<double>(matched) / total : 0.0;
 }
 
+// The case rung three exists for: two shapes that do not move together.
+//
+// Everything above moves in one piece, so one translation is the whole truth
+// and rung three can only agree with rung two or be wrong. Cel animation is not
+// like that -- an arm goes one way while the body goes another -- and one
+// translation then has to be wrong about one of them, whichever way it goes.
+//
+// It is also the failure that was reported against rung two from the other end:
+// a global search takes its resolution from the box round everything drawn, so
+// something scribbled a long way off made the carrying of a mark somewhere else
+// worse. Here the two shapes are far apart on purpose.
+struct Apart {
+    int top = 200;
+    int height = 260;
+    int width = 220;
+    int still_left = 60;
+    int moving_left = 560;
+
+    PixelRect still() const { return {still_left, top, width, height}; }
+    PixelRect moving(int shift) const { return {moving_left + shift, top, width, height}; }
+};
+
+void drawClosed(Document& doc, TrackId track, ImageId image, LayerId ink, const PixelRect& box) {
+    const float l = static_cast<float>(box.x);
+    const float t = static_cast<float>(box.y);
+    const float r = static_cast<float>(box.x + box.width);
+    const float b = static_cast<float>(box.y + box.height);
+    strokeOn(doc, track, image, ink, l, t, r, t, 2.5f, 0, 0, 0, false);
+    strokeOn(doc, track, image, ink, l, b, r, b, 2.5f, 0, 0, 0, false);
+    strokeOn(doc, track, image, ink, l, t, l, b, 2.5f, 0, 0, 0, false);
+    strokeOn(doc, track, image, ink, r, t, r, b, 2.5f, 0, 0, 0, false);
+}
+
+void carryAcrossApart(int count, int step, float mark, bool follow) {
+    Document doc;
+    doc.setCanvasSize(kCanvasWidth, kCanvasHeight);
+    const TrackId track = doc.addTrack("main");
+    const LayerId colour = doc.addLayer(track, "colour", 0, LayerKind::Ctg);
+    const LayerId ink = doc.addLayer(track, "ink", 1);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        settings.ctg_follow_motion = follow;
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const Apart shapes;
+    std::vector<ImageId> drawings;
+    for (int i = 0; i < count; ++i) {
+        drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(i)));
+        drawClosed(doc, track, drawings.back(), ink, shapes.still());
+        drawClosed(doc, track, drawings.back(), ink, shapes.moving(i * step));
+    }
+
+    // A mark in each, on the first drawing only. Red in the one that stays,
+    // blue in the one that goes.
+    const PixelRect still = shapes.still();
+    const PixelRect moving = shapes.moving(0);
+    const float middle_y = static_cast<float>(still.y + still.height / 2);
+    strokeOn(doc, track, drawings.front(), colour, static_cast<float>(still.x + still.width / 4),
+             middle_y, static_cast<float>(still.x + 3 * still.width / 4), middle_y, mark, 1.0f,
+             0.0f, 0.0f, true);
+    strokeOn(doc, track, drawings.front(), colour,
+             static_cast<float>(moving.x + moving.width / 4), middle_y,
+             static_cast<float>(moving.x + 3 * moving.width / 4), middle_y, mark, 0.0f, 0.0f,
+             1.0f, true);
+
+    std::printf("  two %dx%d shapes %d px apart, one still, the other moving %d px a drawing, "
+                "marks %s\n",
+                shapes.width, shapes.height, shapes.moving_left - shapes.still_left - shapes.width,
+                step, follow ? "follow" : "stay");
+    std::printf("    drawing   shift    still red   moving blue   spread     decided\n");
+
+    constexpr int kInset = 12;
+    for (int i = 0; i < count; ++i) {
+        const CtgJob job = ctgJobFor(doc, track, drawings[static_cast<std::size_t>(i)], colour,
+                                     CtgSettings{}, kFullSolveBudget);
+        const CtgFill fill = solveCtgJob(job, true);
+
+        const PixelRect a{still.x + kInset, still.y + kInset, still.width - 2 * kInset,
+                          still.height - 2 * kInset};
+        const PixelRect at = shapes.moving(i * step);
+        const PixelRect b{at.x + kInset, at.y + kInset, at.width - 2 * kInset,
+                          at.height - 2 * kInset};
+
+        std::printf("    %5d   %5d      %7.1f%%       %7.1f%%   %6.2f   %9s\n", i + 1, i * step,
+                    fractionOf(fill, a, true) * 100.0, fractionOf(fill, b, false) * 100.0,
+                    static_cast<double>(fill.spread), decided(fill.carried_by).c_str());
+    }
+    std::printf("\n");
+}
+
 void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
                         bool follow) {
     Document doc;
@@ -288,11 +408,11 @@ void carryAcrossDivided(int count, int step, float mark, bool neighbour_marked,
         const PixelRect right_half{mid + kInset, at.y + kInset, at.x + at.width - mid - 2 * kInset,
                                    at.height - 2 * kInset};
 
-        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %5d\n",
+        std::printf("    %5d   %5d     %7.1f%%     %7.1f%%    %7.1f%%   %6.2f   %9s\n",
                     i + 1, i * step, fractionOf(fill, left_half, true) * 100.0,
                     fractionOf(fill, right_half, false) * 100.0,
                     fractionOf(fill, right_half, true) * 100.0,
-                    static_cast<double>(fill.spread), fill.carried_by.overall.x);
+                    static_cast<double>(fill.spread), decided(fill.carried_by).c_str());
     }
     std::printf("\n");
 }
@@ -345,6 +465,16 @@ int main() {
             carryAcrossDivided(6, step, 30.0f, false, follow);
         }
     }
+    std::printf(
+        "\nAnd two shapes that do not move together, which is what one translation\n"
+        "for the whole drawing cannot be right about. Still red and moving blue are\n"
+        "each shape keeping its own colour; one number has to lose one of them.\n\n");
+    for (bool follow : {false, true}) {
+        for (int step : {20, 40, 80}) {
+            carryAcrossApart(6, step, 30.0f, follow);
+        }
+    }
+
     std::printf("all of it in %.1f s\n",
                 std::chrono::duration<double>(Clock::now() - started).count());
     return 0;

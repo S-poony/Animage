@@ -245,6 +245,22 @@ int main() {
                         timed, shift.x, shift.y);
         }
 
+        // And what asking it per region costs instead, which is the same
+        // question plus a coarse cut of the source drawing and one search for
+        // each piece a mark owns. Read as a multiple of the line above and of
+        // the solve below it -- what rung three costs is what it adds to a
+        // solve, and the solve is the expensive thing here.
+        {
+            const CtgJob job = ctgJobFor(doc, track, image, colour);
+            const auto start = Clock::now();
+            const CtgWarp warp =
+                estimateCtgWarp(job.sources, job.sources, job.scribbles, CtgSettings{});
+            const double timed = milliseconds(start, Clock::now());
+            std::printf("    the same per region                    %9.1f ms  (%s)\n", timed,
+                        warp.isUniform() ? "every region agreed"
+                                         : "regions disagreed, a field was built");
+        }
+
         // What flattening the ink costs, over the drawing and over four times
         // as much paper as the drawing needs.
         //
