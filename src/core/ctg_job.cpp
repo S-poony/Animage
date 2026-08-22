@@ -426,9 +426,22 @@ SearchResult searchShiftCells(InkLevel a, InkLevel b, CtgShift prior, int reach,
     }
 
     // Exhaustive at the top, where the grid is a dozen cells across and every
-    // shift can simply be tried, then one refinement per level down. A
-    // translation found at the top is worth two cells at the next level, so the
-    // window below only has to cover the halving.
+    // shift can simply be tried -- then several of the answers it liked are
+    // refined down separately and the one that is still best at full
+    // resolution wins.
+    //
+    // Several, because one was not enough and the case that showed it is in the
+    // tree. On drawing 2 of tests/projects/two-circles.animage the search
+    // answered -84 px, which scores 3.73 at the finest level, while +84 px
+    // scores 4.08 and was never looked at: the coarsest level preferred the
+    // wrong one of two peaks and everything below it only ever refined that
+    // choice. A coarse decision is exactly the decision the coarse level is
+    // worst placed to make.
+    //
+    // This cannot answer worse than taking one. The peak the old search started
+    // from is always among the candidates, refining from it follows the same
+    // path it followed, and the winner is chosen on the finest level's score --
+    // so the answer is that one or something that beats it where it counts.
     const int top = static_cast<int>(pyramid_a.size()) - 1;
     const bool bounded = reach >= 0;
 
@@ -446,55 +459,111 @@ SearchResult searchShiftCells(InkLevel a, InkLevel b, CtgShift prior, int reach,
     };
     const auto reach_at = [&](int level) { return std::max(1, reach >> level); };
 
-    CtgShift best = centre_at(top);
-    for (int level = top; level >= 0; --level) {
-        if (abandoned(abandon)) return {};
-        const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(level)];
-        const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(level)];
-        const bool at_top = level == top;
+    // How many of the top level's peaks are worth following down, and how far
+    // apart two of them have to be to count as different answers.
+    //
+    // The separation is the refinement window: two starting points closer than
+    // that converge on the same place and the second one is a wasted descent.
+    // The count is a price rather than a rule -- more of them can only find a
+    // better answer, never a worse one -- and four is where the descents stop
+    // costing anything next to the exhaustive pass above them.
+    constexpr std::size_t kCandidates = 4;
+    constexpr int kApart = 3;
 
-        // Everything, at the top of an unbounded search -- and not half of it.
-        // The area covers both drawings, so a shape that moved by more than
-        // half of it, which is any shape that has moved most of its own width,
-        // sits outside a window of half the grid and the search then reports
-        // the best wrong answer with nothing to say it was looking in the wrong
-        // place. It is a few hundred thousand operations at this size either
-        // way. Below the top, two cells is what a halving can be out by.
-        int window_x = at_top ? coarse_b.width : 2;
-        int window_y = at_top ? coarse_b.height : 2;
+    const InkLevel& coarse_a = pyramid_a[static_cast<std::size_t>(top)];
+    const InkLevel& coarse_b = pyramid_b[static_cast<std::size_t>(top)];
 
-        CtgShift from_above{at_top ? best.x : best.x * 2, at_top ? best.y : best.y * 2};
-        int low_x = from_above.x - window_x;
-        int high_x = from_above.x + window_x;
-        int low_y = from_above.y - window_y;
-        int high_y = from_above.y + window_y;
+    // Everything, at the top of an unbounded search -- and not half of it. The
+    // area covers both drawings, so a shape that moved by more than half of it,
+    // which is any shape that has moved most of its own width, sits outside a
+    // window of half the grid and the search then reports the best wrong answer
+    // with nothing to say it was looking in the wrong place. It is a few
+    // hundred thousand operations at this size either way.
+    const CtgShift centre = centre_at(top);
+    int low_x = centre.x - coarse_b.width;
+    int high_x = centre.x + coarse_b.width;
+    int low_y = centre.y - coarse_b.height;
+    int high_y = centre.y + coarse_b.height;
+    if (bounded) {
+        const int allowed = reach_at(top);
+        low_x = std::max(low_x, centre.x - allowed);
+        high_x = std::min(high_x, centre.x + allowed);
+        low_y = std::max(low_y, centre.y - allowed);
+        high_y = std::min(high_y, centre.y + allowed);
+    }
 
-        if (bounded) {
-            const CtgShift centre = centre_at(level);
-            const int allowed = reach_at(level);
-            from_above.x = std::clamp(from_above.x, centre.x - allowed, centre.x + allowed);
-            from_above.y = std::clamp(from_above.y, centre.y - allowed, centre.y + allowed);
-            low_x = std::max(low_x, centre.x - allowed);
-            high_x = std::min(high_x, centre.x + allowed);
-            low_y = std::max(low_y, centre.y - allowed);
-            high_y = std::min(high_y, centre.y + allowed);
+    std::vector<std::pair<double, CtgShift>> peaks;
+    peaks.reserve(static_cast<std::size_t>(std::max(0, high_x - low_x + 1)) *
+                  static_cast<std::size_t>(std::max(0, high_y - low_y + 1)));
+    for (int dy = low_y; dy <= high_y; ++dy) {
+        for (int dx = low_x; dx <= high_x; ++dx) {
+            peaks.emplace_back(agreement(coarse_a, coarse_b, dx, dy), CtgShift{dx, dy});
         }
+    }
+    if (abandoned(abandon)) return {};
+    std::sort(peaks.begin(), peaks.end(),
+              [](const auto& left, const auto& right) { return left.first > right.first; });
 
-        // Ties go to the shift already in hand, which at the top is the prior:
-        // nothing to choose between two alignments means this region did
-        // whatever the drawing did, and for a whole drawing that is not moving
-        // at all.
-        CtgShift found = from_above;
-        double score = agreement(coarse_a, coarse_b, found.x, found.y);
-        for (int dy = low_y; dy <= high_y; ++dy) {
-            for (int dx = low_x; dx <= high_x; ++dx) {
-                const double scored = agreement(coarse_a, coarse_b, dx, dy);
-                if (scored <= score) continue;
-                score = scored;
-                found = {dx, dy};
+    // The prior first, so that a tie anywhere below still goes to the answer
+    // already in hand: nothing to choose between two alignments means this
+    // region did whatever the drawing did, and for a whole drawing that it did
+    // not move at all.
+    std::vector<CtgShift> starts{centre};
+    for (const auto& [score, at] : peaks) {
+        if (starts.size() > kCandidates) break;
+        const bool crowded = std::any_of(starts.begin(), starts.end(), [&](const CtgShift& taken) {
+            return std::abs(taken.x - at.x) < kApart && std::abs(taken.y - at.y) < kApart;
+        });
+        if (!crowded) starts.push_back(at);
+    }
+
+    // One candidate, carried down to the finest level.
+    const auto refine = [&](CtgShift from) {
+        double score = agreement(coarse_a, coarse_b, from.x, from.y);
+        for (int level = top - 1; level >= 0; --level) {
+            const InkLevel& fine_a = pyramid_a[static_cast<std::size_t>(level)];
+            const InkLevel& fine_b = pyramid_b[static_cast<std::size_t>(level)];
+
+            // Two cells is what a halving can be out by.
+            CtgShift here{from.x * 2, from.y * 2};
+            int from_x = here.x - 2;
+            int to_x = here.x + 2;
+            int from_y = here.y - 2;
+            int to_y = here.y + 2;
+            if (bounded) {
+                const CtgShift middle = centre_at(level);
+                const int allowed = reach_at(level);
+                here.x = std::clamp(here.x, middle.x - allowed, middle.x + allowed);
+                here.y = std::clamp(here.y, middle.y - allowed, middle.y + allowed);
+                from_x = std::max(from_x, middle.x - allowed);
+                to_x = std::min(to_x, middle.x + allowed);
+                from_y = std::max(from_y, middle.y - allowed);
+                to_y = std::min(to_y, middle.y + allowed);
             }
+
+            CtgShift found = here;
+            score = agreement(fine_a, fine_b, found.x, found.y);
+            for (int dy = from_y; dy <= to_y; ++dy) {
+                for (int dx = from_x; dx <= to_x; ++dx) {
+                    const double scored = agreement(fine_a, fine_b, dx, dy);
+                    if (scored <= score) continue;
+                    score = scored;
+                    found = {dx, dy};
+                }
+            }
+            from = found;
         }
-        best = found;
+        return std::pair<CtgShift, double>{from, score};
+    };
+
+    CtgShift best = centre;
+    double best_score = -1.0;
+    for (const CtgShift& from : starts) {
+        if (abandoned(abandon)) return {};
+        const auto [landed, score] = refine(from);
+        if (score <= best_score) continue;  // ties keep the earlier candidate
+        best_score = score;
+        best = landed;
     }
 
     return {true, best};
