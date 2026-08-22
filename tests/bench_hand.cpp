@@ -122,6 +122,88 @@ Agreement compare(const CtgFill& truth, const CtgFill& test, const PixelRect& ov
     return out;
 }
 
+// How many separate things somebody would have to go and fix.
+//
+// Counting pixels answers "how much of the picture is wrong", and that is not
+// what a colourist pays. A whole body that came back with no colour is one
+// scribble to nudge; three small areas each taking a neighbour's colour is
+// three, and costs more. Weighted by area the first looks like a disaster and
+// the second like nothing, which is the comparison upside down.
+//
+// So the unit is the region: a connected run of one label in the hand-coloured
+// fill, and whether the carried fill gave it that same colour over most of it.
+// Majority, because that is the rule the whole layer runs on -- a region takes
+// the colour with the greater share of its pixels, so a region that is mostly
+// right is right.
+//
+// Regions smaller than a small scribble are skipped. The labelling is exact and
+// its edges are ragged at the cut, so a shape's outline leaves slivers a cell or
+// two wide that nobody would call a region or go and fix.
+struct Fixes {
+    int regions = 0;
+    int wrong = 0;
+};
+
+constexpr long long kSmallestRegion = 24 * 24;  // image pixels
+
+Fixes countFixes(const CtgFill& truth, const CtgFill& test) {
+    Fixes out;
+    const int width = truth.gridWidth();
+    const int height = truth.gridHeight();
+    const std::size_t cells = static_cast<std::size_t>(std::max(0, width)) * std::max(0, height);
+    if (cells == 0 || truth.labels.size() != cells) return out;
+
+    const long long cell_pixels =
+        static_cast<long long>(truth.step) * static_cast<long long>(truth.step);
+    std::vector<char> seen(cells, 0);
+    std::vector<int> stack;
+    std::vector<int> region;
+
+    for (std::size_t start = 0; start < cells; ++start) {
+        if (seen[start] || truth.labels[start] < 0) continue;
+        const std::int16_t label = truth.labels[start];
+
+        region.clear();
+        stack.clear();
+        stack.push_back(static_cast<int>(start));
+        seen[start] = 1;
+        while (!stack.empty()) {
+            const int at = stack.back();
+            stack.pop_back();
+            region.push_back(at);
+            const int cx = at % width;
+            const int cy = at / width;
+            const auto visit = [&](int nx, int ny) {
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+                const std::size_t index = static_cast<std::size_t>(ny) * width + nx;
+                if (seen[index] || truth.labels[index] != label) return;
+                seen[index] = 1;
+                stack.push_back(static_cast<int>(index));
+            };
+            visit(cx - 1, cy);
+            visit(cx + 1, cy);
+            visit(cx, cy - 1);
+            visit(cx, cy + 1);
+        }
+
+        if (static_cast<long long>(region.size()) * cell_pixels < kSmallestRegion) continue;
+        ++out.regions;
+
+        // Compared as colours and not as labels: two fills index their own
+        // palettes, and the same colour is a different number in each.
+        const std::uint32_t wanted =
+            scribbleLabel(truth.palette_colours[static_cast<std::size_t>(label)]);
+        long long agreed = 0;
+        for (int at : region) {
+            const int x = truth.solved.x + (at % width) * truth.step + truth.step / 2;
+            const int y = truth.solved.y + (at / width) * truth.step + truth.step / 2;
+            if (scribbleLabel(ctgFillPixel(test, x, y)) == wanted) ++agreed;
+        }
+        if (agreed * 2 < static_cast<long long>(region.size())) ++out.wrong;
+    }
+    return out;
+}
+
 // What the carry decided, in one column: the shift it gave the whole drawing,
 // and where the field departed from it. A row that went wrong and a row that
 // departed a long way are usually the same row, and without this the table says
@@ -239,10 +321,14 @@ int main(int argc, char** argv) {
 
             std::printf("\n  track \"%s\", layer \"%s\": %zu drawings\n", track.name.c_str(),
                         layer.name.c_str(), shown.size());
-            std::printf("      drawing   marks    method                 same     wrong      none"
-                        "   decided\n");
+            std::printf("      drawing   marks    method                to fix      same"
+                        "     wrong      none   decided\n");
 
             Agreement totals[std::size(methods)];
+            int to_fix[std::size(methods)] = {};
+            int regions[std::size(methods)] = {};
+            std::vector<double> each_same[std::size(methods)];
+            std::vector<double> each_wrong[std::size(methods)];
 
             for (std::size_t at = 0; at < shown.size(); ++at) {
                 const ImageId image = shown[at];
@@ -299,15 +385,22 @@ int main(int argc, char** argv) {
                     const CtgFill test = solveCtgJob(job, true);
                     const PixelRect over = judged(truth, test);
                     const Agreement scored = compare(truth, test, over, kStride);
+                    const Fixes fixes = countFixes(truth, test);
+                    to_fix[m] += fixes.wrong;
+                    regions[m] += fixes.regions;
 
                     totals[m].judged += scored.judged;
                     totals[m].agreed += scored.agreed;
                     totals[m].differed += scored.differed;
                     totals[m].missing += scored.missing;
+                    each_same[m].push_back(scored.percent(scored.agreed));
+                    each_wrong[m].push_back(scored.percent(scored.differed));
 
-                    std::printf("      %5zu    %5s    %-20s %6.1f%%   %6.1f%%   %6.1f%%   %s\n",
+                    char fixed[32];
+                    std::snprintf(fixed, sizeof(fixed), "%d of %d", fixes.wrong, fixes.regions);
+                    std::printf("      %5zu    %5s    %-20s %7s   %6.1f%%   %6.1f%%   %6.1f%%   %s\n",
                                 at + 1, m == 0 ? std::to_string(colours).c_str() : "",
-                                methods[m].name, scored.percent(scored.agreed),
+                                methods[m].name, fixed, scored.percent(scored.agreed),
                                 scored.percent(scored.differed), scored.percent(scored.missing),
                                 methods[m].follow ? decided(test.carried_by).c_str() : "");
 
@@ -335,13 +428,39 @@ int main(int argc, char** argv) {
                 }
             }
 
-            std::printf("      %-32s", "  over the whole shot");
+            // Two summaries, because they answer different questions and the
+            // first one alone was misleading.
+            //
+            // The total is weighted by area, so one drawing where a mark landed
+            // off its shape speaks for the whole shot -- which is worth knowing
+            // and is not what "is this method better" means. The middle drawing
+            // and the worst one say it the other way round: how it goes
+            // ordinarily, and how badly it goes when it goes badly. A method
+            // that is better on most drawings and catastrophic on one is a
+            // different thing from a method that is mildly worse throughout,
+            // and the total cannot tell them apart.
+            std::printf("\n      %-32s%-20s %7s   %6s   %6s   %6s\n", "", "", "to fix",
+                        "same", "wrong", "none");
             for (std::size_t m = 0; m < std::size(methods); ++m) {
-                if (m > 0) std::printf("      %-32s", "");
-                std::printf("%-20s %6.1f%%   %6.1f%%   %6.1f%%\n", methods[m].name,
+                char fixed[32];
+                std::snprintf(fixed, sizeof(fixed), "%d of %d", to_fix[m], regions[m]);
+                std::printf("      %-32s%-20s %7s   %6.1f%%   %6.1f%%   %6.1f%%\n",
+                            m == 0 ? "  over the whole shot" : "", methods[m].name, fixed,
                             totals[m].percent(totals[m].agreed),
                             totals[m].percent(totals[m].differed),
                             totals[m].percent(totals[m].missing));
+            }
+            for (std::size_t m = 0; m < std::size(methods); ++m) {
+                std::vector<double> same = each_same[m];
+                std::vector<double> wrong = each_wrong[m];
+                if (same.empty()) continue;
+                std::sort(same.begin(), same.end());
+                std::sort(wrong.begin(), wrong.end());
+                const double middle = same[same.size() / 2];
+                const double middle_wrong = wrong[wrong.size() / 2];
+                std::printf("      %-32s%-20s %7s   %6.1f%%   %6.1f%%   worst drawing %5.1f%%\n",
+                            m == 0 ? "  the middle drawing" : "", methods[m].name, "", middle,
+                            middle_wrong, same.front());
             }
         }
     }
