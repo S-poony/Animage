@@ -1129,6 +1129,72 @@ struct LatticeFit {
     bool moved = false;
 };
 
+// The shape of the match surface at the offset the push step chose.
+//
+// Sampled rather than derived. The search has already scored the whole window
+// and thrown it away; a second difference over the three cells either side of
+// the winner is the curvature of the surface there, and nine block differences
+// is three per cent on top of the two hundred and eighty-nine the search
+// already paid.
+//
+// The small eigenvalue's direction is the one the surface is flattest along --
+// a valley -- and the ratio of the two eigenvalues is how much of a pit rather
+// than a valley it is. **The ratio and not either eigenvalue**: a block's
+// absolute curvature scales with how much ink is under it, so a cutoff on one
+// eigenvalue would mean a different thing on a thick line than on a thin one,
+// where their ratio means the same thing everywhere.
+struct Surface {
+    double flat_x = 1.0;     // unit vector along the valley
+    double flat_y = 0.0;     //
+    double ratio = 1.0;      // small curvature over large: 1 a pit, 0 a valley
+    bool degenerate = true;  // no curvature in any direction: a plateau
+    bool saddle = false;     // the flat direction is not flat but falling
+};
+
+// A saddle is a place where suppressing motion along the flat direction would
+// be refusing the one direction the cost is still falling in, so it was worth
+// knowing how often it happens before calling anything a trade rather than a
+// defect. Measured: **3% of pushed nodes on the ring and 0% on the box.** It is
+// not what costs two-circles its mark. Kept counted so it is not re-derived.
+
+Surface surfaceAt(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
+    const double at = blockDifference(a, b, x, y, dx, dy);
+    const double xp = blockDifference(a, b, x, y, dx + 1, dy);
+    const double xm = blockDifference(a, b, x, y, dx - 1, dy);
+    const double yp = blockDifference(a, b, x, y, dx, dy + 1);
+    const double ym = blockDifference(a, b, x, y, dx, dy - 1);
+    const double pp = blockDifference(a, b, x, y, dx + 1, dy + 1);
+    const double pm = blockDifference(a, b, x, y, dx + 1, dy - 1);
+    const double mp = blockDifference(a, b, x, y, dx - 1, dy + 1);
+    const double mm = blockDifference(a, b, x, y, dx - 1, dy - 1);
+
+    const double hxx = xp - 2.0 * at + xm;
+    const double hyy = yp - 2.0 * at + ym;
+    const double hxy = 0.25 * (pp - pm - mp + mm);
+
+    Surface surface;
+    const double middle = 0.5 * (hxx + hyy);
+    const double gap =
+        std::sqrt(std::max(0.0, 0.25 * (hxx - hyy) * (hxx - hyy) + hxy * hxy));
+    const double large = middle + gap;
+    const double small = middle - gap;
+    if (large <= 1e-9) return surface;
+    surface.degenerate = false;
+    surface.saddle = small < 0.0;
+    surface.ratio = std::max(0.0, small) / large;
+
+    double vx = hxy;
+    double vy = small - hxx;
+    if (std::abs(vx) + std::abs(vy) < 1e-9) {
+        vx = (hxx <= hyy) ? 1.0 : 0.0;
+        vy = (hxx <= hyy) ? 0.0 : 1.0;
+    }
+    const double length = std::hypot(vx, vy);
+    surface.flat_x = vx / length;
+    surface.flat_y = vy / length;
+    return surface;
+}
+
 // A temporary window on the settle loop, for issue #69.
 //
 // **Not part of the design, and it comes out with the fix.** It is here because
@@ -1280,6 +1346,16 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
     for (int stepped = 0; stepped < kSteps; ++stepped) {
         if (abandoned(abandon)) return fit;
 
+        // Where the push step's displacement points, against the surface that
+        // chose it -- issue #69, and out with it. See the note on Surface.
+        double along = 0.0;
+        double across = 0.0;
+        double ratios = 0.0;
+        int valleys = 0;
+        int plateaus = 0;
+        int saddles = 0;
+        int sampled = 0;
+
         for (Node& node : fit.nodes) {
             if (node.anchored) continue;
             const int x = static_cast<int>(std::lround(node.rest_x));
@@ -1308,8 +1384,63 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
                     best_y = dy;
                 }
             }
-            node.x = static_cast<float>(x + best_x);
-            node.y = static_cast<float>(y + best_y);
+            // Take the part of that the surface can actually see -- issue #69.
+            //
+            // A node on a long straight edge has a whole line of positions that
+            // match equally well, and the one the search returns is chosen by
+            // whichever of them the blur and the ink happen to favour by a
+            // hair. Measured, that is not a small effect and it does not fade:
+            // on a 180 px box the push step displaced its nodes by about eleven
+            // hundred cells along the valley and five hundred across it, every
+            // step, for the whole run. The regularisation removes what it can
+            // and the rest compounds -- see the trace.
+            //
+            // So the displacement is split against the surface that chose it
+            // and the along-valley half is scaled by how much of a pit rather
+            // than a valley the surface is. **There is no constant in this.**
+            // A pit keeps all of its motion, a perfect valley keeps none of it
+            // along and all of it across, and everything between is scaled by
+            // its own ratio -- which is the quantity, not a cutoff on it.
+            //
+            // What supplies the along component instead is the regularisation,
+            // which is the paper's division of labour: the push step says what
+            // it can see and the rigid fit says what holds the shape together.
+            // A node that can see nothing at all -- no curvature in any
+            // direction, which is a block adrift in blank paper -- stays where
+            // it is, because a flat surface is not evidence of anywhere.
+            const Surface surface = surfaceAt(a, b, x, y, best_x, best_y);
+            const double asked_x = best_x - at_x;
+            const double asked_y = best_y - at_y;
+            const double asked_along = asked_x * surface.flat_x + asked_y * surface.flat_y;
+            const double asked_across = asked_x * -surface.flat_y + asked_y * surface.flat_x;
+            const double taken_along = surface.degenerate ? 0.0 : asked_along * std::sqrt(surface.ratio);
+            const double taken_across = surface.degenerate ? 0.0 : asked_across;
+
+            if (tracingLattice()) {
+                if (surface.degenerate) {
+                    ++plateaus;
+                } else {
+                    along += std::abs(asked_along);
+                    across += std::abs(asked_across);
+                    ratios += surface.ratio;
+                    if (surface.ratio < 0.1) ++valleys;
+                    if (surface.saddle) ++saddles;
+                    ++sampled;
+                }
+            }
+
+            node.x = static_cast<float>(x + at_x + taken_along * surface.flat_x +
+                                        taken_across * -surface.flat_y);
+            node.y = static_cast<float>(y + at_y + taken_along * surface.flat_y +
+                                        taken_across * surface.flat_x);
+        }
+
+        if (tracingLattice() && sampled > 0) {
+            std::fprintf(stderr,
+                         "  #69 step %2d surface   valleys %3d%% saddles %3d%% plateaus %3d  "
+                         "mean ratio %5.3f  moved along %7.2f across %7.2f\n",
+                         stepped, 100 * valleys / sampled, 100 * saddles / sampled, plateaus,
+                         ratios / sampled, along, across);
         }
 
         // Rigid to begin with and looser later, so that nothing flies off while
