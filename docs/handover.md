@@ -1529,19 +1529,34 @@ to a recorded depth rather than counting undos, because an edit that changes
 nothing records no command and counting them is how a bench quietly pops
 somebody else's step.
 
-Three shots are in the tree, and they are for different questions:
+Four shots are in the tree, and they are for different questions:
 
 | | |
 |---|---|
 | `chatquimarche-coloured.animage` | a shot coloured drawing by drawing, four times over, each pass scribbled with a different rung running. Answers "is this better" — and, because the four passes disagree, "better for whom" |
 | `two-circles.animage` | two circles moving up either side of the frame. Answers "what exactly is broken" |
+| `still-and-moving-circles.animage` | one circle held still and one moving up past it. Answers "how far is too far" |
 | `chatquimarche.animage` | the same shot before it was coloured, for `bench_session` |
 
-The circles are the one to reach for first when something is wrong, and they
-were reported rather than constructed. Two shapes the same size means sliding
-the drawing sideways puts one on the other, which is the ambiguity every failure
-so far has turned out to be — and being five drawings of two circles, it runs in
-seconds and every number in it can be checked by eye.
+The circles are the ones to reach for first when something is wrong, and both
+pairs were reported rather than constructed. Two shapes the same size means
+sliding the drawing sideways puts one on the other, which is the ambiguity every
+failure so far has turned out to be — and being five drawings of two circles
+each, they run in seconds and every number in them can be checked by eye.
+
+**The two pairs are not the same question, and the difference is the point of
+having both.** In `two-circles` both circles move, so the drawing has evidence
+everywhere and the failure is that one translation cannot describe two motions:
+rung two slides everything 780 px and puts one circle's mark on the other. In
+`still-and-moving-circles` one of them does not move at all, and the moving one
+goes further in a drawing than a node can see — so half the drawing has good
+evidence, half has none, and the answer is confident about the wrong half. Its
+layers say which is which: `colour 1` is what you get having coloured only the
+first drawing, and `corrected` is the answer. That is
+[#72](https://github.com/S-poony/Animage/issues/72), and rung four is already
+the best of the three rungs on it — it leaves the moving circle uncoloured
+where rungs two and three fill it with the *other* circle's colour, which is
+the better failure and still not the right answer.
 
 `--pictures DIR` writes the fills out, named `layer-drawing-method`, with the
 colourist's beside them. On a shot with two colour layers both are scored, which

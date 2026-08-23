@@ -1,0 +1,140 @@
+{
+    "canvas": {
+        "height": 1080,
+        "width": 1920
+    },
+    "fixed_length": false,
+    "format": "animage-scene",
+    "framerate": 24,
+    "length": 100,
+    "tracks": [
+        {
+            "blend": "normal",
+            "end": "nothing",
+            "id": 1,
+            "images": [
+                {
+                    "cels": [
+                        {
+                            "cel": 1,
+                            "layer": 1
+                        },
+                        {
+                            "cel": 6,
+                            "layer": 2
+                        },
+                        {
+                            "cel": 7,
+                            "layer": 3
+                        }
+                    ],
+                    "id": 1,
+                    "number": 1
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 2,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 2,
+                    "number": 2
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 3,
+                            "layer": 1
+                        },
+                        {
+                            "cel": 8,
+                            "layer": 3
+                        }
+                    ],
+                    "id": 3,
+                    "number": 3
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 4,
+                            "layer": 1
+                        }
+                    ],
+                    "id": 4,
+                    "number": 4
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 5,
+                            "layer": 1
+                        },
+                        {
+                            "cel": 9,
+                            "layer": 3
+                        }
+                    ],
+                    "id": 5,
+                    "number": 5
+                }
+            ],
+            "layers": [
+                {
+                    "blend": "normal",
+                    "id": 1,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "layer 1",
+                    "opacity": 1,
+                    "visible": true
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        1
+                    ],
+                    "id": 2,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "colour 1",
+                    "opacity": 1,
+                    "show_scribbles": false,
+                    "visible": true
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        1
+                    ],
+                    "id": 3,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "corrected",
+                    "opacity": 1,
+                    "show_scribbles": false,
+                    "visible": false
+                }
+            ],
+            "name": "track 1",
+            "opacity": 1,
+            "overwrite_drawings": true,
+            "slots": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "time_offset": 0
+        }
+    ],
+    "version": 1
+}
