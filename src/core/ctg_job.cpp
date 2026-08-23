@@ -1,11 +1,9 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctg_job.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <cstdio>
-#include <cstring>
 #include <limits>
 #include <unordered_map>
 
@@ -944,28 +942,35 @@ constexpr int kSmoothingOver = 50;
 
 // How long it is given, and what counts as having stopped.
 //
-// **The cap is a safety net and not the stopping rule.** The paper's own
-// observation is that a simple case converges within 30 steps and its hardest
-// take 80; taking only the along-valley motion the surface can see (see the
-// push step) roughly halves the speed at which a shape crosses ground it can
-// only see one direction of, so the hardest case here needs more than 100.
-// tests/projects/two-circles.animage is that case: at 40 steps and at 100 it is
-// cut off mid-walk and puts a mark outside its circle, and at 200 it arrives.
-// Every other drawing in the tree stops long before this, which is why the cap
-// costs what it costs -- 165 ms against 162 on bench_composite, and 9.1 s
-// against 7.6 on the whole of two-circles.
+// **The cap has to be read together with kSmoothingOver above it, because for
+// a while it was the same number.** The ramp used to be spread over `kSteps`,
+// so raising the cap stretched the schedule with it. Under that stretch
+// tests/projects/two-circles.animage needed 200 steps to arrive and was cut off
+// mid-walk at 40 and at 100, putting a mark outside its circle. With the ramp
+// untied and fixed at fifty, the same shot converges inside 60 -- so the cap
+// stopped being a thing to raise and went back down. The paper's own figures
+// are the same shape: a simple case within 30 steps, the hardest at 80.
 //
-// **And the cutoff is two decades tighter than it was, because the quantity
-// under it stopped being diluted.** It is compared against the change in the
-// paper's average distance from the rest pose, which used to be divided by
-// every node in the bounding grid rather than by the lattice -- issue #71 --
-// so 0.01 meant between two and eight times looser depending on how much blank
-// paper the drawing sat on. Undiluted, 0.01 stops a lattice that is still
-// walking: on two-circles it, 0.003 and 0.001 all cut it off, and 0.0003 and
-// 0.0001 do not. Measured across that sweep the cost is flat to within 3 ms,
-// because a lattice that has really stopped stops at any of them. So this is
-// not a tuned number between two failures -- it is "has it actually stopped",
-// where the old one meant "has it nearly stopped".
+// 60 was measured against 80 rather than assumed: on the four colourings 80
+// costs 115.5 s for 7, 11, 10 and 13 regions to fix, and 60 costs 108.4 s for
+// 7, 11, 10 and 12. Below 50 the ramp itself would be truncated, which is a
+// different thing from stopping early and is not what this constant is for.
+//
+// **And the cutoff is two decades tighter than the 0.01 it was.** It is
+// compared against the change in the paper's average distance from the rest
+// pose, which used to be divided by every node in the bounding grid rather
+// than by the lattice -- issue #71 -- so 0.01 meant between two and eight times
+// looser depending on how much blank paper the drawing sat on. Undiluted, 0.01
+// is still too loose to mean "stopped": every shape in bench_shapes keeps its
+// answer under it except the open straight ones, which lose four pixels of
+// accuracy apiece -- `one straight line` and `two parallel walls` go from 4 to
+// 7 -- because those are the shapes that go on improving slowly for longest.
+//
+// What is *not* established, and would want the trace that found #69 to
+// answer: how often the rule fires at all at this cutoff rather than the cap
+// stopping the run. It fires at 0.01, which is why loosening it changes the
+// answers above. Do not write "the cap is only a safety net" here until
+// somebody has counted.
 constexpr int kSteps = 60;
 constexpr int kSettleAfter = 8;          // steps with nothing moving before stopping
 constexpr double kSettleBelow = 0.0001;  // cells of average movement that count as none
@@ -1175,9 +1180,16 @@ struct LatticeFit {
 //
 // Sampled rather than derived. The search has already scored the whole window
 // and thrown it away; a second difference over the three cells either side of
-// the winner is the curvature of the surface there, and nine block differences
-// is three per cent on top of the two hundred and eighty-nine the search
-// already paid.
+// the winner is the curvature of the surface there.
+//
+// **These nine are not the cheap part they look like, and the reason is the
+// early exit.** Against a search that scored all 289 candidates in full this
+// was nine comparisons against 289, or three per cent. The search now abandons
+// most candidates on their first row, while these nine pass no cutoff -- they
+// want the number and not a comparison -- so each pays all 49 samples. Nine
+// full blocks against a search that mostly costs a row apiece is nearer a fifth
+// of the push step than a thirtieth, and it is the second largest term in it.
+// Anybody profiling this should start here rather than trust the old figure.
 //
 // The small eigenvalue's direction is the one the surface is flattest along --
 // a valley -- and the ratio of the two eigenvalues is how much of a pit rather

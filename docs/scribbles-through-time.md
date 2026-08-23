@@ -446,7 +446,7 @@ Order of attack, cheapest first:
    2009, the direct sequel to LazyBrush and built for this. Read it before
    designing anything past 3.
 
-   > **Built, measured, and off by default.** `estimateCtgLattice`. Push every
+   > **Built, measured, and the default.** `estimateCtgLattice`. Push every
    > lattice node on its own to where its neighbourhood matches best, then pull
    > the lattice back towards rigid, and repeat until it stops moving.
    >
@@ -499,14 +499,22 @@ Order of attack, cheapest first:
    > [#68](https://github.com/S-poony/Animage/issues/68), where two attempts to
    > fix it were measured and both were worse.
    >
-   > **Rung four is still not the default**, and the reason is now honest rather
-   > than a bug. On the shot coloured for rung three it agrees slightly more
-   > often and leaves more regions to fix, and the two fail on *different*
-   > drawings: rung three's worst is one rung four gets exactly right, and rung
-   > four puts a whole leg in a foot's colour where rung three is nearly right.
+   > **Rung four is the default**, and it was not decided on accuracy, because
+   > on the shot the two rungs are a wash. They fail on *different* drawings:
+   > rung three's worst is one rung four gets exactly right, and rung four could
+   > put a whole leg in a foot's colour where rung three was nearly right.
    > Which failure a colourist would rather have is not a question a benchmark
-   > can answer, so `ANIMAGE_CARRY` exists, temporarily, to let one be chosen by
-   > hand.
+   > can answer, so it was asked of a person — the shot was coloured four times
+   > over, once under each rung — and the answer was **an uncoloured region over
+   > a confidently wrong one**. That is the rule to keep: where this cannot know,
+   > it should say so rather than answer with the nearest other thing's colour.
+   > Rung four is also the only rung that can be right about two things that
+   > moved differently at all.
+   >
+   > **The shear it used to have on straight-edged closed shapes is fixed**, and
+   > the fix has a constant in it that the next person will meet before anything
+   > else: `kAlongKeep`. See "what the push step is allowed to see" and "the one
+   > constant in rung four, and what bounds it" in the handover.
 
 5. **Region-graph matching.** Regions with adjacency and area from *N*, matched
    against an over-segmentation of *N+1*. Robust to large motion, brittle to

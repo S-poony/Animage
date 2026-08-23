@@ -154,9 +154,15 @@ int furthestFrom(const CtgWarp& warp, CtgShift truth) {
 
 // Which shapes to run, when a run is a trace rather than a table.
 //
-// `--only` is here because ANIMAGE_LATTICE_TRACE prints a hundred lines per
-// lattice, and fifteen shapes of that is not something anybody reads. It
-// matches on any part of the name: `--only box,` is the four box rows.
+// It matches on any part of the name: `--only box,` is the four box rows, and
+// `--only sweep` is the size sweep.
+//
+// Added for a temporary trace inside the estimator that printed a hundred lines
+// per lattice, where running fifteen shapes was not something anybody could
+// read. That trace went out with the defect it found -- see the handover's
+// "what the push step is allowed to see" -- and this stayed, because the next
+// person to put a trace back will want it, and because reading one row's
+// answer without fourteen others scrolling past is useful on its own.
 const char* g_only = nullptr;
 
 void report(const char* what, const Sheet& before, const Sheet& after, CtgShift truth) {
@@ -339,9 +345,13 @@ int main(int argc, char** argv) {
     }
 
     std::printf(
-        "\nThe last seven rows are one shape's worth of difference apart. Three\n"
-        "walls against four, sixty pixels across against three hundred, a\n"
-        "cross through the middle or nothing there -- see issue #69, and the\n"
-        "handover's \"rung four, and what it took to make it the paper's\".\n");
+        "\nRead the rows above the sweep against each other: they are one\n"
+        "shape's worth of difference apart. Three walls against four, sixty\n"
+        "pixels across against three hundred, a cross through the middle or\n"
+        "nothing there, the same box turned 45 degrees. Then read the sweep as\n"
+        "one line: the same box and the same motion at eight sizes, which is\n"
+        "what says whether a failure is about the shape or about how much of\n"
+        "it there is. See issue #69 and the handover's \"what the push step is\n"
+        "allowed to see\".\n");
     return 0;
 }

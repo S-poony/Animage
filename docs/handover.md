@@ -21,7 +21,9 @@ the shape of the program. Those five maps are.
 | [Naming a track or a layer](#naming-a-track-or-a-layer) | renaming a row where it is, and what a name is allowed to be |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
 | [Colour through time, part two](#colour-through-time-part-two) | and moved to where that drawing went |
-| [Colour through time, part three](#colour-through-time-part-three) | one number became a field, and what three shots said about it |
+| [Colour through time, part three](#colour-through-time-part-three) | one number became a field, and what four shots said about it |
+| [What the push step is allowed to see](#what-the-push-step-is-allowed-to-see) | why rung four sheared a rectangle, and what it cost to stop it |
+| [**The one constant in rung four**](#the-one-constant-in-rung-four-and-what-bounds-it) | `kAlongKeep`: the number to turn, and the two failures that bound it |
 | [**Scoring a rung against a hand**](#scoring-a-rung-against-a-hand) | `bench_hand`: a shot somebody coloured, as the thing to beat |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
 | [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, the first mode, and changing a key |
@@ -1594,6 +1596,61 @@ executable, the relink fails, and a build checked by grepping its output for
 "error" does not notice, because ninja says `FAILED:`. Two runs reported the
 pre-change numbers to the digit while a bench that had relinked reported the new
 ones. **Check a build by its exit code, and never measure while one is running.**
+
+### The one constant in rung four, and what bounds it
+
+**`kAlongKeep`, in `src/core/ctg_job.cpp`. If rung four is misbehaving and you
+are looking for a number to turn, this is the number, and this section is the
+measurement that put it where it is.**
+
+It is the power the curvature ratio is raised to before scaling the
+along-valley half of a push step's displacement -- see "what the push step is
+allowed to see" above for what that means and why it exists. Read it as *how
+much of the motion a node cannot see is kept anyway*: at 0 all of it, at 1
+almost none of it.
+
+**It is bounded on both sides by a different failure, and both bounds are
+measured**, which is the only reason it is defensible at all:
+
+| | `bench_shapes` | what it costs |
+|---|---|---|
+| 0.25 and below | diamond **98**, and worse below | the shear comes back — keeping more of what compounds is what compounds |
+| **0.35** | diamond 34, straight line 4 | shipped |
+| 0.5 | diamond 29, straight line 6 | limbs suffer |
+
+and on the four hand colourings, 0.35 against 0.5 is 7·11·10·12 regions to fix
+against 7·12·10·12, with **pixels taking a wrong colour 0.9 / 2.0 / 1.4 / 0.8
+against 2.0 / 2.1 / 1.4 / 1.4**. That last row is why it is 0.35 and not 0.5:
+the shot's owner asked for an uncoloured region over a confidently wrong one,
+and the wrong-colour column is the one that measures the thing they did not
+want.
+
+**What the two bounds are about, in one line each.** Below it the diamond
+shears, because along-valley motion is exactly what accumulated into the #69
+runaway. Above it a *limb* suffers, because a leg is two long parallel edges
+that slide along their own length between drawings — so its real motion lies
+along the direction being suppressed, and suppressing too much of it leaves the
+leg behind while its foot's colour walks up it.
+
+**Three warnings before you turn it.**
+
+- **It was very nearly fitted to a bug.** 0.35 was first chosen over 0.5
+  because 0.5 put a leg in its foot's pink, 11.2% of one drawing in a wrong
+  colour. That leg was suffering from a rigidity ramp tied to the wrong
+  constant, not from the exponent. With the ramp fixed the comparison had to be
+  run again, and 0.35 won on different and much narrower grounds. **A constant
+  justified by a measurement taken under a defect has no justification.**
+- **`bench_shapes` alone will mislead you here.** The diamond and the straight
+  line move in opposite directions across this constant, and neither of them is
+  a drawing. The colourings are what decided it, and they can only be read four
+  at once — this session twice saw a change look clean on one colouring and be
+  a regression on another.
+- **The family is `pow(ratio, k)` and nothing about that is sacred.** It is a
+  smooth monotone map chosen because a wrong value degrades gradually where a
+  threshold has a cliff, and cliffs are what made the three rejected thresholds
+  in "the traps" wrong. If you find a better-motivated shape — a shrinkage with
+  a noise scale in it, say — the thing to preserve is smoothness, not this
+  particular curve.
 
 ## Scoring a rung against a hand
 

@@ -40,11 +40,20 @@ namespace {
 
 // What the warp decided, in one column.
 //
-// Rung three's answer is a field, so "how far the drawing moved" stopped being
-// the whole of it: this is how many distinct shifts the field holds and how far
-// the furthest of them is from the drawing's own answer. A bare number is a
-// uniform warp, which is rung two -- and on a case where every region agrees
-// that is the right answer and not a failure to find one.
+// An answer above rung two is a field, so "how far the drawing moved" stopped
+// being the whole of it: this is how many distinct shifts the field holds and
+// how far the furthest of them is from the drawing's own answer. A bare number
+// is a uniform warp, which is rung two -- and on a case where every region
+// agrees that is the right answer and not a failure to find one.
+//
+// **Which rung produced it is whatever ships**, because this bench asks how
+// much motion a mark survives in the program as it is, and the settings below
+// are deliberately left bare so that they follow `CtgSettings::carry`. That
+// makes the numbers here move when the default moves -- they did, when the
+// lattice became the default -- so a row is only comparable with a row taken
+// under the same default. The rule the handover draws from `bench_composite`
+// getting this wrong still holds and is not violated here: a measurement whose
+// *label* names a rung has to ask for that rung. This one names none.
 std::string decided(const CtgWarp& warp) {
     char text[64];
     if (warp.isUniform()) {
