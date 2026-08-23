@@ -942,6 +942,7 @@ constexpr int kSmoothingAtLast = 32;
 constexpr int kSteps = 40;
 constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
 
+
 // How unlike the neighbourhood of (x, y) in `a` the neighbourhood of
 // (x + dx, y + dy) in `b` is. Smaller is better, and it is what the push step
 // minimises.
@@ -1087,6 +1088,173 @@ void regularise(std::vector<Node>& nodes, const std::vector<Square>& squares, in
     }
 }
 
+
+// One lattice, settled: where every node ended up, and what that cost.
+//
+// Separated out because the answer depends on where the lattice *started* in a
+// way that no single starting point gets right, so it is run more than once.
+// See estimateCtgLattice.
+struct LatticeFit {
+    std::vector<Node> nodes;
+    std::vector<Square> squares;
+    std::vector<char> in_lattice;
+    int across = 0;
+    int down = 0;
+    bool ok = false;
+
+    // The sum of block differences over the nodes that were pushed, at where
+    // they ended up. The paper's own measure of "how plausible is this
+    // registration" -- section 3.3 computes the same average to talk about
+    // convergence.
+    double cost = std::numeric_limits<double>::max();
+
+    // Whether any pushed node ended up anywhere but where it was put. False
+    // means the run saw nothing: every node tied at every offset it could
+    // reach, which is what "the two drawings do not overlap here" looks like
+    // from inside the push step.
+    bool moved = false;
+};
+
+LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
+                      const std::atomic<bool>* abandon) {
+    LatticeFit fit;
+
+    // The lattice, over the whole grid. Nodes with no ink under them are still
+    // nodes -- they are what carries rigidity across a gap -- but they are
+    // never pushed, because there is nothing under them to match and whatever a
+    // block match said about blank paper would be noise with a confident face.
+    fit.across = (a.width - 1) / kNodeSpacing + 1;
+    fit.down = (a.height - 1) / kNodeSpacing + 1;
+    if (fit.across < 3 || fit.down < 3) return fit;
+
+    fit.nodes.reserve(static_cast<std::size_t>(fit.across) * fit.down);
+    for (int ny = 0; ny < fit.down; ++ny) {
+        for (int nx = 0; nx < fit.across; ++nx) {
+            const int x = std::min(nx * kNodeSpacing, a.width - 1);
+            const int y = std::min(ny * kNodeSpacing, a.height - 1);
+            Node node;
+            node.rest_x = static_cast<float>(x);
+            node.rest_y = static_cast<float>(y);
+            node.x = static_cast<float>(x + started.x);
+            node.y = static_cast<float>(y + started.y);
+            node.anchored = !inkNear(a, x, y);
+            fit.nodes.push_back(node);
+        }
+    }
+
+    // Only where the drawing is.
+    //
+    // The paper embeds the image in a lattice "respecting its articulated
+    // shape", and skipping that is not a shortcut -- it changes the answer. A
+    // lattice over the whole bounding box of a sparse drawing is mostly blank
+    // paper, and a blank node is never pushed, so those nodes are a rigid frame
+    // nailed round the outside of everything that moves. Measured on the
+    // coloured shot: with the frame, marks came back where the drawing no
+    // longer was and a tenth of the colour landed on nothing.
+    //
+    // A square is kept when any of its corners has ink under it, so the lattice
+    // reaches one square past the drawing and no further -- which is the margin
+    // that lets an outline pull the paper just outside it along.
+    fit.squares.reserve(static_cast<std::size_t>(fit.across - 1) * (fit.down - 1));
+    fit.in_lattice.assign(fit.nodes.size(), 0);
+    for (int ny = 0; ny + 1 < fit.down; ++ny) {
+        for (int nx = 0; nx + 1 < fit.across; ++nx) {
+            const int at = ny * fit.across + nx;
+            const Square square{{at, at + 1, at + fit.across, at + fit.across + 1}};
+            const bool any_ink =
+                std::any_of(std::begin(square.corner), std::end(square.corner), [&](int corner) {
+                    return !fit.nodes[static_cast<std::size_t>(corner)].anchored;
+                });
+            if (!any_ink) continue;
+            fit.squares.push_back(square);
+            for (int corner : square.corner) fit.in_lattice[static_cast<std::size_t>(corner)] = 1;
+        }
+    }
+    if (fit.squares.empty()) return fit;
+
+    // Push, regularise, and stop when the lattice stops moving.
+    //
+    // The paper stops on the average distance from the rest pose rather than on
+    // the match score, and says why: while part of a shape is crossing ground
+    // that matches nothing, the score barely moves for several iterations and
+    // then falls sharply. A stopping rule reading the score gives up in the
+    // middle of that.
+    double settled_at = -1.0;
+    int settled_for = 0;
+
+    for (int stepped = 0; stepped < kSteps; ++stepped) {
+        if (abandoned(abandon)) return fit;
+
+        for (Node& node : fit.nodes) {
+            if (node.anchored) continue;
+            const int x = static_cast<int>(std::lround(node.rest_x));
+            const int y = static_cast<int>(std::lround(node.rest_y));
+
+            // Where it is now, not where it started: the search is a window
+            // around the node's current guess, so the lattice walks towards the
+            // answer over several steps rather than having to reach it in one.
+            const int at_x = static_cast<int>(std::lround(node.x)) - x;
+            const int at_y = static_cast<int>(std::lround(node.y)) - y;
+
+            // The position in hand is scored first and only a strictly better
+            // one displaces it, so a node with nothing to choose between two
+            // places stays where it is. That is the whole of why registering a
+            // drawing against itself drifts nothing: a node on a straight line
+            // ties along that line, and a tie is not a reason to move.
+            int best_x = at_x;
+            int best_y = at_y;
+            double best = blockDifference(a, b, x, y, at_x, at_y);
+            for (int dy = at_y - kSearchReach; dy <= at_y + kSearchReach; ++dy) {
+                for (int dx = at_x - kSearchReach; dx <= at_x + kSearchReach; ++dx) {
+                    const double scored = blockDifference(a, b, x, y, dx, dy);
+                    if (scored >= best) continue;
+                    best = scored;
+                    best_x = dx;
+                    best_y = dy;
+                }
+            }
+            node.x = static_cast<float>(x + best_x);
+            node.y = static_cast<float>(y + best_y);
+        }
+
+        // Rigid to begin with and looser later, so that nothing flies off while
+        // the pose is still being found.
+        const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
+        const int rounds = static_cast<int>(
+            std::lround(kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
+        regularise(fit.nodes, fit.squares, std::max(1, rounds));
+
+        double moved = 0.0;
+        for (const Node& node : fit.nodes) {
+            moved += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
+        }
+        moved /= static_cast<double>(fit.nodes.size());
+        if (settled_at >= 0.0 && std::abs(moved - settled_at) < 0.01) {
+            if (++settled_for >= kSettleAfter) break;
+        } else {
+            settled_for = 0;
+        }
+        settled_at = moved;
+    }
+
+    // What it settled on, in the measure it was settled by, and whether it
+    // settled anywhere but where it began.
+    double cost = 0.0;
+    for (std::size_t at = 0; at < fit.nodes.size(); ++at) {
+        const Node& node = fit.nodes[at];
+        if (node.anchored || !fit.in_lattice[at]) continue;
+        const int x = static_cast<int>(std::lround(node.rest_x));
+        const int y = static_cast<int>(std::lround(node.rest_y));
+        const int dx = static_cast<int>(std::lround(node.x)) - x;
+        const int dy = static_cast<int>(std::lround(node.y)) - y;
+        cost += blockDifference(a, b, x, y, dx, dy);
+        if (dx != started.x || dy != started.y) fit.moved = true;
+    }
+    fit.cost = cost;
+    fit.ok = true;
+    return fit;
+}
+
 }  // namespace
 
 CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
@@ -1114,124 +1282,57 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
     blur(b);
     if (abandoned(abandon)) return warp;
 
-    // The lattice, over the whole grid. Nodes with no ink under them are still
-    // nodes -- they are what carries rigidity across a gap -- but they are
-    // never pushed, because there is nothing under them to match and whatever a
-    // block match said about blank paper would be noise with a confident face.
-    const int across = (a.width - 1) / kNodeSpacing + 1;
-    const int down = (a.height - 1) / kNodeSpacing + 1;
-    if (across < 3 || down < 3) return warp;
-
-    std::vector<Node> nodes;
-    nodes.reserve(static_cast<std::size_t>(across) * down);
-    for (int ny = 0; ny < down; ++ny) {
-        for (int nx = 0; nx < across; ++nx) {
-            const int x = std::min(nx * kNodeSpacing, a.width - 1);
-            const int y = std::min(ny * kNodeSpacing, a.height - 1);
-            Node node;
-            node.rest_x = node.x = static_cast<float>(x);
-            node.rest_y = node.y = static_cast<float>(y);
-            node.anchored = !inkNear(a, x, y);
-            nodes.push_back(node);
-        }
-    }
-
-    // Only where the drawing is.
+    // **Twice, from two starting points, and the cheaper answer wins.**
     //
-    // The paper embeds the image in a lattice "respecting its articulated
-    // shape", and skipping that is not a shortcut -- it changes the answer. A
-    // lattice over the whole bounding box of a sparse drawing is mostly blank
-    // paper, and a blank node is never pushed, so those nodes are a rigid frame
-    // nailed round the outside of everything that moves. Measured on the
-    // coloured shot: with the frame, marks came back where the drawing no
-    // longer was and a tenth of the colour landed on nothing.
+    // Where the lattice starts decides what it can reach, and neither answer to
+    // "where should it start" is right on its own. Each failure is a measured
+    // one and they pull opposite ways:
     //
-    // A square is kept when any of its corners has ink under it, so the lattice
-    // reaches one square past the drawing and no further -- which is the margin
-    // that lets an outline pull the paper just outside it along.
-    std::vector<Square> squares;
-    squares.reserve(static_cast<std::size_t>(across - 1) * (down - 1));
-    std::vector<char> in_lattice(nodes.size(), 0);
-    for (int ny = 0; ny + 1 < down; ++ny) {
-        for (int nx = 0; nx + 1 < across; ++nx) {
-            const int at = ny * across + nx;
-            const Square square{{at, at + 1, at + across, at + across + 1}};
-            const bool any_ink = std::any_of(std::begin(square.corner), std::end(square.corner),
-                                             [&](int corner) {
-                                                 return !nodes[static_cast<std::size_t>(corner)]
-                                                             .anchored;
-                                             });
-            if (!any_ink) continue;
-            squares.push_back(square);
-            for (int corner : square.corner) in_lattice[static_cast<std::size_t>(corner)] = 1;
-        }
-    }
-    if (squares.empty()) return warp;
-
-    // Push, regularise, and stop when the lattice stops moving.
+    // *At rest.* A node walks towards its match through the search window, a
+    // few cells a step, and the push step keeps the position in hand whenever
+    // two places tie. So a shape that has moved further than its own width has
+    // nothing under any of its nodes to walk towards, and long straight lines
+    // tie everywhere along themselves. A box moved 260 px was not followed at
+    // all, and a box moved 20 px produced a field 239 px wide.
     //
-    // The paper stops on the average distance from the rest pose rather than on
-    // the match score, and says why: while part of a shape is crossing ground
-    // that matches nothing, the score barely moves for several iterations and
-    // then falls sharply. A stopping rule reading the score gives up in the
-    // middle of that.
-    double settled_at = -1.0;
-    int settled_for = 0;
+    // *At rung two's answer.* The paper asks for exactly this -- it says the
+    // method "requires partial overlap" and recommends that "the initial
+    // rigid-body transformation be estimated by hand or that some automatic
+    // rigid-body registration technique should be used". It fixes both of the
+    // above. But rung two answers with one translation for the whole drawing,
+    // and when two things moved differently that answer is whichever one it can
+    // explain best: on tests/projects/two-circles.animage it slides everything
+    // 780 px and puts one circle's mark on the other. Started there, the
+    // lattice stays there -- 56.5% of the drawing in the wrong colour, which is
+    // the one failure rung four exists to not have.
+    //
+    // So both are run and the one that matches better is kept, scored by the
+    // same block difference the push step minimises. That is not a threshold
+    // and not a rule about which drawings are which: it is the shape
+    // searchShiftCells already uses for the same reason -- follow more than one
+    // candidate down and let the finest level choose -- and like that one it
+    // cannot answer worse than either start alone, because both starts are
+    // among the candidates.
+    //
+    // It costs a second lattice, which is most of the estimate. That is the
+    // trade this rung is allowed to make: colouring is not inking, a colourist
+    // is not laying down marks continuously, and a solved drawing stays solved.
+    const CtgShift prior = estimateCtgShift(from, to, area);
+    const CtgShift started{static_cast<int>(std::lround(static_cast<double>(prior.x) / step)),
+                           static_cast<int>(std::lround(static_cast<double>(prior.y) / step))};
 
-    for (int stepped = 0; stepped < kSteps; ++stepped) {
-        if (abandoned(abandon)) return warp;
-
-        for (Node& node : nodes) {
-            if (node.anchored) continue;
-            const int x = static_cast<int>(std::lround(node.rest_x));
-            const int y = static_cast<int>(std::lround(node.rest_y));
-
-            // Where it is now, not where it started: the search is a window
-            // around the node's current guess, so the lattice walks towards the
-            // answer over several steps rather than having to reach it in one.
-            const int at_x = static_cast<int>(std::lround(node.x)) - x;
-            const int at_y = static_cast<int>(std::lround(node.y)) - y;
-
-            // The position in hand is scored first and only a strictly better
-            // one displaces it, so a node with nothing to choose between two
-            // places stays where it is. That is the whole of why registering a
-            // drawing against itself now drifts nothing: a node on a straight
-            // line ties along that line, and a tie is not a reason to move.
-            int best_x = at_x;
-            int best_y = at_y;
-            double best = blockDifference(a, b, x, y, at_x, at_y);
-            for (int dy = at_y - kSearchReach; dy <= at_y + kSearchReach; ++dy) {
-                for (int dx = at_x - kSearchReach; dx <= at_x + kSearchReach; ++dx) {
-                    const double scored = blockDifference(a, b, x, y, dx, dy);
-                    if (scored >= best) continue;
-                    best = scored;
-                    best_x = dx;
-                    best_y = dy;
-                }
-            }
-            node.x = static_cast<float>(x + best_x);
-            node.y = static_cast<float>(y + best_y);
-        }
-
-        // Rigid to begin with and looser later, so that nothing flies off while
-        // the pose is still being found.
-        const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
-        const int rounds = static_cast<int>(std::lround(
-            kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
-        regularise(nodes, squares, std::max(1, rounds));
-
-        double moved = 0.0;
-        for (const Node& node : nodes) {
-            moved += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
-        }
-        moved /= static_cast<double>(nodes.size());
-        if (settled_at >= 0.0 && std::abs(moved - settled_at) < 0.01) {
-            if (++settled_for >= kSettleAfter) break;
-        } else {
-            settled_for = 0;
-        }
-        settled_at = moved;
+    LatticeFit fit = fitLattice(a, b, {0, 0}, abandon);
+    if (!fit.ok || abandoned(abandon)) return warp;
+    if (!fit.moved && !(started.x == 0 && started.y == 0)) {
+        LatticeFit from_prior = fitLattice(a, b, started, abandon);
+        if (from_prior.ok) fit = std::move(from_prior);
     }
+    if (abandoned(abandon)) return warp;
+
+    const std::vector<Node>& nodes = fit.nodes;
+    const std::vector<char>& in_lattice = fit.in_lattice;
+    const int across = fit.across;
+    const int down = fit.down;
 
     // The lattice, read back as the field a mark is carried through.
     //
@@ -1257,7 +1358,7 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
     long long shifted_y = 0;
     long long counted = 0;
     for (std::size_t at = 0; at < nodes.size(); ++at) {
-        if (!in_lattice[at]) continue;
+        if (!in_lattice[at] || nodes[at].anchored) continue;
         shifted_x += std::lround((nodes[at].x - nodes[at].rest_x) * step);
         shifted_y += std::lround((nodes[at].y - nodes[at].rest_y) * step);
         ++counted;
@@ -1280,7 +1381,7 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
                     const int y = ny + dy;
                     if (x < 0 || y < 0 || x >= across || y >= down) continue;
                     const std::size_t at = static_cast<std::size_t>(y) * across + x;
-                    if (in_lattice[at]) return &nodes[at];
+                    if (in_lattice[at] && !nodes[at].anchored) return &nodes[at];
                 }
             }
         }

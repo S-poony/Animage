@@ -278,6 +278,12 @@ CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<Til
 // to anyway it reports whichever single thing it can explain best. See the note
 // above `agreement` for that measured, and tests/projects/two-circles.animage
 // for it in two shapes.
+//
+// It starts at rest, and falls back to starting at rung two's answer when the
+// rest run found nothing to move towards -- which is what the paper's "requires
+// partial overlap" looks like from inside the push step. See the note in the
+// source: neither starting point is right on its own and the fallback is not a
+// judgement about quality.
 CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<TileGrid>& to,
                            const PixelRect& area, const std::atomic<bool>* abandon = nullptr);
 
