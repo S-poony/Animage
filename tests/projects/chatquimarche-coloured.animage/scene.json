@@ -26,6 +26,10 @@
                         {
                             "cel": 122,
                             "layer": 6
+                        },
+                        {
+                            "cel": 138,
+                            "layer": 7
                         }
                     ],
                     "id": 143,
@@ -40,6 +44,10 @@
                         {
                             "cel": 123,
                             "layer": 6
+                        },
+                        {
+                            "cel": 139,
+                            "layer": 7
                         }
                     ],
                     "id": 163,
@@ -58,6 +66,10 @@
                         {
                             "cel": 124,
                             "layer": 6
+                        },
+                        {
+                            "cel": 140,
+                            "layer": 7
                         }
                     ],
                     "id": 151,
@@ -72,6 +84,10 @@
                         {
                             "cel": 125,
                             "layer": 6
+                        },
+                        {
+                            "cel": 141,
+                            "layer": 7
                         }
                     ],
                     "id": 157,
@@ -90,6 +106,10 @@
                         {
                             "cel": 126,
                             "layer": 6
+                        },
+                        {
+                            "cel": 142,
+                            "layer": 7
                         }
                     ],
                     "id": 152,
@@ -104,6 +124,10 @@
                         {
                             "cel": 127,
                             "layer": 6
+                        },
+                        {
+                            "cel": 143,
+                            "layer": 7
                         }
                     ],
                     "id": 156,
@@ -122,6 +146,10 @@
                         {
                             "cel": 128,
                             "layer": 6
+                        },
+                        {
+                            "cel": 144,
+                            "layer": 7
                         }
                     ],
                     "id": 145,
@@ -146,6 +174,10 @@
                         {
                             "cel": 129,
                             "layer": 6
+                        },
+                        {
+                            "cel": 145,
+                            "layer": 7
                         }
                     ],
                     "id": 158,
@@ -164,6 +196,10 @@
                         {
                             "cel": 130,
                             "layer": 6
+                        },
+                        {
+                            "cel": 146,
+                            "layer": 7
                         }
                     ],
                     "id": 146,
@@ -178,6 +214,10 @@
                         {
                             "cel": 131,
                             "layer": 6
+                        },
+                        {
+                            "cel": 147,
+                            "layer": 7
                         }
                     ],
                     "id": 160,
@@ -192,6 +232,10 @@
                         {
                             "cel": 132,
                             "layer": 6
+                        },
+                        {
+                            "cel": 148,
+                            "layer": 7
                         }
                     ],
                     "id": 161,
@@ -210,6 +254,10 @@
                         {
                             "cel": 133,
                             "layer": 6
+                        },
+                        {
+                            "cel": 149,
+                            "layer": 7
                         }
                     ],
                     "id": 149,
@@ -224,6 +272,10 @@
                         {
                             "cel": 134,
                             "layer": 6
+                        },
+                        {
+                            "cel": 150,
+                            "layer": 7
                         }
                     ],
                     "id": 162,
@@ -242,6 +294,10 @@
                         {
                             "cel": 135,
                             "layer": 6
+                        },
+                        {
+                            "cel": 151,
+                            "layer": 7
                         }
                     ],
                     "id": 148,
@@ -260,6 +316,10 @@
                         {
                             "cel": 136,
                             "layer": 6
+                        },
+                        {
+                            "cel": 152,
+                            "layer": 7
                         }
                     ],
                     "id": 155,
@@ -278,6 +338,10 @@
                         {
                             "cel": 137,
                             "layer": 6
+                        },
+                        {
+                            "cel": 153,
+                            "layer": 7
                         }
                     ],
                     "id": 147,
@@ -315,6 +379,22 @@
                     "kind": "ctg",
                     "locked": false,
                     "name": "colour 1",
+                    "opacity": 1,
+                    "show_scribbles": false,
+                    "visible": false
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        5
+                    ],
+                    "id": 7,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "colour 2",
                     "opacity": 1,
                     "show_scribbles": false,
                     "visible": true
