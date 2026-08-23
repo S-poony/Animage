@@ -110,24 +110,6 @@ InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& re
 
 }  // namespace
 
-CtgSettings::Carry carryFromEnvironment() {
-    using Carry = CtgSettings::Carry;
-    static const Carry chosen = [] {
-        const char* set = std::getenv("ANIMAGE_CARRY");
-        if (set == nullptr) return Carry::PerRegion;
-        if (std::strcmp(set, "drawing") == 0) return Carry::WholeDrawing;
-        if (std::strcmp(set, "region") == 0) return Carry::PerRegion;
-        if (std::strcmp(set, "lattice") == 0) return Carry::Lattice;
-        // A word this does not know is not a rung, and falling through quietly
-        // would make a typo indistinguishable from asking for the default --
-        // which is the one thing this exists in order to tell apart.
-        std::fprintf(stderr,
-                     "ANIMAGE_CARRY=%s is not drawing, region or lattice; carrying per region\n",
-                     set);
-        return Carry::PerRegion;
-    }();
-    return chosen;
-}
 
 std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
                                   int step, InkReduce reduce_with) {
@@ -950,6 +932,16 @@ constexpr int kSearchReach = 8;   // half-width of the window searched
 constexpr int kSmoothingAtFirst = 256;
 constexpr int kSmoothingAtLast = 32;
 
+// **Over the first fifty steps, not over the whole run.** The paper's schedule
+// is "linearly decreased from 256 to 32 during the first 50 push-regularize
+// steps", and a run it expects to reach 80 spends the rest of itself flexible.
+// This was `stepped / (kSteps - 1)`, which ties the ramp to the cap -- so
+// raising the cap from 40 to 200 to let a slow shape converge also stretched
+// the ramp fivefold, and a lattice that used to reach full flexibility by step
+// 40 was still doing 211 smoothing rounds there. That is most of what made the
+// four colourings take 167 s against 94.
+constexpr int kSmoothingOver = 50;
+
 // How long it is given, and what counts as having stopped.
 //
 // **The cap is a safety net and not the stopping rule.** The paper's own
@@ -974,7 +966,7 @@ constexpr int kSmoothingAtLast = 32;
 // because a lattice that has really stopped stops at any of them. So this is
 // not a tuned number between two failures -- it is "has it actually stopped",
 // where the old one meant "has it nearly stopped".
-constexpr int kSteps = 200;
+constexpr int kSteps = 60;
 constexpr int kSettleAfter = 8;          // steps with nothing moving before stopping
 constexpr double kSettleBelow = 0.0001;  // cells of average movement that count as none
 // How much of the along-valley motion to keep, as a power of the curvature
@@ -1031,7 +1023,18 @@ constexpr double kAlongKeep = 0.35;
 // skipped. Skipping it would make a block that has been pushed off the edge
 // cost nothing, which is the failure the whole-drawing score is written to
 // avoid, arriving by the other door.
-double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
+//
+// **`stop_above` is the paper's early termination and it changes no answer.**
+// Section 3.1 recommends it by name -- Li and Salari 1995 -- on the grounds
+// that the best block position stays put for most iterations while every other
+// shift scores much higher, so almost every comparison is one that is going to
+// lose. The search only ever asks "is this strictly better than what I have",
+// so a sum that has already passed the best in hand cannot change the answer
+// however it finishes, and the row it is on is where it can stop. Callers that
+// want the number itself rather than a comparison pass no cutoff and get the
+// exact total.
+double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy,
+                       double stop_above = std::numeric_limits<double>::max()) {
     double total = 0.0;
     for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
         // Hoisted, because they do not vary across the row and this is the
@@ -1054,6 +1057,7 @@ double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int d
                                   : 0.0;
             total += std::abs(from - to);
         }
+        if (total >= stop_above) return total;
     }
     return total;
 }
@@ -1186,14 +1190,15 @@ struct Surface {
     double flat_y = 0.0;     //
     double ratio = 1.0;      // small curvature over large: 1 a pit, 0 a valley
     bool degenerate = true;  // no curvature in any direction: a plateau
-    bool saddle = false;     // the flat direction is not flat but falling
 };
 
-// A saddle is a place where suppressing motion along the flat direction would
-// be refusing the one direction the cost is still falling in, so it was worth
-// knowing how often it happens before calling anything a trade rather than a
-// defect. Measured: **3% of pushed nodes on the ring and 0% on the box.** It is
-// not what costs two-circles its mark. Kept counted so it is not re-derived.
+// **A saddle here was measured and is not a problem, which is why nothing
+// counts them.** Where the small curvature is negative the surface is still
+// falling along the direction this suppresses, so suppressing it would be
+// refusing the one way worth going -- worth knowing the rate before calling
+// any of this a trade rather than a defect. It is 3% of pushed nodes on a ring
+// and 0% on a box, and clamping the ratio at zero there is what the code does.
+// Recorded so the question is not opened a second time.
 
 Surface surfaceAt(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
     const double at = blockDifference(a, b, x, y, dx, dy);
@@ -1218,7 +1223,6 @@ Surface surfaceAt(const InkLevel& a, const InkLevel& b, int x, int y, int dx, in
     const double small = middle - gap;
     if (large <= 1e-9) return surface;
     surface.degenerate = false;
-    surface.saddle = small < 0.0;
     surface.ratio = std::max(0.0, small) / large;
 
     double vx = hxy;
@@ -1231,74 +1235,6 @@ Surface surfaceAt(const InkLevel& a, const InkLevel& b, int x, int y, int dx, in
     surface.flat_x = vx / length;
     surface.flat_y = vy / length;
     return surface;
-}
-
-// A temporary window on the settle loop, for issue #69.
-//
-// **Not part of the design, and it comes out with the fix.** It is here because
-// the two things #69 proposes trying predict different traces and reasoning
-// cannot tell them apart: one says the lattice's collective centre walks away,
-// the other says the field spreads while the centre stays put. This prints both
-// on either side of the regularisation, so the step that creates the error is
-// visible rather than inferred.
-//
-// Off unless ANIMAGE_LATTICE_TRACE is set, and it writes to stderr so that a
-// benchmark's own table stays readable.
-bool tracingLattice() {
-    static const bool on = [] {
-        const char* set = std::getenv("ANIMAGE_LATTICE_TRACE");
-        return set != nullptr && *set != '\0';
-    }();
-    return on;
-}
-
-// Where the pushed nodes have got to, as a centre and a spread.
-//
-// `mean` is what one translation would say the lattice did -- the part proposal
-// 1 removes -- and `spread` is how far the furthest pushed node is from that
-// centre, which is the shear proposal 1 cannot reach. `davg` is the paper's
-// stopping quantity, section 3.3 equation (6), over every node as the loop
-// computes it. `cost` is the paper's other curve from the same section: the
-// *average* sum of absolute differences over the blocks, so it can be read
-// against Figure 9. All distances in cells of the ink grid.
-void traceLattice(const char* when, int stepped, int rounds, const std::vector<Node>& nodes,
-                  const std::vector<char>& in_lattice, const InkLevel& a, const InkLevel& b) {
-    double mean_x = 0.0;
-    double mean_y = 0.0;
-    int pushed = 0;
-    for (std::size_t at = 0; at < nodes.size(); ++at) {
-        if (nodes[at].anchored || !in_lattice[at]) continue;
-        mean_x += nodes[at].x - nodes[at].rest_x;
-        mean_y += nodes[at].y - nodes[at].rest_y;
-        ++pushed;
-    }
-    if (pushed > 0) {
-        mean_x /= pushed;
-        mean_y /= pushed;
-    }
-
-    double spread = 0.0;
-    double cost = 0.0;
-    for (std::size_t at = 0; at < nodes.size(); ++at) {
-        const Node& node = nodes[at];
-        if (node.anchored || !in_lattice[at]) continue;
-        spread = std::max({spread, std::abs(node.x - node.rest_x - mean_x),
-                           std::abs(node.y - node.rest_y - mean_y)});
-        const int x = static_cast<int>(std::lround(node.rest_x));
-        const int y = static_cast<int>(std::lround(node.rest_y));
-        cost += blockDifference(a, b, x, y, static_cast<int>(std::lround(node.x)) - x,
-                                static_cast<int>(std::lround(node.y)) - y);
-    }
-    if (pushed > 0) cost /= pushed;
-
-    double davg = 0.0;
-    for (const Node& node : nodes) davg += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
-    davg /= static_cast<double>(nodes.size());
-
-    std::fprintf(stderr,
-                 "  #69 step %2d %-9s rounds %3d  mean %7.2f,%7.2f  spread %7.2f  davg %6.2f  "
-                 "cost %7.3f\n",
-                 stepped, when, rounds, mean_x, mean_y, spread, davg, cost);
 }
 
 LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
@@ -1369,30 +1305,10 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
     double settled_at = -1.0;
     int settled_for = 0;
 
-    if (tracingLattice()) {
-        int pushed = 0;
-        for (std::size_t at = 0; at < fit.nodes.size(); ++at) {
-            if (!fit.nodes[at].anchored && fit.in_lattice[at]) ++pushed;
-        }
-        std::fprintf(stderr,
-                     "  #69 grid %dx%d cells, lattice %dx%d nodes, %d squares, %d pushed, "
-                     "started %d,%d\n",
-                     a.width, a.height, fit.across, fit.down, static_cast<int>(squares.size()),
-                     pushed, started.x, started.y);
-    }
 
     for (int stepped = 0; stepped < kSteps; ++stepped) {
         if (abandoned(abandon)) return fit;
 
-        // Where the push step's displacement points, against the surface that
-        // chose it -- issue #69, and out with it. See the note on Surface.
-        double along = 0.0;
-        double across = 0.0;
-        double ratios = 0.0;
-        int valleys = 0;
-        int plateaus = 0;
-        int saddles = 0;
-        int sampled = 0;
 
         for (Node& node : fit.nodes) {
             if (node.anchored) continue;
@@ -1415,7 +1331,7 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
             double best = blockDifference(a, b, x, y, at_x, at_y);
             for (int dy = at_y - kSearchReach; dy <= at_y + kSearchReach; ++dy) {
                 for (int dx = at_x - kSearchReach; dx <= at_x + kSearchReach; ++dx) {
-                    const double scored = blockDifference(a, b, x, y, dx, dy);
+                    const double scored = blockDifference(a, b, x, y, dx, dy, best);
                     if (scored >= best) continue;
                     best = scored;
                     best_x = dx;
@@ -1454,18 +1370,6 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
             const double taken_along = surface.degenerate ? 0.0 : asked_along * std::pow(surface.ratio, kAlongKeep);
             const double taken_across = surface.degenerate ? 0.0 : asked_across;
 
-            if (tracingLattice()) {
-                if (surface.degenerate) {
-                    ++plateaus;
-                } else {
-                    along += std::abs(asked_along);
-                    across += std::abs(asked_across);
-                    ratios += surface.ratio;
-                    if (surface.ratio < 0.1) ++valleys;
-                    if (surface.saddle) ++saddles;
-                    ++sampled;
-                }
-            }
 
             node.x = static_cast<float>(x + at_x + taken_along * surface.flat_x +
                                         taken_across * -surface.flat_y);
@@ -1473,26 +1377,14 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
                                         taken_across * surface.flat_x);
         }
 
-        if (tracingLattice() && sampled > 0) {
-            std::fprintf(stderr,
-                         "  #69 step %2d surface   valleys %3d%% saddles %3d%% plateaus %3d  "
-                         "mean ratio %5.3f  moved along %7.2f across %7.2f\n",
-                         stepped, 100 * valleys / sampled, 100 * saddles / sampled, plateaus,
-                         ratios / sampled, along, across);
-        }
 
         // Rigid to begin with and looser later, so that nothing flies off while
         // the pose is still being found.
-        const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
+        const double through =
+            std::min(1.0, static_cast<double>(stepped) / std::max(1, kSmoothingOver - 1));
         const int rounds = static_cast<int>(
             std::lround(kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
-        if (tracingLattice()) {
-            traceLattice("pushed", stepped, rounds, fit.nodes, fit.in_lattice, a, b);
-        }
         regularise(fit.nodes, squares, std::max(1, rounds));
-        if (tracingLattice()) {
-            traceLattice("regular", stepped, rounds, fit.nodes, fit.in_lattice, a, b);
-        }
 
         // The paper's stopping quantity, over the paper's set -- issue #71.
         //
@@ -1524,12 +1416,7 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
         if (counted == 0) break;
         moved /= static_cast<double>(counted);
         if (settled_at >= 0.0 && std::abs(moved - settled_at) < kSettleBelow) {
-            if (++settled_for >= kSettleAfter) {
-                if (tracingLattice()) {
-                    std::fprintf(stderr, "  #69 settled after step %d of %d\n", stepped, kSteps);
-                }
-                break;
-            }
+            if (++settled_for >= kSettleAfter) break;
         } else {
             settled_for = 0;
         }

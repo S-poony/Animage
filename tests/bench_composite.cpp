@@ -253,8 +253,16 @@ int main() {
         {
             const CtgJob job = ctgJobFor(doc, track, image, colour);
             const auto start = Clock::now();
+            // Named rather than inherited. `CtgSettings{}` is the lattice now
+            // that the rung is settled, so a bare one here measured rung four
+            // under a line that says "per region" -- which is the trap in the
+            // handover's "what a default member initialiser reaches that you
+            // did not mean it to", arriving from the other side. A measurement
+            // that names a rung has to ask for it.
+            CtgSettings per_region;
+            per_region.carry = CtgSettings::Carry::PerRegion;
             const CtgWarp warp =
-                estimateCtgWarp(job.sources, job.sources, job.scribbles, CtgSettings{});
+                estimateCtgWarp(job.sources, job.sources, job.scribbles, per_region);
             const double timed = milliseconds(start, Clock::now());
             std::printf("    the same per region                    %9.1f ms  (%s)\n", timed,
                         warp.isUniform() ? "every region agreed"

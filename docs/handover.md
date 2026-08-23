@@ -1291,15 +1291,17 @@ marks must read it too.
 
 ## Colour through time, part three
 
-**A carried mark's position stopped being a number and became a field.** Rung
-three of [scribbles-through-time.md](scribbles-through-time.md) — one
-translation per region rather than one per drawing — is built and is the
-default. Rung four, the paper's as-rigid-as-possible lattice, is built and is
-**off**. Both are `CtgSettings::carry`, which no part of the interface sets: it
-exists so that a benchmark can ask three rungs the same question about the same
-drawings, and — temporarily, while the two are being decided between — so that
-`ANIMAGE_CARRY` can ask a person the same question. See "rung four, and what it
-took to make it the paper's" below.
+**A carried mark's position stopped being a number and became a field, and the
+field is the paper's lattice.** Rung four — the as-rigid-as-possible lattice of
+[scribbles-through-time.md](scribbles-through-time.md) — is built and is **the
+default**. Rung three, one translation per region, and rung two, one for the
+whole drawing, are still there and still reachable: `CtgSettings::carry` exists
+so that a benchmark can ask three rungs the same question about the same
+drawings, because what a rung is worth is the difference between it and the one
+below it. Nothing else sets it. There is no environment variable and no
+interface for choosing a rung; `ANIMAGE_CARRY` existed while the choice was open
+and came out with the choice. See "rung four, and what it took to make it the
+paper's" below.
 
 **The marks are carried once now, and that is the load-bearing part.** Part two
 records three readers each applying one shift their own way and two of them
@@ -1502,15 +1504,96 @@ above.** The drift was the score, which is why registering a drawing against
 itself now answers zero; this is the geometry, which a zero-drift score does not
 reach. Both sentences are needed and neither replaces the other.
 
-So the honest scope of rung four today: **good on drawn character art,
-unreliable on anything geometric.** Backgrounds, props, architecture. The four
-hand colourings say nothing about it, because a cat has no straight walls — which
-is the general warning as much as the particular one, since every fixture in
-`tests/` that is not a hand-drawn shot is made of boxes.
+That was the scope of rung four for as long as it sheared: **good on drawn
+character art, unreliable on anything geometric.** It is fixed — see "what the
+push step is allowed to see" below — and the warning that came with it is worth
+keeping anyway, because it is general: the four hand colourings said nothing
+about the defect at all, since a cat has no straight walls, and every fixture in
+`tests/` that is not a hand-drawn shot is made of boxes. A shot of a person's
+drawings and a bench of synthetic shapes fail to notice different things, which
+is why `bench_shapes` exists beside `bench_hand` rather than instead of it.
 
+### What the push step is allowed to see
 
-`ANIMAGE_CARRY` and the two batch files beside `run-animage.bat` are there
-so somebody can look at both.
+**Rung four sheared a rectangle because the push step moved nodes along
+directions it could not see, and the regularisation could not take it back
+fast enough.** That is [#69](https://github.com/S-poony/Animage/issues/69), and
+the trace that found it is worth describing because the fix follows from it
+directly.
+
+Per step, on a 180 px box, the push step injected about **+6.5 cells of spread
+every step, at every rigidity, from the first step to the last** — and what
+varied was how much the regularisation removed: −6.9 at 239 inner rounds,
+−6.5 at 135, −4.9 at 101, −3.1 at 32. While the net was zero the lattice sat
+still and the match cost was flat. Below about 140 rounds removal lost, the
+error compounded, and the loop hit its step cap still diverging, so the answer
+was wherever the runaway had got to. Two things cut the removal rate — the
+rigidity ramp and the size of the lattice, since the regularisation is a local
+averaging and scatter across 43 nodes takes far more rounds to diffuse out than
+across 28 — and one thing set the injection rate, which did not vary at all.
+
+**So the removal side cannot be bought.** More rounds cost time quadratically,
+cost the flexibility the method exists for, and still lose on a big enough
+drawing: pinning rigidity at its maximum for the whole run left a 400 px box
+diverging from step one. The fix had to be on the injection side.
+
+**What a node is allowed to contribute is now split against the surface that
+chose it.** The search has already scored its whole window and thrown it away;
+nine more block differences round the winner give the curvature there. The small
+eigenvalue names the direction the surface is flat along — a valley — and the
+ratio of the two eigenvalues says how much of a pit rather than a valley it is.
+The across-valley component is taken whole; the along-valley component is scaled
+by that ratio. **The ratio and not either eigenvalue**, because a block's
+absolute curvature scales with the ink under it where their ratio does not; and
+a scaling and not a cutoff, because a threshold has been tried and rejected
+three times here and a cliff is what was wrong with each.
+
+Measured, the separation is not subtle: **84% of a box's pushed nodes sit in a
+valley against 15% of a ring's**, mean ratio 0.056 against 0.269 — and the ring
+stops moving entirely after three steps where the box never stops.
+
+`bench_shapes` went from 334, 326, 320, 289 and 185 pixels wrong on five rows to
+nothing worse than 34 on any row, with every box in single figures.
+
+**Three constants moved with it, and two of them were wrong before.**
+
+- *The stopping quantity.* The paper averages the distance from the rest pose
+  over the points of the embedding lattice; this averaged over every node in the
+  bounding grid, including ones in no square that are never pushed and never
+  regularised. The rule reads a change, so the constant they contribute cancels
+  — but the divisor does not, and it made the cutoff mean something two to eight
+  times looser depending on how much blank paper the drawing sat on. That is
+  [#71](https://github.com/S-poony/Animage/issues/71), fixed here rather than
+  after, because taking less of the push slows convergence and a rule calibrated
+  against a diluted quantity then started stopping shapes before they arrived.
+- *The rigidity ramp.* It was `stepped / (kSteps - 1)`, which ties the schedule
+  to the cap — so raising the cap to let a slow shape converge also stretched
+  the ramp, and a lattice that should have been at 32 smoothing rounds by step 40
+  was still doing 211. The paper ramps over its **first fifty steps** whatever
+  the run length. Untying them was worth 26% of the running time *and* the best
+  colouring scores of any rung, which is the signal that it was a defect and not
+  a tuning: cost and quality do not usually move the same way.
+- *The along weight.* Bounded from both sides and the bounds are measured: below
+  a third of the along motion kept, the diamond returns to the hundreds, because
+  keeping more of what compounds is what compounds; above it, limbs suffer — a
+  leg is two long parallel edges that slide along their own length, which is the
+  one shape whose real motion lies along the direction being suppressed.
+
+**And it got faster rather than slower.** The paper recommends the early
+termination of Li and Salari by name in §3.1: the best block position stays put
+for most iterations while every other shift scores much higher, so almost every
+comparison is one that is going to lose, and a sum that has already passed the
+best in hand can stop where it is. The search only ever asks "is this strictly
+better", so **no answer changes** — `bench_shapes` is identical value for value
+— and the estimate went from 204 ms to 80 ms, which is half what rung four cost
+before any of this work.
+
+**One warning to carry forward.** Two rounds of measurement in this work were
+taken against a stale binary: a benchmark left running holds a lock on its own
+executable, the relink fails, and a build checked by grepping its output for
+"error" does not notice, because ninja says `FAILED:`. Two runs reported the
+pre-change numbers to the digit while a bench that had relinked reported the new
+ones. **Check a build by its exit code, and never measure while one is running.**
 
 ## Scoring a rung against a hand
 
@@ -4905,10 +4988,18 @@ loudly; the numbers are just about a different thing than they say.
 
 It is the rule in [scribbles-through-time.md](scribbles-through-time.md)'s
 "things not to do", arriving from an unexpected direction: *a flag that tells the
-user is fine; a rule that changes behaviour behind them is not.* The application
-asks for its rung through `applicationCtgSettings` now and nothing else does, so
-the compiled default is what every test and bench gets. There is a check for it
-that costs nothing: run the suite with the variable set and it must still pass.
+user is fine; a rule that changes behaviour behind them is not.* The variable and
+`applicationCtgSettings` are both gone now, with the choice they existed for, so
+the compiled default is what everything gets.
+
+**And the same trap fired again from the other side the moment that default
+changed.** `bench_composite` timed a line labelled "the same per region" through
+a bare `CtgSettings{}` — which was rung three while the default was rung three,
+and became rung four the instant the default did. It read 78 ms against the
+lattice's 78 ms and would have gone on being read as rung three's cost. It names
+the rung it wants now. **A measurement that names a rung has to ask for it**:
+inheriting a default is fine for behaviour and never fine for a label, because a
+label is a claim and the default is free to move underneath it.
 
 
 ### What a stylesheet with no type selector also paints
@@ -5142,19 +5233,15 @@ thing, which is what stops the table meaning what it looks like it means. With
 `--pictures DIR` it writes the fills out with the line art drawn over them,
 which is the only form in which the question it is asking can be judged by eye.
 
-**And the instrument it cannot be:** which rung a colourist would rather have is
-a question about which failure they would rather find, and rungs three and four
-fail on different drawings. So there is a temporary way to run the program on
-one rung rather than the other —
-
-```powershell
-./rung3_run-animage.bat    # one translation per region, the default
-./rung4_run-animage.bat    # the as-rigid-as-possible lattice
-$env:ANIMAGE_CARRY = "drawing"; ./run-animage.bat   # and rung two, for a floor
-```
-
-— which is `CtgSettings::carryFromEnvironment`, read once at startup, and it
-goes when the rung is settled.
+**And the instrument it could not be:** which rung a colourist would rather have
+is a question about which failure they would rather find, and rungs three and
+four fail on different drawings. No benchmark answers that, so for a while the
+program could be run on one rung or the other from two batch files beside
+`run-animage.bat`, reading `ANIMAGE_CARRY` once at startup. The shot was
+coloured four times over, the person who coloured it reported the two a wash on
+speed and preferred rung four's failure — an uncoloured region over a
+confidently wrong one — and with that answered the scaffolding came out.
+`run-animage.bat` runs what ships.
 
 `bench_save` reports a full save, a full re-save, an incremental save with
 nothing changed and one with a single drawing touched. The last is what autosave
@@ -5367,25 +5454,17 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **Make rung four fit to be the default, which is one defect away.**
-   [#69](https://github.com/S-poony/Animage/issues/69). The choice between the
-   two rungs is *made* — the shot was coloured four times, once under each rung,
-   and the person who coloured it found them equally quick, so it was decided on
-   the grounds that are not accuracy: rung four is the only rung that can be
-   right about two things that moved differently, and it never loses a drawing
-   outright where rung three loses one on every colouring in the tree.
-
-   What stops it is that it shears on a closed loop of straight edges — a
-   rectangle translated twenty pixels comes back with a field three hundred
-   pixels wide. `bench_shapes` is the instrument and the issue carries the plan,
-   the two things worth trying in order, and the five things already ruled out
-   with numbers so nobody spends an afternoon on them. The gates are there too,
-   and the fourth is the one to watch: a change that fixes `bench_shapes` and
-   costs a colouring is a real trade that needs a person to look at pictures.
-
-   With it fixed, `CtgSettings::carry` becomes `Lattice` and the `ANIMAGE_CARRY`
-   scaffolding comes out with it — `carryFromEnvironment`,
-   `applicationCtgSettings`, and the two batch files beside `run-animage.bat`.
+2. **Rung four is the default and the queue moved on.** What it took is in
+   "colour through time, part three" and "what the push step is allowed to see";
+   the defect that held it up was [#69](https://github.com/S-poony/Animage/issues/69)
+   and it is fixed. Two things it left behind, both reported from use rather
+   than found by a bench:
+   [#72](https://github.com/S-poony/Animage/issues/72), a mark that stops
+   following a shape which moved further than the search window can see, and
+   [#73](https://github.com/S-poony/Animage/issues/73), dropping a carried mark
+   that lands where it fills nothing instead of carrying the mistake on. #72 is
+   the one that limits what the rung can do; #73 is the one that would make its
+   failures cheaper to live with.
 
    Rung three's own score is the same mistake one rung down and is
    [#68](https://github.com/S-poony/Animage/issues/68). Two fixes were measured

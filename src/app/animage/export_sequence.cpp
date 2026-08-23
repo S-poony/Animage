@@ -355,7 +355,7 @@ bool write(Document& doc, const Options& options, const Progress& progress, cons
     // A solve nobody is waiting on wants the whole allowance; one the caller is
     // standing in front of gets the interactive cap, because that is the deal
     // the cap exists to keep.
-    const CtgSettings settings = applicationCtgSettings();
+    const CtgSettings settings;
     const long long budget = solve ? kFullSolveBudget : kInteractiveSolveBudget;
 
     // How many max-flows this is going to be. Counted here, before anything has

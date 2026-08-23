@@ -44,62 +44,32 @@ struct CtgSettings {
     // region, or by a lattice that bends. Rungs two, three and four of
     // docs/scribbles-through-time.md.
     //
-    // The default is what every test and benchmark gets, and no part of the
-    // interface changes it -- the application asks for its own rung through
-    // applicationCtgSettings below, which is temporary scaffolding and the only
-    // thing that reads the environment.
+    // **The default is the lattice, and nothing anywhere changes it.** No part
+    // of the interface offers a rung and there is no environment variable for
+    // one: an `ANIMAGE_CARRY` existed while the choice was open and came out
+    // with the choice, because a rule that changes behaviour behind the user is
+    // what scribbles-through-time.md's "things not to do" forbids by name.
     //
-    // This is here so that the rungs can be asked the same question about the
-    // same drawings: what a rung is worth is the difference between it and the
-    // one below it, and a benchmark that can only run the current one measures
-    // a level rather than a difference. See bench_hand, which scores them
-    // against a shot somebody coloured by hand -- four times over, once with
-    // each rung running while the marks were placed.
+    // The enum stays because what a rung is worth is the difference between it
+    // and the one below it, and a benchmark that can only run the current one
+    // measures a level rather than a difference. bench_hand asks all three the
+    // same question about the same drawings, and bench_shapes asks two of them
+    // what they do to a family of shapes.
+    //
+    // Why the lattice, in one line: it is the only rung that can be right about
+    // two things that moved differently, and it is the only one that answers
+    // "I do not know" instead of confidently answering with the other thing's
+    // colour. See the handover's "colour through time, part three".
     enum class Carry {
         WholeDrawing,  // rung two: one translation
         PerRegion,     // rung three: one per piece the marks own
         Lattice,       // rung four: as-rigid-as-possible
     };
 
-    Carry carry = Carry::PerRegion;
+    Carry carry = Carry::Lattice;
 
     LazyBrushOptions lazybrush;
 };
-
-// Which rung the *application* carries with.
-//
-// **Temporary, and a way of looking rather than a setting.** Because nothing
-// chooses a rung, the only way to see one against another has been a benchmark
-// -- and a benchmark scores two fills against each other, where what a
-// colourist judges is a picture with the line art over it and a hand on the
-// timeline. bench_hand's own note says its table means less than it looks like
-// it means. Somebody has to look.
-//
-// Read once, from ANIMAGE_CARRY: `drawing`, `region` or `lattice`. Anything
-// else is `region` and says so on stderr, because a typo that silently means
-// the default is the one thing this cannot afford to be.
-//
-// **It is deliberately not the default of CtgSettings.** It was, and that made
-// the default of every `CtgSettings{}` in the process follow the environment --
-// including inside test_ctg, bench_carry and bench_composite. Setting the
-// variable to look at the program, as the handover tells you to, then left it
-// set in that shell, so the next run of the tests asserted rung two's semantics
-// against whichever rung was named. That is the shape of thing
-// scribbles-through-time.md's "things not to do" forbids by name: a flag that
-// tells the user is fine, a rule that changes behaviour behind them is not.
-//
-// So the two places the application builds settings ask for it, and everything
-// else gets the compiled default. To be removed when the rung is settled.
-CtgSettings::Carry carryFromEnvironment();
-
-// What the application solves with, as against what a test or a benchmark
-// does. The only difference is the line above, and having a name for it is
-// what keeps that difference in one place.
-inline CtgSettings applicationCtgSettings() {
-    CtgSettings settings;
-    settings.carry = carryFromEnvironment();
-    return settings;
-}
 
 // What the whole-track audit solves at.
 //

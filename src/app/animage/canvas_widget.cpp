@@ -647,7 +647,7 @@ void CanvasWidget::requestCtgFills() {
     dropStaleColourRequests(/*only_this_frame=*/true);
 
     const std::uint64_t generation = doc_.ctgCache().generation();
-    const CtgSettings settings = applicationCtgSettings();
+    const CtgSettings settings;
     for (const Track& track_here : doc_.scene().tracks) {
       const TrackId track_id = track_here.id;
       // What is on screen needs a fill, wherever in its own time it came from:
