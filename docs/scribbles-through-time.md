@@ -7,9 +7,11 @@ Design notes for two things, in this order:
 
 **Part 1 is built. Part 2 is built to its fourth rung, and the third is the one
 that runs.** Rung 3 — one translation per region — is on by default. Rung 4 —
-the paper's as-rigid-as-possible lattice — is built, measured and **off**,
-because on a real coloured shot it does not beat rung 3. Rung 5 is still
-research.
+the paper's as-rigid-as-possible lattice — is built, measured and **off**, but
+the margin is much narrower than it was: most of what kept it there was a match
+score it should never have had, and with the paper's own score it now wins some
+of the drawings rung 3 loses and loses some rung 3 wins. Which is better is a
+question for somebody colouring a shot with each. Rung 5 is still research.
 
 Rung 3 has moved since this was written, because the fill it would read has: see
 the note under [estimating the transform](#estimating-the-transform). This
@@ -460,17 +462,51 @@ Order of attack, cheapest first:
    > never picks a translation to be wrong about. 56.5% of a drawing in the
    > wrong colour becomes none of it.
    >
-   > **On a real shot it does not beat rung three**, measured and confirmed by
-   > hand. It fixes rung three's worst drawing and loses more than it gains
+   > **On a real shot it did not beat rung three**, measured and confirmed by
+   > hand. It fixed rung three's worst drawing and lost more than it gained
    > elsewhere.
    >
-   > **And the reason has a number on it.** Registered against a drawing and
-   > *itself*, where the only honest answer is that nothing moved, the lattice
-   > drifts 146 px. That is the aperture problem: a node on a straight line
-   > matches equally well anywhere along that line, and line art is mostly
-   > straight lines where the paper's examples are filled cartoon regions. It is
-   > the first thing to fix, `bench_composite` reports it in one line, and until
-   > it is fixed nothing else about rung four is worth tuning.
+   > **And the reason had a number on it, and the number was not what it looked
+   > like.** Registered against a drawing and *itself*, where the only honest
+   > answer is that nothing moved, the lattice drifted 146 px — and that was
+   > read here, and in #66, as the aperture problem: a node on a straight line
+   > matches equally well anywhere along it, and line art is mostly straight
+   > lines where the paper's examples are filled cartoon regions.
+   >
+   > **It was the score.** The push step maximised agreement — a sum of
+   > products — where the paper minimises a sum of absolute differences
+   > (§3.1, equation 1). The two disagree about blank paper, and blank paper is
+   > most of a drawing: under a difference, blank against blank is a perfect
+   > score and bare paper is evidence, where under a sum of products blank
+   > against blank and blank against ink both score zero and what is left is a
+   > quantity largest wherever the target has the *most* ink. Every node was
+   > pulled towards the nearest dense thing.
+   >
+   > Under the paper's measure the drift is not smaller, it is **zero** — a node
+   > on a straight line *ties* along that line, and the search scores the
+   > position in hand first and only displaces it on a strictly better score, so
+   > a tie is not a reason to move. The regions a colourist would have to fix
+   > went from 19 of 52 to 10 on the first colouring and 22 of 53 to 14 on the
+   > second, and the whole estimate costs 195 ms against 526 because the lattice
+   > settles rather than thrashing. two-circles is unmoved.
+   >
+   > The aperture problem is real and this does not solve it. It was not what
+   > the number was, and the lesson underneath is the one worth carrying to
+   > rung five: **a sum of products is only a fair score where both sides are
+   > the same size and the overlap does not move with the shift.** Rung two is
+   > that case. A block is not, and neither is rung three's masked region — see
+   > [#68](https://github.com/S-poony/Animage/issues/68), where two attempts to
+   > fix it were measured and both were worse.
+   >
+   > **Rung four is still not the default**, and the reason is now honest rather
+   > than a bug. On the shot coloured for rung three it agrees slightly more
+   > often and leaves more regions to fix, and the two fail on *different*
+   > drawings: rung three's worst is one rung four gets exactly right, and rung
+   > four puts a whole leg in a foot's colour where rung three is nearly right.
+   > Which failure a colourist would rather have is not a question a benchmark
+   > can answer, so `ANIMAGE_CARRY` exists, temporarily, to let one be chosen by
+   > hand.
+
 5. **Region-graph matching.** Regions with adjacency and area from *N*, matched
    against an over-segmentation of *N+1*. Robust to large motion, brittle to
    topology change — a limb crossing a body merges two regions and the match is

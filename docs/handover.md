@@ -1295,9 +1295,11 @@ marks must read it too.
 three of [scribbles-through-time.md](scribbles-through-time.md) — one
 translation per region rather than one per drawing — is built and is the
 default. Rung four, the paper's as-rigid-as-possible lattice, is built and is
-**off**. Both are `CtgSettings::carry`, which nothing in the application sets:
-it exists so that a benchmark can ask three rungs the same question about the
-same drawings.
+**off**. Both are `CtgSettings::carry`, which no part of the interface sets: it
+exists so that a benchmark can ask three rungs the same question about the same
+drawings, and — temporarily, while the two are being decided between — so that
+`ANIMAGE_CARRY` can ask a person the same question. See "rung four, and what it
+took to make it the paper's" below.
 
 **The marks are carried once now, and that is the load-bearing part.** Part two
 records three readers each applying one shift their own way and two of them
@@ -1346,23 +1348,40 @@ thing.** The same shot coloured twice — once with marks placed while rung two
 was running, once with marks placed for rung three — ranks the two rungs in
 opposite orders:
 
-| | agreed | wrong colour | no colour |
-|---|---|---|---|
-| coloured for rung two, carried by rung two | 91.5% | 0.6% | 8.0% |
-| coloured for rung two, carried by rung three | 85.7% | 0.5% | 13.8% |
-| coloured for rung three, carried by rung two | 92.9% | 2.6% | 4.5% |
-| coloured for rung three, carried by rung three | 89.9% | **0.7%** | 9.4% |
+| carried by | to fix | agreed | wrong colour | no colour |
+|---|---|---|---|---|
+| **coloured for rung two** | | | | |
+| left where drawn | 10 of 52 | 86.6% | 0.8% | 12.5% |
+| rung two | 11 of 52 | 92.0% | 0.6% | 7.4% |
+| rung three | 9 of 52 | 86.3% | 0.5% | 13.2% |
+| rung four | 10 of 52 | 91.8% | 0.4% | 7.9% |
+| **coloured for rung three** | | | | |
+| left where drawn | 7 of 53 | 91.1% | 2.0% | 6.9% |
+| rung two | 10 of 53 | 93.0% | 2.6% | 4.4% |
+| rung three | 9 of 53 | 90.0% | **0.7%** | 9.3% |
+| rung four | 14 of 53 | 91.2% | 1.8% | 7.0% |
 
-Drawing by drawing on the second colouring rung three is better on nine, worse
-on four and level on two, and the column that moves most is the wrong one:
-pixels taking a colour that is not the right one go from 2.6% to 0.5%. That is
-the failure that costs a colourist time, because a missing colour announces
-itself and a wrong one has to be found. The person who coloured it estimates the
-second pass was about a fifth less work.
+Drawing by drawing on the second colouring rung three is better than rung two on
+nine, worse on four and level on two, and the column that moves most is the
+wrong one: pixels taking a colour that is not the right one go from 2.6% to
+0.7%. That is the failure that costs a colourist time, because a missing colour
+announces itself and a wrong one has to be found. The person who coloured it
+estimates the second pass was about a fifth less work.
 
 So "which rung is better" is not a question with an answer until somebody says
 how they scribble, and a benchmark that scores a rung on marks placed for a
-different rung is measuring the marks. Both colourings are in the tree.
+different rung is measuring the marks. **Both colourings are in the tree**, as
+two CTG layers on the one shot — which this document claimed for a while before
+it was true, and the claim being unfalsifiable is how two changes to rung three
+nearly shipped on the strength of the first colouring alone.
+
+**And rung four is now in the same argument rather than beneath it.** Its rows
+above are since [#67](https://github.com/S-poony/Animage/issues/67); before it
+they were 19 and 22 regions to fix. It agrees with the hand slightly more often
+than rung three on the colouring made for rung three and leaves more to fix, and
+the drawings the two get wrong are *different* drawings — so the table cannot
+rank them and the pictures have to. See "rung four, and what it took to make it
+the paper's".
 
 **Neither of the two numbers settles it, and both are reported.** Pixels answer
 "how much of the picture is wrong", which is not what a colourist pays — a whole
@@ -1373,14 +1392,15 @@ a drawing that was 9.4% wrong without any region's majority flipping. Two ways
 of being wrong about the question, kept side by side, and the pictures are
 better than either.
 
-### Rung four, and why it is off
+### Rung four, and what it took to make it the paper's
 
 `estimateCtgLattice`, and it needed no plumbing at all: a rung is now an
-estimator and nothing else. The paper's, with three things taken verbatim — the
-closed-form rigid fit, rigidity decreasing from 256 rounds to 32 over the run,
-and a stopping rule that reads the distance from the rest pose rather than the
-match score — and one thing not: it matches blurred ink coverage on the reduced
-grid rather than pixels, because our drawings are line art.
+estimator and nothing else. The paper's, with four things taken from it — the
+closed-form rigid fit, rigidity decreasing from 256 rounds to 32 over the run, a
+stopping rule that reads the distance from the rest pose rather than the match
+score, and the sum of absolute differences it matches blocks by. Two things not:
+it matches blurred ink coverage rather than pixels, and it runs on the reduced
+grid, both because our drawings are line art.
 
 Embedding the lattice **on the drawing rather than on its bounding box** is the
 paper's too, and skipping it changes the answer rather than the cost: a blank
@@ -1388,16 +1408,34 @@ node is never pushed, so a lattice over a sparse sheet is a rigid frame nailed
 round everything that moves.
 
 On two shapes that no single translation can describe it is decisive — 56.5% of
-a drawing in the wrong colour becomes none of it. On a real coloured shot it
-does not beat rung three, measured and confirmed by hand.
+a drawing in the wrong colour becomes none of it.
 
-**The reason has a number on it: registered against a drawing and itself, where
-the only honest answer is that nothing moved, the lattice drifts 146 px.** That
-is the aperture problem — a node sitting on a straight line matches equally well
-anywhere along it — and line art is mostly straight lines where the paper's
-examples are filled cartoon regions. `bench_composite` reports that drift in one
-line. Until it is smaller, nothing else about rung four is worth tuning, and
-that is [#66](https://github.com/S-poony/Animage/issues/66).
+**The fourth of those was taken late, and it was worth 146 px.** The push step
+scored agreement — a sum of products, maximised — because that is what the rungs
+below it score. Registered against a drawing and *itself*, where the only honest
+answer is that nothing moved, the lattice drifted 146 px. It drifts none now,
+and the regions a colourist would have to fix went from 19 of 52 to 10 on the
+first colouring and 22 of 53 to 14 on the second, at 195 ms against 526.
+
+**That drift was not the aperture problem, which is what this document and #66
+both used to say it was.** Under a difference, a node on a straight line *ties*
+along that line — and the push step scores the position in hand first and only
+displaces it on a strictly better score, so a tie is not a reason to move. Drift
+needs a measure that actively prefers somewhere else, and an unnormalised sum of
+products is one: see "why a sum of products is not a score for a block" below.
+The aperture problem is real. It was not what the number was.
+
+**Rung four is still not the default, and the reason is now an honest one.** On
+the shot coloured for rung three it agrees with the hand slightly more often —
+91.2% against 90.0% — and leaves more regions to fix, 14 against 9, and more
+pixels in a wrong colour, 1.8% against 0.7%. What the pictures show is that the
+two fail on *different drawings*, badly, and neither dominates: on drawing 9 of
+that colouring rung three colours almost nothing and rung four is
+indistinguishable from the hand, and on drawing 10 rung three is nearly right
+and rung four puts a whole leg in the foot's pink. That is a choice about which
+failure a colourist would rather have, and it is not a choice a benchmark can
+make. `ANIMAGE_CARRY` and the two batch files beside `run-animage.bat` are there
+so somebody can look at both.
 
 ## Scoring a rung against a hand
 
@@ -4681,6 +4719,55 @@ is the absence of it, and any future one has to be computed for drawings nobody
 has opened.
 
 
+### Why a sum of products is not a score for a block
+**A sum of products is only a fair score where both sides are the same size and
+the overlap does not move with the shift.** Rung two is that case, and the note
+above `agreement` is the measurement for it: a whole drawing against a whole
+drawing, where a difference charges a wrong alignment twice and charges sliding
+off the edge once. That rule was then carried into two places where its premise
+is absent, and in one of them it was worth 146 px of invented movement.
+
+Rung four's push step matches a fixed-size block that covers the same number of
+samples at every offset. Nothing shrinks, so nothing penalises a wrong answer —
+and what is left is a quantity **largest wherever the target has the most ink**,
+whatever shape it is in. Every node was pulled towards the nearest dense thing.
+The two measures disagree about blank paper and blank paper is most of a
+drawing: under a difference, blank against blank is a perfect score and bare
+paper says "there should be nothing here", where under a sum of products blank
+against blank and blank against ink both score zero and bare paper says nothing
+at all. The paper minimises a sum of absolute differences (§3.1, equation 1) and
+so does this now.
+
+Rung three's region search is the same shape of mistake one rung down and is
+**still there**, because both attempts to fix it were worse. It masks its source
+to one region and leaves its target whole — deliberately, and that is what makes
+it a region's question — so a small masked source slides over a large unmasked
+target and prefers wherever that target is densest. Two replacements were
+measured and neither survived the second colouring:
+
+| rung three, whole shot | colour 1 | colour 2 |
+|---|---|---|
+| `agreement` and the reach bound | 9 to fix · 0.5% wrong | **9 to fix · 0.7% wrong** |
+| divided by the target under the mask | 9 to fix · 0.6% wrong | 10 to fix · **8.1%** wrong |
+| a difference under the mask | 14 to fix · 0.7% wrong | 15 to fix · 2.3% wrong |
+
+Normalising fails in a way worth knowing before anybody tries it a third time:
+dividing by what is under the mask makes a region that landed on **nearly blank
+paper** score well, because a small numerator over a small denominator is large.
+On `colour 2` drawing 15 it took the picture from 1.0% in a wrong colour to
+85.9%.
+
+What that says is that `agreement` **and the reach bound together** are doing a
+job neither half does alone — the bound is holding back a score that prefers the
+wrong place — so the next attempt is not a third score. That is
+[#68](https://github.com/S-poony/Animage/issues/68).
+
+And the reason both attempts looked like improvements first: they were measured
+on `colour 1`, the colouring made while rung two was running. **A rung scored on
+marks placed for a different rung is measuring the marks**, and this is that
+sentence catching something on its way in rather than after.
+
+
 ### What a stylesheet with no type selector also paints
 **A Qt stylesheet with no type selector styles the widget's tooltip too.** A
 swatch styled `background:#c00` handed its own colour to its own tooltip, and the
@@ -4891,7 +4978,23 @@ is scored against the same hand on the same drawings, so what it reports is a
 difference between rungs rather than a level. Read
 [scoring a rung against a hand](#scoring-a-rung-against-a-hand) before reading
 its numbers — particularly the part about the marks and the rung being one
-thing, which is what stops the table meaning what it looks like it means.
+thing, which is what stops the table meaning what it looks like it means. With
+`--pictures DIR` it writes the fills out with the line art drawn over them,
+which is the only form in which the question it is asking can be judged by eye.
+
+**And the instrument it cannot be:** which rung a colourist would rather have is
+a question about which failure they would rather find, and rungs three and four
+fail on different drawings. So there is a temporary way to run the program on
+one rung rather than the other —
+
+```powershell
+./rung3_run-animage.bat    # one translation per region, the default
+./rung4_run-animage.bat    # the as-rigid-as-possible lattice
+$env:ANIMAGE_CARRY = "drawing"; ./run-animage.bat   # and rung two, for a floor
+```
+
+— which is `CtgSettings::carryFromEnvironment`, read once at startup, and it
+goes when the rung is settled.
 
 `bench_save` reports a full save, a full re-save, an incremental save with
 nothing changed and one with a single drawing touched. The last is what autosave
@@ -5104,15 +5207,23 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **The lattice slides along a line, and until it stops nothing else about rung
-   four is worth tuning.**
-   [#66](https://github.com/S-poony/Animage/issues/66). Rungs three and four are
-   both built — see "colour through time, part three" — and rung four is off
-   because on a real coloured shot it does not beat rung three. The one number
-   that says why is in `bench_composite`: registered against a drawing and
-   itself, the lattice drifts 146 px where the only honest answer is zero. That
-   is the aperture problem and it is a parameter question rather than a
-   construction one.
+2. **Decide between rung three and rung four, by looking rather than by
+   scoring.** Rung four was off because it did not beat rung three, and most of
+   the reason it did not was a score it should never have had —
+   [#67](https://github.com/S-poony/Animage/issues/67), fixed: the drift on an
+   unmoved drawing is zero and the regions to fix went from 22 of 53 to 14. It
+   still leaves more to fix than rung three's 9, and the two fail on *different*
+   drawings. Rung three's worst drawing is one rung four gets exactly right, and
+   the other way round. No number here settles which failure a colourist would
+   rather have, so `ANIMAGE_CARRY` and the two batch files beside
+   `run-animage.bat` exist to let somebody switch rungs and colour a shot with
+   each. That is the measurement now, and it is temporary scaffolding to be
+   taken out with the decision.
+
+   Rung three's own score is the same mistake one rung down and is
+   [#68](https://github.com/S-poony/Animage/issues/68). Two fixes were measured
+   and both were worse; see "why a sum of products is not a score for a block".
+
 3. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the

@@ -65,7 +65,7 @@ Everything under [docs/](docs/), and whether it describes something that exists:
 |---|---|
 | [handover.md](docs/handover.md) | how the program fits together, what was built and what it cost, and the traps. Start at its own table of contents. **Built** |
 | [why-our-own-formats.md](docs/why-our-own-formats.md) | why the project file and the cel format are its own, measured against the alternatives. **Built** |
-| [scribbles-through-time.md](docs/scribbles-through-time.md) | a scribble staying from one drawing to the next, and moving to follow the animation. **Built** to one translation per region; the lattice past it is built and off, and the rung past that is research |
+| [scribbles-through-time.md](docs/scribbles-through-time.md) | a scribble staying from one drawing to the next, and moving to follow the animation. **Built** to one translation per region; the lattice past it is built and off by default, close enough to be a choice rather than a gap, and the rung past that is research |
 | [lasso-and-transform.md](docs/lasso-and-transform.md) | selecting part of a drawing, moving, rotating and scaling it, and the clipboard. **Built** |
 | [m0-latency.md](docs/m0-latency.md) | the pen-to-pixel latency gate, and how it is measured. **Built** |
 | [importing.md](docs/importing.md) | bringing in image sequences and audio. Two decisions still open: which audio library, and how an imported sequence is stored. **Not built** |
