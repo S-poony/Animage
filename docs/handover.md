@@ -1342,46 +1342,71 @@ a coarse level decides that the fine levels never revisit" below.
 
 ### What a hand says about a rung
 
-Three shots now disagree with each other, usefully, and the disagreement is the
+Three shots disagree with each other, usefully, and the disagreement is the
 finding. **The way a shot is scribbled and the rung that carries it are one
-thing.** The same shot coloured twice — once with marks placed while rung two
-was running, once with marks placed for rung three — ranks the two rungs in
-opposite orders:
+thing.** The same shot coloured under one rung and then another ranks them in
+opposite orders, which is why it has now been coloured four times:
 
-| carried by | to fix | agreed | wrong colour | no colour |
-|---|---|---|---|---|
-| **coloured for rung two** | | | | |
-| left where drawn | 10 of 52 | 86.6% | 0.8% | 12.5% |
-| rung two | 11 of 52 | 92.0% | 0.6% | 7.4% |
-| rung three | 9 of 52 | 86.3% | 0.5% | 13.2% |
-| rung four | 10 of 52 | 91.8% | 0.4% | 7.9% |
-| **coloured for rung three** | | | | |
-| left where drawn | 7 of 53 | 91.1% | 2.0% | 6.9% |
-| rung two | 10 of 53 | 93.0% | 2.6% | 4.4% |
-| rung three | 9 of 53 | 90.0% | **0.7%** | 9.3% |
-| rung four | 14 of 53 | 91.2% | 1.8% | 7.0% |
+The shot is coloured **four times over**, by the same person, each pass with a
+different rung running while the marks were placed. That is the instrument, and
+it exists because of the sentence above: a rung scored on marks placed for a
+different rung is measuring the marks.
 
-Drawing by drawing on the second colouring rung three is better than rung two on
-nine, worse on four and level on two, and the column that moves most is the
-wrong one: pixels taking a colour that is not the right one go from 2.6% to
-0.7%. That is the failure that costs a colourist time, because a missing colour
-announces itself and a wrong one has to be found. The person who coloured it
-estimates the second pass was about a fifth less work.
+`to fix` is regions whose majority flipped, `same`/`wrong`/`none` are pixels the
+hand gave a colour to, and `worst` is the lowest `same` any single drawing
+scored — which is the column that says whether a method ever loses a drawing
+outright.
 
-So "which rung is better" is not a question with an answer until somebody says
-how they scribble, and a benchmark that scores a rung on marks placed for a
-different rung is measuring the marks. **Both colourings are in the tree**, as
-two CTG layers on the one shot — which this document claimed for a while before
-it was true, and the claim being unfalsifiable is how two changes to rung three
-nearly shipped on the strength of the first colouring alone.
+| | to fix | same | wrong | none | worst |
+|---|---|---|---|---|---|
+| **colour 1**, scribbled for rung two | | | | | |
+| left where drawn | 10 of 52 | 86.6% | 0.8% | 12.5% | 5.5% |
+| rung two | 11 of 52 | 92.0% | 0.6% | 7.4% | 61.1% |
+| rung three | 9 of 52 | 86.3% | 0.5% | 13.2% | 11.8% |
+| rung four | 10 of 52 | 91.8% | 0.4% | 7.9% | 62.8% |
+| **colour 2**, scribbled for rung three | | | | | |
+| left where drawn | 7 of 53 | 91.1% | 2.0% | 6.9% | 63.1% |
+| rung two | 10 of 53 | 93.0% | 2.6% | 4.4% | 67.8% |
+| rung three | 9 of 53 | 90.0% | 0.7% | 9.3% | 24.3% |
+| rung four | 14 of 53 | 91.2% | 1.8% | 7.0% | 65.6% |
+| **colour 3**, scribbled for rung three | | | | | |
+| left where drawn | 11 of 50 | 85.9% | 0.7% | 13.4% | 3.2% |
+| rung two | 14 of 50 | 89.3% | 0.5% | 10.2% | 11.1% |
+| rung three | 9 of 50 | 83.7% | 1.0% | 15.2% | 9.6% |
+| rung four | 11 of 50 | 93.3% | 1.3% | 5.3% | 80.1% |
+| **colour 4**, scribbled for rung four | | | | | |
+| left where drawn | 13 of 60 | 87.8% | 0.7% | 11.5% | 4.5% |
+| rung two | 14 of 60 | 92.7% | 0.8% | 6.6% | 65.7% |
+| rung three | 16 of 60 | 87.6% | 0.5% | 11.8% | 10.0% |
+| rung four | 14 of 60 | 92.9% | 0.6% | 6.5% | 68.2% |
 
-**And rung four is now in the same argument rather than beneath it.** Its rows
-above are since [#67](https://github.com/S-poony/Animage/issues/67); before it
-they were 19 and 22 regions to fix. It agrees with the hand slightly more often
-than rung three on the colouring made for rung three and leaves more to fix, and
-the drawings the two get wrong are *different* drawings — so the table cannot
-rank them and the pictures have to. See "rung four, and what it took to make it
-the paper's".
+**Read the two columns that disagree, because they are the finding.** Rung four
+wins `same` and `none` on all four colourings and never loses a drawing
+outright. Rung three wins `to fix` on three of four — and it wins it *because*
+of the drawings it loses outright: a body that came back with no colour is one
+scribble to nudge, so a wipeout counts as one region while rung four's smaller
+scattered errors count as several. Both readings are honest and they point
+opposite ways.
+
+**The person who coloured it says the two are a wash**, and colouring the shot
+took about five minutes under each against about seven for the earlier passes.
+So the benchmark and the hand agree, including about not being able to choose.
+What is left to decide between them is not accuracy:
+
+- rung four is the paper's, and it is the only rung that can be right about two
+  things that moved differently — `two-circles` is a reported failure rung three
+  **cannot** fix, because it starts from rung two's whole-drawing answer and is
+  bounded near it, so when that answer is an alias rung three goes with it;
+- rung three costs 41 ms against rung four's 195, both off the interface thread;
+- rung three's failures are whole drawings and rung four's are patches, which is
+  a question about which kind of mistake is easier to find.
+
+**And rung three's own score is worth knowing about before choosing.** Given the
+paper's difference instead of `agreement` — [#68](https://github.com/S-poony/Animage/issues/68),
+measured and not shipped — rung three loses the wipeouts and gains the scattered
+errors, arriving at 14 · 93.6% · 1.1% · 5.3% on colour 3 against rung four's
+11 · 93.3% · 1.3% · 5.3%. It converges on rung four rather than beating it,
+which is the argument that the two are one decision and not two.
 
 **Neither of the two numbers settles it, and both are reported.** Pixels answer
 "how much of the picture is wrong", which is not what a colourist pays — a whole
@@ -1458,7 +1483,7 @@ Three shots are in the tree, and they are for different questions:
 
 | | |
 |---|---|
-| `chatquimarche-coloured.animage` | a shot coloured drawing by drawing. Answers "is this better" |
+| `chatquimarche-coloured.animage` | a shot coloured drawing by drawing, four times over, each pass scribbled with a different rung running. Answers "is this better" — and, because the four passes disagree, "better for whom" |
 | `two-circles.animage` | two circles moving up either side of the frame. Answers "what exactly is broken" |
 | `chatquimarche.animage` | the same shot before it was coloured, for `bench_session` |
 

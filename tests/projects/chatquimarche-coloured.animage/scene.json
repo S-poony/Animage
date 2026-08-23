@@ -30,6 +30,14 @@
                         {
                             "cel": 138,
                             "layer": 7
+                        },
+                        {
+                            "cel": 156,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 172,
+                            "layer": 10
                         }
                     ],
                     "id": 143,
@@ -48,6 +56,14 @@
                         {
                             "cel": 139,
                             "layer": 7
+                        },
+                        {
+                            "cel": 157,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 173,
+                            "layer": 10
                         }
                     ],
                     "id": 163,
@@ -70,6 +86,14 @@
                         {
                             "cel": 140,
                             "layer": 7
+                        },
+                        {
+                            "cel": 158,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 174,
+                            "layer": 10
                         }
                     ],
                     "id": 151,
@@ -88,6 +112,14 @@
                         {
                             "cel": 141,
                             "layer": 7
+                        },
+                        {
+                            "cel": 159,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 175,
+                            "layer": 10
                         }
                     ],
                     "id": 157,
@@ -110,6 +142,14 @@
                         {
                             "cel": 142,
                             "layer": 7
+                        },
+                        {
+                            "cel": 160,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 176,
+                            "layer": 10
                         }
                     ],
                     "id": 152,
@@ -128,6 +168,14 @@
                         {
                             "cel": 143,
                             "layer": 7
+                        },
+                        {
+                            "cel": 161,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 177,
+                            "layer": 10
                         }
                     ],
                     "id": 156,
@@ -150,6 +198,14 @@
                         {
                             "cel": 144,
                             "layer": 7
+                        },
+                        {
+                            "cel": 162,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 178,
+                            "layer": 10
                         }
                     ],
                     "id": 145,
@@ -160,6 +216,10 @@
                         {
                             "cel": 114,
                             "layer": 5
+                        },
+                        {
+                            "cel": 179,
+                            "layer": 10
                         }
                     ],
                     "id": 159,
@@ -178,6 +238,14 @@
                         {
                             "cel": 145,
                             "layer": 7
+                        },
+                        {
+                            "cel": 163,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 180,
+                            "layer": 10
                         }
                     ],
                     "id": 158,
@@ -200,6 +268,14 @@
                         {
                             "cel": 146,
                             "layer": 7
+                        },
+                        {
+                            "cel": 164,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 181,
+                            "layer": 10
                         }
                     ],
                     "id": 146,
@@ -218,6 +294,14 @@
                         {
                             "cel": 147,
                             "layer": 7
+                        },
+                        {
+                            "cel": 165,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 182,
+                            "layer": 10
                         }
                     ],
                     "id": 160,
@@ -236,6 +320,14 @@
                         {
                             "cel": 148,
                             "layer": 7
+                        },
+                        {
+                            "cel": 166,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 183,
+                            "layer": 10
                         }
                     ],
                     "id": 161,
@@ -258,6 +350,14 @@
                         {
                             "cel": 149,
                             "layer": 7
+                        },
+                        {
+                            "cel": 167,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 184,
+                            "layer": 10
                         }
                     ],
                     "id": 149,
@@ -276,6 +376,14 @@
                         {
                             "cel": 150,
                             "layer": 7
+                        },
+                        {
+                            "cel": 168,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 185,
+                            "layer": 10
                         }
                     ],
                     "id": 162,
@@ -298,6 +406,14 @@
                         {
                             "cel": 151,
                             "layer": 7
+                        },
+                        {
+                            "cel": 169,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 186,
+                            "layer": 10
                         }
                     ],
                     "id": 148,
@@ -320,6 +436,14 @@
                         {
                             "cel": 152,
                             "layer": 7
+                        },
+                        {
+                            "cel": 170,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 187,
+                            "layer": 10
                         }
                     ],
                     "id": 155,
@@ -342,6 +466,14 @@
                         {
                             "cel": 153,
                             "layer": 7
+                        },
+                        {
+                            "cel": 171,
+                            "layer": 8
+                        },
+                        {
+                            "cel": 188,
+                            "layer": 10
                         }
                     ],
                     "id": 147,
@@ -395,6 +527,38 @@
                     "kind": "ctg",
                     "locked": false,
                     "name": "colour 2",
+                    "opacity": 1,
+                    "show_scribbles": false,
+                    "visible": false
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        5
+                    ],
+                    "id": 8,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "colour 3",
+                    "opacity": 1,
+                    "show_scribbles": false,
+                    "visible": false
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        5
+                    ],
+                    "id": 10,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "colour 4",
                     "opacity": 1,
                     "show_scribbles": false,
                     "visible": true
@@ -514,6 +678,41 @@
             "overwrite_drawings": true,
             "slots": [
                 144
+            ],
+            "time_offset": 0
+        },
+        {
+            "blend": "normal",
+            "end": "hold",
+            "id": 4,
+            "images": [
+                {
+                    "cels": [
+                        {
+                            "cel": 155,
+                            "layer": 9
+                        }
+                    ],
+                    "id": 164,
+                    "number": 1
+                }
+            ],
+            "layers": [
+                {
+                    "blend": "normal",
+                    "id": 9,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "layer 1",
+                    "opacity": 1,
+                    "visible": true
+                }
+            ],
+            "name": "color ref",
+            "opacity": 1,
+            "overwrite_drawings": true,
+            "slots": [
+                164
             ],
             "time_offset": 0
         }
