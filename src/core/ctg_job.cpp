@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctg_job.h"
 
 #include <algorithm>
@@ -949,8 +949,34 @@ constexpr int kSearchReach = 8;   // half-width of the window searched
 // hierarchy, and it is the same shape as the reach bound rung three needed.
 constexpr int kSmoothingAtFirst = 256;
 constexpr int kSmoothingAtLast = 32;
-constexpr int kSteps = 40;
-constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
+
+// How long it is given, and what counts as having stopped.
+//
+// **The cap is a safety net and not the stopping rule.** The paper's own
+// observation is that a simple case converges within 30 steps and its hardest
+// take 80; taking only the along-valley motion the surface can see (see the
+// push step) roughly halves the speed at which a shape crosses ground it can
+// only see one direction of, so the hardest case here needs more than 100.
+// tests/projects/two-circles.animage is that case: at 40 steps and at 100 it is
+// cut off mid-walk and puts a mark outside its circle, and at 200 it arrives.
+// Every other drawing in the tree stops long before this, which is why the cap
+// costs what it costs -- 165 ms against 162 on bench_composite, and 9.1 s
+// against 7.6 on the whole of two-circles.
+//
+// **And the cutoff is two decades tighter than it was, because the quantity
+// under it stopped being diluted.** It is compared against the change in the
+// paper's average distance from the rest pose, which used to be divided by
+// every node in the bounding grid rather than by the lattice -- issue #71 --
+// so 0.01 meant between two and eight times looser depending on how much blank
+// paper the drawing sat on. Undiluted, 0.01 stops a lattice that is still
+// walking: on two-circles it, 0.003 and 0.001 all cut it off, and 0.0003 and
+// 0.0001 do not. Measured across that sweep the cost is flat to within 3 ms,
+// because a lattice that has really stopped stops at any of them. So this is
+// not a tuned number between two failures -- it is "has it actually stopped",
+// where the old one meant "has it nearly stopped".
+constexpr int kSteps = 200;
+constexpr int kSettleAfter = 8;          // steps with nothing moving before stopping
+constexpr double kSettleBelow = 0.0001;  // cells of average movement that count as none
 
 
 // How unlike the neighbourhood of (x, y) in `a` the neighbourhood of
@@ -1456,12 +1482,36 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
             traceLattice("regular", stepped, rounds, fit.nodes, fit.in_lattice, a, b);
         }
 
+        // The paper's stopping quantity, over the paper's set -- issue #71.
+        //
+        // Equation (6) averages the distance from the rest pose over `P`, the
+        // points of the embedding lattice. This summed over every node in the
+        // bounding grid and divided by all of them, and a node in no square is
+        // never pushed and never regularised, so it contributed a constant.
+        // The rule reads a *change*, which a constant does not affect -- but
+        // the divisor does, and it made the cutoff below mean something
+        // different on every drawing: between two and eight times looser across
+        // the fifteen shapes of bench_shapes, and looser the more blank paper
+        // the drawing sits on.
+        //
+        // `in_lattice` and not "was ever pushed": an anchored node that is a
+        // corner of a kept square is not pushed but *is* regularised, so it
+        // moves and it is a point of the embedding lattice.
+        //
+        // This is #71 and it was going to be done after #69, until #69's fix
+        // made the lattice converge more slowly and the early stop started
+        // cutting two-circles off before it arrived.
         double moved = 0.0;
-        for (const Node& node : fit.nodes) {
+        int counted = 0;
+        for (std::size_t at = 0; at < fit.nodes.size(); ++at) {
+            if (!fit.in_lattice[at]) continue;
+            const Node& node = fit.nodes[at];
             moved += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
+            ++counted;
         }
-        moved /= static_cast<double>(fit.nodes.size());
-        if (settled_at >= 0.0 && std::abs(moved - settled_at) < 0.01) {
+        if (counted == 0) break;
+        moved /= static_cast<double>(counted);
+        if (settled_at >= 0.0 && std::abs(moved - settled_at) < kSettleBelow) {
             if (++settled_for >= kSettleAfter) {
                 if (tracingLattice()) {
                     std::fprintf(stderr, "  #69 settled after step %d of %d\n", stepped, kSteps);
