@@ -469,9 +469,10 @@ Order of attack, cheapest first:
    > **And the reason had a number on it, and the number was not what it looked
    > like.** Registered against a drawing and *itself*, where the only honest
    > answer is that nothing moved, the lattice drifted 146 px — and that was
-   > read here, and in #66, as the aperture problem: a node on a straight line
-   > matches equally well anywhere along it, and line art is mostly straight
-   > lines where the paper's examples are filled cartoon regions.
+   > read here, and in #66 (since closed), as the aperture problem: a node on a
+   > straight line matches equally well anywhere along it, and line art is
+   > mostly straight lines where the paper's examples are filled cartoon
+   > regions.
    >
    > **It was the score.** The push step maximised agreement — a sum of
    > products — where the paper minimises a sum of absolute differences

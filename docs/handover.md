@@ -1442,8 +1442,9 @@ answer is that nothing moved, the lattice drifted 146 px. It drifts none now,
 and the regions a colourist would have to fix went from 19 of 52 to 10 on the
 first colouring and 22 of 53 to 14 on the second, at about 170 ms against 526.
 
-**That drift was not the aperture problem, which is what this document and #66
-both used to say it was.** Under a difference, a node on a straight line *ties*
+**That drift was not the aperture problem, which is what this document and
+[#66](https://github.com/S-poony/Animage/issues/66) both used to say it was**
+(closed, and superseded by #67 for the score and #69 for the shear). Under a difference, a node on a straight line *ties*
 along that line — and the push step scores the position in hand first and only
 displaces it on a strictly better score, so a tie is not a reason to move. Drift
 needs a measure that actively prefers somewhere else, and an unnormalised sum of
@@ -5351,22 +5352,31 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **Decide between rung three and rung four, by looking rather than by
-   scoring.** Rung four was off because it did not beat rung three, and most of
-   the reason it did not was a score it should never have had —
-   [#67](https://github.com/S-poony/Animage/issues/67), fixed: the drift on an
-   unmoved drawing is zero and the regions to fix went from 22 of 53 to 14. It
-   still leaves more to fix than rung three's 9, and the two fail on *different*
-   drawings. Rung three's worst drawing is one rung four gets exactly right, and
-   the other way round. No number here settles which failure a colourist would
-   rather have, so `ANIMAGE_CARRY` and the two batch files beside
-   `run-animage.bat` exist to let somebody switch rungs and colour a shot with
-   each. That is the measurement now, and it is temporary scaffolding to be
-   taken out with the decision.
+2. **Make rung four fit to be the default, which is one defect away.**
+   [#69](https://github.com/S-poony/Animage/issues/69). The choice between the
+   two rungs is *made* — the shot was coloured four times, once under each rung,
+   and the person who coloured it found them equally quick, so it was decided on
+   the grounds that are not accuracy: rung four is the only rung that can be
+   right about two things that moved differently, and it never loses a drawing
+   outright where rung three loses one on every colouring in the tree.
+
+   What stops it is that it shears on a closed loop of straight edges — a
+   rectangle translated twenty pixels comes back with a field three hundred
+   pixels wide. `bench_shapes` is the instrument and the issue carries the plan,
+   the two things worth trying in order, and the five things already ruled out
+   with numbers so nobody spends an afternoon on them. The gates are there too,
+   and the fourth is the one to watch: a change that fixes `bench_shapes` and
+   costs a colouring is a real trade that needs a person to look at pictures.
+
+   With it fixed, `CtgSettings::carry` becomes `Lattice` and the `ANIMAGE_CARRY`
+   scaffolding comes out with it — `carryFromEnvironment`,
+   `applicationCtgSettings`, and the two batch files beside `run-animage.bat`.
 
    Rung three's own score is the same mistake one rung down and is
    [#68](https://github.com/S-poony/Animage/issues/68). Two fixes were measured
    and both were worse; see "why a sum of products is not a score for a block".
+   It matters less the moment rung four is the default, which is a reason to
+   settle that first rather than to do them together.
 
 3. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
