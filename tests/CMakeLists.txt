@@ -25,6 +25,13 @@ target_link_libraries(bench_composite PRIVATE animage::core)
 add_executable(bench_carry bench_carry.cpp)
 target_link_libraries(bench_carry PRIVATE animage::core)
 
+# A measurement rather than a test: what an estimator does to a family of
+# shapes, all moved the same known amount. Every other fixture moves one shape,
+# which is how four rungs were asked the same question about a rectangle for a
+# year without anyone noticing rung four cannot follow one. See issue #69.
+add_executable(bench_shapes bench_shapes.cpp)
+target_link_libraries(bench_shapes PRIVATE animage::core)
+
 # What a transform costs, and where. Written before anything was optimised.
 add_executable(bench_transform bench_transform.cpp)
 target_link_libraries(bench_transform PRIVATE animage::core)

@@ -5075,6 +5075,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_session -platform offscreen [--project FOLDER]   # does a session get heavy?
 ./build/tests/bench_save          # save, incremental save, open
 ./build/tests/bench_carry         # how far a mark survives being carried
+./build/tests/bench_shapes        # what an estimator does to a family of shapes
 ./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]  # against a hand
 ./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
@@ -5097,6 +5098,22 @@ per drawing, marks only the first, and reports what the fill did on the rest:
 how much of the region took the colour, how much of the world outside it did,
 what `spread` said about it, and how far the solve decided the drawing had moved. Every case runs twice, with the marks left where they were drawn and with
 them following the line art, so the two are read side by side.
+
+`bench_shapes` is the newest and the one that would have caught the most. Every
+other fixture in `tests/` moves **one** shape — `bench_carry` moves a box,
+`bench_hand` opens a shot somebody coloured — so between them they asked four
+rungs the same question about a rectangle for a year, and none of them noticed
+that rung four cannot follow a rectangle at all. This one moves fifteen shapes
+by the same known amount and prints how far the worst cell of each answer is
+from the truth, which is the number that decides whether a carried mark lands.
+
+Its value is not the rows, it is the **differences between neighbouring rows**.
+Three walls of a box against four; sixty pixels across against three hundred; a
+cross through the middle or nothing there; the same shape turned 45°. Each pair
+differs in one property, so a failure says what it is a property *of* — which is
+the thing no single fixture can tell you, and which took ten minutes here after
+a week of not knowing. Add shapes to it freely, in pairs that differ in one
+thing.
 
 `bench_hand` is the other measurement of carrying and it asks the question
 `bench_carry` cannot: not "how far does a mark survive being moved a known
