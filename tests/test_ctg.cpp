@@ -1519,6 +1519,15 @@ void aCarriedMarkThatLandsRightWinsARegion() {
 // The trap this measurement has: a mark wins its own pixels in the finished
 // fill whatever the solver decided, so reading confidence back off the fill
 // would report every mark as perfectly placed, always.
+//
+// **That is still true of every mark the fill keeps, and it is why both numbers
+// come off the solver's labels.** What changed under
+// [#73](https://github.com/S-poony/Animage/issues/73) is that a *carried* mark
+// which won no region is no longer one the fill keeps: it is dropped, labels
+// and pixels together, rather than left painting a small patch of a wrong
+// colour that nobody would spot. So this case -- a mark carried onto a drawing
+// whose shape has moved out from under it -- now shows nothing at all, and the
+// case below it, where the mark lands right, is where the trap still bites.
 void confidenceIsMeasuredAgainstTheSolveAndNotTheFill() {
     TEST("confidence reads the solver's answer, not the one the mark overrode");
     Sequence s(2);
@@ -1527,13 +1536,41 @@ void confidenceIsMeasuredAgainstTheSolveAndNotTheFill() {
     s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
 
     const CtgFill& carried = s.fillOf(1);
-    CHECK(carried.spread < 1.05f);
 
-    // Every one of those pixels is nonetheless its own colour in the fill,
-    // which is what makes the fill useless for judging this.
+    // The measurement still says stranded, taken where it has to be taken.
+    CHECK(carried.spread < 1.05f);
+    CHECK(carried.inherited);
+
+    // And the fill no longer shows it: a guess the program made and that won
+    // nothing is one it withdraws. Every pixel of the mark is now un-honoured,
+    // which is the exact opposite of what this case used to assert.
     const Cel* marks = s.doc.celAt(s.track, s.at(0), s.colour);
     CHECK(marks != nullptr);
-    CHECK_EQ(scribblePixelsNotHonoured(*marks, carried, nullptr), std::size_t{0});
+    CHECK(scribblePixelsNotHonoured(*marks, carried, nullptr) > std::size_t{0});
+    CHECK_NEAR(fillAt(carried, 130, 100).a, 0.0f, 0.01f);
+}
+
+// The same trap, on the mark this does not touch.
+//
+// A mark somebody drew on this drawing is a statement about the pixels it
+// covers and is honoured whatever the solver decided -- which is what makes the
+// finished fill useless for judging placement, and is why nothing above reads
+// it. Only a carried mark can be withdrawn, because only a carried mark is the
+// program's own guess.
+void aMarkDrawnHereIsHonouredEvenWhereItWinsNothing() {
+    TEST("a mark drawn on this drawing shows its pixels even winning nothing");
+    Sequence s(1);
+    s.box(0, 320, 60, 460, 180, 380, 400);
+    s.stroke(0, s.colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& own = s.fillOf(0);
+    CHECK(own.valid);
+    CHECK(!own.inherited);
+    CHECK(own.spread < 1.05f);  // it won nothing: the box is elsewhere
+
+    const Cel* marks = s.doc.celAt(s.track, s.at(0), s.colour);
+    CHECK(marks != nullptr);
+    CHECK_EQ(scribblePixelsNotHonoured(*marks, own, nullptr), std::size_t{0});
 }
 
 // --- a mark is a label, and one of the labels is "nothing" ----------------
@@ -2673,6 +2710,7 @@ int main() {
     aCarriedMarkThatLandsWrongWinsNothingButItself();
     aCarriedMarkThatLandsRightWinsARegion();
     confidenceIsMeasuredAgainstTheSolveAndNotTheFill();
+    aMarkDrawnHereIsHonouredEvenWhereItWinsNothing();
 
     aCtgStrokeWritesLabelsAndNotPaint();
     theTransparentScribbleSurvivesTheHalfFloat();

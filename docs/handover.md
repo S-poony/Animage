@@ -24,6 +24,7 @@ the shape of the program. Those five maps are.
 | [Colour through time, part three](#colour-through-time-part-three) | one number became a field, and what four shots said about it |
 | [What the push step is allowed to see](#what-the-push-step-is-allowed-to-see) | why rung four sheared a rectangle, and what it cost to stop it |
 | [**The one constant in rung four**](#the-one-constant-in-rung-four-and-what-bounds-it) | `kAlongKeep`: the number to turn, and the two failures that bound it |
+| [A mark the program moved, and did not land](#a-mark-the-program-moved-and-did-not-land) | dropping a stray, and why no benchmark here could see one |
 | [**Scoring a rung against a hand**](#scoring-a-rung-against-a-hand) | `bench_hand`: a shot somebody coloured, as the thing to beat |
 | [What a track does past its last drawing](#what-a-track-does-past-its-last-drawing) | holds, shows, and the difference |
 | [What the keyboard does, and when](#what-the-keyboard-does-and-when) | the shortcut table, the first mode, and changing a key |
@@ -1651,6 +1652,74 @@ leg behind while its foot's colour walks up it.
   in "the traps" wrong. If you find a better-motivated shape — a shrinkage with
   a noise scale in it, say — the thing to preserve is smoothness, not this
   particular curve.
+
+### A mark the program moved, and did not land
+
+**A carried mark that wins no region is dropped now rather than left where it
+fell.** [#73](https://github.com/S-poony/Animage/issues/73), reported from using
+the program rather than found by a bench — which matters, because **no
+measurement in this tree could see it**.
+
+A stray does not merely fail to colour a region. It colours its own pixels,
+because `ctgFillPixel` consults the mark before the labels — a scribble is a
+statement about the pixels it covers. So a mark carried off its shape leaves a
+small patch of a wrong colour on the drawing, and somebody has to find it and
+rub it out.
+
+**Small is worse than large here, and that inverts the usual reading.** Measured
+over the four hand colourings before the fix: a stray colours at worst 119 to
+295 image pixels, an eleven-pixel square, and usually far less. A stray the size
+of a limb gets noticed and fixed. One this size survives into the render. The
+argument for dropping them is not about area — the area is negligible and always
+was.
+
+And it is not rare: **15 to 20 per cent of the regions a mark stands in were won
+by nothing**, about one stray every other drawing.
+
+**Why no bench caught it, which is the part worth keeping.** `countFixes` only
+counts a region once it is at least 24×24 image pixels, and a stray is smaller
+than that, so it was never a region to fix. The pixel percentages are over
+millions of pixels, so a few hundred never moved them at a tenth of a per cent.
+Dropping every stray in the shot changed `to fix`, `same`, `wrong` and `none` by
+**exactly nothing** — 7, 11, 10 and 12 regions before and after, to the digit.
+The instrument that found it is a person using the program, and the instrument
+that now watches it had to be built for it: `bench_hand` reports strays as a
+rate, the pixels they colour, and the worst single one.
+
+**The unit is a connected run of labels, not a mark.** `CtgFill::spread` is per
+palette colour and reduced to one number for a whole fill, so it cannot say
+which mark was stranded, and two scribbles sharing a colour average each other
+out. A run of labels can: barely larger than the mark inside it means that mark
+won nothing, and two same-coloured scribbles landing in one region leave a run
+holding both, which is correctly not a stray.
+
+**Only a carried mark, never one drawn here, and that distinction is the whole
+licence for doing it.** A scribble a person made is honoured whatever the solver
+decided — there are tests pinning that and they are right. A scribble the
+program moved here is a guess the program made, and a guess that won nothing is
+one it may withdraw. The first version of this ignored the difference and three
+tests caught it in the first run. `CtgFill::inherited` is the distinction and it
+was already there.
+
+**Both halves have to go.** Clearing the labels alone leaves the mark painting
+its own pixels; clearing the marks alone leaves the labels colouring the cells
+around it. And the marks are rebuilt rather than edited: the grid is shared
+copy-on-write with the cel it came from, so writing through it would rub the
+mark off the drawing somebody made it on.
+
+**It cost nothing and it needed no persistence.** 106.7 s against 108.4 on the
+four colourings, every gate unchanged, and `two-circles` went from two strays
+colouring 644 px to none. Persistence was considered and is not needed here:
+`celSourceFor` walks back to the drawing that *owns* the marks, so each drawing
+carries from the owner rather than from the previous carried result. There is no
+chain for an error to compound along, and nothing for a dropped mark to stay
+dropped in.
+
+**What it cannot reach.** A mark that landed in the *wrong* region rather than
+in no region — a leg taking its foot's colour. That one won plenty, just not the
+right thing, and `spread` measures it *higher* than a correct placement rather
+than lower. It is a different defect, it wants a correspondence between regions
+on two drawings, and #73 records what is known about it.
 
 ## Scoring a rung against a hand
 

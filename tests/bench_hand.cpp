@@ -154,6 +154,103 @@ struct Fixes {
 
 constexpr long long kSmallestRegion = 24 * 24;  // image pixels
 
+// A carried mark that filled nothing but itself, and how much of the drawing it
+// put a colour on anyway.
+//
+// For [#73](https://github.com/S-poony/Animage/issues/73), and a measurement
+// before any of it is built: how often does a carried mark land somewhere it
+// wins no region, and when it does, is the mess it leaves big enough to see?
+// The second half is the question that decides whether this is worth doing --
+// a stray that colours forty pixels is one a colourist never notices, and a
+// stray that colours a tenth of the drawing is one they have to hunt for and
+// erase.
+//
+// **Off the solver's labels and never off the finished fill.** A mark wins its
+// own pixels in the fill whatever the solver decided, so read back from the
+// picture every mark looks perfectly placed -- the handover's "why the proposed
+// confidence score reads 1 on every case", and there is a test pinning it.
+//
+// A *component* and not a mark, which is the granularity that makes this
+// answerable. `CtgFill::spread` is per palette colour and reduced to one number
+// for the whole fill, so it cannot say which mark was stranded, and two
+// scribbles sharing a colour average each other out. A connected run of labels
+// can: if a run is barely larger than the mark sitting in it, that mark won
+// nothing, and if two same-coloured scribbles landed in one region the run
+// holds both and is not a stray. No new plumbing in the estimator to find out.
+struct Strays {
+    int found = 0;           // components a mark won nothing in
+    long long pixels = 0;    // image pixels those components coloured
+    long long worst = 0;     // and the largest single one
+    int marked = 0;          // components with any mark in them, as the floor
+};
+
+// How much bigger than the mark inside it a component has to be to count as
+// won. Deliberately generous: a mark that filled nothing measures exactly 1.00
+// and one that snugly fills a small region measures 1.96, so anything at or
+// under 1.5 is the stranded end of a gap the handover measured rather than a
+// cutoff chosen here. Being a measurement and not a rule, what matters is that
+// the number is stated, not that it is exactly right.
+constexpr double kWonNothingBelow = 1.5;
+
+Strays strays(const CtgFill& fill) {
+    Strays out;
+    const int width = fill.gridWidth();
+    const int height = fill.gridHeight();
+    const std::size_t cells = static_cast<std::size_t>(std::max(0, width)) * std::max(0, height);
+    if (cells == 0 || fill.labels.size() != cells || fill.step <= 0) return out;
+
+    const long long cell_pixels =
+        static_cast<long long>(fill.step) * static_cast<long long>(fill.step);
+    std::vector<char> seen(cells, 0);
+    std::vector<int> stack;
+
+    for (std::size_t start = 0; start < cells; ++start) {
+        if (seen[start] || fill.labels[start] < 0) continue;
+        const std::int16_t label = fill.labels[start];
+
+        long long area = 0;
+        long long seeded = 0;
+        stack.clear();
+        stack.push_back(static_cast<int>(start));
+        seen[start] = 1;
+        while (!stack.empty()) {
+            const int at = stack.back();
+            stack.pop_back();
+            ++area;
+
+            // Is a mark standing on this cell? The marks travel with the fill
+            // and are already where they are used, so this is the drawing's own
+            // coordinates and no warp is applied here.
+            const int cx = at % width;
+            const int cy = at / width;
+            const int px = fill.solved.x + cx * fill.step;
+            const int py = fill.solved.y + cy * fill.step;
+            if (fill.marks.pixel(px, py).a >= fill.mark_threshold) ++seeded;
+
+            const auto visit = [&](int nx, int ny) {
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+                const std::size_t index = static_cast<std::size_t>(ny) * width + nx;
+                if (seen[index] || fill.labels[index] != label) return;
+                seen[index] = 1;
+                stack.push_back(static_cast<int>(index));
+            };
+            visit(cx - 1, cy);
+            visit(cx + 1, cy);
+            visit(cx, cy - 1);
+            visit(cx, cy + 1);
+        }
+
+        if (seeded == 0) continue;  // reached by spreading, not by a mark of its own
+        ++out.marked;
+        if (static_cast<double>(area) > kWonNothingBelow * static_cast<double>(seeded)) continue;
+        ++out.found;
+        const long long coloured = area * cell_pixels;
+        out.pixels += coloured;
+        out.worst = std::max(out.worst, coloured);
+    }
+    return out;
+}
+
 Fixes countFixes(const CtgFill& truth, const CtgFill& test) {
     Fixes out;
     const int width = truth.gridWidth();
@@ -394,6 +491,10 @@ int main(int argc, char** argv) {
             Agreement totals[std::size(methods)];
             int to_fix[std::size(methods)] = {};
             int regions[std::size(methods)] = {};
+            int stray_found[std::size(methods)] = {};
+            int stray_marked[std::size(methods)] = {};
+            long long stray_pixels[std::size(methods)] = {};
+            long long stray_worst[std::size(methods)] = {};
             std::vector<double> each_same[std::size(methods)];
             std::vector<double> each_wrong[std::size(methods)];
 
@@ -479,13 +580,25 @@ int main(int argc, char** argv) {
                     each_same[m].push_back(scored.percent(scored.agreed));
                     each_wrong[m].push_back(scored.percent(scored.differed));
 
+                    const Strays stray = strays(test);
+                    stray_found[m] += stray.found;
+                    stray_marked[m] += stray.marked;
+                    stray_pixels[m] += stray.pixels;
+                    stray_worst[m] = std::max(stray_worst[m], stray.worst);
+
                     char fixed[32];
                     std::snprintf(fixed, sizeof(fixed), "%d of %d", fixes.wrong, fixes.regions);
-                    std::printf("      %5zu    %5s    %-20s %7s   %6.1f%%   %6.1f%%   %6.1f%%   %s\n",
-                                at + 1, m == 0 ? std::to_string(colours).c_str() : "",
-                                methods[m].name, fixed, scored.percent(scored.agreed),
-                                scored.percent(scored.differed), scored.percent(scored.missing),
-                                methods[m].follow ? decided(test.carried_by).c_str() : "");
+                    char stranded[32] = "";
+                    if (stray.found > 0) {
+                        std::snprintf(stranded, sizeof(stranded), "%d stray, %lldpx", stray.found,
+                                      stray.worst);
+                    }
+                    std::printf(
+                        "      %5zu    %5s    %-20s %7s   %6.1f%%   %6.1f%%   %6.1f%%   %-14s %s\n",
+                        at + 1, m == 0 ? std::to_string(colours).c_str() : "", methods[m].name,
+                        fixed, scored.percent(scored.agreed), scored.percent(scored.differed),
+                        scored.percent(scored.missing), stranded,
+                        methods[m].follow ? decided(test.carried_by).c_str() : "");
 
                     if (!options.pictures.isEmpty()) {
                         pictured = unite(pictured, over);
@@ -539,6 +652,24 @@ int main(int argc, char** argv) {
                             totals[m].percent(totals[m].agreed),
                             totals[m].percent(totals[m].differed),
                             totals[m].percent(totals[m].missing));
+            }
+
+            // And what a stray costs, for #73.
+            //
+            // `stray` is a mark that won no region; `of` is every component a
+            // mark stands in, so the two together are a rate and not a count.
+            // `px` is what those strays coloured in total and `worst` the
+            // largest one, which is the pair that says whether a colourist
+            // would see them: a stray the size of a scribble is one nobody
+            // notices, and one the size of a limb is one they have to hunt.
+            std::printf("\n      %-32s%-20s %10s   %10s   %10s\n", "", "", "strays", "px",
+                        "worst px");
+            for (std::size_t m = 0; m < std::size(methods); ++m) {
+                char rate[32];
+                std::snprintf(rate, sizeof(rate), "%d of %d", stray_found[m], stray_marked[m]);
+                std::printf("      %-32s%-20s %10s   %10lld   %10lld\n",
+                            m == 0 ? "  marks that won nothing" : "", methods[m].name, rate,
+                            stray_pixels[m], stray_worst[m]);
             }
             for (std::size_t m = 0; m < std::size(methods); ++m) {
                 std::vector<double> same = each_same[m];

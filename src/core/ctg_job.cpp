@@ -29,7 +29,8 @@ bool abandoned(const std::atomic<bool>* abandon) {
 // A fact about the labels that were computed, not an estimate of them. It is
 // what lets ctgFillSpan answer an empty row in one test, which is the shortcut
 // an absent tile used to give the compositor for nothing.
-bool ringIsClear(const std::vector<int>& labels, int width, int height) {
+template <typename Label>
+bool ringIsClear(const std::vector<Label>& labels, int width, int height) {
     if (width <= 0 || height <= 0) return true;
     if (labels.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
         return false;
@@ -1875,6 +1876,156 @@ CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<Til
     return warp;
 }
 
+// A carried mark that won no region is dropped rather than left where it fell.
+//
+// Issue #73, and reported from using it rather than found by a bench: a mark
+// carried off its shape does not merely fail to colour anything, it *does*
+// colour something -- its own pixels, because a scribble wins the pixels it
+// covers whatever the solver decided (see ctgFillPixel). So a stray leaves a
+// small patch of a wrong colour on the drawing, and somebody has to find it and
+// rub it out.
+//
+// **Small is worse than large here, which inverts the usual reading.** Measured
+// over the four hand colourings, a stray colours at worst 119 to 295 image
+// pixels and usually far less -- an eleven-pixel square. A stray the size of a
+// limb gets noticed and fixed; one this size survives into the render. That is
+// the argument for dropping them, and it is not an argument about area: the
+// area is negligible and always was.
+//
+// It is *not* rare. Across those colourings 15 to 20 per cent of the regions a
+// mark stands in are won by nothing, about one stray every other drawing.
+//
+// **The unit is a connected run of labels and not a mark**, which is what makes
+// this decidable at all. `CtgFill::spread` is per palette colour and reduced to
+// one number for a whole fill, so it cannot say *which* mark was stranded, and
+// two scribbles sharing a colour average each other out. A run of labels can:
+// barely larger than the mark inside it means that mark won nothing, and two
+// same-coloured scribbles landing in one region leave a run that holds both and
+// is correctly not a stray.
+//
+// **Both halves have to go.** Clearing the labels alone would leave the mark
+// painting its own pixels, because ctgFillPixel consults the mark first and the
+// labels second. Clearing the marks alone would leave the labels colouring the
+// cells around it. So the run's labels go back to "nothing reached" and the
+// mark's pixels come out of the copy of the marks that travels with the fill.
+//
+// **What this cannot reach**, and the next person should not expect it to: a
+// mark that landed in the *wrong* region rather than in no region. That one won
+// plenty, just not the right thing, and `spread` measures it *higher* than a
+// correct placement rather than lower -- see the handover's "why the proposed
+// confidence score reads 1 on every case". It is a different defect and wants a
+// correspondence between regions on two drawings, which is what #73 records.
+//
+// **Only marks that were carried here, never a mark somebody drew on this
+// drawing.** That distinction is the whole licence for doing this at all. A
+// scribble a person made is a statement about the pixels it covers, and
+// ctgFillPixel honours it whatever the solver decided -- there are tests
+// pinning that, and they are right. A scribble the program moved here is a
+// guess the program made, and a guess that turned out to win nothing is one it
+// is entitled to withdraw. Dropping the first kind would be rubbing out
+// somebody's work because the solver disagreed with it.
+//
+// The drawing the marks were made on is untouched either way. This edits the
+// copy that travels with the fill, so the next drawing carries from the owner
+// exactly as it did before.
+void dropMarksThatWonNothing(CtgFill& fill) {
+    if (!fill.inherited) return;
+    const int width = fill.gridWidth();
+    const int height = fill.gridHeight();
+    const std::size_t cells = static_cast<std::size_t>(std::max(0, width)) * std::max(0, height);
+    if (cells == 0 || fill.labels.size() != cells || fill.step <= 0 || fill.marks.empty()) return;
+
+    // How much bigger than the mark in it a run has to be to count as won.
+    //
+    // The gap this sits in was measured before it was chosen and is wide: a
+    // mark that filled nothing scores exactly 1.00, and the snuggest real fill
+    // in the tests -- a mark filling a small region tightly -- scores 1.96. A
+    // thinner region would score less, which is why this is nearer the bottom
+    // of the gap than the middle of it. Erring low leaves a stray in place,
+    // which is the failure that was already happening; erring high rubs out a
+    // mark that was doing its job.
+    constexpr double kWonNothingBelow = 1.5;
+
+    std::vector<char> seen(cells, 0);
+    std::vector<int> stack;
+    std::vector<int> run;
+    std::vector<int> stranded;
+
+    for (std::size_t start = 0; start < cells; ++start) {
+        if (seen[start] || fill.labels[start] < 0) continue;
+        const std::int16_t label = fill.labels[start];
+
+        run.clear();
+        stack.clear();
+        stack.push_back(static_cast<int>(start));
+        seen[start] = 1;
+        long long seeded = 0;
+        while (!stack.empty()) {
+            const int at = stack.back();
+            stack.pop_back();
+            run.push_back(at);
+
+            const int cx = at % width;
+            const int cy = at / width;
+            if (fill.marks.pixel(fill.solved.x + cx * fill.step, fill.solved.y + cy * fill.step).a >=
+                fill.mark_threshold) {
+                ++seeded;
+            }
+
+            const auto visit = [&](int nx, int ny) {
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+                const std::size_t index = static_cast<std::size_t>(ny) * width + nx;
+                if (seen[index] || fill.labels[index] != label) return;
+                seen[index] = 1;
+                stack.push_back(static_cast<int>(index));
+            };
+            visit(cx - 1, cy);
+            visit(cx + 1, cy);
+            visit(cx, cy - 1);
+            visit(cx, cy + 1);
+        }
+
+        if (seeded == 0) continue;  // reached by spreading, not seeded by a mark
+        if (static_cast<double>(run.size()) > kWonNothingBelow * static_cast<double>(seeded)) {
+            continue;
+        }
+        for (const int at : run) {
+            fill.labels[static_cast<std::size_t>(at)] = -1;
+            stranded.push_back(at);
+        }
+    }
+    if (stranded.empty()) return;
+
+    // And out of the marks, rebuilt rather than edited in place: the grid is
+    // shared by copy-on-write with the cel it came from and with every other
+    // fill that carried the same scribbles, so writing through it would rub the
+    // mark off the drawing somebody made it on.
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> rebuilt;
+    for (const auto& [coord, tile] : fill.marks.tiles()) {
+        if (tile) rebuilt.emplace(coord, std::make_shared<Tile>(*tile));
+    }
+    for (const int at : stranded) {
+        const int cx = at % width;
+        const int cy = at / width;
+        const int from_x = fill.solved.x + cx * fill.step;
+        const int from_y = fill.solved.y + cy * fill.step;
+        for (int y = from_y; y < from_y + fill.step; ++y) {
+            for (int x = from_x; x < from_x + fill.step; ++x) {
+                const auto found = rebuilt.find(tileCoordFor(x, y));
+                if (found == rebuilt.end() || !found->second) continue;
+                found->second->setPixel(tileLocal(x), tileLocal(y), Rgba{});
+            }
+        }
+    }
+
+    TileGrid kept;
+    for (auto& [coord, tile] : rebuilt) {
+        if (tile && !tile->isFullyTransparent()) kept.set(coord, TileRef(std::move(tile)));
+    }
+    fill.marks = std::move(kept);
+    fill.marks_drawn = drawnBounds(fill.marks);
+}
+
 CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>* abandon) {
     const CtgFill kNothing;
     if (!job.valid) return kNothing;
@@ -2115,7 +2266,8 @@ CtgFill solveCtgJob(const CtgJob& job, bool want_labels, const std::atomic<bool>
     for (const int label : solved.labels) {
         built.labels.push_back(static_cast<std::int16_t>(label));
     }
-    built.outside_is_clear = ringIsClear(solved.labels, problem.width, problem.height);
+    dropMarksThatWonNothing(built);
+    built.outside_is_clear = ringIsClear(built.labels, problem.width, problem.height);
     return built;
 }
 
