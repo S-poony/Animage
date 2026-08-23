@@ -1450,16 +1450,65 @@ needs a measure that actively prefers somewhere else, and an unnormalised sum of
 products is one: see "why a sum of products is not a score for a block" below.
 The aperture problem is real. It was not what the number was.
 
-**Rung four is still not the default, and the reason is now an honest one.** On
-the shot coloured for rung three it agrees with the hand slightly more often —
-91.2% against 90.0% — and leaves more regions to fix, 14 against 9, and more
-pixels in a wrong colour, 1.8% against 0.7%. What the pictures show is that the
-two fail on *different drawings*, badly, and neither dominates: on drawing 9 of
-that colouring rung three colours almost nothing and rung four is
-indistinguishable from the hand, and on drawing 10 rung three is nearly right
-and rung four puts a whole leg in the foot's pink. That is a choice about which
-failure a colourist would rather have, and it is not a choice a benchmark can
-make. `ANIMAGE_CARRY` and the two batch files beside `run-animage.bat` are there
+**On the shot the two rungs are a wash, and that is worth keeping in view.** On
+the colouring made for rung three, rung four agrees with the hand slightly more
+often — 91.2% against 90.0% — and leaves more regions to fix, 14 against 9. What
+the pictures show is that the two fail on *different drawings*, badly, and
+neither dominates: on drawing 9 of that colouring rung three colours almost
+nothing and rung four is indistinguishable from the hand, and on drawing 10 rung
+three is nearly right and rung four puts a whole leg in the foot's pink. The
+person who coloured it found them equally quick. So the shot cannot choose
+between them, and did not have to:
+
+**Rung four is not the default, and there is now one reason rather than a
+judgement: it comes apart on a closed loop of straight edges.** A rectangle
+translated twenty pixels — about as ordinary as motion gets, and something every
+rung below it gets right — produces a field running from −314 px to +58 px. That
+is [#69](https://github.com/S-poony/Animage/issues/69), and a probe of twelve
+shapes says exactly where the edge of it is:
+
+| | rung four says | the field |
+|---|---|---|
+| one straight line, moved 20 | 17, 0 | uniform |
+| two parallel walls, moved 20 | 17, 0 | uniform |
+| L shape, moved 20 | 13, −7 | tight |
+| C shape (three walls), moved 20 | 11, −6 | tight |
+| ring, moved 20 | 20, 0 | uniform |
+| filled disc, shrunk 10 | −1, −3 | tight |
+| small 60 px box, moved 10 | 5, −4 | tight |
+| box with a cross inside, moved 20 | 4, −15 | tight |
+| **box, moved 20** | **−93, −116** | **x [−314, 58]** |
+| **filled box, moved 20** | **−54, −69** | **x [−269, 55]** |
+| **diamond outline, moved 20** | **47, −97** | **x [−104, 142]** |
+
+**Closing the loop is what breaks it.** Three walls of a box are fine and four
+are not; the same shape turned 45° is just as bad, so it is not axis alignment.
+**Filling it does not help** — the filled box fails too — while a filled *disc*
+is fine and a box with a cross scribbled through it is fine. So it is not line
+art against filled art either, which is what the issue assumed when it was
+opened.
+
+What the working cases have and the failing ones lack is **something within a
+block's reach that pins both directions at once**: curvature on the ring and the
+disc, a free end on the L and the C, an interior feature on the crossed box, and
+on the 60 px box corners that are never further off than a block can see. A long
+straight run has none of that, and a closed loop of them can shear while every
+local rigid fit stays satisfied — each wall slides freely along itself and the
+loop has no interior tying opposite walls together.
+
+**That one is the aperture problem, and it is a different thing from the 146 px
+above.** The drift was the score, which is why registering a drawing against
+itself now answers zero; this is the geometry, which a zero-drift score does not
+reach. Both sentences are needed and neither replaces the other.
+
+So the honest scope of rung four today: **good on drawn character art,
+unreliable on anything geometric.** Backgrounds, props, architecture. The four
+hand colourings say nothing about it, because a cat has no straight walls — which
+is the general warning as much as the particular one, since every fixture in
+`tests/` that is not a hand-drawn shot is made of boxes.
+
+
+`ANIMAGE_CARRY` and the two batch files beside `run-animage.bat` are there
 so somebody can look at both.
 
 ## Scoring a rung against a hand
@@ -4791,6 +4840,59 @@ And the reason both attempts looked like improvements first: they were measured
 on `colour 1`, the colouring made while rung two was running. **A rung scored on
 marks placed for a different rung is measuring the marks**, and this is that
 sentence catching something on its way in rather than after.
+
+
+### What a comment goes on claiming after you replace the design under it
+**The design was changed, the comment above it was not, and the comment was the
+thing that read as correct.** `estimateCtgLattice` runs the lattice twice and
+the first version chose between the two runs by their match score. That was
+measured and was wrong — on two-circles the aliased translation genuinely
+matches better, so scoring picked it — so the choice became "use the second run
+only when the first one moved no node at all". The code was rewritten. The
+fifteen lines above it went on saying "both are run and the one that matches
+better is kept", and, a paragraph later, "it cannot answer worse than either
+start alone".
+
+Neither sentence was true any more, and the second one was a promise the code
+had stopped keeping: the fallback replaced the first run unconditionally, so a
+drawing that had correctly found nothing to do could be handed rung two's alias
+instead. `LatticeFit::cost` was still computed on every call, with its own
+justification attached, and read by nobody.
+
+An outside review found it in one pass by reading the comment against the code —
+which is the whole argument for having one. Two things about this worth keeping:
+**a comment that survives the design it described does not decay into being
+vague, it decays into being false**, and it is the most confident thing in the
+file while it does so. And **the leftover of a design is usually still visible**:
+a field computed and never read is where the removed rule used to be, so an
+unused member is a place to go looking rather than a tidiness question.
+
+The fix kept the cost after all, as a floor rather than as the choice — a
+fallback that matches worse than the run it replaces is not an improvement —
+which is a third thing: the measurement that killed the old design did not kill
+the quantity it was measured on.
+
+### What a default member initialiser reaches that you did not mean it to
+**`ANIMAGE_CARRY` was the default of `CtgSettings::carry`, so it reached the
+tests.** It was added as temporary scaffolding, so that a person could run the
+program on one rung and then another and look at the difference — the one thing
+no benchmark can do. Written as `Carry carry = carryFromEnvironment();` it also
+became the default of every `CtgSettings{}` in the process, and `test_ctg`,
+`bench_carry` and `bench_composite` all build one.
+
+The failure needs nobody to make a mistake. The handover tells the reader to set
+the variable and run the program; PowerShell keeps it set for the rest of that
+shell; the next `run-tests.bat` in the same window then asserts rung two's
+semantics against whichever rung was named, and `bench_composite` prints a line
+labelled "the same per region" that is measuring rung four. Nothing fails
+loudly; the numbers are just about a different thing than they say.
+
+It is the rule in [scribbles-through-time.md](scribbles-through-time.md)'s
+"things not to do", arriving from an unexpected direction: *a flag that tells the
+user is fine; a rule that changes behaviour behind them is not.* The application
+asks for its rung through `applicationCtgSettings` now and nothing else does, so
+the compiled default is what every test and bench gets. There is a check for it
+that costs nothing: run the suite with the variable set and it must still pass.
 
 
 ### What a stylesheet with no type selector also paints
