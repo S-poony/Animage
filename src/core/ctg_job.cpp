@@ -1129,6 +1129,74 @@ struct LatticeFit {
     bool moved = false;
 };
 
+// A temporary window on the settle loop, for issue #69.
+//
+// **Not part of the design, and it comes out with the fix.** It is here because
+// the two things #69 proposes trying predict different traces and reasoning
+// cannot tell them apart: one says the lattice's collective centre walks away,
+// the other says the field spreads while the centre stays put. This prints both
+// on either side of the regularisation, so the step that creates the error is
+// visible rather than inferred.
+//
+// Off unless ANIMAGE_LATTICE_TRACE is set, and it writes to stderr so that a
+// benchmark's own table stays readable.
+bool tracingLattice() {
+    static const bool on = [] {
+        const char* set = std::getenv("ANIMAGE_LATTICE_TRACE");
+        return set != nullptr && *set != '\0';
+    }();
+    return on;
+}
+
+// Where the pushed nodes have got to, as a centre and a spread.
+//
+// `mean` is what one translation would say the lattice did -- the part proposal
+// 1 removes -- and `spread` is how far the furthest pushed node is from that
+// centre, which is the shear proposal 1 cannot reach. `davg` is the paper's
+// stopping quantity, section 3.3 equation (6), over every node as the loop
+// computes it. `cost` is the paper's other curve from the same section: the
+// *average* sum of absolute differences over the blocks, so it can be read
+// against Figure 9. All distances in cells of the ink grid.
+void traceLattice(const char* when, int stepped, int rounds, const std::vector<Node>& nodes,
+                  const std::vector<char>& in_lattice, const InkLevel& a, const InkLevel& b) {
+    double mean_x = 0.0;
+    double mean_y = 0.0;
+    int pushed = 0;
+    for (std::size_t at = 0; at < nodes.size(); ++at) {
+        if (nodes[at].anchored || !in_lattice[at]) continue;
+        mean_x += nodes[at].x - nodes[at].rest_x;
+        mean_y += nodes[at].y - nodes[at].rest_y;
+        ++pushed;
+    }
+    if (pushed > 0) {
+        mean_x /= pushed;
+        mean_y /= pushed;
+    }
+
+    double spread = 0.0;
+    double cost = 0.0;
+    for (std::size_t at = 0; at < nodes.size(); ++at) {
+        const Node& node = nodes[at];
+        if (node.anchored || !in_lattice[at]) continue;
+        spread = std::max({spread, std::abs(node.x - node.rest_x - mean_x),
+                           std::abs(node.y - node.rest_y - mean_y)});
+        const int x = static_cast<int>(std::lround(node.rest_x));
+        const int y = static_cast<int>(std::lround(node.rest_y));
+        cost += blockDifference(a, b, x, y, static_cast<int>(std::lround(node.x)) - x,
+                                static_cast<int>(std::lround(node.y)) - y);
+    }
+    if (pushed > 0) cost /= pushed;
+
+    double davg = 0.0;
+    for (const Node& node : nodes) davg += std::hypot(node.x - node.rest_x, node.y - node.rest_y);
+    davg /= static_cast<double>(nodes.size());
+
+    std::fprintf(stderr,
+                 "  #69 step %2d %-9s rounds %3d  mean %7.2f,%7.2f  spread %7.2f  davg %6.2f  "
+                 "cost %7.3f\n",
+                 stepped, when, rounds, mean_x, mean_y, spread, davg, cost);
+}
+
 LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
                       const std::atomic<bool>* abandon) {
     LatticeFit fit;
@@ -1197,6 +1265,18 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
     double settled_at = -1.0;
     int settled_for = 0;
 
+    if (tracingLattice()) {
+        int pushed = 0;
+        for (std::size_t at = 0; at < fit.nodes.size(); ++at) {
+            if (!fit.nodes[at].anchored && fit.in_lattice[at]) ++pushed;
+        }
+        std::fprintf(stderr,
+                     "  #69 grid %dx%d cells, lattice %dx%d nodes, %d squares, %d pushed, "
+                     "started %d,%d\n",
+                     a.width, a.height, fit.across, fit.down, static_cast<int>(squares.size()),
+                     pushed, started.x, started.y);
+    }
+
     for (int stepped = 0; stepped < kSteps; ++stepped) {
         if (abandoned(abandon)) return fit;
 
@@ -1237,7 +1317,13 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
         const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
         const int rounds = static_cast<int>(
             std::lround(kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
+        if (tracingLattice()) {
+            traceLattice("pushed", stepped, rounds, fit.nodes, fit.in_lattice, a, b);
+        }
         regularise(fit.nodes, squares, std::max(1, rounds));
+        if (tracingLattice()) {
+            traceLattice("regular", stepped, rounds, fit.nodes, fit.in_lattice, a, b);
+        }
 
         double moved = 0.0;
         for (const Node& node : fit.nodes) {
@@ -1245,7 +1331,12 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
         }
         moved /= static_cast<double>(fit.nodes.size());
         if (settled_at >= 0.0 && std::abs(moved - settled_at) < 0.01) {
-            if (++settled_for >= kSettleAfter) break;
+            if (++settled_for >= kSettleAfter) {
+                if (tracingLattice()) {
+                    std::fprintf(stderr, "  #69 settled after step %d of %d\n", stepped, kSteps);
+                }
+                break;
+            }
         } else {
             settled_for = 0;
         }

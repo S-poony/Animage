@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <utility>
@@ -151,7 +152,15 @@ int furthestFrom(const CtgWarp& warp, CtgShift truth) {
     return worst;
 }
 
+// Which shapes to run, when a run is a trace rather than a table.
+//
+// `--only` is here because ANIMAGE_LATTICE_TRACE prints a hundred lines per
+// lattice, and fifteen shapes of that is not something anybody reads. It
+// matches on any part of the name: `--only box,` is the four box rows.
+const char* g_only = nullptr;
+
 void report(const char* what, const Sheet& before, const Sheet& after, CtgShift truth) {
+    if (g_only != nullptr && std::strstr(what, g_only) == nullptr) return;
     const TileGrid a = before.freeze();
     const TileGrid b = after.freeze();
 
@@ -175,7 +184,11 @@ void report(const char* what, const Sheet& before, const Sheet& after, CtgShift 
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) g_only = argv[++i];
+    }
+
     std::printf(
         "\nOne translation, many shapes. `truth` is what the shape was really\n"
         "given, so it is the answer; `worst` is how far the furthest cell of\n"
@@ -299,6 +312,30 @@ int main() {
         a.box(100, 100, 400, 400, 4);
         b.box(108, 112, 388, 384, 4);
         report("box, redrawn 8-16 px smaller", a, b, kStill);
+    }
+
+    // The same box, over and over, at sizes between the one that works and the
+    // one that does not.
+    //
+    // A 60 px box is followed and a 300 px box is not, which leaves the reason
+    // in the gap between two rows rather than in a row. These are that gap made
+    // readable: one shape, one motion, and the only thing varying is how much of
+    // it there is. Where the answer comes apart says what the defect is a
+    // property of -- how many nodes lie along a wall, how far a corner is from
+    // the middle of one, how many steps it takes to walk there -- and none of
+    // those can be told apart from a single failing size.
+    //
+    // The motion is the same 20 px every other row uses, so these are readable
+    // against them. The row at 300 is the same shape as "box, 300 px across"
+    // above and should answer the same thing; it is repeated here so the sweep
+    // can be read without looking away.
+    for (const int across : {60, 100, 140, 180, 220, 260, 300, 400}) {
+        Sheet a, b;
+        a.box(100, 100, 100 + across, 100 + across, 4);
+        b.box(100 + kMoved, 100, 100 + across + kMoved, 100 + across, 4);
+        char what[64];
+        std::snprintf(what, sizeof(what), "box sweep, %d px across", across);
+        report(what, a, b, kAcross);
     }
 
     std::printf(
