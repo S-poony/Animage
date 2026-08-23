@@ -977,6 +977,18 @@ constexpr int kSmoothingAtLast = 32;
 constexpr int kSteps = 200;
 constexpr int kSettleAfter = 8;          // steps with nothing moving before stopping
 constexpr double kSettleBelow = 0.0001;  // cells of average movement that count as none
+// How much of the along-valley motion to keep, as a power of the curvature
+// ratio. Zero would keep all of it and this rung would shear again; one keeps
+// the least and costs limbs, which is what a leg is: two long parallel edges
+// that slide along their own length between drawings.
+//
+// Swept on bench_shapes and on all four colourings. Below 0.35 the diamond
+// goes back to the hundreds -- keeping more of the along motion lets the shear
+// return -- and above it the limbs suffer: at 0.5 a leg takes its foot pink
+// from hip to ankle on colouring 4 drawing 10, 11.2% of that drawing in a
+// wrong colour against 1.4% here. The two failures bound it from opposite
+// sides and 0.35 is what is between them.
+constexpr double kAlongKeep = 0.35;
 
 
 // How unlike the neighbourhood of (x, y) in `a` the neighbourhood of
@@ -1439,7 +1451,7 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
             const double asked_y = best_y - at_y;
             const double asked_along = asked_x * surface.flat_x + asked_y * surface.flat_y;
             const double asked_across = asked_x * -surface.flat_y + asked_y * surface.flat_x;
-            const double taken_along = surface.degenerate ? 0.0 : asked_along * std::sqrt(surface.ratio);
+            const double taken_along = surface.degenerate ? 0.0 : asked_along * std::pow(surface.ratio, kAlongKeep);
             const double taken_across = surface.degenerate ? 0.0 : asked_across;
 
             if (tracingLattice()) {
