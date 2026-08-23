@@ -929,21 +929,63 @@ constexpr int kSmoothingAtLast = 32;
 constexpr int kSteps = 40;
 constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
 
-// How much the neighbourhood of (x, y) in `a` looks like the neighbourhood of
-// (x + dx, y + dy) in `b`. Agreement, for the same reason everything else here
-// uses it -- see the note above `agreement`.
-double blockAgreement(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
+// How unlike the neighbourhood of (x, y) in `a` the neighbourhood of
+// (x + dx, y + dy) in `b` is. Smaller is better, and it is what the push step
+// minimises.
+//
+// The paper's, and taken from it deliberately: equation (1) is
+// `t = arg min sum |S(p + t) - T(p)|` over the block, a sum of absolute
+// differences. This scored agreement instead -- a sum of products, maximised --
+// because that is what the rungs below it score, and it was wrong here for a
+// reason that does not apply to them.
+//
+// **The two measures disagree about blank paper, and blank paper is most of a
+// drawing.** Under a difference, blank against blank is a perfect score: bare
+// paper is evidence, and it says "there should be nothing here". Under a sum of
+// products, blank against blank and blank against ink both score zero -- bare
+// paper is evidence of nothing, and what is left is a quantity largest wherever
+// the target has the *most* ink, whatever shape it is in. Every node is then
+// pulled towards the nearest dense thing whether or not it looks like what the
+// node is standing on.
+//
+// Measured, and it is not a small effect. Registered against a drawing and
+// itself, where the only honest answer is that nothing moved, agreement drifted
+// 146 px and this drifts none at all -- exactly none, because a node with
+// nothing to distinguish one position from another keeps the one in hand. On
+// the coloured shot the regions a colourist would have to fix go from 19 of 52
+// to 10, pixels taking a wrong colour from 0.7% to 0.4%, and the whole estimate
+// costs 232 ms against 526.
+//
+// **The note above `agreement` is still right, about the function it is above.**
+// That one scores a whole drawing against a whole drawing, where the overlap
+// shrinks as the shift grows: a difference charges a wrong alignment twice, for
+// the ink it puts where there is none and the ink it fails to cover, while
+// sliding the drawing off the edge is charged once. A block is a fixed window
+// covering the same number of samples at every offset, so there is no shrinking
+// overlap and none of that argument survives the move. It was carried here from
+// the function it was measured in.
+//
+// Outside either grid is bare paper and counts as such, rather than being
+// skipped. Skipping it would make a block that has been pushed off the edge
+// cost nothing, which is the failure the whole-drawing score is written to
+// avoid, arriving by the other door.
+double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
     double total = 0.0;
     for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
         const int ay = y + oy;
         const int by = y + oy + dy;
-        if (ay < 0 || ay >= a.height || by < 0 || by >= b.height) continue;
         for (int ox = -kBlockReach; ox <= kBlockReach; ++ox) {
             const int ax = x + ox;
             const int bx = x + ox + dx;
-            if (ax < 0 || ax >= a.width || bx < 0 || bx >= b.width) continue;
-            total += static_cast<double>(a.ink[static_cast<std::size_t>(ay) * a.width + ax]) *
-                     static_cast<double>(b.ink[static_cast<std::size_t>(by) * b.width + bx]);
+            const double from =
+                (ax >= 0 && ax < a.width && ay >= 0 && ay < a.height)
+                    ? static_cast<double>(a.ink[static_cast<std::size_t>(ay) * a.width + ax])
+                    : 0.0;
+            const double to =
+                (bx >= 0 && bx < b.width && by >= 0 && by < b.height)
+                    ? static_cast<double>(b.ink[static_cast<std::size_t>(by) * b.width + bx])
+                    : 0.0;
+            total += std::abs(from - to);
         }
     }
     return total;
@@ -1137,13 +1179,18 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
             const int at_x = static_cast<int>(std::lround(node.x)) - x;
             const int at_y = static_cast<int>(std::lround(node.y)) - y;
 
+            // The position in hand is scored first and only a strictly better
+            // one displaces it, so a node with nothing to choose between two
+            // places stays where it is. That is the whole of why registering a
+            // drawing against itself now drifts nothing: a node on a straight
+            // line ties along that line, and a tie is not a reason to move.
             int best_x = at_x;
             int best_y = at_y;
-            double best = blockAgreement(a, b, x, y, at_x, at_y);
+            double best = blockDifference(a, b, x, y, at_x, at_y);
             for (int dy = at_y - kSearchReach; dy <= at_y + kSearchReach; ++dy) {
                 for (int dx = at_x - kSearchReach; dx <= at_x + kSearchReach; ++dx) {
-                    const double scored = blockAgreement(a, b, x, y, dx, dy);
-                    if (scored <= best) continue;
+                    const double scored = blockDifference(a, b, x, y, dx, dy);
+                    if (scored >= best) continue;
                     best = scored;
                     best_x = dx;
                     best_y = dy;
