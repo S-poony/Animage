@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 
 #include "compositor.h"
@@ -108,12 +110,20 @@ InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& re
 
 }  // namespace
 
-CtgSettings::Carry CtgSettings::carryFromEnvironment() {
+CtgSettings::Carry carryFromEnvironment() {
+    using Carry = CtgSettings::Carry;
     static const Carry chosen = [] {
         const char* set = std::getenv("ANIMAGE_CARRY");
         if (set == nullptr) return Carry::PerRegion;
         if (std::strcmp(set, "drawing") == 0) return Carry::WholeDrawing;
+        if (std::strcmp(set, "region") == 0) return Carry::PerRegion;
         if (std::strcmp(set, "lattice") == 0) return Carry::Lattice;
+        // A word this does not know is not a rung, and falling through quietly
+        // would make a typo indistinguishable from asking for the default --
+        // which is the one thing this exists in order to tell apart.
+        std::fprintf(stderr,
+                     "ANIMAGE_CARRY=%s is not drawing, region or lattice; carrying per region\n",
+                     set);
         return Carry::PerRegion;
     }();
     return chosen;
@@ -968,7 +978,7 @@ constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
 // nothing to distinguish one position from another keeps the one in hand. On
 // the coloured shot the regions a colourist would have to fix go from 19 of 52
 // to 10, pixels taking a wrong colour from 0.7% to 0.4%, and the whole estimate
-// costs 232 ms against 526.
+// costs about 170 ms against 526.
 //
 // **The note above `agreement` is still right, about the function it is above.**
 // That one scores a whole drawing against a whole drawing, where the overlap
@@ -986,19 +996,24 @@ constexpr int kSettleAfter = 8;  // steps with nothing moving before stopping
 double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
     double total = 0.0;
     for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
+        // Hoisted, because they do not vary across the row and this is the
+        // innermost loop of the rung: offsets times steps times nodes times
+        // samples is of the order of a thousand million iterations per lattice.
         const int ay = y + oy;
         const int by = y + oy + dy;
+        const bool a_row = (ay >= 0 && ay < a.height);
+        const bool b_row = (by >= 0 && by < b.height);
+        const std::size_t a_base = a_row ? static_cast<std::size_t>(ay) * a.width : 0;
+        const std::size_t b_base = b_row ? static_cast<std::size_t>(by) * b.width : 0;
         for (int ox = -kBlockReach; ox <= kBlockReach; ++ox) {
             const int ax = x + ox;
             const int bx = x + ox + dx;
-            const double from =
-                (ax >= 0 && ax < a.width && ay >= 0 && ay < a.height)
-                    ? static_cast<double>(a.ink[static_cast<std::size_t>(ay) * a.width + ax])
-                    : 0.0;
-            const double to =
-                (bx >= 0 && bx < b.width && by >= 0 && by < b.height)
-                    ? static_cast<double>(b.ink[static_cast<std::size_t>(by) * b.width + bx])
-                    : 0.0;
+            const double from = (a_row && ax >= 0 && ax < a.width)
+                                    ? static_cast<double>(a.ink[a_base + ax])
+                                    : 0.0;
+            const double to = (b_row && bx >= 0 && bx < b.width)
+                                  ? static_cast<double>(b.ink[b_base + bx])
+                                  : 0.0;
             total += std::abs(from - to);
         }
     }
@@ -1096,7 +1111,6 @@ void regularise(std::vector<Node>& nodes, const std::vector<Square>& squares, in
 // See estimateCtgLattice.
 struct LatticeFit {
     std::vector<Node> nodes;
-    std::vector<Square> squares;
     std::vector<char> in_lattice;
     int across = 0;
     int down = 0;
@@ -1155,7 +1169,8 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
     // A square is kept when any of its corners has ink under it, so the lattice
     // reaches one square past the drawing and no further -- which is the margin
     // that lets an outline pull the paper just outside it along.
-    fit.squares.reserve(static_cast<std::size_t>(fit.across - 1) * (fit.down - 1));
+    std::vector<Square> squares;
+    squares.reserve(static_cast<std::size_t>(fit.across - 1) * (fit.down - 1));
     fit.in_lattice.assign(fit.nodes.size(), 0);
     for (int ny = 0; ny + 1 < fit.down; ++ny) {
         for (int nx = 0; nx + 1 < fit.across; ++nx) {
@@ -1166,11 +1181,11 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
                     return !fit.nodes[static_cast<std::size_t>(corner)].anchored;
                 });
             if (!any_ink) continue;
-            fit.squares.push_back(square);
+            squares.push_back(square);
             for (int corner : square.corner) fit.in_lattice[static_cast<std::size_t>(corner)] = 1;
         }
     }
-    if (fit.squares.empty()) return fit;
+    if (squares.empty()) return fit;
 
     // Push, regularise, and stop when the lattice stops moving.
     //
@@ -1222,7 +1237,7 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
         const double through = (kSteps > 1) ? static_cast<double>(stepped) / (kSteps - 1) : 1.0;
         const int rounds = static_cast<int>(
             std::lround(kSmoothingAtFirst + (kSmoothingAtLast - kSmoothingAtFirst) * through));
-        regularise(fit.nodes, fit.squares, std::max(1, rounds));
+        regularise(fit.nodes, squares, std::max(1, rounds));
 
         double moved = 0.0;
         for (const Node& node : fit.nodes) {
@@ -1282,50 +1297,61 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
     blur(b);
     if (abandoned(abandon)) return warp;
 
-    // **Twice, from two starting points, and the cheaper answer wins.**
+    // **From rest, and from rung two's answer when the rest run saw nothing.**
     //
     // Where the lattice starts decides what it can reach, and neither answer to
-    // "where should it start" is right on its own. Each failure is a measured
-    // one and they pull opposite ways:
+    // "where should it start" is right on its own. Each failure is measured and
+    // they pull opposite ways:
     //
     // *At rest.* A node walks towards its match through the search window, a
     // few cells a step, and the push step keeps the position in hand whenever
     // two places tie. So a shape that has moved further than its own width has
-    // nothing under any of its nodes to walk towards, and long straight lines
-    // tie everywhere along themselves. A box moved 260 px was not followed at
-    // all, and a box moved 20 px produced a field 239 px wide.
+    // nothing under any of its nodes to walk towards: every offset ties, every
+    // node stays, and the run reports that nothing moved. A 140 px box moved
+    // 260 px was not followed at all.
     //
     // *At rung two's answer.* The paper asks for exactly this -- it says the
     // method "requires partial overlap" and recommends that "the initial
     // rigid-body transformation be estimated by hand or that some automatic
-    // rigid-body registration technique should be used". It fixes both of the
-    // above. But rung two answers with one translation for the whole drawing,
-    // and when two things moved differently that answer is whichever one it can
-    // explain best: on tests/projects/two-circles.animage it slides everything
-    // 780 px and puts one circle's mark on the other. Started there, the
-    // lattice stays there -- 56.5% of the drawing in the wrong colour, which is
-    // the one failure rung four exists to not have.
+    // rigid-body registration technique should be used". It fixes the above.
+    // But rung two answers with one translation for the whole drawing, and when
+    // two things moved differently that answer is whichever one it can explain
+    // best: on tests/projects/two-circles.animage it slides everything 780 px
+    // and puts one circle's mark on the other. Started there, the lattice stays
+    // there -- 56.5% of the drawing in the wrong colour, which is the one
+    // failure rung four exists in order not to have.
     //
-    // So both are run and the one that matches better is kept, scored by the
-    // same block difference the push step minimises. That is not a threshold
-    // and not a rule about which drawings are which: it is the shape
-    // searchShiftCells already uses for the same reason -- follow more than one
-    // candidate down and let the finest level choose -- and like that one it
-    // cannot answer worse than either start alone, because both starts are
-    // among the candidates.
+    // **So the fallback is conditioned on what the first run saw, not on which
+    // answer looks better.** Choosing the cheaper of two settled lattices was
+    // tried first and is wrong: on two-circles the alias genuinely matches
+    // better -- the handover lists five criteria that all prefer it -- so the
+    // score picks it and the failure comes back. What "the rest run moved no
+    // node at all" detects is not a worse answer, it is *no evidence*, which is
+    // what insufficient overlap looks like from inside the push step.
     //
-    // It costs a second lattice, which is most of the estimate. That is the
-    // trade this rung is allowed to make: colouring is not inking, a colourist
-    // is not laying down marks continuously, and a solved drawing stays solved.
-    const CtgShift prior = estimateCtgShift(from, to, area);
-    const CtgShift started{static_cast<int>(std::lround(static_cast<double>(prior.x) / step)),
-                           static_cast<int>(std::lround(static_cast<double>(prior.y) / step))};
-
+    // The cost is still compared, as a floor rather than as the choice: a
+    // fallback that matches worse than the run it replaces is not an
+    // improvement, and this is the only thing standing between an aliased rung
+    // two and a lattice that had correctly found nothing to do. Reaching here
+    // at all means the first run moved nothing, so two-circles never sees this
+    // branch and the comparison cannot bring its failure back.
+    //
+    // Rung two is worked out here rather than above, because on the ordinary
+    // path it is never wanted: it is an exhaustive coarse-to-fine search plus
+    // two more passes of ctgInkCoverage, which this file calls the one
+    // genuinely expensive part, and it takes no `abandon` so it cannot be
+    // stopped once started.
     LatticeFit fit = fitLattice(a, b, {0, 0}, abandon);
     if (!fit.ok || abandoned(abandon)) return warp;
-    if (!fit.moved && !(started.x == 0 && started.y == 0)) {
-        LatticeFit from_prior = fitLattice(a, b, started, abandon);
-        if (from_prior.ok) fit = std::move(from_prior);
+    if (!fit.moved) {
+        const CtgShift prior = estimateCtgShift(from, to, area);
+        const CtgShift started{
+            static_cast<int>(std::lround(static_cast<double>(prior.x) / step)),
+            static_cast<int>(std::lround(static_cast<double>(prior.y) / step))};
+        if (!(started.x == 0 && started.y == 0)) {
+            LatticeFit from_prior = fitLattice(a, b, started, abandon);
+            if (from_prior.ok && from_prior.cost < fit.cost) fit = std::move(from_prior);
+        }
     }
     if (abandoned(abandon)) return warp;
 
@@ -1420,9 +1446,12 @@ CtgWarp estimateCtgWarp(const std::vector<TileGrid>& from, const std::vector<Til
     for (const TileGrid& source : to) ink = unite(ink, drawnBounds(source));
     for (const TileGrid& source : from) ink = unite(ink, drawnBounds(source));
 
-    // Rung four does not begin from a whole-drawing answer, deliberately: what
-    // it is for is the case where there is no good whole-drawing answer to
-    // begin from.
+    // Rung four is not given the whole drawing's answer here, and works out
+    // its own if it turns out to need one -- which is not the same thing as
+    // not using it. What rung four is *for* is the case where there is no good
+    // whole-drawing answer to begin from, so it starts at rest; what it falls
+    // back to when the drawings do not overlap is rung two, worked out inside
+    // estimateCtgLattice and only on that path. See the note there.
     if (settings.carry == CtgSettings::Carry::Lattice) {
         return estimateCtgLattice(from, to, ink, abandon);
     }

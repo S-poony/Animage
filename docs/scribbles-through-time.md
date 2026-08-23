@@ -487,8 +487,8 @@ Order of attack, cheapest first:
    > position in hand first and only displaces it on a strictly better score, so
    > a tie is not a reason to move. The regions a colourist would have to fix
    > went from 19 of 52 to 10 on the first colouring and 22 of 53 to 14 on the
-   > second, and the whole estimate costs 195 ms against 526 because the lattice
-   > settles rather than thrashing. two-circles is unmoved.
+   > second, and the whole estimate costs about 170 ms against 526 because the
+   > lattice settles rather than thrashing. two-circles is unmoved.
    >
    > The aperture problem is real and this does not solve it. It was not what
    > the number was, and the lesson underneath is the one worth carrying to

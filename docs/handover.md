@@ -1440,7 +1440,7 @@ scored agreement — a sum of products, maximised — because that is what the r
 below it score. Registered against a drawing and *itself*, where the only honest
 answer is that nothing moved, the lattice drifted 146 px. It drifts none now,
 and the regions a colourist would have to fix went from 19 of 52 to 10 on the
-first colouring and 22 of 53 to 14 on the second, at 195 ms against 526.
+first colouring and 22 of 53 to 14 on the second, at about 170 ms against 526.
 
 **That drift was not the aperture problem, which is what this document and #66
 both used to say it was.** Under a difference, a node on a straight line *ties*
