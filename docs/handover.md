@@ -1396,6 +1396,16 @@ opposite ways.
 **The person who coloured it says the two are a wash**, and colouring the shot
 took about five minutes under each against about seven for the earlier passes.
 So the benchmark and the hand agree, including about not being able to choose.
+
+**And the only number here that measures what any of this is for: the same shot,
+timed by the person colouring it, went from 7 min 03 s under rung two to 2 min
+44 s.** Every other measurement in this file is a proxy for that one. Roughly
+half of it is the step to a rung that carries marks properly, which the five
+minutes above already records; the rest arrived with rung four becoming fit to
+be the default — the shear fixed, the estimate at half its old cost, and strays
+no longer needing to be found and rubbed out. It is one person on one shot with
+a stopwatch and it is worth more than the tables around it, because it is the
+quantity the tables are trying to predict.
 What is left to decide between them is not accuracy:
 
 - rung four is the paper's, and it is the only rung that can be right about two
