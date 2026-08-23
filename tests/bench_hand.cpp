@@ -65,6 +65,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "compositor.h"
@@ -241,6 +242,33 @@ PixelRect judged(const CtgFill& truth, const CtgFill& test) {
     return unite(over, unite(truth.marks_drawn, test.marks_drawn));
 }
 
+// One drawing's line art, flattened, and the rectangle it was flattened over.
+//
+// The two travel as one thing because a coverage indexed against a rectangle it
+// was not flattened over is off by an origin, which is a wrong picture rather
+// than a crash -- and because every picture of one drawing now shares both.
+struct FlatInk {
+    PixelRect over;
+    std::vector<float> coverage;  // one per pixel of `over`: 0 bare paper, 1 solid
+};
+
+// The sources flattened over `over`, once for every picture of that drawing.
+//
+// Reduced by the most covered pixel, which is the barrier's rule and is right
+// here for the barrier's reason: a line that vanishes is a boundary the eye
+// cannot check.
+//
+// Once per drawing and not once per picture, because this is what writing a
+// picture actually costs: every source layer composited at full resolution and a
+// float per pixel to hold the answer -- about 8 MB over a 1920x1080 drawing. It
+// was done inside writePicture, so a shot of fifty drawings composited the same
+// line art two hundred and fifty times, over five rectangles that were nearly
+// the same rectangle.
+FlatInk flattenInk(const std::vector<TileGrid>& sources, const PixelRect& over) {
+    if (over.isEmpty()) return {};
+    return {over, ctgInkCoverage(sources, over, 1, InkReduce::Most)};
+}
+
 // The fill, with the line art it was cut against drawn over it.
 //
 // The line art is not decoration. A fill on its own is a field of flat colour,
@@ -250,13 +278,20 @@ PixelRect judged(const CtgFill& truth, const CtgFill& test) {
 // has put a whole limb in the wrong colour looks like the right picture
 // slightly moved.
 //
-// Reduced by the most covered pixel, which is the barrier's rule and is right
-// here for the barrier's reason: a line that vanishes is a boundary the eye
-// cannot check.
-void writePicture(const CtgFill& fill, const std::vector<TileGrid>& ink, const PixelRect& over,
-                  const QString& path) {
+// Which is also why the picture covers `lines.over` -- one rectangle for every
+// picture of one drawing -- rather than the rectangle of the fill that made it.
+// Each fill has its own idea of how much of the drawing it is about: a method
+// that carried a mark off its shape solves a different rectangle from one that
+// left it where it was drawn, and the hand-coloured fill a third. Cut to that,
+// the five PNGs of one drawing have five origins and five sizes, so flipping
+// between them in a viewer shifts and rescales the drawing and the eye reads a
+// translation that is not there -- the very thing they are written to show. A
+// common rectangle costs nothing but the pixels it adds: a fill answers outside
+// the rectangle it solved, exactly rather than approximately, and ctgFillPixel
+// says why.
+void writePicture(const CtgFill& fill, const FlatInk& lines, const QString& path) {
+    const PixelRect& over = lines.over;
     if (over.isEmpty()) return;
-    const std::vector<float> lines = ctgInkCoverage(ink, over, 1, InkReduce::Most);
     QImage picture(over.width, over.height, QImage::Format_ARGB32);
     picture.fill(Qt::transparent);
     for (int y = 0; y < over.height; ++y) {
@@ -264,7 +299,8 @@ void writePicture(const CtgFill& fill, const std::vector<TileGrid>& ink, const P
         for (int x = 0; x < over.width; ++x) {
             const Rgba pixel = ctgFillPixel(fill, over.x + x, over.y + y);
             const std::size_t at = static_cast<std::size_t>(y) * over.width + x;
-            const float inked = (at < lines.size()) ? std::clamp(lines[at], 0.0f, 1.0f) : 0.0f;
+            const float inked =
+                (at < lines.coverage.size()) ? std::clamp(lines.coverage[at], 0.0f, 1.0f) : 0.0f;
             const auto channel = [&](float value) {
                 // The ink is black, so what it covers it darkens to nothing.
                 return static_cast<int>(
@@ -275,7 +311,11 @@ void writePicture(const CtgFill& fill, const std::vector<TileGrid>& ink, const P
                            static_cast<int>(alpha * 255.0f + 0.5f));
         }
     }
-    picture.save(path);
+    // Said nothing when it failed: a bad path or a full disk left the run
+    // reporting "pictures in DIR" over a directory that had none.
+    if (!picture.save(path)) {
+        std::fprintf(stderr, "could not write %s\n", qPrintable(path));
+    }
 }
 
 struct Options {
@@ -313,9 +353,9 @@ int main(int argc, char** argv) {
         "the answer to beat, and once with them cleared so that it inherits. Of\n"
         "the pixels the hand-coloured fill gave a colour to, `same` took that\n"
         "colour, `wrong` took another one, and `none` took nothing.\n\n"
-        "`wrong` is the column with nothing else watching it. Read the three\n"
-        "methods against each other rather than the digits: the hand is one\n"
-        "plausible answer and not the only one, so none of them reaches 100.\n\n");
+        "`wrong` is the column with nothing else watching it. Read the methods\n"
+        "against each other rather than the digits: the hand is one plausible\n"
+        "answer and not the only one, so none of them reaches 100.\n\n");
     std::printf("opened %s\n", qPrintable(options.project));
 
     const Method methods[] = {
@@ -396,20 +436,36 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                // One job, read once, and the three methods are three edits to
-                // the copy. Nothing about the layer is touched: an empty
+                // One job, read once, and each method is one edit to the copy.
+                // Nothing about the layer is touched: an empty
                 // `origin_sources` is how a job says "leave the marks where
                 // they were drawn", which is the same switch the layer's own
                 // setting reaches.
                 const CtgJob carried = ctgJobFor(doc, track_id, image, layer_id, CtgSettings{},
                                                  kFullSolveBudget);
 
+                // Every picture of this drawing covers one rectangle, and which
+                // one is not known until the last method has been solved: it is
+                // the union of the rectangles the scoring looked at, starting
+                // from the hand's own. So the fills are kept and the pictures
+                // written afterwards -- and a solve is by far the most
+                // expensive thing here, so keeping them is the alternative to
+                // doing it twice.
+                //
+                // Kept only when there are pictures to write. A fill is one
+                // label per solved cell, about 4 MB at 1080p, and four of them
+                // per drawing is memory a run that writes nothing would never
+                // read.
+                std::vector<CtgFill> for_pictures;
+                PixelRect pictured = judged(truth, truth);
+                if (!options.pictures.isEmpty()) for_pictures.reserve(std::size(methods));
+
                 for (std::size_t m = 0; m < std::size(methods); ++m) {
                     CtgJob job = carried;
                     if (!methods[m].follow) job.origin_sources.clear();
                     job.settings.carry = methods[m].carry;
 
-                    const CtgFill test = solveCtgJob(job, true);
+                    CtgFill test = solveCtgJob(job, true);
                     const PixelRect over = judged(truth, test);
                     const Agreement scored = compare(truth, test, over, kStride);
                     const Fixes fixes = countFixes(truth, test);
@@ -432,17 +488,22 @@ int main(int argc, char** argv) {
                                 methods[m].follow ? decided(test.carried_by).c_str() : "");
 
                     if (!options.pictures.isEmpty()) {
-                        writePicture(test, carried.sources, over,
+                        pictured = unite(pictured, over);
+                        for_pictures.push_back(std::move(test));
+                    }
+                }
+
+                if (!options.pictures.isEmpty()) {
+                    const FlatInk lines = flattenInk(carried.sources, pictured);
+                    for (std::size_t m = 0; m < for_pictures.size(); ++m) {
+                        writePicture(for_pictures[m], lines,
                                      QString("%1/%2-%3-%4.png")
                                          .arg(options.pictures)
                                          .arg(QString::fromStdString(layer.name))
                                          .arg(static_cast<int>(at + 1), 3, 10, QChar('0'))
                                          .arg(static_cast<int>(m) + 1));
                     }
-                }
-
-                if (!options.pictures.isEmpty()) {
-                    writePicture(truth, carried.sources, judged(truth, truth),
+                    writePicture(truth, lines,
                                  QString("%1/%2-%3-hand.png")
                                      .arg(options.pictures)
                                      .arg(QString::fromStdString(layer.name))
@@ -485,10 +546,15 @@ int main(int argc, char** argv) {
                 if (same.empty()) continue;
                 std::sort(same.begin(), same.end());
                 std::sort(wrong.begin(), wrong.end());
+                // Three order statistics over two independently sorted vectors,
+                // so the row is not a drawing -- the median `same`, the median
+                // `wrong` and the lowest `same` can each come from a different
+                // one. It said "the middle drawing", which read as though one
+                // drawing had all three numbers.
                 const double middle = same[same.size() / 2];
                 const double middle_wrong = wrong[wrong.size() / 2];
                 std::printf("      %-32s%-20s %7s   %6.1f%%   %6.1f%%   worst drawing %5.1f%%\n",
-                            m == 0 ? "  the middle drawing" : "", methods[m].name, "", middle,
+                            m == 0 ? "  median over drawings" : "", methods[m].name, "", middle,
                             middle_wrong, same.front());
             }
         }
@@ -498,7 +564,9 @@ int main(int argc, char** argv) {
         std::printf("\npictures in %s, named layer-drawing-method: -hand is the colourist's,\n"
                     "then 1 to %zu for the methods, in the order of the table. The line\n"
                     "art is drawn over each, because where a colour belongs is a fact\n"
-                    "about the drawing and not about the fill.\n",
+                    "about the drawing and not about the fill. All the pictures of one\n"
+                    "drawing cover the same rectangle, so flipping between them in a\n"
+                    "viewer moves only what the method moved.\n",
                     qPrintable(options.pictures), std::size(methods));
     }
     return 0;
