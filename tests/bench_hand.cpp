@@ -241,19 +241,38 @@ PixelRect judged(const CtgFill& truth, const CtgFill& test) {
     return unite(over, unite(truth.marks_drawn, test.marks_drawn));
 }
 
-void writePicture(const CtgFill& fill, const PixelRect& over, const QString& path) {
+// The fill, with the line art it was cut against drawn over it.
+//
+// The line art is not decoration. A fill on its own is a field of flat colour,
+// and the question being asked of it -- did this colour land where somebody
+// meant it to -- is a question about where the regions are, which is a fact
+// about the drawing and not about the fill. Judged without it, an answer that
+// has put a whole limb in the wrong colour looks like the right picture
+// slightly moved.
+//
+// Reduced by the most covered pixel, which is the barrier's rule and is right
+// here for the barrier's reason: a line that vanishes is a boundary the eye
+// cannot check.
+void writePicture(const CtgFill& fill, const std::vector<TileGrid>& ink, const PixelRect& over,
+                  const QString& path) {
     if (over.isEmpty()) return;
+    const std::vector<float> lines = ctgInkCoverage(ink, over, 1, InkReduce::Most);
     QImage picture(over.width, over.height, QImage::Format_ARGB32);
     picture.fill(Qt::transparent);
     for (int y = 0; y < over.height; ++y) {
         auto* row = reinterpret_cast<QRgb*>(picture.scanLine(y));
         for (int x = 0; x < over.width; ++x) {
             const Rgba pixel = ctgFillPixel(fill, over.x + x, over.y + y);
-            const auto channel = [](float value) {
-                return static_cast<int>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+            const std::size_t at = static_cast<std::size_t>(y) * over.width + x;
+            const float inked = (at < lines.size()) ? std::clamp(lines[at], 0.0f, 1.0f) : 0.0f;
+            const auto channel = [&](float value) {
+                // The ink is black, so what it covers it darkens to nothing.
+                return static_cast<int>(
+                    std::clamp(value * (1.0f - inked), 0.0f, 1.0f) * 255.0f + 0.5f);
             };
+            const float alpha = std::clamp(std::max(pixel.a, inked), 0.0f, 1.0f);
             row[x] = qRgba(channel(pixel.r), channel(pixel.g), channel(pixel.b),
-                           channel(pixel.a));
+                           static_cast<int>(alpha * 255.0f + 0.5f));
         }
     }
     picture.save(path);
@@ -413,7 +432,7 @@ int main(int argc, char** argv) {
                                 methods[m].follow ? decided(test.carried_by).c_str() : "");
 
                     if (!options.pictures.isEmpty()) {
-                        writePicture(test, over,
+                        writePicture(test, carried.sources, over,
                                      QString("%1/%2-%3-%4.png")
                                          .arg(options.pictures)
                                          .arg(QString::fromStdString(layer.name))
@@ -423,7 +442,7 @@ int main(int argc, char** argv) {
                 }
 
                 if (!options.pictures.isEmpty()) {
-                    writePicture(truth, judged(truth, truth),
+                    writePicture(truth, carried.sources, judged(truth, truth),
                                  QString("%1/%2-%3-hand.png")
                                      .arg(options.pictures)
                                      .arg(QString::fromStdString(layer.name))
@@ -477,8 +496,10 @@ int main(int argc, char** argv) {
 
     if (!options.pictures.isEmpty()) {
         std::printf("\npictures in %s, named layer-drawing-method: -hand is the colourist's,\n"
-                    "then 1, 2, 3 for the methods in the order of the table\n",
-                    qPrintable(options.pictures));
+                    "then 1 to %zu for the methods, in the order of the table. The line\n"
+                    "art is drawn over each, because where a colour belongs is a fact\n"
+                    "about the drawing and not about the fill.\n",
+                    qPrintable(options.pictures), std::size(methods));
     }
     return 0;
 }
