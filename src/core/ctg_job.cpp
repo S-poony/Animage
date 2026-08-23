@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 #include "compositor.h"
@@ -105,6 +107,17 @@ InkTiles occupiedTiles(const std::vector<TileGrid>& sources, const PixelRect& re
 }
 
 }  // namespace
+
+CtgSettings::Carry CtgSettings::carryFromEnvironment() {
+    static const Carry chosen = [] {
+        const char* set = std::getenv("ANIMAGE_CARRY");
+        if (set == nullptr) return Carry::PerRegion;
+        if (std::strcmp(set, "drawing") == 0) return Carry::WholeDrawing;
+        if (std::strcmp(set, "lattice") == 0) return Carry::Lattice;
+        return Carry::PerRegion;
+    }();
+    return chosen;
+}
 
 std::vector<float> ctgInkCoverage(const std::vector<TileGrid>& sources, const PixelRect& region,
                                   int step, InkReduce reduce_with) {

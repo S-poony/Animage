@@ -54,7 +54,25 @@ struct CtgSettings {
         PerRegion,     // rung three: one per piece the marks own
         Lattice,       // rung four: as-rigid-as-possible
     };
-    Carry carry = Carry::PerRegion;
+
+    // **Temporary, and a way of looking rather than a setting.** Because
+    // nothing in the application chooses a rung, the only way to see one
+    // against another has been a benchmark -- and a benchmark scores two fills
+    // against each other, where what a colourist judges is a picture with the
+    // line art over it and a hand on the timeline. bench_hand's own note says
+    // its table means less than it looks like it means. Somebody has to look.
+    //
+    // Read once, from ANIMAGE_CARRY: `drawing`, `region` or `lattice`.
+    // Anything else, including absent, is `region` -- so every existing caller
+    // gets what it got before, and the benches that set `carry` themselves are
+    // untouched.
+    //
+    // To be removed when the rung is settled. If it turns out somebody wants to
+    // choose per layer rather than per session, that is a layer property and a
+    // menu, and this is not the beginning of one.
+    static Carry carryFromEnvironment();
+
+    Carry carry = carryFromEnvironment();
 
     LazyBrushOptions lazybrush;
 };
