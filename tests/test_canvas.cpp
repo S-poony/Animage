@@ -6657,6 +6657,128 @@ void theResizeGestureShowsWhatItIsSetting() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
+// Issue #76, and the shape of it is the reason it is worth a test.
+//
+// **A tablet gesture is not one device's.** The pen's barrel button reaches Qt
+// as a *mouse* right press, and the drag that follows it arrives as tablet
+// moves -- so Alt and the barrel, dragged with the nib in the air, is one
+// gesture spread across two event streams and has to stay one. What must not
+// cross is the end: the pen tip touching down in the middle of it used to be
+// read as a fresh press, which with Alt still held is the eyedropper, and the
+// tip lifting used to end the resize the other hand was still holding.
+//
+// So this asserts both halves at once, which is the only way to be sure a fix
+// for one did not buy it out of the other:
+//
+//   - the tip landing, moving and lifting changes no colour and writes nothing;
+//   - and the resize goes on working the whole time, driven by the pen.
+void restingTheNibDoesNotInterruptTheResizeGesture() {
+    TEST("the pen touching down during an Alt+right resize neither picks nor draws");
+    Fixture f;
+
+    // Something to pick a colour off, so that "no colour was picked" is a
+    // statement about the routing and not about there being nothing there.
+    {
+        ScopedCommand command(f.doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = 30.0f;
+        settings.pressure_affects_opacity = false;
+        settings.r = 0.0f;
+        settings.g = 0.6f;
+        settings.b = 0.2f;
+        Brush brush(settings);
+        brush.begin(f.doc, f.track, f.image, f.layer, {400.0f, 300.0f, 1.0f});
+        brush.extend({420.0f, 300.0f, 1.0f});
+        brush.end();
+    }
+
+    int picks = 0;
+    QObject::connect(&f.canvas, &CanvasWidget::colourPicked,
+                     [&](float, float, float) { ++picks; });
+
+    const std::size_t written = f.doc.undoDepth();
+    const QPointF anchor(500.0, 300.0);
+    const QPointF on_the_stroke(410.0, 300.0);
+
+    // The barrel button, which is a mouse right press with Alt held.
+    sendMouseWith(&f.canvas, QEvent::MouseButtonPress, anchor, Qt::RightButton, Qt::RightButton,
+                  Qt::AltModifier);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::SizeBrush));
+    const double at_press = f.canvas.brushSettings().radius;
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+
+    // The nib comes down, on the stroke, with Alt still held -- which is exactly
+    // the eyedropper's press. It must do nothing at all.
+    QTabletEvent nib_down(QEvent::TabletPress, &stylus, on_the_stroke,
+                          f.canvas.mapToGlobal(on_the_stroke), 1.0, 0, 0, 0, 0, 0,
+                          Qt::AltModifier, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(&f.canvas, &nib_down);
+    QCoreApplication::processEvents();
+    CHECK_EQ(picks, 0);
+    CHECK(!f.canvas.isStroking());
+    CHECK_EQ(f.doc.undoDepth(), written);
+    // And the gesture the other hand is holding is still the one in progress.
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::SizeBrush));
+    CHECK(f.canvas.toolRing().has_value());
+
+    // Dragging with the nib down goes on resizing, which is the half that must
+    // not be bought with the half above. A gesture only its opener could
+    // continue is a gesture the pen could not drag at all.
+    QTabletEvent nib_moved(QEvent::TabletMove, &stylus, anchor + QPointF(120.0, 40.0),
+                           f.canvas.mapToGlobal(anchor + QPointF(120.0, 40.0)), 1.0, 0, 0, 0, 0,
+                           0, Qt::AltModifier, Qt::NoButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(&f.canvas, &nib_moved);
+    QCoreApplication::processEvents();
+    CHECK(f.canvas.brushSettings().radius > at_press);
+    CHECK_EQ(picks, 0);
+    CHECK(!f.canvas.isStroking());
+
+    // The nib lifts. This is not the release of the button that opened the
+    // gesture, so it must not end it -- and it must not take a colour on its way
+    // out, which is what the release used to do.
+    const double while_sizing = f.canvas.brushSettings().radius;
+    QTabletEvent nib_up(QEvent::TabletRelease, &stylus, anchor + QPointF(120.0, 40.0),
+                        f.canvas.mapToGlobal(anchor + QPointF(120.0, 40.0)), 0.0, 0, 0, 0, 0, 0,
+                        Qt::AltModifier, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::sendEvent(&f.canvas, &nib_up);
+    QCoreApplication::processEvents();
+    CHECK_EQ(picks, 0);
+    CHECK_EQ(pointingOf(f.canvas), pointing(CanvasWidget::Pointing::SizeBrush));
+    CHECK(f.canvas.toolRing().has_value());
+
+    // Still resizing, with the nib off the tablet again: hovering drives it, and
+    // that is the gesture rather than a side effect of it.
+    QTabletEvent hovering(QEvent::TabletMove, &stylus, anchor + QPointF(200.0, 40.0),
+                          f.canvas.mapToGlobal(anchor + QPointF(200.0, 40.0)), 0.0, 0, 0, 0, 0, 0,
+                          Qt::AltModifier, Qt::NoButton, Qt::NoButton);
+    QCoreApplication::sendEvent(&f.canvas, &hovering);
+    QCoreApplication::processEvents();
+    CHECK(f.canvas.brushSettings().radius > while_sizing);
+
+    // The barrel comes up, which is the release that does end it.
+    sendMouseWith(&f.canvas, QEvent::MouseButtonRelease, anchor + QPointF(200.0, 40.0),
+                  Qt::RightButton, Qt::NoButton, Qt::AltModifier);
+    CHECK(!f.canvas.toolRing().has_value());
+
+    // Nothing was drawn and nothing was picked, from first to last.
+    CHECK_EQ(picks, 0);
+    CHECK_EQ(f.doc.undoDepth(), written);
+    CHECK(!f.canvas.isStroking());
+
+    // And the eyedropper still works once the gesture is over: the fix is a
+    // gesture holding the press, not Alt having been disarmed.
+    QTabletEvent pick_down(QEvent::TabletPress, &stylus, on_the_stroke,
+                           f.canvas.mapToGlobal(on_the_stroke), 1.0, 0, 0, 0, 0, 0,
+                           Qt::AltModifier, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::sendEvent(&f.canvas, &pick_down);
+    QCoreApplication::processEvents();
+    CHECK_EQ(picks, 1);
+}
+
 // An old bug, reported while the canvas's pointer was being built: the timeline
 // turned into a hand the moment the pointer entered it. The ruler is the first
 // thing crossed coming down from the canvas and it claimed a pointing hand, so
@@ -8245,6 +8367,7 @@ int main(int argc, char** argv) {
     theEraserSaysSoBeforeYouDraw();
     turningThePenOverShowsTheEraser();
     theResizeGestureShowsWhatItIsSetting();
+    restingTheNibDoesNotInterruptTheResizeGesture();
     theHandDoesNotGetStuckClosed();
     shiftDrawsAStraightLineAtAnyAngle();
     withoutShiftTheSameGestureFollowsTheHand();

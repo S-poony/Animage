@@ -2805,12 +2805,18 @@ void CanvasWidget::endStroke() {
 // machine and not for the event -- so the resize gesture could not be driven by
 // a test at all, and #5 was about a gesture nothing was watching.
 bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton button,
-                                   Qt::KeyboardModifiers modifiers) {
+                                   Qt::KeyboardModifiers modifiers, Opened by) {
+    // Nothing opens a gesture that is already open. Without this a second press
+    // -- another button, or the same one arriving twice through a promotion --
+    // re-anchors a live drag, and the drawing jumps by however far it had got.
+    if (isNavigating()) return true;
+
     // Alt and the right button, dragged sideways, resizes the brush without
     // leaving the drawing -- the gesture Photoshop and Krita already taught
     // everyone's hands.
     if (button == Qt::RightButton && (modifiers & Qt::AltModifier)) {
         navigating_ = Navigating::Sizing;
+        navigation_opened_ = by;
         size_anchor_widget_ = widget_point;
         radius_at_press_ = brushSettings().radius;
         refreshPointer();
@@ -2818,6 +2824,7 @@ bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton 
     }
     if (zoom_key_held_) {
         navigating_ = Navigating::Zooming;
+        navigation_opened_ = by;
         zoom_anchor_widget_ = widget_point;
         zoom_at_press_ = zoom_;
         refreshPointer();
@@ -2825,6 +2832,7 @@ bool CanvasWidget::beginNavigation(const QPointF& widget_point, Qt::MouseButton 
     }
     if (button == Qt::MiddleButton || (space_held_ && button == Qt::LeftButton)) {
         navigating_ = Navigating::Panning;
+        navigation_opened_ = by;
         pan_anchor_widget_ = widget_point;
         pan_anchor_image_ = pan_;
         refreshPointer();
@@ -2878,6 +2886,7 @@ bool CanvasWidget::continueNavigation(const QPointF& widget_point) {
 void CanvasWidget::endNavigation() {
     if (!isNavigating()) return;
     navigating_ = Navigating::None;
+    navigation_opened_ = Opened::Nobody;
     // This used to be the held-key chain written out by hand, and two others
     // like it were elsewhere. Whatever is true now is what the pointer says now.
     refreshPointer();
@@ -2936,17 +2945,34 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
 
     // The tip, whatever button the platform calls it: the pen's own gestures
     // here are Space-drag and held Z, and both are the tip with a key down.
+    //
+    // Landing the tip in the middle of a gesture somebody is already holding
+    // starts nothing at all -- `beginNavigation` refuses to re-open one, and the
+    // `return` is what keeps the press from falling through to `pressAt` and
+    // becoming the eyedropper or a stroke. **Issue #76**: Alt and the barrel
+    // button resizing the brush is held with one hand while the other still has
+    // the pen, and resting the nib on the tablet must not be an instruction.
     if (event->type() == QEvent::TabletPress &&
-        beginNavigation(widget_point, Qt::LeftButton, event->modifiers())) {
+        (isNavigating() || beginNavigation(widget_point, Qt::LeftButton, event->modifiers(),
+                                           Opened::ByATabletPress))) {
         return;
     }
     // The same shape as the mouse path below: continueNavigation answers "was
     // there one to continue", so the tablet path no longer re-derives that from
     // the flags by hand.
+    //
+    // Not gated on which press opened the gesture, and that is the point. Alt
+    // and the barrel button arrive as a *mouse* right press and the drag that
+    // follows arrives here, so a gesture that only its opener could continue
+    // would be a gesture the pen could not drag.
     if (event->type() == QEvent::TabletMove && continueNavigation(widget_point)) {
         return;
     }
-    if (isNavigating() && event->type() == QEvent::TabletRelease) {
+    // Only a gesture a tablet press opened. The pen lifting off the tablet is
+    // not the release of a mouse button, and ending somebody's resize because
+    // they rested the nib is the other half of #76.
+    if (navigation_opened_ == Opened::ByATabletPress &&
+        event->type() == QEvent::TabletRelease) {
         endNavigation();
         // And then the release goes on to whatever else is open. A press that
         // fell through beginNavigation and opened a stroke, with the navigation
@@ -3172,7 +3198,14 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
     if (!eventIsSynthesisedFromPen(event)) hover_eraser_ = false;
     updatePointerAt(event->position());
-    if (beginNavigation(event->position(), event->button(), event->modifiers())) return;
+    // A button pressed during a gesture the pen tip is holding is not part of
+    // it, and must not start anything either. The tablet path's rule, the other
+    // way round.
+    if (isNavigating()) return;
+    if (beginNavigation(event->position(), event->button(), event->modifiers(),
+                        Opened::ByAMousePress)) {
+        return;
+    }
     if (eventIsSynthesisedFromPen(event)) return;
     if (event->button() != Qt::LeftButton) return;
     // A mouse has no pressure to report, so it presses at full weight.
@@ -3198,7 +3231,9 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     alt_held_ = (event->modifiers() & Qt::AltModifier) != 0;
     updatePointerAt(event->position());
-    if (isNavigating()) {
+    // Only a gesture a mouse press opened -- including the barrel button's,
+    // which is a mouse press here and releases as one.
+    if (navigation_opened_ == Opened::ByAMousePress) {
         endNavigation();
         // See the tablet path: a stroke opened before the navigation began still
         // has to be released, or it is never closed at all.
@@ -3206,6 +3241,9 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     if (eventIsSynthesisedFromPen(event)) return;
+    // And a gesture the *pen* is holding is left alone, while this still closes
+    // whatever the mouse itself had open. Swallowing it wholesale would strand a
+    // stroke the mouse had started, which costs the session its undo.
     releaseAt(event->position());
 }
 

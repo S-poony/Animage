@@ -117,6 +117,14 @@ if(TARGET animage_ui)
   target_link_libraries(window_probe PRIVATE animage_ui)
   target_include_directories(window_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+  # The third probe, and the one for questions whose answer belongs to a tablet
+  # driver rather than to Qt or to us: every pen and mouse event the canvas is
+  # offered, and what the canvas made of each. Built but never run by ctest, for
+  # dock_probe's reasons -- a hand is the only way in.
+  add_executable(pen_probe WIN32 pen_probe.cpp)
+  target_link_libraries(pen_probe PRIVATE animage_ui)
+  target_include_directories(pen_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
   # Issue #50: a floating panel's title bar has to be Qt's own, or a pen cannot
   # press it. Plain widget state, so no private Qt headers are needed.
   add_executable(test_floating_dock_frame test_floating_dock_frame.cpp)

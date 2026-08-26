@@ -3616,6 +3616,7 @@ trap.
 | [Four tool states in three booleans, and the pair a handler half-cleared](#four-tool-states-in-three-booleans-and-the-pair-a-handler-half-cleared) | Mutually exclusive state in separate flags drifts apart |
 | [What the tests for a failed swap do and do not prove](#what-the-tests-for-a-failed-swap-do-and-do-not-prove) | The recovery is tested; the rename that triggers it never was |
 | [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
+| [A tablet gesture is not one device's](#a-tablet-gesture-is-not-one-devices) | The barrel button presses as a mouse and the drag arrives as tablet moves |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -5338,6 +5339,47 @@ looked for a while like the fix overshooting. `processEvents` between the
 triggers is the whole of it — but the lesson is that a differencing call and a
 deferred layout are two ways of saying the same thing, and a test that drives the
 first has to pump the second.
+
+### A tablet gesture is not one device's
+**The pen's barrel button reaches Qt as a *mouse* right press, and the drag that
+follows it arrives as tablet moves.** So "Alt and the right button, dragged
+sideways" -- the brush resize -- is one gesture spread across two event streams,
+and it has to stay that way: the hand doing it is holding the pen in the air,
+not touching the tablet with it. Any rule of the form "a gesture belongs to the
+device that started it, and only that device may drive it" breaks the gesture
+outright. That rule was designed, written down and shown to the maintainer before
+it was found to be wrong, which is the cheapest place to find it.
+
+**What must not cross is the *end*.** The release that closes a gesture is the
+release of the press that opened it, and nothing else. Resting the nib on the
+tablet in the middle of an Alt-and-barrel resize used to be read as a fresh press
+-- which, with Alt still held, is the eyedropper -- and the nib lifting used to
+be read as the end of the resize the other hand was still holding.
+[#76](https://github.com/S-poony/Animage/issues/76). So `navigation_opened_`
+records whether a tablet press or a mouse press opened the gesture, presses from
+the other stream are swallowed, and only the opener's release ends it. Moves are
+deliberately not gated at all.
+
+**Classified by the event that arrived and never by the physical device**, for
+exactly the barrel's reason: it is the pen, and it presses and releases as a
+mouse. A check of "is this really the pen" would get this one backwards.
+
+**And the one thing the swallowing must never eat is a release that would close
+an open stroke.** `CanvasWidget::abandonGesture`'s comment has the cost:
+`Document::beginCommand` nests by depth and commits at zero, so a stroke that
+never ends leaves the depth at one for the rest of the session -- nothing reaches
+the undo stack again, autosave defers for ever, and no colour layer solves. All
+of it silent. That is why the guards are on the *press* and on `endNavigation`,
+and why `releaseAt` still runs on a release from either stream.
+
+**What a synthetic test can and cannot say here.** `tests/test_canvas.cpp` drives
+the whole gesture with real `QMouseEvent`s and `QTabletEvent`s and is red without
+the fix, which genuinely covers the routing. What it cannot say is what a real
+pen sends -- that belongs to a tablet driver and a Windows Ink setting.
+`tests/pen_probe.cpp` is for that: the real window, logging every pen and mouse
+event the canvas is offered and what the canvas made of each. It writes one
+synthetic event through its own filter first, so an empty log means the probe is
+broken rather than the pen.
 
 ## How to work on it
 

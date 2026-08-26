@@ -528,8 +528,13 @@ private:
     void rebindStrokeToCurrentImage();
     bool eventIsSynthesisedFromPen(QMouseEvent* event) const;
 
+    // Which press opened a navigation gesture, and so which release may close
+    // it. Deliberately no default, for beginStroke's reason: there are two call
+    // sites, one per device.
+    enum class Opened { Nobody, ByATabletPress, ByAMousePress };
+
     bool beginNavigation(const QPointF& widget_point, Qt::MouseButton button,
-                         Qt::KeyboardModifiers modifiers);
+                         Qt::KeyboardModifiers modifiers, Opened by);
     bool continueNavigation(const QPointF& widget_point);
     void endNavigation();
 
@@ -765,6 +770,26 @@ private:
     enum class Navigating { None, Panning, Zooming, Sizing };
     Navigating navigating_ = Navigating::None;
     bool isNavigating() const { return navigating_ != Navigating::None; }
+
+    // And which press opened it, which is a different question from which hand
+    // is driving it. **A tablet gesture is not one device's**: the pen's barrel
+    // button reaches Qt as a *mouse* right press while the drag that follows it
+    // arrives as tablet moves, so Alt and the barrel dragged with the pen in the
+    // air is one gesture across two event streams and has to stay that way.
+    //
+    // What must not cross is the *end*. The release that closes a gesture is the
+    // release of the press that opened it, and the pen tip touching down in the
+    // middle of an Alt-and-barrel resize is not that -- it used to end the
+    // resize and pick a colour on the way out, which is issue #76.
+    //
+    // Classified by the event that arrived and never by the physical device, for
+    // exactly the barrel's reason: it presses as a mouse and releases as one.
+    //
+    // Set and cleared with `navigating_` by the same two functions, so it is
+    // `Nobody` exactly when there is no gesture. Two values that must agree are
+    // kept in step by having one place set them, which is what "four tool states
+    // in three booleans" in the handover is about.
+    Opened navigation_opened_ = Opened::Nobody;
 
     // Each gesture's anchor. Only the live one means anything; the others hold
     // whatever the last gesture of that kind left behind.
