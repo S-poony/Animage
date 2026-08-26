@@ -917,6 +917,50 @@ CanvasWidget::OnionState CanvasWidget::onionState() const {
 // Flattens the neighbouring drawings into one tinted, faded layer. Previous
 // drawings go warm and later ones cool, which is the convention every animator
 // already reads without being told.
+// How many passes, from the top, are drawn over the onion skin.
+//
+// **The ghosts belong immediately under the layer being drawn on.** That is the
+// answer to issue #77 and it is chosen rather than obvious, so the reasoning is
+// here: painting them under the whole document -- which is what it did -- means
+// any opaque pixel in any layer of any track hides them, and painting them over
+// the whole document means they cover the line you are drawing, which is
+// backwards for inking. Under the current layer, they sit beneath the mark your
+// hand is making, and anything you have deliberately stacked above that layer
+// covers the ghost and your own line alike, which is at least coherent.
+//
+// **Counted in layers and not in passes, which is the whole subtlety.** The
+// obvious version looks for the current layer among the passes and splits
+// there. It is wrong in the case that matters most: a layer with nothing on
+// this frame yet produces no pass at all, and standing on an empty drawing with
+// the neighbours showing through is *the* reason onion skin exists. The first
+// version of this fix did exactly that, fell through to a fallback, and put the
+// ghosts back under the whole track -- which is the bug it was written to fix.
+//
+// So this walks the stack in the order `scenePasses` walks it, consuming each
+// pass as it reaches the layer that produced it, and stops at the current
+// layer. Layers that drew nothing simply do not advance the count.
+//
+// A layer that is not in the document at all -- nothing selected -- puts the
+// ghosts on top of everything. The one thing worse than a ghost in the wrong
+// place is a ghost that cannot be seen.
+std::size_t CanvasWidget::onionSplit(const std::vector<LayerPass>& topmost_first) const {
+    std::size_t above = 0;
+    std::size_t next = 0;
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (next < topmost_first.size() && topmost_first[next].layer &&
+                topmost_first[next].layer->id == layer.id) {
+                ++next;
+                ++above;
+            }
+            // The current layer's own pass, if it has one, has just been
+            // counted -- so it is above the ghosts and they are under it.
+            if (layer.id == active_layer_) return above;
+        }
+    }
+    return 0;
+}
+
 void CanvasWidget::rebuildOnion() {
     // Taken first and kept whatever route this takes out, including the ones
     // that leave the buffer empty: what is recorded is what the buffer holds,
@@ -1264,7 +1308,30 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
         transform_ ? SubstitutedLayer{transform_->layer, &transform_->remaining}
                    : SubstitutedLayer{};
 
-    compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_, substituted);
+    // **Where the onion skin sits in the stack.** Issue #77: the ghosts used to
+    // be painted straight onto the paper, under every layer of every track, so
+    // one opaque layer anywhere hid them -- a white background is the obvious
+    // one, and it does not even have to be in the track being drawn on.
+    //
+    // They go under the layer being drawn on instead, which means compositing
+    // the scene in two pieces. Only when there is an onion to place: with none,
+    // the split would be two composites and a blend to arrive at exactly what
+    // one composite already produces, so `under_` is emptied and everything
+    // below takes the path it always took.
+    if (onion_.isEmpty()) {
+        under_.resize(0, 0);
+        compositor_.compositeScene(doc_, slot_, area, scratch_, cache_step_, substituted);
+    } else {
+        const std::vector<LayerPass> passes =
+            compositor_.scenePasses(doc_, slot_, substituted);
+        const std::size_t split = std::min(onionSplit(passes), passes.size());
+
+        passes_above_.assign(passes.begin(), passes.begin() + static_cast<long>(split));
+        passes_below_.assign(passes.begin() + static_cast<long>(split), passes.end());
+
+        compositor_.compositeGrids(passes_above_, area, scratch_, cache_step_);
+        compositor_.compositeGrids(passes_below_, area, under_, cache_step_);
+    }
 
     // Where this patch of entries sits in the cache.
     const long long first_column = cache_step_.entryAt(area.x);
@@ -1316,8 +1383,12 @@ void CanvasWidget::refreshRegion(const PixelRect& region) {
                     background = light ? 1.0f : 0.78f;
                 }
 
-                // Paper, then the onion skin over it, then the drawing over that.
+                // Paper, then whatever is below the onion skin, then the onion
+                // skin, then the rest of the drawing over that. With the onion
+                // off, `under_` is empty and this is the paper and the drawing
+                // exactly as it was.
                 Rgba base{background, background, background, 1.0f};
+                if (!under_.isEmpty()) base = over(under_.row(y)[x], base);
                 if (!onion_.isEmpty() && row < onion_.height() && column < onion_.width()) {
                     base = over(onion_.row(row)[column], base);
                 }

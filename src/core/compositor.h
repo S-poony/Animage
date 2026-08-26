@@ -217,6 +217,20 @@ public:
                         Framebuffer& out, SampleStep step = {},
                         const SubstitutedLayer& substituted = {}) const;
 
+    // The layers `compositeScene` would composite, resolved and topmost first,
+    // without compositing them.
+    //
+    // Exposed so a caller can **split the stack and composite the halves apart**,
+    // which is what the onion skin needs: the ghosts belong under the layer being
+    // drawn on and not under the whole document, or any opaque layer anywhere in
+    // any track hides them. Issue #77.
+    //
+    // The pointers in the passes are the document's, so they are good for
+    // exactly as long as the document is not edited — the same rule
+    // `compositeScene` has always relied on internally.
+    std::vector<LayerPass> scenePasses(const Document& doc, std::size_t slot,
+                                       const SubstitutedLayer& substituted = {}) const;
+
     // The same again with the layers already resolved to pixels, topmost first,
     // and every one of them drawn -- visibility, CTG fills and absent cels have
     // all been decided by whoever built the list. This is the whole of the

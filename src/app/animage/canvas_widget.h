@@ -506,6 +506,11 @@ private:
     };
     OnionState onionState() const;
 
+    // Where in the stack the onion skin goes: the number of passes, counting
+    // from the top, that are drawn *over* it. See issue #77 and the comment on
+    // the definition.
+    std::size_t onionSplit(const std::vector<animage::LayerPass>& topmost_first) const;
+
     void rebuildOnion();
     void paintOnion(const animage::PixelRect& region);
     void fitTo(const animage::PixelRect& bounds);
@@ -619,6 +624,18 @@ private:
     animage::Compositor compositor_;
     animage::Brush brush_;
     animage::Framebuffer scratch_;
+
+    // The stack below the onion skin, when there is an onion skin. Issue #77:
+    // the ghosts belong under the layer being drawn on, so the scene is
+    // composited in two pieces -- this one, then the ghosts, then `scratch_`
+    // over both. Empty whenever the onion is off, which is the signal to take
+    // the one-composite path that existed before and cost nothing.
+    animage::Framebuffer under_;
+
+    // Reused across paints so that splitting the stack does not allocate on
+    // every one. Only meaningful inside refreshRegion.
+    std::vector<animage::LayerPass> passes_above_;
+    std::vector<animage::LayerPass> passes_below_;
 
     // The solves asked for and not yet installed, and what each one was asked
     // about. Without this a paint would ask again for a solve already running,

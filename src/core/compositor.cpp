@@ -659,9 +659,8 @@ void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId 
     compositeGrids(passes, region, out, step);
 }
 
-void Compositor::compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
-                                Framebuffer& out, SampleStep step,
-                                const SubstitutedLayer& substituted) const {
+std::vector<LayerPass> Compositor::scenePasses(const Document& doc, std::size_t slot,
+                                              const SubstitutedLayer& substituted) const {
     std::vector<LayerPass> passes;
 
     // Topmost first, which is the order compositeGrids wants and the order the
@@ -678,7 +677,13 @@ void Compositor::compositeScene(const Document& doc, std::size_t slot, const Pix
         collectPasses(doc, track.id, image, layers, passes, substituted);
     }
 
-    compositeGrids(passes, region, out, step);
+    return passes;
+}
+
+void Compositor::compositeScene(const Document& doc, std::size_t slot, const PixelRect& region,
+                                Framebuffer& out, SampleStep step,
+                                const SubstitutedLayer& substituted) const {
+    compositeGrids(scenePasses(doc, slot, substituted), region, out, step);
 }
 
 void Compositor::compositeGrids(const std::vector<LayerPass>& topmost_first,

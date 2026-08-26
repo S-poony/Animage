@@ -6657,6 +6657,94 @@ void theResizeGestureShowsWhatItIsSetting() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
+// Issue #77. The ghosts were painted straight onto the paper, under every layer
+// of every track, so one opaque layer anywhere hid them -- and "anywhere"
+// includes a white background in a track you are not even drawing on.
+//
+// They go immediately under the layer being drawn on now, and both halves of
+// that are asserted here: a layer *below* the current one no longer hides them,
+// and a layer the artist has deliberately stacked *above* the current one still
+// does. The second is what makes this the chosen design rather than "paint the
+// onion on top of everything", which would also have passed the first.
+//
+// Checkable directly, unlike the slider this session: compositing order is our
+// own arithmetic in the conversion loop and not anything a platform style
+// draws, so a render says what the screen says.
+void theOnionSkinIsNotHiddenByAnOpaqueLayer() {
+    TEST("the onion skin shows through a layer under the one being drawn on, not over it");
+    Fixture f;
+
+    // Slot 0 keeps the drawing that will be ghosted; slot 1 is where we stand,
+    // with nothing on it yet. **That is the case that matters** -- an empty
+    // drawing with its neighbours showing through is what onion skin is for,
+    // and it is also the case where the layer being drawn on contributes no
+    // pixels at all, which is what the first version of this fix got wrong.
+    const ImageId second = f.doc.insertImage(f.track, 1);
+    f.draw(300.0f, 300.0f, 500.0f, 300.0f);
+
+    f.canvas.setActiveLayer(f.layer);
+    f.canvas.setFrame(1);
+    f.canvas.setOnion({1, 0, 0.6f});
+    f.canvas.refreshAll();
+    f.render();
+
+    // An opaque white band across the ghost, on whichever layer is asked for.
+    // Painted on the drawing we are standing on, because a layer's pixels
+    // belong to a cel.
+    const auto paintWhite = [&](LayerId layer) {
+        ScopedCommand command(f.doc, "White");
+        BrushSettings settings;
+        settings.radius = 260.0f;
+        settings.pressure_affects_opacity = false;
+        settings.r = 1.0f;
+        settings.g = 1.0f;
+        settings.b = 1.0f;
+        Brush brush(settings);
+        brush.begin(f.doc, f.track, second, layer, {300.0f, 300.0f, 1.0f});
+        brush.extend({500.0f, 300.0f, 1.0f});
+        brush.end();
+    };
+
+    // Zoom 1 and pan 0, so a widget point is an image point -- the same
+    // assumption the eyedropper tests make.
+    const auto onTheGhost = [&] {
+        f.canvas.refreshAll();
+        return f.render().pixelColor(400, 300);
+    };
+    const auto isFlatWhite = [](const QColor& c) {
+        return c.red() > 250 && c.green() > 250 && c.blue() > 250;
+    };
+
+    // Nothing over it yet: the ghost of an earlier drawing, tinted red. Checked
+    // as "red, and not white" rather than against an exact colour -- the value
+    // is the falloff, the opacity and the tint multiplied together, and pinning
+    // it would break every time one of those was tuned.
+    const QColor bare = onTheGhost();
+    CHECK(!isFlatWhite(bare));
+    CHECK(bare.red() > bare.blue());
+
+    // A white layer *below* the one being drawn on. This is the report.
+    const LayerId below = f.doc.addLayer(f.track, "white below", 1);
+    paintWhite(below);
+    const QColor through = onTheGhost();
+    CHECK(!isFlatWhite(through));
+    CHECK(through.red() > through.blue());
+
+    // And a white layer *above* it, which must still cover the ghost: the
+    // ghosts went under the current layer, not on top of the document. Anything
+    // deliberately stacked over the layer you are drawing on hides the ghost
+    // and your own line alike, which is the coherent half of this choice.
+    const LayerId above = f.doc.addLayer(f.track, "white above", 0);
+    paintWhite(above);
+    CHECK(isFlatWhite(onTheGhost()));
+
+    // With the onion off the second composite is not taken at all -- the path
+    // that costs nothing, and the one every session that never turns the onion
+    // on is running.
+    f.canvas.setOnion({0, 0, 0.6f});
+    CHECK(isFlatWhite(onTheGhost()));
+}
+
 // Issue #78, which arrived as three reports and is one fault.
 //
 // A stroke was not ended when the tool changed under it, so `stroking_` stayed
@@ -8483,6 +8571,7 @@ int main(int argc, char** argv) {
     theResizeGestureShowsWhatItIsSetting();
     restingTheNibDoesNotInterruptTheResizeGesture();
     changingToolEndsTheStrokeUnderIt();
+    theOnionSkinIsNotHiddenByAnOpaqueLayer();
     theHandDoesNotGetStuckClosed();
     shiftDrawsAStraightLineAtAnyAngle();
     withoutShiftTheSameGestureFollowsTheHand();
