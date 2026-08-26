@@ -259,6 +259,12 @@ private:
     void placeTransformBar();
     void onTransformBegan();
     void onTransformEnded();
+    // The layer panel's button: every drawing of the active layer, moved
+    // together. Issue #25.
+    void transformLayerThroughTime();
+    // Whether that button can be pressed on the layer in front of you, and what
+    // its tooltip says when it cannot.
+    void syncLayerTransformButton();
     void syncTransformFields();
     void onTransformFieldEdited();
 
@@ -392,6 +398,9 @@ private:
     // main text changing length cannot shuffle it sideways: what it says has to
     // be readable out of the corner of an eye that is watching the canvas.
     QLabel* playback_rate_ = nullptr;
+    // Enabled per layer rather than per program: a colour layer cannot be
+    // transformed at all, and a locked or hidden one is not being edited.
+    QPushButton* layer_transform_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
     QPushButton* transparent_swatch_ = nullptr;
 
@@ -420,6 +429,12 @@ private:
     // that happens: the button shows which way round the drawing currently is.
     QPushButton* transform_flip_x_ = nullptr;
     QPushButton* transform_flip_y_ = nullptr;
+    // What the bar is a transform *of*: this drawing, or the whole layer
+    // through time. A label and never a control -- there are two doors into the
+    // gesture and the scope is fixed by which one you came through, so a switch
+    // here would be the persistent checkbox docs/lasso-and-transform.md
+    // refused, one gesture further along.
+    QLabel* transform_scope_ = nullptr;
     bool updating_transform_fields_ = false;
     // Whether the transform fitted last time the fields were read, so that the
     // status bar says it has stopped fitting once rather than on every move.

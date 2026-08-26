@@ -96,6 +96,7 @@
 #include <QGuiApplication>
 #include <QPalette>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QDir>
@@ -845,6 +846,63 @@ const std::vector<Situation>& situations() {
              huge.scale_y = 29.0;
              s.canvas->setTransformValues(huge);
              s.canvas->setZoom(0.05, s.centre());
+             s.settle();
+         }},
+
+        {"a-layer-moved-through-time",
+         "issue #25: the box is green rather than blue, and it is round the union of every "
+         "drawing on the layer rather than the one in front of you -- the other drawings "
+         "are under the float at low opacity, in their own colours, and they move with it",
+         [](Stage& s) {
+             s.canvas->setZoom(1.0, s.centre());
+             // Five drawings, each further right, so the union is visibly wider
+             // than any one of them and the ghosts are told apart from the
+             // drawing in front of you by where they are rather than by a tint.
+             for (int d = 0; d < 5; ++d) {
+                 s.circle(s.centre() + QPointF(d * 40.0 - 80.0, 0.0), 70.0);
+                 if (d < 4) s.press(Id::InsertDrawing);
+             }
+             s.choose("Transform layer through time");
+             // Moved and turned, because a box that has not moved is a box that
+             // proves nothing about what moves with it.
+             Transform placed = s.canvas->transformValues();
+             placed.dy = -60.0;
+             placed.rotation = 10.0;
+             s.canvas->setTransformValues(placed);
+             s.settle();
+         }},
+
+        {"a-layer-moved-through-time-with-onion-skin",
+         "the onion skin leaves out the layer being moved: the neighbouring drawings of it "
+         "are already on screen, moving, under the float -- without that they would be here "
+         "twice over, once still and warm and once moving, and only in the same place until "
+         "the first drag",
+         [](Stage& s) {
+             s.canvas->setZoom(1.0, s.centre());
+             for (int d = 0; d < 3; ++d) {
+                 s.circle(s.centre() + QPointF(d * 50.0 - 50.0, 0.0), 70.0);
+                 if (d < 2) s.press(Id::InsertDrawing);
+             }
+             // Through the control and not past it, so the readout in the
+             // picture agrees with what the canvas is doing.
+             if (auto* onion = s.window.findChild<QSpinBox*>(QStringLiteral("onionCount"))) {
+                 onion->setValue(2);
+             }
+             s.settle();
+             s.choose("Transform layer through time");
+             Transform placed = s.canvas->transformValues();
+             placed.dy = -70.0;
+             s.canvas->setTransformValues(placed);
+             s.settle();
+         }},
+
+        {"a-colour-layer-cannot-move-through-time",
+         "the layer panel's button is greyed out on a colour layer rather than absent, and "
+         "its tooltip is what says why -- a mark on one is a label, and interpolating two "
+         "labels invents a third colour that competes for regions on its own account",
+         [](Stage& s) {
+             s.circle(s.centre(), 120.0);
+             s.choose("Add colour layer");
              s.settle();
          }},
 

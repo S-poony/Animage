@@ -307,6 +307,18 @@ MainWindow::MainWindow() {
         statusBar()->showMessage(
             QStringLiteral("Cannot bake this: %1").arg(CanvasWidget::explain(why)));
     });
+    // How many drawings one press wrote. The number is the whole point of
+    // saying anything at all: a layer bake is the one gesture in this program
+    // where a single Apply rewrites work you are not looking at, and counting
+    // the rows in the timeline to find out how much is not a reasonable thing
+    // to ask of anybody.
+    connect(canvas_, &CanvasWidget::layerTransformed, this, [this](int drawings) {
+        statusBar()->showMessage(
+            (drawings == 1)
+                ? QStringLiteral("Transformed 1 drawing on this layer")
+                : QStringLiteral("Transformed %1 drawings on this layer").arg(drawings),
+            4000);
+    });
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
@@ -1278,6 +1290,19 @@ void MainWindow::buildTransformBar() {
     row->setContentsMargins(8, 4, 8, 4);
     row->setSpacing(4);
 
+    // What this transform is *of*, first on the bar, because it is the thing
+    // that decides what everything to the right of it will write. A layer bake
+    // and a drawing transform have the same five fields and the same Apply, and
+    // they differ by two orders of magnitude in what pressing it costs.
+    transform_scope_ = new QLabel(transform_bar_);
+    transform_scope_->setToolTip(
+        QStringLiteral("Whether this moves the drawing in front of you or every\n"
+                       "drawing of the layer. Which one it is was decided by how the\n"
+                       "transform was started: the Transform tool takes this drawing,\n"
+                       "the layer panel's button takes the layer."));
+    row->addWidget(transform_scope_);
+    row->addSpacing(8);
+
     const auto number = [&](const QString& label, double lowest, double highest, int decimals,
                             const QString& suffix) {
         row->addWidget(new QLabel(label, transform_bar_));
@@ -1441,6 +1466,13 @@ void MainWindow::onTransformBegan() {
     // the eraser up behind a checked Transform button.
     if (transform_action_ && !transform_action_->isChecked()) {
         transform_action_->setChecked(true);
+    }
+    if (transform_scope_) {
+        // Set before the bar is placed, because it changes the bar's width and
+        // the placement is worked out from the size hint.
+        transform_scope_->setText(canvas_->transformIsWholeLayer()
+                                      ? QStringLiteral("Whole layer")
+                                      : QStringLiteral("This drawing"));
     }
     if (transform_bar_) {
         // Placed before it is shown: the fields have just been given their
@@ -1737,6 +1769,18 @@ void MainWindow::buildLayerPanel() {
                        "Scrawl roughly inside a region with the ordinary brush and the\n"
                        "whole region takes that colour, gaps in the line art included."));
 
+    // Issue #25, and it is a button here rather than a switch on the transform
+    // bar. The bar exists only while a transform does, so a scope control on it
+    // would be asking you to change what a gesture already on screen is about;
+    // a button is a second door into the gesture, which is the same shape the
+    // Transform tool already has -- the tool is the button, and so is this.
+    //
+    // Beside Add and Remove because it is the third thing you do to a layer as
+    // a whole, and what it costs is on that scale: one press writes every
+    // drawing in the layer.
+    layer_transform_ = panelButton(QStringLiteral("Transform layer through time"),
+                                   &MainWindow::transformLayerThroughTime);
+
     // No Move up and Move down. The stack is restacked by dragging a row, which
     // is one gesture for any distance where the buttons were one click per
     // position -- and it is the gesture the timeline's rows now take too.
@@ -1808,6 +1852,11 @@ void MainWindow::buildTimelinePanel() {
     // One number either side. Asymmetric onion skin is a real thing but a rare
     // one, and making it the default meant two controls to set every time.
     onion_ = new QSpinBox(controls);
+    // Named so a test or a screenshot can set it the way a hand does. Nothing
+    // shows an object name; what it buys is that a situation which turns the
+    // onion skin on photographs a readout that agrees with it, rather than
+    // reaching past the control and leaving it reading zero.
+    onion_->setObjectName(QStringLiteral("onionCount"));
     onion_->setRange(0, 5);
     onion_->setToolTip(QStringLiteral("Drawings shown either side of this one"));
     onion_->setFocusPolicy(Qt::ClickFocus);
@@ -3318,6 +3367,59 @@ void MainWindow::onLayerSelected() {
         syncColourControls();
     }
     syncColourLayerPanel();
+    syncLayerTransformButton();
+}
+
+// Whether the layer in front of you can be moved through time, and what to say
+// when it cannot.
+//
+// Greyed out and explained rather than absent: a button that comes and goes as
+// you move between layers is a button nobody can find twice, and "why can I not
+// do this here" is exactly the question a disabled control exists to answer.
+//
+// The order is the order refuseHere asks in, and that is not cosmetic: the kind
+// is asked ahead of the lock, because unlocking a colour layer would not make
+// this work and naming the lock would send somebody to fix the wrong thing.
+void MainWindow::syncLayerTransformButton() {
+    if (!layer_transform_) return;
+
+    const Layer* layer = currentLayer();
+    QString refusal;
+    if (!layer) {
+        refusal = QStringLiteral("there is no layer selected");
+    } else if (layer->kind == LayerKind::Ctg) {
+        refusal = QStringLiteral("a colour layer cannot be transformed.\n"
+                                 "A mark on one is a label rather than paint, and turning or\n"
+                                 "scaling it would blend two labels into a third colour that\n"
+                                 "then competes for regions on its own account.");
+    } else if (layer->locked) {
+        refusal = QStringLiteral("this layer is locked");
+    } else if (!layer->visible) {
+        refusal = QStringLiteral("this layer is hidden");
+    }
+
+    layer_transform_->setEnabled(refusal.isEmpty());
+    layer_transform_->setToolTip(
+        refusal.isEmpty()
+            ? QStringLiteral("Move, turn or scale every drawing of this layer at once.\n\n"
+                             "It is baked on Apply: every drawing in the layer is written,\n"
+                             "in one undo step. A nudge or a flip is exact; turning or\n"
+                             "scaling resamples every drawing, once.")
+            : QStringLiteral("Cannot transform this layer through time: %1").arg(refusal));
+}
+
+// The layer panel's button. The canvas owns the gesture; this is the door.
+void MainWindow::transformLayerThroughTime() {
+    const CanvasWidget::Refusal why = canvas_->beginLayerTransform();
+    if (why != CanvasWidget::Refusal::None) {
+        sayCannot(statusBar(), "transform this layer through time", why);
+        return;
+    }
+    // The pen has to go back to the canvas, or the first thing the box hears is
+    // nothing at all. The panel's buttons are NoFocus for this reason and the
+    // canvas is where the keyboard lives; this is the one that also matters for
+    // the pen, because the gesture that follows is entirely on the canvas.
+    canvas_->setFocus();
 }
 
 // What the panel's rename editor typed, applied to the document.
@@ -3365,6 +3467,10 @@ void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {
     doc_.updateLayer(track_, updated.id, updated);
 
     canvas_->refreshAll();
+    // Hiding a layer is one of the two things that takes the layer transform
+    // away, and it is the only one of them the panel can do -- so the button
+    // has to be asked again here and not only when the selection moves.
+    syncLayerTransformButton();
     syncStatus();
 }
 

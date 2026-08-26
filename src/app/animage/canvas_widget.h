@@ -260,6 +260,21 @@ public:
     Refusal beginTransform();
     bool transformIsLive() const { return transform_.has_value(); }
 
+    // The other door: every drawing of the active layer, moved together. Issue
+    // #25, and the layer panel's button is what presses it.
+    //
+    // Two doors and no switch between them. The tool takes this drawing, the
+    // button takes the layer, and which one you came through is fixed for the
+    // gesture -- a control that changed the scope of a transform already on
+    // screen is the persistent checkbox docs/lasso-and-transform.md refused,
+    // one gesture further along.
+    //
+    // Refuses where the tool refuses, and that includes a colour layer: a mark
+    // on one is a label, and interpolating it invents a colour that competes
+    // for regions on its own account.
+    Refusal beginLayerTransform();
+    bool transformIsWholeLayer() const { return transform_ && transform_->whole_layer; }
+
     // The five numbers on the bar. Setting them puts the pivot back to the
     // middle of what was picked up, so that a typed rotation always means the
     // same thing whatever the last handle drag did.
@@ -421,6 +436,14 @@ Q_SIGNALS:
     // so a return value would not reach the status bar from any of them.
     void transformRefused(Refusal why);
 
+    // A layer bake landed, and how many drawings it wrote.
+    //
+    // The number is the whole point of saying anything: one stroke of a hand
+    // moved every drawing in the layer, and nobody should have to count them in
+    // the timeline to find out how many. The canvas has nowhere to put it, so
+    // the status bar is told.
+    void layerTransformed(int drawings);
+
     // A loop was made or cleared. Nothing but the status bar listens: a
     // selection has no panel and no state of its own to keep in step.
     void selectionChanged();
@@ -507,6 +530,20 @@ private:
         // from, so an undo that moves a neighbouring drawing's pixels counts.
         std::vector<std::uint64_t> revisions;
 
+        // The layer the ghosts are leaving out, which is the one being moved
+        // through time. `kNoId` the rest of the time.
+        //
+        // Part of the state and not a hand-set `onion_dirty_`, and that is the
+        // whole reason this field exists rather than three flags. Starting a
+        // layer transform, committing one and cancelling one all change what
+        // the ghosts are made of while no drawing has moved, so nothing else in
+        // the state would notice -- and the version of this that set the flag at
+        // those three places was the invalidation-by-signalling that the onion
+        // buffer already had a bug from. See "what refreshAll does not refresh"
+        // in docs/handover.md: there are twenty-six calls to refreshAll, and a
+        // rule that each new one has to remember is a rule that gets forgotten.
+        animage::LayerId omitted = animage::kNoId;
+
         friend bool operator==(const OnionState&, const OnionState&) = default;
     };
     OnionState onionState() const;
@@ -555,6 +592,18 @@ private:
     std::array<QPointF, 8> transformHandles() const;
     void drawTransformPreview(QPainter& painter);
     void buildTransformPicture();
+    // The ghosts: every other drawing of the layer, flattened and composited
+    // once, into the same rectangle the float uses. Does nothing unless the
+    // transform is a whole-layer one.
+    void buildTransformGhosts();
+    // What the compositor should stand in for while a transform is live: the
+    // half that stayed, or nothing at all where the whole cel was picked up.
+    //
+    // In one function because three callers need the same answer and one of
+    // them is new -- the onion skin, which has to omit a layer being moved
+    // through time or a neighbouring drawing appears twice, once still and once
+    // moving.
+    animage::SubstitutedLayer substitutedLayer() const;
     // The middle of what was picked up, in image coordinates. Two things want
     // it: the pivot between gestures, and the pivot a symmetrical handle drag
     // scales about.
@@ -853,6 +902,34 @@ private:
         // an undo step.
         bool pasted = false;
 
+        // Whether this moves every drawing of the layer rather than the one in
+        // front of you. Issue #25.
+        //
+        // Not a scope that can be switched mid-gesture, and deliberately not:
+        // there are two doors -- the Transform tool takes this drawing, the
+        // layer panel's button takes the layer -- and which door you came
+        // through is what this remembers. A switch on the bar would be the
+        // persistent checkbox docs/lasso-and-transform.md refused, one gesture
+        // further along.
+        //
+        // What it changes: the box is the union of every drawing's bounds
+        // rather than this one's, so the pivot does not depend on where the
+        // playhead is; the box is drawn green; the budget is one total across
+        // the layer; the selection is ignored, because a loop drawn on this
+        // drawing describes nothing on the other forty; and Apply goes through
+        // Document::transformLayer.
+        bool whole_layer = false;
+
+        // Every *other* drawing of the layer, flattened into one grid, for the
+        // ghosts. Empty unless `whole_layer`.
+        //
+        // One grid and not one per drawing. They all move by the same matrix,
+        // so they can be merged once and blitted once -- and merged rather than
+        // blitted separately, because forty low-opacity blits pile up into
+        // black wherever the drawings overlap, which on a layer of animation is
+        // everywhere the character stayed still.
+        animage::TileGrid ghost_grid;
+
         // The float: the layer alone, ready to be blitted through the matrix.
         //
         // The preview and the commit will not agree exactly, and that is
@@ -863,6 +940,10 @@ private:
         QImage picture;
         animage::PixelRect covers;
         animage::SampleStep step;
+
+        // The ghosts, drawn under the float at low opacity. Shares `covers` and
+        // `step` with it, so both go through one matrix and cannot drift apart.
+        QImage ghosts;
     };
     std::optional<LiveTransform> transform_;
 
