@@ -21,6 +21,7 @@
 #include <numeric>
 
 #include "scene.h"
+#include "slider_handle_room.h"
 
 namespace {
 
@@ -143,6 +144,10 @@ SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, b
 
     resolution_ = new QSlider(Qt::Horizontal, canvas);
     resolution_->setRange(kMinResolution, kMaxResolution);
+    // The same as the layer opacity slider: the platform style draws a handle
+    // bigger than the space it reserves, and cuts it at either end of the
+    // travel. See slider_handle_room.h -- issue #75.
+    giveTheHandleRoom(resolution_);
     form->addRow(QStringLiteral("Resolution"), resolution_);
 
     auto* pixel_row = new QWidget(canvas);

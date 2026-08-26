@@ -31,10 +31,25 @@
 //   ./build/tests/shots --list         their names and what each is for
 //   ./build/tests/shots transform      only the ones whose name says transform
 //   ./build/tests/shots -o somewhere   write them somewhere else
+//   ./build/tests/shots -platform windows   the style the program really runs
 //
 // It runs offscreen unless something else has been asked for, so it needs no
 // display and no `-platform` flag. Every file it writes is printed with its
 // path, because the next thing anyone does is open one.
+//
+// **Offscreen is a different style, and that is the one trap in here.** The
+// offscreen platform has no native style to fall back on, so Qt gives it
+// *fusion* -- while the program on somebody's Windows desk runs *windows11*,
+// which draws different controls with different metrics. Anything about
+// **layout** is the same in both and can be run the default way. Anything about
+// **how a control is drawn** has to be run with `-platform windows`, or the
+// picture is of a control the reporter has never seen.
+//
+// That is not hypothetical. Issue #75 -- a slider handle cut off at both ends of
+// its travel -- does not happen under fusion at all, and several rounds went
+// into photographing the wrong style before the reporter said the handle looked
+// different on theirs. Every run now prints the style it drew with, on its
+// first line; if a shot and a report disagree, read that first.
 //
 // --- If you are an agent reading this, this file is yours ---------------------
 //
@@ -59,7 +74,9 @@
 #include <QCursor>
 #include <QGuiApplication>
 #include <QPalette>
+#include <QSlider>
 #include <QStyle>
+#include <QStyleOptionSlider>
 #include <QDir>
 #include <QDockWidget>
 #include <QElapsedTimer>
@@ -94,6 +111,7 @@
 #include "document.h"
 #include "floating_dock_frame.h"
 #include "layer_list.h"
+#include "scene_settings_dialog.h"
 #include "main_window.h"
 #include "shortcuts.h"
 #include "shortcuts_dialog.h"
@@ -1176,6 +1194,114 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(dock);
          }},
 
+        {"the-opacity-slider-at-both-ends",
+         "issue #75: the layer opacity slider at 0, in the middle and at 100 -- each end of "
+         "the travel, magnified, with the panel's own background round it. The handle must be "
+         "a whole circle in all three, and no groove may show past it. "
+         "**Run this one with -platform windows**: offscreen falls back to fusion, whose "
+         "handle fits the space reserved for it and which never had this fault",
+         [](Stage& s) {
+             auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
+             if (!dock) return;
+             auto* slider = dock->findChild<QSlider*>();
+             QWidget* panel = dock->widget();
+             if (!slider || !panel) return;
+
+             std::vector<std::pair<QString, QImage>> rows;
+             for (int value : {50, 0, 100}) {
+                 slider->setValue(value);
+                 s.settle();
+
+                 QStyleOptionSlider option;
+                 option.initFrom(slider);
+                 option.minimum = slider->minimum();
+                 option.maximum = slider->maximum();
+                 option.sliderPosition = slider->sliderPosition();
+                 option.sliderValue = slider->value();
+                 option.orientation = slider->orientation();
+                 const QRect handle = slider->style()->subControlRect(
+                     QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider);
+
+                 // Photographed from the *panel*. Grabbing the slider alone
+                 // renders it into a pixmap of its own size, which crops at
+                 // exactly the edge in question and manufactures the very thing
+                 // being looked for.
+                 const QImage shot = panel->grab().toImage();
+                 const qreal dpr = shot.devicePixelRatio();
+                 const QRect around = QRect(slider->mapTo(panel, QPoint(0, 0)), slider->size())
+                                          .adjusted(-10, -6, 10, 6);
+                 // The end the handle is at, not the whole strip: a sliced
+                 // circle and a whole one are two pixels apart.
+                 const QRect where =
+                     value == 100
+                         ? around.adjusted(around.width() - 64, 0, 0, 0)
+                         : QRect(around.topLeft(), QSize(64, around.height()));
+                 const QRect device = QRectF(where.x() * dpr, where.y() * dpr,
+                                             where.width() * dpr, where.height() * dpr)
+                                          .toRect()
+                                          .intersected(shot.rect());
+                 const QImage near = shot.copy(device);
+
+                 const QString what =
+                     QStringLiteral("%1%% -- handle %2..%3, %4 long, in a slider %5x%6; style %7")
+                         .arg(value)
+                         .arg(handle.left())
+                         .arg(handle.right())
+                         .arg(handle.width())
+                         .arg(slider->width())
+                         .arg(slider->height())
+                         .arg(QApplication::style()->objectName());
+                 rows.push_back({what, near.scaled(near.width() * 4, near.height() * 4,
+                                                   Qt::IgnoreAspectRatio,
+                                                   Qt::FastTransformation)});
+             }
+             s.picture = stackOf(rows);
+         }},
+
+        {"the-scene-settings-resolution-slider",
+         "issue #75 again, in the other place it happens: the Resolution slider in Scene "
+         "settings, at each end of its travel. The same handle drawn by the same style, so "
+         "the same fault and the same cure -- and the only picture there is of this dialog. "
+         "Run it with -platform windows, as above",
+         [](Stage& s) {
+             // Built and shown rather than reached through the menu, which opens
+             // it modally and would stop the tool here.
+             auto* dialog = new SceneSettingsDialog(24, 1920, 1080, false, 0, 12, &s.window);
+             dialog->show();
+             s.settle();
+             auto* slider = dialog->findChild<QSlider*>();
+             if (!slider) return;
+
+             std::vector<std::pair<QString, QImage>> rows;
+             for (int value : {slider->minimum(), slider->maximum()}) {
+                 slider->setValue(value);
+                 s.settle();
+                 const QImage shot = dialog->grab().toImage();
+                 const qreal dpr = shot.devicePixelRatio();
+                 const QRect around = QRect(slider->mapTo(dialog, QPoint(0, 0)), slider->size())
+                                          .adjusted(-10, -6, 10, 6);
+                 const QRect where = value == slider->minimum()
+                                         ? QRect(around.topLeft(), QSize(64, around.height()))
+                                         : around.adjusted(around.width() - 64, 0, 0, 0);
+                 const QRect device = QRectF(where.x() * dpr, where.y() * dpr,
+                                             where.width() * dpr, where.height() * dpr)
+                                          .toRect()
+                                          .intersected(shot.rect());
+                 const QImage near = shot.copy(device);
+                 rows.push_back({QStringLiteral("%1 px tall -- slider %2..%3, %4 wide; style %5")
+                                     .arg(value)
+                                     .arg(slider->minimum())
+                                     .arg(slider->maximum())
+                                     .arg(slider->width())
+                                     .arg(QApplication::style()->objectName()),
+                                 near.scaled(near.width() * 4, near.height() * 4,
+                                             Qt::IgnoreAspectRatio, Qt::FastTransformation)});
+             }
+             // And the whole dialog under them, which nothing else photographs.
+             rows.push_back({QStringLiteral("the dialog it is in"), dialog->grab().toImage()});
+             s.picture = stackOf(rows);
+         }},
+
         {"panels-the-close-button-itself",
          "issue #50: Qt's close button on a docked panel, and ours on a floating one, both "
          "magnified. The number beside each is the bounding box of its *ink* -- every metric "
@@ -1616,7 +1742,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("\nWriting to %s\n\n", qPrintable(QDir::toNativeSeparators(where)));
+    // Which style drew these, said once and at the top, because it is the first
+    // thing to check when a picture and a report disagree. Offscreen has no
+    // native style to fall back on and gets fusion; the program on a Windows
+    // desk gets windows11, and the two do not draw the same controls. See the
+    // note at the top of this file.
+    std::printf("\nQt %s, platform %s, style %s\n", qVersion(),
+                qPrintable(QGuiApplication::platformName()),
+                qPrintable(QApplication::style()->objectName()));
+    std::printf("Writing to %s\n\n", qPrintable(QDir::toNativeSeparators(where)));
 
     int written = 0;
     for (const Situation& situation : situations()) {

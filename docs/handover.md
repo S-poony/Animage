@@ -3168,7 +3168,18 @@ PNG each.
 ./build/tests/shots            every situation, into build/shots/
 ./build/tests/shots --list     their names and what each is for
 ./build/tests/shots transform  only the ones whose name says transform
+./build/tests/shots -platform windows   the style the program really runs
 ```
+
+**The default run is the wrong style, and that is the one trap in it.** It runs
+offscreen so it needs no display, and the offscreen platform has no native style
+to fall back on, so Qt gives it *fusion* — while the program on somebody's
+Windows desk runs *windows11*, which draws different controls with different
+metrics. Layout is the same in both. **How a control is drawn is not**, and a
+shot of the wrong style is a picture of a control the reporter has never seen.
+Issue #75 is the whole lesson: a slider handle cut off at both ends of its
+travel, which under fusion does not happen at all. Every run now prints its
+style on the first line; read that first when a shot and a report disagree.
 
 **Every interface bug in this file was caught by looking, and none by a green
 build** — the mis-encoded character, the "Add colour layer" button an edit
