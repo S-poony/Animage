@@ -2803,6 +2803,22 @@ emptying that region and no more of it.
 covering what it covered and nothing in either buffer means anything; there is
 nothing to carry and it all gets composited again.
 
+**And the one time the buffers are handed back.** Keeping them is the whole
+point above, so releasing them is on the onion *setting* being turned off and on
+nothing else — `CanvasWidget::setOnion`. There are now two of them: the ghosts,
+and the part of the layer stack they sit over, which issue #77 added when the
+onion moved out from under the whole document. Both are screen-sized, so
+together they are around 50 MB at an ordinary window and near 300 MB at 4K
+maximised, and `Framebuffer::resize(0, 0)` gives none of it back — shrinking a
+vector never reduces its capacity. `Framebuffer::release` does, and
+`turningTheOnionOffGivesItsMemoryBack` in `tests/test_render.cpp` pins both
+halves: that switching off frees, and that a frame which merely *shows* no
+ghosts does not. The second half is the one that matters, because
+`collectGhosts` comes back empty during playback and on any frame with no
+neighbour — releasing there would hand back a screen-sized allocation and ask
+for it again on the next frame, once per frame while scrubbing, which is exactly
+the cost this section exists to have removed.
+
 What pins it is `panning leaves the same pixels a full recomposite would` in
 `tests/test_render.cpp`, which pans through the scrolling path and compares the
 result to `refreshAll` on the same view, pixel for pixel, at three zooms and in

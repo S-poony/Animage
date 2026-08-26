@@ -572,6 +572,14 @@ void Framebuffer::resizeCleared(int width, int height) {
 
 void Framebuffer::clear() { std::fill(pixels_.begin(), pixels_.end(), Rgba{}); }
 
+// swap with an empty vector rather than shrink_to_fit, which is a non-binding
+// request the standard lets an implementation ignore.
+void Framebuffer::release() {
+    width_ = 0;
+    height_ = 0;
+    std::vector<Rgba>().swap(pixels_);
+}
+
 void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_id,
                            const PixelRect& region, Framebuffer& out, SampleStep step) const {
     const Track* track = doc.scene().findTrack(track_id);

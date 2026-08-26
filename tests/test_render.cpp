@@ -702,6 +702,58 @@ void anUndoOnANeighbourReachesTheOnion() {
 
 }  // namespace
 
+// Onion skin hands its buffers back when it is switched off.
+//
+// Both are screen-sized -- the tinted ghosts, and the part of the layer stack
+// they sit over -- so together they are about 50 MB at a normal window and
+// nearly 300 MB at 4K maximised. `Framebuffer::resize(0, 0)` does not give any
+// of that back: shrinking a vector never reduces its capacity, so a buffer
+// resized to nothing still owns every byte it ever asked for, and turning the
+// onion on once would have cost that for the rest of the session.
+//
+// **The trigger is the setting and not the state**, and this asserts that too.
+// The ghosts are also empty during playback and on any frame with no
+// neighbouring drawing; releasing on those would hand back a screen-sized
+// allocation and ask for it again on the very next frame, which is the cost
+// "what a pan costs" in docs/handover.md exists to avoid.
+void turningTheOnionOffGivesItsMemoryBack() {
+    TEST("onion skin gives its buffers back when it is switched off, not when it shows nothing");
+    Fixture f(1200, 700);
+
+    // A neighbour to ghost, so the buffers are really filled rather than merely
+    // sized.
+    const ImageId second = f.doc.insertImage(f.track, 1);
+    drawCurves(f.doc, f.track, second, f.layer, 4, 1920, 1080);
+
+    f.canvas.setFrame(1);
+    f.canvas.setOnion({1, 1, 0.5f});
+    f.canvas.grab();
+    const std::size_t held = f.canvas.onionBytesForTesting();
+    CHECK(held > 0);
+
+    // A frame with no neighbour either side empties the ghosts without the
+    // setting changing. The memory must stay put: this is the case that would
+    // otherwise churn a screen-sized allocation every time somebody scrubbed.
+    f.canvas.setFrame(0);
+    f.canvas.grab();
+    CHECK_EQ(f.canvas.onionBytesForTesting(), held);
+
+    f.canvas.setFrame(1);
+    f.canvas.grab();
+    CHECK_EQ(f.canvas.onionBytesForTesting(), held);
+
+    // Switched off, and now it goes.
+    f.canvas.setOnion({0, 0, 0.5f});
+    f.canvas.grab();
+    CHECK_EQ(f.canvas.onionBytesForTesting(), std::size_t{0});
+
+    // And back on again, which costs one allocation and is a thing somebody
+    // does now and again rather than every frame.
+    f.canvas.setOnion({1, 1, 0.5f});
+    f.canvas.grab();
+    CHECK(f.canvas.onionBytesForTesting() > 0);
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("render:\n");
@@ -718,5 +770,6 @@ int main(int argc, char** argv) {
     twoViewChangesBeforeAPaint();
     aLayerSwitchedOffReachesTheOnion();
     anUndoOnANeighbourReachesTheOnion();
+    turningTheOnionOffGivesItsMemoryBack();
     return testing::summarise("render");
 }

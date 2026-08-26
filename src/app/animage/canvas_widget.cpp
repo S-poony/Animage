@@ -622,9 +622,33 @@ void CanvasWidget::setPassePartout(bool shown) {
     update();
 }
 
+std::size_t CanvasWidget::onionBytesForTesting() const {
+    return (onion_.capacityEntries() + under_.capacityEntries()) * sizeof(Rgba);
+}
+
 void CanvasWidget::setOnion(const OnionSettings& settings) {
     onion_settings_ = settings;
     onion_dirty_ = true;
+
+    // Onion skin turned off gives its buffers back. Both are screen-sized --
+    // `onion_` holds the tinted ghosts and `under_` the part of the stack they
+    // sit over -- which is about 25 MB each at a normal window and 145 MB each
+    // at 4K maximised, and `resize(0, 0)` keeps every byte of that.
+    //
+    // **On the setting and never on the state, which is the whole care needed
+    // here.** `collectGhosts` also comes back empty during playback and on any
+    // frame with no neighbouring drawing, and `rebuildOnion` empties the buffer
+    // when it does. Releasing on *that* would hand back a screen-sized
+    // allocation and ask for it again on the next frame -- once per frame while
+    // scrubbing, which is the opposite of what "what a pan costs" in
+    // docs/handover.md spent its effort on. Turning the feature off is a thing
+    // somebody does now and again, and paying one allocation the next time they
+    // turn it on is the right side of that trade.
+    if (settings.before <= 0 && settings.after <= 0) {
+        onion_.release();
+        under_.release();
+    }
+
     refreshAll();
 }
 

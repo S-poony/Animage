@@ -358,6 +358,11 @@ public:
         QPointF at;
         double radius = 0.0;  // screen pixels
     };
+    // What the onion skin's two buffers are holding, used or not. For the test
+    // that pins them being handed back when onion skin is turned off -- they
+    // are screen-sized, and a buffer resized to nothing keeps every byte.
+    std::size_t onionBytesForTesting() const;
+
     std::optional<ToolRing> toolRing() const;
 
     // Entries in the composite cache. Exposed so a test can assert this tracks

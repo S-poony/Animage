@@ -104,6 +104,22 @@ public:
 
     void clear();
 
+    // Hands the memory back, which `resize(0, 0)` does not: shrinking a vector
+    // never reduces its capacity, so a buffer resized to nothing still owns
+    // every byte it ever asked for. These are screen-sized -- about 25 MB at a
+    // normal window and 145 MB at 4K maximised -- so the difference is worth a
+    // function.
+    //
+    // Rare by design. See CanvasWidget::setOnion for why this is called on the
+    // onion *setting* and never on a frame that happens to show no ghosts.
+    void release();
+
+    // What the buffer is holding, whether or not it is using it. Only a test
+    // wants this, and the test is worth having: the difference between
+    // `resize(0, 0)` and `release()` is invisible from every other accessor,
+    // which is exactly how a screen-sized allocation goes unnoticed.
+    std::size_t capacityEntries() const { return pixels_.capacity(); }
+
     int width() const { return width_; }
     int height() const { return height_; }
     bool isEmpty() const { return width_ <= 0 || height_ <= 0; }
