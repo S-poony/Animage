@@ -241,6 +241,49 @@ int main() {
                         retained == 0 ? 0 : Document::kDefaultHistoryBudget / retained,
                         Document::kDefaultHistoryBudget / (1024 * 1024));
         }
+
+        // And the same drawing forty times over, which is what a layer bake is.
+        // Issue #25.
+        //
+        // Two numbers, and the second is the one that decides anything. The
+        // wait is one commit multiplied by the drawings, which nobody needed a
+        // benchmark to predict -- what is worth measuring is that one command
+        // now retains a whole *layer*, so the history budget stops being a
+        // number a session's work fits inside and becomes one that a single
+        // gesture can walk past on its own.
+        {
+            constexpr int kDrawings = 40;
+            Document doc;
+            const TrackId track = doc.addTrack("main");
+            const LayerId layer = doc.addLayer(track, "ink");
+            for (int d = 0; d < kDrawings; ++d) {
+                const ImageId image = doc.insertImage(track, static_cast<std::size_t>(d));
+                ScopedCommand command(doc, "Draw");
+                doc.celForWriting(track, image, layer)->replaceTiles(ink, doc.journal());
+            }
+
+            const std::size_t before = doc.historyBytes();
+            const auto layer_start = Clock::now();
+            const std::size_t written = doc.transformLayer(track, layer, turn);
+            const double took = milliseconds(layer_start, Clock::now());
+            const std::size_t retained = doc.historyBytes() - before;
+
+            std::printf("    layer of %zu, rotated %8.2f ms   (%.1f ms a drawing)\n", written,
+                        took, written == 0 ? 0.0 : took / static_cast<double>(written));
+            std::printf("    it in the history    %8.2f MB   (the budget is %zu MB)\n",
+                        static_cast<double>(retained) / (1024.0 * 1024.0),
+                        Document::kDefaultHistoryBudget / (1024 * 1024));
+
+            // Whether one gesture on this layer can be committed at all, which
+            // is one total across the drawings and not one each.
+            const std::vector<const TileGrid*> grids = doc.layerGrids(track, layer);
+            Transform bigger;
+            bigger.scale_x = 2.0;
+            bigger.scale_y = 2.0;
+            std::printf("    budget: turn %s, twice the size %s\n\n",
+                        commitFitsInBudget(grids, turn) ? "fits" : "REFUSED",
+                        commitFitsInBudget(grids, bigger) ? "fits" : "REFUSED");
+        }
     }
 
     return 0;
