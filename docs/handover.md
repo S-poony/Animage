@@ -3187,17 +3187,16 @@ PNG each.
 ./build/tests/shots -platform windows   the style the program really runs
 ```
 
-**`shots` photographs where things are. It cannot photograph how a control is
-drawn**, and that is the one trap in it — a bad one, because what it hands back
-is not a blank or a crash but a clear and convincing picture of a *different
-control*. Two reasons stack up: the default run is offscreen, which has no
-native style, so Qt gives it *fusion* while the program runs *windows11*; and
-`QWidget::grab()` does not draw what the screen draws, which `-platform windows`
-does not fix. See [the picture `shots` cannot take](#the-picture-shots-cannot-take)
-— it cost most of a session and two published conclusions that were both wrong.
-Every run prints its style on the first line; read that first when a shot and a
-report disagree, and reach for a screenshot when the question is what something
-looks like.
+**These are pictures of the Qt on this machine, not of the Qt anybody
+downloads**, and that is the one trap in it. Two gaps hide in there and only one
+has a flag. The default run is offscreen, which has no native style, so Qt gives
+it *fusion* while the program runs *windows11* — `-platform windows` closes that
+one. The Qt *version* no flag closes: `shots` links against whatever MSYS2 has,
+`ci.yml` decides what a download gets per platform, and a control's appearance is
+Qt's to change between versions. Every run prints its Qt, its platform and its
+style on the first line; read that before anything else when a shot and a report
+disagree. See [three explanations for a bug nobody here had](#three-explanations-for-a-bug-nobody-here-had),
+which cost a session and three published conclusions that were all wrong.
 
 **Every interface bug in this file was caught by looking, and none by a green
 build** — the mis-encoded character, the "Add colour layer" button an edit
@@ -3386,7 +3385,7 @@ still differs:
 | | yours, per the README | the download |
 |---|---|---|
 | compiler | GCC, MSYS2 UCRT64 | MSVC 19, Visual Studio 2022 |
-| Qt | whatever MSYS2 has today — 6.11 at the time of writing | 6.8.\*, pinned in `ci.yml` |
+| Qt | whatever MSYS2 has today — 6.11 at the time of writing | pinned per platform in `ci.yml`: Windows 6.11.2, Linux and macOS 6.8.\* ([#82](https://github.com/S-poony/Animage/issues/82)) |
 | sanitizers | none with MinGW; the probe fails, see [where it got to](#where-it-got-to) | off, deliberately |
 | C runtime | UCRT via MinGW | MSVC's |
 | Qt libraries | MSYS2's DLLs on `PATH` | whatever `windeployqt` copied |
@@ -3635,7 +3634,7 @@ trap.
 | [What the tests for a failed swap do and do not prove](#what-the-tests-for-a-failed-swap-do-and-do-not-prove) | The recovery is tested; the rename that triggers it never was |
 | [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
 | [A tablet gesture is not one device's](#a-tablet-gesture-is-not-one-devices) | The barrel button presses as a mouse and the drag arrives as tablet moves |
-| [The picture `shots` cannot take](#the-picture-shots-cannot-take) | `grab()` draws a different control from the screen, convincingly |
+| [Three explanations for a bug nobody here had](#three-explanations-for-a-bug-nobody-here-had) | #75 was Qt 6.8's, and every instrument was running 6.11 |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -3826,8 +3825,9 @@ numbers and the playhead went on drawing, because those are roles used as they
 come rather than bent.
 
 **Forcing the alpha fixed it and shipped a worse bug**, which is the part of this
-worth reading twice. The Qt the Windows build ships against hands `Window` over as
-`#00000000` — transparent, and *black underneath*. Made opaque that is pure black,
+worth reading twice. Qt 6.8 on Windows 11 — which is what the Windows build shipped
+against at the time, and what Linux and macOS still ship against — hands `Window`
+over as `#00000000`: transparent, and *black underneath*. Made opaque that is pure black,
 `lightness()` reads 0, the theme is taken for a dark one, and `lighter()` scales
 the HSV value, so it cannot lift a black: `lighter(180)` on black is black. Same
 widget, same commit, one release later, a black slab instead of a white one. The
@@ -3864,8 +3864,11 @@ screenshot before any code is opened.
 **It is not a dark theme's problem and not a rare one.** This machine's Windows 11
 theme hands over `WindowText` at `#e4000000` — alpha 228. The palette the
 timeline reads is *already* one with transparency in it; which roles carry it is
-Qt's business and moves between Qt versions. Local is Qt 6.11 from MSYS2 and CI
-builds against 6.8, which is the entire difference between the two pictures.
+Qt's business and moves between Qt versions. Local was Qt 6.11 from MSYS2 and CI
+built against 6.8, which is the entire difference between the two pictures.
+Windows is pinned to 6.11 now, so that particular pair has closed; Linux and macOS
+are still built against 6.8 ([#82](https://github.com/S-poony/Animage/issues/82)),
+and the palette a download reads is still not a thing this repository can pin.
 
 **The suite is green through all of it, and always was.** All fifteen tests pass
 with either bug present — they pin arithmetic, and this is a colour arriving from
@@ -4641,8 +4644,12 @@ children not receiving resize events."* Three lines of Qt say the whole story:
 So it is a regression with a narrow blast radius: a commit called "Code cleanup
 in QMainWindowLayout" replaced a defaulted `bool keepSavedState` with a
 `QInternal::SaveStateRule` enum, and one call site got the wrong enumerator.
-**Nothing that ships ever had it** — `ci.yml` pins Qt 6.8 — so this was only ever
-visible to somebody building locally against MSYS2's Qt while it sat on 6.11.1.
+**Nothing that ships has ever had it**, and that is now a pin rather than an
+accident: `ci.yml` builds Windows against 6.11.2 — chosen over 6.10.1 and over a
+floating `6.11.*` for this reason — and Linux and macOS against 6.8. So it was
+only ever visible to somebody building locally against MSYS2's Qt while it sat on
+6.11.1. **If the Windows pin ever moves back to 6.11.1, a download gets this bug**,
+which is what the version check below is for.
 
 `MainWindow::wakeLayout` is therefore scoped to exactly that release, through
 `QLibraryInfo::version()` rather than `QT_VERSION`, because Qt is a DLL here and
@@ -5400,61 +5407,69 @@ event the canvas is offered and what the canvas made of each. It writes one
 synthetic event through its own filter first, so an empty log means the probe is
 broken rather than the pen.
 
-### The picture `shots` cannot take
-**`QWidget::grab()` does not draw what the screen draws.** Qt's Windows styles
-put some controls through the native theme, and a grab does not take that path —
-so for anything whose *drawing* is in question, `shots` returns a picture of a
-different control. Not a blank, not a crash: a clean, sharp, entirely convincing
-picture of a control the program has never put on screen.
+### Three explanations for a bug nobody here had
+**Issue #75 was a bug in Qt 6.8, and every instrument pointed at it was running
+Qt 6.11.** Nothing in this repository ever caused it, nothing here ever fixed it,
+and three separate mechanisms were published for it before anybody asked which Qt
+the reporter's binary was built against.
 
-**Issue #75 is what that costs.** A slider handle cut flat at both ends of its
-travel, reported with a screenshot. What happened next, in order, is the lesson:
+The fault is [QTBUG-140649](https://qt-project.atlassian.net/browse/QTBUG-140649).
+Qt's *windows11* style cut a `QSlider`'s handle flat at both ends of its travel;
+the fix landed in **6.10.1** and 6.11.0 and was never picked to 6.8. A local
+Windows build links against whatever MSYS2 has, which was 6.11 throughout. The
+download was built against **6.8.3**, because `ci.yml` pinned `6.8.*` and 6.8.3 is
+the newest 6.8 an open-source user can obtain. So the program on the maintainer's
+desk did not have the bug, and the program the maintainer downloaded did.
 
-1. `shots` was run and showed no fault. That was put down to the offscreen
-   platform falling back to *fusion*, which is true and was worth fixing.
-2. `shots -platform windows` was run. It now drew under *windows11* and appeared
-   to show the fault, and a mechanism was published off those pictures: the style
-   paints a handle bigger than the `PM_SliderLength` it publishes, and `QWidget`
-   clips it. A workaround was written with a constant "bounded" at 2, 4 and 6 by
-   reading magnified crops.
-3. A second opinion, with a standalone Qt reproducer and per-pixel maps, found no
-   overflow at all: the handle paints exactly inside its rect at every position
-   and every scale factor. Re-measured here from a panel grab, the ring is 12–13
-   pixels wide and stops a pixel short of the widget's edge, with the workaround
-   and without it. The published mechanism was retracted.
-4. **The retraction was also wrong.** The maintainer, who could see the running
-   program, said the handle had genuinely been cut before the workaround and was
-   whole after — and that the *style itself* had changed. The workaround installs
-   a `QProxyStyle`, and installing one is what changes which handle Qt draws. The
-   four pixels did nothing.
+**What was published, in order, and all of it wrong:**
 
-So step 1's picture and step 3's measurements were of the same drawing — the one
-a grab produces — which never had the fault. **Every instrument in the chain
-agreed with every other one, and all of them were pointed at the wrong control.**
-Agreement between two instruments that share a blind spot is worth nothing, and
-there was no way to tell from inside `shots` that it had one.
+1. *The style paints a handle bigger than the `PM_SliderLength` it publishes and
+   `QWidget` clips it.* A workaround followed — four pixels added to the handle,
+   the groove pulled in to match, the constant "bounded" at 2, 4 and 6 by reading
+   magnified crops. Written into a commit, a header and a comment on #75.
+2. *Retraction: there is no overflow at all.* A standalone Qt reproducer and
+   per-pixel maps found the handle painting exactly inside its rect at every
+   position and every scale factor. True — of Qt 6.11, which is what the
+   reproducer was built against, and which had already been fixed.
+3. *Installing any `QProxyStyle` changes which handle Qt draws, and `QWidget::grab()`
+   renders some controls differently from the screen.* Both invented to explain
+   why the fix appeared to work and why no instrument could see it. Written into a
+   commit, a header, #81, and this file.
 
-**What to do instead.** When the question is *what does this look like*,
-screenshot the running application. `PrintWindow` with `PW_RENDERFULLCONTENT`
-captures a window without needing it in front, which matters because
-`SetForegroundWindow` is refused to a background process. When the question is
-*where is it, how big is it, is it there at all* — `shots` is right and cheap,
-and that is most questions.
+**Every one of those was reasoned from a picture of Qt 6.11.** Agreement between
+instruments that share a version is worth nothing, and there was nothing wrong
+with any of them: `shots` drew a whole handle because on 6.11 the handle *is*
+whole. The `grab()` claim in 3 is withdrawn — nothing has ever shown a grab
+drawing a control the screen does not.
 
-**And what it says about a bug report with a picture in it.** The reporter's
-screenshot had the answer in it the whole time: a 17×18 handle in a six-row
-groove, where this build draws a twelve-pixel ring in a four-row groove. That
-difference was noticed, and explained away twice — first as an older Qt (the
-package was installed three weeks before the report, so no), then as a hover or
-pressed state (the reporter said it was neither). **A measurement that disagrees
-with the reporter's own picture is the measurement that is wrong**, and the
-number of rounds spent explaining the picture away rather than believing it is
-the whole of what went wrong here.
+**What ended it took ten minutes.** The maintainer downloaded the release, opened
+it, and saw the fault still there with the workaround compiled in. One binary that
+users actually run, looked at once.
 
-The workaround lives in `src/app/animage/slider_style.h`, which says what is
-known and what is only a reading, and
-[#81](https://github.com/S-poony/Animage/issues/81) is the thing to delete it
-against.
+**The reporter's screenshot was correct evidence the entire time.** It showed a
+17x18 handle in a six-row groove where the local build draws a twelve-pixel ring
+in a four-row groove. That difference was noticed and explained away twice — first
+as *an older Qt*, which was the right answer, dismissed because the MSYS2 package
+on the desk had been installed three weeks earlier; then as a hover or pressed
+state, which the reporter denied. The right answer was raised and refuted with a
+fact about the wrong machine. **Nobody asked which Qt built the binary in the
+picture**, and that question is one line of `ci.yml`.
+
+**So the rule.** When a report and your instruments disagree, the first question
+is not *what is my instrument missing*. It is **are we running the same program** —
+and [the same source, two different pictures](#the-same-source-two-different-pictures)
+is that question in a form answerable in a minute. That section already existed
+when #75 was filed, written after the same version gap produced a white-on-white
+timeline. It was not opened.
+
+`shots` prints its Qt, its platform and its style on the first line of every run.
+`ci.yml` says what a download gets, per platform. If those two differ, the
+difference is a suspect before anything in this repository is.
+
+Windows now builds against 6.11.2, so for that platform the gap is closed and the
+download draws what the desk draws. Linux and macOS still build against 6.8.3,
+which is a version that can no longer receive a fix —
+[#82](https://github.com/S-poony/Animage/issues/82).
 
 ## How to work on it
 

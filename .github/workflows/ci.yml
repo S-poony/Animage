@@ -19,6 +19,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # What a build gets unless its matrix entry names another one, and what the
+  # sanitizer jobs get. **6.8 is an LTS, and for an open-source project that
+  # means frozen rather than maintained**: the newest 6.8 on Qt's download
+  # server is 6.8.3, from April 2025, and every patch release after it is
+  # commercial-only. So this is a version that cannot receive a fix, and the
+  # Windows entry below is pinned past it because it needed one.
   QT_VERSION: '6.8.*'
   BUILD_TYPE: RelWithDebInfo
 
@@ -37,6 +43,24 @@ jobs:
           - name: windows
             os: windows-2022
             generator: Visual Studio 17 2022
+            # Not QT_VERSION, and the only entry that departs from it. Qt's
+            # windows11 style cut a QSlider's handle flat at both ends of its
+            # travel until 6.10.1 -- QTBUG-140649, reported here as #75 -- and
+            # the fix was never picked to 6.8. Nothing in this repository caused
+            # it and nothing here could fix it.
+            #
+            # 6.11 rather than 6.10.1 because 6.10 leaves standard support in
+            # October 2026, and because 6.11 is what MSYS2 gives a local Windows
+            # build: the download and the desk now draw the same program, which
+            # is the thing whose absence hid #75 for a session. Exact rather than
+            # 6.11.*, because a patch release arriving unannounced is how that
+            # happened -- and 6.11.1 in particular carries the dock-drag
+            # regression in #58.
+            #
+            # Linux and macOS stay on 6.8: neither draws this control and
+            # neither has a bug that a bump would fix. That they are frozen on a
+            # dead-end Qt is real and is #82, not this.
+            qt: '6.11.2'
           - name: macos
             os: macos-14
             generator: Ninja
@@ -71,7 +95,7 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: ${{ env.QT_VERSION }}
+          version: ${{ matrix.qt || env.QT_VERSION }}
           cache: true
 
       - name: Configure

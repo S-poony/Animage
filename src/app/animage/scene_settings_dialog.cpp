@@ -21,7 +21,6 @@
 #include <numeric>
 
 #include "scene.h"
-#include "slider_style.h"
 
 namespace {
 
@@ -144,9 +143,6 @@ SceneSettingsDialog::SceneSettingsDialog(int framerate, int width, int height, b
 
     resolution_ = new QSlider(Qt::Horizontal, canvas);
     resolution_->setRange(kMinResolution, kMaxResolution);
-    // The same as the layer opacity slider, and the same hack: see
-    // slider_style.h. Issue #75, tracked for deletion by #81.
-    keepTheHandleWhole(resolution_);
     form->addRow(QStringLiteral("Resolution"), resolution_);
 
     auto* pixel_row = new QWidget(canvas);

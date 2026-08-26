@@ -32,40 +32,45 @@
 //   ./build/tests/shots transform      only the ones whose name says transform
 //   ./build/tests/shots -o somewhere   write them somewhere else
 //   ./build/tests/shots -platform windows   the style the program really runs
-//                                           (but see the trap below -- not the
-//                                            drawing the program really shows)
 //
 // It runs offscreen unless something else has been asked for, so it needs no
 // display and no `-platform` flag. Every file it writes is printed with its
 // path, because the next thing anyone does is open one.
 //
-// **This cannot photograph how a control is drawn. It can only photograph where
-// things are.** That is the one trap in here and it is a bad one, because the
-// picture it produces is not blank or broken -- it is a clear, convincing
-// picture of a different control.
+// **These are pictures of the Qt on your machine, and that is the one trap in
+// here.** Not of the Qt anybody downloads. The first line of every run says
+// which Qt, which platform and which style drew the pictures below it; when a
+// shot and a report disagree, read that line before anything else.
 //
-// Two separate reasons stack up:
+// Two gaps hide in there, and only one of them has a flag:
 //
 //   - **Offscreen is a different style.** The offscreen platform has no native
 //     style to fall back on, so Qt gives it *fusion*, while the program on
-//     somebody's Windows desk runs *windows11*. Every run prints the style it
-//     drew with on its first line; read that first when a shot and a report
-//     disagree. `-platform windows` fixes this half.
-//   - **`QWidget::grab()` does not draw what the screen draws**, and
-//     `-platform windows` does not fix that half. Qt's Windows styles put some
-//     controls through the native theme, and a grab does not take that path.
+//     somebody's Windows desk runs *windows11*, and the two draw different
+//     controls. `-platform windows` closes this one.
+//   - **The Qt version is a different Qt**, and no flag closes it. This links
+//     against whatever MSYS2 has; `ci.yml` decides what a download gets, per
+//     platform, and it is not obliged to agree. A control's appearance is Qt's
+//     to change and it does change between versions.
 //
-// **Issue #75 is the whole lesson and it cost most of a session.** A slider
-// handle cut off at both ends of its travel: fusion does not do it, and neither
-// does a `grab()` under `-platform windows`. So these two situations reported a
-// whole, well-clear handle *before* the fix and after it, a standalone Qt
-// reproducer agreed with them, and both were pictures of a control the program
-// has never put on screen. Two confident and opposite conclusions were published
-// off them. The only instrument that answered it was a screenshot of the running
-// application. See "the picture shots cannot take" in docs/handover.md.
+// **Issue #75 is what the second gap costs.** A slider handle cut flat at both
+// ends of its travel, reported with a screenshot. Qt cut it in the windows11
+// style until 6.10.1 -- QTBUG-140649 -- and the reporter was running a build
+// made against 6.8.3, while `shots` here was linked against 6.11 and drew a
+// handle that had never had the fault. So it reported a whole, well-clear handle
+// under `-platform windows`, correctly, about a Qt no user was running. A
+// standalone Qt reproducer, built the same way, agreed with it.
+//
+// That disagreement was then explained as a defect in `QWidget::grab()` -- that
+// a grab renders some controls differently from the screen -- and written up
+// here as one. **It was not.** The instrument was honest; it was pointed at
+// another Qt. Nothing has ever shown `grab()` drawing a control the screen does
+// not. See "the same source, two different pictures" in docs/handover.md, which
+// is the general form of this and predates #75 by months.
 //
 // So: layout, presence, ordering, scrolling, what is in view -- ask those here.
-// Anything of the form "what does this control look like" -- take a screenshot.
+// **What does this look like to somebody who downloaded it** -- that question
+// has a Qt version in it, and this cannot answer it. Open the download.
 //
 // --- If you are an agent reading this, this file is yours ---------------------
 //
@@ -1014,10 +1019,11 @@ const std::vector<Situation>& situations() {
          }},
 
         {"a-timeline-whose-window-colour-is-transparent-black",
-         "Window set to #00000000, which is not a hypothetical: it is what the Qt the "
-         "Windows build ships against hands over, and it broke this row twice. Read as "
-         "transparent it drew white on white; forced opaque it drew a black slab, because "
-         "black is what was under the transparency. Must look like the two above",
+         "Window set to #00000000, which is not a hypothetical: it is what Qt 6.8 on Windows "
+         "11 hands over, and it broke this row twice. Read as transparent it drew white on "
+         "white; forced opaque it drew a black slab, because black is what was under the "
+         "transparency. Must look like the two above. Which Qt a download is built against is "
+         "in ci.yml and moves -- this holds the palette still so it does not matter",
          [](Stage& s) {
              QPalette bent = s.timeline->palette();
              bent.setColor(QPalette::Window, QColor(0, 0, 0, 0));
@@ -1211,13 +1217,12 @@ const std::vector<Situation>& situations() {
          }},
 
         {"the-opacity-slider-at-both-ends",
-         "issue #75, and READ THE TRAP AT THE TOP OF THIS FILE BEFORE TRUSTING IT. This "
-         "cannot see #75. It draws the handle Qt paints into a grab, which is whole and well "
-         "clear of the edge with the workaround and without it -- while the handle the program "
-         "actually showed was a different one, and was cut. Kept because where the slider sits "
-         "and how long it is are still worth a picture, and because a situation that was "
-         "believed to answer a question it cannot answer is worth leaving with the warning "
-         "attached",
+         "the layer opacity slider at 0, in the middle and at 100 -- each end of the travel, "
+         "magnified, with the panel's own background round it. Issue #75 was a handle cut flat "
+         "at both ends here, and **this can only see that on a Qt that has it**: Qt cut it in "
+         "the windows11 style until 6.10.1, and this links against whatever MSYS2 has. On a "
+         "newer Qt the handle is whole in all three and that is Qt being fixed, not the fault "
+         "being absent. Read the trap at the top of this file",
          [](Stage& s) {
              auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
              if (!dock) return;
@@ -1278,9 +1283,9 @@ const std::vector<Situation>& situations() {
 
         {"the-scene-settings-resolution-slider",
          "the Resolution slider in Scene settings, at each end of its travel -- and the only "
-         "picture there is of this dialog, which is why it is kept. It carries the same "
-         "warning as the opacity one above: it cannot see #75, because a grab draws a "
-         "different handle from the one the program shows",
+         "picture there is of this dialog, which is half of why it is kept. The same handle "
+         "drawn by the same style as the opacity one above, and the same warning: what it shows "
+         "depends on which Qt this was built against",
          [](Stage& s) {
              // Built and shown rather than reached through the menu, which opens
              // it modally and would stop the tool here.
@@ -1760,11 +1765,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Which style drew these, said once and at the top, because it is the first
-    // thing to check when a picture and a report disagree. Offscreen has no
-    // native style to fall back on and gets fusion; the program on a Windows
-    // desk gets windows11, and the two do not draw the same controls. See the
-    // note at the top of this file.
+    // What drew these, said once and at the top, because it is the first thing
+    // to check when a picture and a report disagree. Both halves matter. The
+    // style: offscreen has no native one to fall back on and gets fusion, while
+    // a Windows desk gets windows11, and they do not draw the same controls. The
+    // Qt version: a control's appearance is Qt's to change and it does change,
+    // so a picture from one Qt says nothing about a build made against another.
+    // Issue #75 was the second of those and cost a session. See the note at the
+    // top of this file.
     std::printf("\nQt %s, platform %s, style %s\n", qVersion(),
                 qPrintable(QGuiApplication::platformName()),
                 qPrintable(QApplication::style()->objectName()));

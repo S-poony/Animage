@@ -64,7 +64,6 @@
 #include "project_io.h"
 #include "color.h"
 #include "scribble.h"
-#include "slider_style.h"
 #include "scene_settings_dialog.h"
 #include "shortcuts_dialog.h"
 #include "timeline_widget.h"
@@ -1706,11 +1705,11 @@ void MainWindow::buildLayerPanel() {
     opacity_->setRange(0, 100);
     opacity_->setValue(100);
     opacity_->setFocusPolicy(Qt::NoFocus);
-    // 0% and 100% are where this slider spends most of its life, and they are
-    // the two places the platform style cut the handle in half. A hack, and one
-    // whose whole effect is that it is installed -- read slider_style.h before
-    // touching it. Issue #75, tracked for deletion by #81.
-    keepTheHandleWhole(opacity_);
+    // If the handle here or on Scene settings' Resolution looks cut flat at 0%
+    // or 100%, that is QTBUG-140649 in the windows11 style and it is not ours to
+    // fix: Qt cut it at both ends of the travel until 6.10.1. Issue #75 has a
+    // workaround that was written for it, believed for a day, and deleted --
+    // read that before writing another one.
     // The drag is one command, not one per tick. Nested commands collapse, so
     // opening it on press and closing it on release leaves a single undo step
     // however many values the slider passed through.
