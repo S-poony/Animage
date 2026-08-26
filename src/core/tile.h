@@ -65,6 +65,17 @@ struct PixelRect {
     int height = 0;
 
     bool isEmpty() const { return width <= 0 || height <= 0; }
+
+    // Field for field, and it is two rectangles being the same rectangle rather
+    // than covering the same area: every empty rectangle is empty, and this
+    // does not call them equal. Nothing needs that and pretending otherwise
+    // would make `unite` and this disagree about what an empty one is.
+    //
+    // Here because `CtgWarp` declares a defaulted `operator==` and could not
+    // have one without it: a defaulted comparison over a member that has none
+    // is *deleted*, silently under GCC and as an error under clang, so the
+    // declaration was a promise the type did not keep. See CtgWarp.
+    friend bool operator==(const PixelRect&, const PixelRect&) = default;
 };
 
 // The two things everybody does with a pair of these, and the test that goes

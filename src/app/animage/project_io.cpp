@@ -701,18 +701,20 @@ bool ProjectIO::load(Document& doc, const QString& folder, QString* error, Damag
         // absent -- the same as a layer that was never drawn on, and what the
         // rest of the program already handles everywhere. With nowhere to
         // report it, it costs the project, exactly as it always did.
-        const auto lose = [&](const QString& why) {
+        const auto lose = [&](const QString& reason) {
             if (!damage) {
-                if (error) *error = QStringLiteral("%1: %2").arg(name, why);
+                if (error) *error = QStringLiteral("%1: %2").arg(name, reason);
                 return false;
             }
-            damage->lost.push_back({id, name, why});
+            damage->lost.push_back({id, name, reason});
             return true;
         };
 
         QByteArray bytes;
-        // Not named `why`: the scene reader above has one of those, and MSVC
-        // makes shadowing an error where GCC says nothing.
+        // Not named `why`, and neither is `lose`'s argument above: the scene
+        // reader has one of those and it is still in scope here. MSVC makes
+        // hiding a local an error (C4456) where GCC's -Wall says nothing, so
+        // this is only visible on CI unless you ask for -Wshadow=local.
         QString cel_error;
         // Missing counts the same as unreadable. A project is a folder, so a
         // sync that brought back all of it but one file is at least as likely

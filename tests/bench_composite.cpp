@@ -301,10 +301,13 @@ int main() {
         // everything above answers in one pass.
         {
             const CtgJob job = ctgJobFor(doc, track, image, colour);
-            PixelRect ink;
-            for (const TileGrid& source : job.sources) ink = unite(ink, drawnBounds(source));
+            // Not `ink`: that is the line-art layer's id in the scope above, and
+            // MSVC treats hiding a local as an error where GCC's -Wall says
+            // nothing.
+            PixelRect drawn;
+            for (const TileGrid& source : job.sources) drawn = unite(drawn, drawnBounds(source));
             const auto start = Clock::now();
-            const CtgWarp warp = estimateCtgLattice(job.sources, job.sources, ink);
+            const CtgWarp warp = estimateCtgLattice(job.sources, job.sources, drawn);
             const double timed = milliseconds(start, Clock::now());
             // Against the same drawing, so the honest answer is that nothing
             // moved. What it reports instead is how far the lattice drifts on a
