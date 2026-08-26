@@ -33,6 +33,25 @@ option(ANIMAGE_WERROR "Treat compiler warnings as errors" ON)
 # sanitizer runtime.
 option(ANIMAGE_SANITIZE "Build with ASan and UBSan" ON)
 
+# For CI, and for nothing else. The probes below fall back quietly when a
+# sanitizer runtime will not link -- which is right on a development machine,
+# where MSYS2's GCC has neither and refusing to build would help nobody. It is
+# exactly wrong in the jobs whose whole purpose is to run the tests under a
+# sanitizer: there the fallback is a green run that proves nothing, and a green
+# run that proves nothing is worse than a red one. Turned on, the same
+# conditions raise a fatal error instead.
+option(ANIMAGE_REQUIRE_SANITIZERS
+       "Fail configuration if the sanitizers asked for do not link" OFF)
+
+# Says what a missing sanitizer runtime costs, as a warning or as a refusal.
+function(animage_no_sanitizer why)
+  if(ANIMAGE_REQUIRE_SANITIZERS)
+    message(FATAL_ERROR "ANIMAGE_REQUIRE_SANITIZERS is ON and ${why}")
+  else()
+    message(WARNING "ANIMAGE_SANITIZE is ON but ${why}")
+  endif()
+endfunction()
+
 if(MSVC)
   add_compile_options(/W4 /permissive-)
   # C4458: a parameter named `id` in a struct whose own field is `id`. Forty-odd
@@ -69,7 +88,7 @@ if(ANIMAGE_SANITIZE)
       add_link_options(/fsanitize=address)
       message(STATUS "Sanitizers: AddressSanitizer")
     else()
-      message(WARNING "ANIMAGE_SANITIZE is ON but this MSVC cannot link ASan")
+      animage_no_sanitizer("this MSVC cannot link ASan")
     endif()
   else()
     # -fno-sanitize-recover is what turns a sanitizer report into a test
@@ -87,7 +106,13 @@ if(ANIMAGE_SANITIZE)
     else()
       # Some distributions ship a compiler without the ASan runtime (Fedora's
       # gcc is one). UBSan alone still catches the undefined behaviour, so
-      # fall back to it rather than silently building without any.
+      # fall back to it rather than silently building without any -- on a
+      # development machine. In CI it is half the cover the job claims to give,
+      # so the fallback is a refusal there instead.
+      if(ANIMAGE_REQUIRE_SANITIZERS)
+        message(FATAL_ERROR "ANIMAGE_REQUIRE_SANITIZERS is ON and ASan does not "
+                            "link with this compiler; UBSan alone is half the cover")
+      endif()
       set(CMAKE_REQUIRED_FLAGS
           "-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer")
       check_cxx_source_compiles("int main() { return 0; }" ANIMAGE_UBSAN_OK)
@@ -98,8 +123,7 @@ if(ANIMAGE_SANITIZE)
         add_link_options(-fsanitize=undefined)
         message(STATUS "Sanitizers: UndefinedBehaviorSanitizer only (no ASan runtime here)")
       else()
-        message(WARNING "ANIMAGE_SANITIZE is ON but no sanitizer runtime links; "
-                        "tests will not detect memory or UB errors")
+        animage_no_sanitizer("no sanitizer runtime links; tests will not detect memory or UB errors")
       endif()
     endif()
   endif()

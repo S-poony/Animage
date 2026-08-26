@@ -172,8 +172,16 @@ jobs:
           version: ${{ env.QT_VERSION }}
           cache: true
 
+      # ANIMAGE_REQUIRE_SANITIZERS: see the same flag on the Windows job below.
+      # A runner whose GCC stopped linking ASan would otherwise fall back to
+      # UBSan alone and stay green, which is half the cover this job's name
+      # claims.
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: >
+          cmake -S . -B build
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DANIMAGE_REQUIRE_SANITIZERS=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -210,19 +218,77 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # For cl.exe and Ninja, and for the ASan runtime -- which is the part that
-      # is easy to miss. MSVC links AddressSanitizer dynamically, so every test
-      # binary needs clang_rt.asan_dynamic-x86_64.dll beside the compiler at run
-      # time; without this the build is green and every test dies at start-up
-      # with 0xC0000135, DLL not found, before it prints a line.
-      - uses: ilammy/msvc-dev-cmd@v1
+      # A Developer Command Prompt, without an action to do it.
+      #
+      # **Issue #80.** This was `ilammy/msvc-dev-cmd@v1`, which runs on Node 20
+      # -- deprecated, forced onto Node 24 by the runner with a warning, and a
+      # failed step the day the forcing stops. Its last release is v1.13.0 from
+      # January 2024 and `action.yml` still says `using: node20`, so waiting for
+      # it was waiting for nothing. Any replacement action is the same bet again
+      # on somebody else's release schedule; what the step actually does is ask
+      # vswhere where Visual Studio is and run its own `VsDevCmd.bat`, which is
+      # nine lines of the shell the runner already has.
+      #
+      # Diffed against the environment rather than dumped over it: `set` prints
+      # every variable, GitHub's own included, and writing all of them back would
+      # be this step rewriting the workflow's context to say what it said before
+      # the batch file ran.
+      - name: Developer Command Prompt (x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationPath
+          if (-not $root) { throw 'no Visual Studio with the C++ tools on this runner' }
+          Write-Host "Visual Studio: $root"
+
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          cmd /c "`"$root\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 -no_logo && set" |
+            ForEach-Object {
+              $name, $value = $_ -split '=', 2
+              if ($name -and $null -ne $value -and $before[$name] -ne $value) {
+                "$name=$value" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
+
+      # What the step above is for, checked rather than assumed -- because the
+      # way it fails is a green build that ran no tests.
+      #
+      # cl.exe on PATH is the compiler CMake will pick with Ninja, and it is
+      # named to CMake outright below so that a GCC left on the runner's PATH
+      # cannot be chosen instead and quietly turn this into a third Linux job.
+      # The DLL beside it is the other half: MSVC links AddressSanitizer
+      # dynamically, so without `clang_rt.asan_dynamic-x86_64.dll` every test
+      # binary dies at start-up with 0xC0000135 before printing a line.
+      - name: Check the compiler and the ASan runtime are there
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cl = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+          if (-not $cl) { throw 'cl.exe is not on PATH: the Developer Command Prompt step did not take' }
+          Write-Host "cl.exe: $cl"
+          $asan = Join-Path (Split-Path $cl) 'clang_rt.asan_dynamic-x86_64.dll'
+          if (-not (Test-Path $asan)) { throw "the ASan runtime is missing: $asan" }
+          Write-Host "ASan runtime: $asan"
 
       # No Qt step, deliberately. See above.
+      #
+      # ANIMAGE_REQUIRE_SANITIZERS turns the quiet fallback into a refusal: on a
+      # development machine a compiler that cannot link ASan should still build,
+      # and in the job that exists to run the tests under ASan it should stop.
       - name: Configure
+        env:
+          CC: cl
+          CXX: cl
         run: >
           cmake -S . -B build
           -G Ninja
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DANIMAGE_REQUIRE_SANITIZERS=ON
 
       - name: Build
         run: cmake --build build --parallel
