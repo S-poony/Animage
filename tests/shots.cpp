@@ -32,24 +32,40 @@
 //   ./build/tests/shots transform      only the ones whose name says transform
 //   ./build/tests/shots -o somewhere   write them somewhere else
 //   ./build/tests/shots -platform windows   the style the program really runs
+//                                           (but see the trap below -- not the
+//                                            drawing the program really shows)
 //
 // It runs offscreen unless something else has been asked for, so it needs no
 // display and no `-platform` flag. Every file it writes is printed with its
 // path, because the next thing anyone does is open one.
 //
-// **Offscreen is a different style, and that is the one trap in here.** The
-// offscreen platform has no native style to fall back on, so Qt gives it
-// *fusion* -- while the program on somebody's Windows desk runs *windows11*,
-// which draws different controls with different metrics. Anything about
-// **layout** is the same in both and can be run the default way. Anything about
-// **how a control is drawn** has to be run with `-platform windows`, or the
-// picture is of a control the reporter has never seen.
+// **This cannot photograph how a control is drawn. It can only photograph where
+// things are.** That is the one trap in here and it is a bad one, because the
+// picture it produces is not blank or broken -- it is a clear, convincing
+// picture of a different control.
 //
-// That is not hypothetical. Issue #75 -- a slider handle cut off at both ends of
-// its travel -- does not happen under fusion at all, and several rounds went
-// into photographing the wrong style before the reporter said the handle looked
-// different on theirs. Every run now prints the style it drew with, on its
-// first line; if a shot and a report disagree, read that first.
+// Two separate reasons stack up:
+//
+//   - **Offscreen is a different style.** The offscreen platform has no native
+//     style to fall back on, so Qt gives it *fusion*, while the program on
+//     somebody's Windows desk runs *windows11*. Every run prints the style it
+//     drew with on its first line; read that first when a shot and a report
+//     disagree. `-platform windows` fixes this half.
+//   - **`QWidget::grab()` does not draw what the screen draws**, and
+//     `-platform windows` does not fix that half. Qt's Windows styles put some
+//     controls through the native theme, and a grab does not take that path.
+//
+// **Issue #75 is the whole lesson and it cost most of a session.** A slider
+// handle cut off at both ends of its travel: fusion does not do it, and neither
+// does a `grab()` under `-platform windows`. So these two situations reported a
+// whole, well-clear handle *before* the fix and after it, a standalone Qt
+// reproducer agreed with them, and both were pictures of a control the program
+// has never put on screen. Two confident and opposite conclusions were published
+// off them. The only instrument that answered it was a screenshot of the running
+// application. See "the picture shots cannot take" in docs/handover.md.
+//
+// So: layout, presence, ordering, scrolling, what is in view -- ask those here.
+// Anything of the form "what does this control look like" -- take a screenshot.
 //
 // --- If you are an agent reading this, this file is yours ---------------------
 //
@@ -1195,11 +1211,13 @@ const std::vector<Situation>& situations() {
          }},
 
         {"the-opacity-slider-at-both-ends",
-         "issue #75: the layer opacity slider at 0, in the middle and at 100 -- each end of "
-         "the travel, magnified, with the panel's own background round it. The handle must be "
-         "a whole circle in all three, and no groove may show past it. "
-         "**Run this one with -platform windows**: offscreen falls back to fusion, whose "
-         "handle fits the space reserved for it and which never had this fault",
+         "issue #75, and READ THE TRAP AT THE TOP OF THIS FILE BEFORE TRUSTING IT. This "
+         "cannot see #75. It draws the handle Qt paints into a grab, which is whole and well "
+         "clear of the edge with the workaround and without it -- while the handle the program "
+         "actually showed was a different one, and was cut. Kept because where the slider sits "
+         "and how long it is are still worth a picture, and because a situation that was "
+         "believed to answer a question it cannot answer is worth leaving with the warning "
+         "attached",
          [](Stage& s) {
              auto* dock = qobject_cast<QDockWidget*>(s.layerPanel());
              if (!dock) return;
@@ -1259,10 +1277,10 @@ const std::vector<Situation>& situations() {
          }},
 
         {"the-scene-settings-resolution-slider",
-         "issue #75 again, in the other place it happens: the Resolution slider in Scene "
-         "settings, at each end of its travel. The same handle drawn by the same style, so "
-         "the same fault and the same cure -- and the only picture there is of this dialog. "
-         "Run it with -platform windows, as above",
+         "the Resolution slider in Scene settings, at each end of its travel -- and the only "
+         "picture there is of this dialog, which is why it is kept. It carries the same "
+         "warning as the opacity one above: it cannot see #75, because a grab draws a "
+         "different handle from the one the program shows",
          [](Stage& s) {
              // Built and shown rather than reached through the menu, which opens
              // it modally and would stop the tool here.

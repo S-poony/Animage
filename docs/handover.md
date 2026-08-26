@@ -3171,15 +3171,17 @@ PNG each.
 ./build/tests/shots -platform windows   the style the program really runs
 ```
 
-**The default run is the wrong style, and that is the one trap in it.** It runs
-offscreen so it needs no display, and the offscreen platform has no native style
-to fall back on, so Qt gives it *fusion* — while the program on somebody's
-Windows desk runs *windows11*, which draws different controls with different
-metrics. Layout is the same in both. **How a control is drawn is not**, and a
-shot of the wrong style is a picture of a control the reporter has never seen.
-Issue #75 is the whole lesson: a slider handle cut off at both ends of its
-travel, which under fusion does not happen at all. Every run now prints its
-style on the first line; read that first when a shot and a report disagree.
+**`shots` photographs where things are. It cannot photograph how a control is
+drawn**, and that is the one trap in it — a bad one, because what it hands back
+is not a blank or a crash but a clear and convincing picture of a *different
+control*. Two reasons stack up: the default run is offscreen, which has no
+native style, so Qt gives it *fusion* while the program runs *windows11*; and
+`QWidget::grab()` does not draw what the screen draws, which `-platform windows`
+does not fix. See [the picture `shots` cannot take](#the-picture-shots-cannot-take)
+— it cost most of a session and two published conclusions that were both wrong.
+Every run prints its style on the first line; read that first when a shot and a
+report disagree, and reach for a screenshot when the question is what something
+looks like.
 
 **Every interface bug in this file was caught by looking, and none by a green
 build** — the mis-encoded character, the "Add colour layer" button an edit
@@ -3617,6 +3619,7 @@ trap.
 | [What the tests for a failed swap do and do not prove](#what-the-tests-for-a-failed-swap-do-and-do-not-prove) | The recovery is tested; the rename that triggers it never was |
 | [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
 | [A tablet gesture is not one device's](#a-tablet-gesture-is-not-one-devices) | The barrel button presses as a mouse and the drag arrives as tablet moves |
+| [The picture `shots` cannot take](#the-picture-shots-cannot-take) | `grab()` draws a different control from the screen, convincingly |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -5380,6 +5383,62 @@ pen sends -- that belongs to a tablet driver and a Windows Ink setting.
 event the canvas is offered and what the canvas made of each. It writes one
 synthetic event through its own filter first, so an empty log means the probe is
 broken rather than the pen.
+
+### The picture `shots` cannot take
+**`QWidget::grab()` does not draw what the screen draws.** Qt's Windows styles
+put some controls through the native theme, and a grab does not take that path —
+so for anything whose *drawing* is in question, `shots` returns a picture of a
+different control. Not a blank, not a crash: a clean, sharp, entirely convincing
+picture of a control the program has never put on screen.
+
+**Issue #75 is what that costs.** A slider handle cut flat at both ends of its
+travel, reported with a screenshot. What happened next, in order, is the lesson:
+
+1. `shots` was run and showed no fault. That was put down to the offscreen
+   platform falling back to *fusion*, which is true and was worth fixing.
+2. `shots -platform windows` was run. It now drew under *windows11* and appeared
+   to show the fault, and a mechanism was published off those pictures: the style
+   paints a handle bigger than the `PM_SliderLength` it publishes, and `QWidget`
+   clips it. A workaround was written with a constant "bounded" at 2, 4 and 6 by
+   reading magnified crops.
+3. A second opinion, with a standalone Qt reproducer and per-pixel maps, found no
+   overflow at all: the handle paints exactly inside its rect at every position
+   and every scale factor. Re-measured here from a panel grab, the ring is 12–13
+   pixels wide and stops a pixel short of the widget's edge, with the workaround
+   and without it. The published mechanism was retracted.
+4. **The retraction was also wrong.** The maintainer, who could see the running
+   program, said the handle had genuinely been cut before the workaround and was
+   whole after — and that the *style itself* had changed. The workaround installs
+   a `QProxyStyle`, and installing one is what changes which handle Qt draws. The
+   four pixels did nothing.
+
+So step 1's picture and step 3's measurements were of the same drawing — the one
+a grab produces — which never had the fault. **Every instrument in the chain
+agreed with every other one, and all of them were pointed at the wrong control.**
+Agreement between two instruments that share a blind spot is worth nothing, and
+there was no way to tell from inside `shots` that it had one.
+
+**What to do instead.** When the question is *what does this look like*,
+screenshot the running application. `PrintWindow` with `PW_RENDERFULLCONTENT`
+captures a window without needing it in front, which matters because
+`SetForegroundWindow` is refused to a background process. When the question is
+*where is it, how big is it, is it there at all* — `shots` is right and cheap,
+and that is most questions.
+
+**And what it says about a bug report with a picture in it.** The reporter's
+screenshot had the answer in it the whole time: a 17×18 handle in a six-row
+groove, where this build draws a twelve-pixel ring in a four-row groove. That
+difference was noticed, and explained away twice — first as an older Qt (the
+package was installed three weeks before the report, so no), then as a hover or
+pressed state (the reporter said it was neither). **A measurement that disagrees
+with the reporter's own picture is the measurement that is wrong**, and the
+number of rounds spent explaining the picture away rather than believing it is
+the whole of what went wrong here.
+
+The workaround lives in `src/app/animage/slider_style.h`, which says what is
+known and what is only a reading, and
+[#81](https://github.com/S-poony/Animage/issues/81) is the thing to delete it
+against.
 
 ## How to work on it
 

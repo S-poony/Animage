@@ -64,7 +64,7 @@
 #include "project_io.h"
 #include "color.h"
 #include "scribble.h"
-#include "slider_handle_room.h"
+#include "slider_style.h"
 #include "scene_settings_dialog.h"
 #include "shortcuts_dialog.h"
 #include "timeline_widget.h"
@@ -1707,9 +1707,10 @@ void MainWindow::buildLayerPanel() {
     opacity_->setValue(100);
     opacity_->setFocusPolicy(Qt::NoFocus);
     // 0% and 100% are where this slider spends most of its life, and they are
-    // the two places the platform style would cut the handle in half. See
-    // slider_handle_room.h -- issue #75.
-    giveTheHandleRoom(opacity_);
+    // the two places the platform style cut the handle in half. A hack, and one
+    // whose whole effect is that it is installed -- read slider_style.h before
+    // touching it. Issue #75, tracked for deletion by #81.
+    keepTheHandleWhole(opacity_);
     // The drag is one command, not one per tick. Nested commands collapse, so
     // opening it on press and closing it on release leaves a single undo step
     // however many values the slider passed through.
