@@ -694,6 +694,131 @@ void committingATransformUndoesInOneStep() {
     CHECK_EQ(doc.celAt(track, image, layer)->pixel(50, 50).a, 0.0f);
 }
 
+// A box of ink at a known place, on one drawing of one layer.
+void drawBox(Document& doc, TrackId track, ImageId image, LayerId layer, const PixelRect& area) {
+    ScopedCommand command(doc, "Draw");
+    Cel* cel = doc.celForWriting(track, image, layer);
+    for (int y = area.y; y < area.y + area.height; ++y) {
+        for (int x = area.x; x < area.x + area.width; ++x) {
+            Tile* tile = cel->writableTile(tileCoordFor(x, y), doc.journal());
+            tile->setPixel(tileLocal(x), tileLocal(y), kInk);
+        }
+    }
+}
+
+void bakingALayerTouchesEveryDrawingOnce() {
+    TEST("a layer bake moves every drawing, a held one once, and undoes in one step");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId rough = doc.addLayer(track, "rough");
+
+    // The first drawing is held over three frames, which is the trap: walking
+    // `slots` would resample it three times over and land it at 900 rather than
+    // at 300, each pass reading what the last one left.
+    const ImageId held = doc.insertImage(track, 0);
+    doc.extendExposure(track, 0, 2);
+    const ImageId second = doc.insertImage(track, 3);
+    // And one drawing with nothing on this layer, to pin that a bake creates no
+    // cel where there was none. An absent cel means the layer is empty here,
+    // and a bake that filled it in would be inventing a drawing.
+    const ImageId elsewhere = doc.insertImage(track, 4);
+
+    drawBox(doc, track, held, ink, {40, 40, 40, 20});
+    drawBox(doc, track, second, ink, {40, 40, 40, 20});
+    drawBox(doc, track, elsewhere, rough, {40, 40, 40, 20});
+
+    CHECK_EQ(doc.scene().findTrack(track)->slots.size(), std::size_t{5});
+
+    const TileGrid held_before = doc.celAt(track, held, ink)->tiles();
+    const TileGrid second_before = doc.celAt(track, second, ink)->tiles();
+    const std::size_t before = doc.undoDepth();
+
+    Transform t;
+    t.dx = 300.0;
+    t.dy = 200.0;
+    // Two drawings and not five slots, which is the number this returns for.
+    CHECK_EQ(doc.transformLayer(track, ink, t), std::size_t{2});
+    CHECK_EQ(doc.undoDepth(), before + 1);
+
+    for (const ImageId image : {held, second}) {
+        CHECK(doc.celAt(track, image, ink)->pixel(350, 250).a > 0.9f);
+        CHECK_EQ(doc.celAt(track, image, ink)->pixel(50, 50).a, 0.0f);
+        // Moved once. Three times over would have put it here.
+        CHECK_EQ(doc.celAt(track, image, ink)->pixel(950, 650).a, 0.0f);
+    }
+    CHECK(doc.celAt(track, elsewhere, ink) == nullptr);
+    // The layer beside it is not in the bake at all.
+    CHECK(doc.celAt(track, elsewhere, rough)->pixel(50, 50).a > 0.9f);
+
+    // One step puts every drawing back, which is the whole claim of doing it in
+    // one command.
+    CHECK(doc.undo());
+    CHECK(sameBits(held_before, doc.celAt(track, held, ink)->tiles(), 0, 0, {0, 0, 600, 500}));
+    CHECK(sameBits(second_before, doc.celAt(track, second, ink)->tiles(), 0, 0, {0, 0, 600, 500}));
+    CHECK_EQ(doc.undoDepth(), before);
+}
+
+void bakingAnIdentityWritesNothing() {
+    TEST("a layer bake that has not moved writes nothing and leaves no undo step");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId image = doc.insertImage(track, 0);
+    drawBox(doc, track, image, ink, {40, 40, 40, 20});
+
+    const std::size_t before = doc.undoDepth();
+    const std::uint64_t revision = doc.celAt(track, image, ink)->revision();
+
+    CHECK_EQ(doc.transformLayer(track, ink, Transform{}), std::size_t{0});
+    CHECK_EQ(doc.undoDepth(), before);
+    // Not resampled and not even touched: a commit softens line art, so one
+    // that changed nothing would be a pure loss.
+    CHECK_EQ(doc.celAt(track, image, ink)->revision(), revision);
+
+    // And a layer that is not there at all is not an error.
+    Transform moved;
+    moved.dx = 10.0;
+    CHECK_EQ(doc.transformLayer(track, 9999, moved), std::size_t{0});
+    CHECK_EQ(doc.transformLayer(9999, ink, moved), std::size_t{0});
+    CHECK_EQ(doc.undoDepth(), before);
+}
+
+void theLayerBudgetIsOneTotalAndNotOneEach() {
+    TEST("the budget for a layer bake is the sum across its drawings");
+
+    const TileGrid grid = gridWith({0, 0, 300, 300}, kInk);
+
+    Transform scaled;
+    scaled.scale_x = 4.0;
+    scaled.scale_y = 4.0;
+
+    // A budget one drawing fits inside comfortably.
+    const std::size_t one = 200;
+    CHECK(commitFitsInBudget(grid, scaled, one));
+
+    // Ten of them do not, and that is the point: each cel's destination tiles
+    // land in that cel and stay there, so the layer really does hold the sum.
+    const std::vector<const TileGrid*> ten(10, &grid);
+    CHECK(!commitFitsInBudget(ten, scaled, one));
+    CHECK(commitFitsInBudget(ten, scaled, one * 10));
+
+    // A nudge across the layer is never refused, however many drawings there
+    // are: it is a block copy, and refusing a registration nudge would be
+    // refusing the commonest thing this feature is for.
+    Transform nudge;
+    nudge.dx = 7.0;
+    nudge.dy = -3.0;
+    CHECK(nudge.isWholePixelTranslation());
+    CHECK(commitFitsInBudget(ten, nudge, 1));
+
+    // Nothing to move costs nothing to ask about.
+    const std::vector<const TileGrid*> nothing;
+    CHECK(commitFitsInBudget(nothing, scaled, 1));
+}
+
 }  // namespace
 
 int main() {
@@ -718,5 +843,8 @@ int main() {
     aScaleThatWouldExhaustMemoryIsRefused();
     transformedBoundsCoversEveryCorner();
     committingATransformUndoesInOneStep();
+    bakingALayerTouchesEveryDrawingOnce();
+    bakingAnIdentityWritesNothing();
+    theLayerBudgetIsOneTotalAndNotOneEach();
     return testing::summarise("transform");
 }

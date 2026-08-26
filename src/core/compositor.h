@@ -204,15 +204,23 @@ public:
     //
     // `region` should be snapped to the grid -- see snapToSampleGrid -- or the
     // entries at its edges are averaged from part of their block.
+    //
+    // `substituted` stands in for one layer's pixels, exactly as it does for
+    // compositeScene. The onion skin is what wants it here: a transform of a
+    // whole layer through time moves every drawing of that layer at once, so a
+    // ghost that went on drawing the layer where the document still has it
+    // would show the same drawing twice, once still and once moving.
     void composite(const Document& doc, TrackId track, ImageId image,
-                   const PixelRect& region, Framebuffer& out, SampleStep step = {}) const;
+                   const PixelRect& region, Framebuffer& out, SampleStep step = {},
+                   const SubstitutedLayer& substituted = {}) const;
 
     // Same, for an arbitrary set of layers in the order given, topmost first.
     // The CTG layer will need this to flatten several line-art layers into one
     // barrier, and onion skin needs it to draw a neighbouring image alone.
     void compositeLayers(const Document& doc, TrackId track, ImageId image,
                          const std::vector<LayerId>& layers, const PixelRect& region,
-                         Framebuffer& out, SampleStep step = {}) const;
+                         Framebuffer& out, SampleStep step = {},
+                         const SubstitutedLayer& substituted = {}) const;
 
     // The whole picture at one frame of the timeline: every track, stacked.
     //

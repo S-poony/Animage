@@ -448,29 +448,45 @@ TileGrid transformTiles(const TileGrid& source, const Transform& t) {
     return out;
 }
 
-bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t tile_budget) {
-    // The two exact paths cannot grow the grid at all: a whole-pixel
-    // translation re-keys the handles it was given and a mirror permutes them,
-    // so neither allocates a tile the source had not already got. Asking the
-    // general question about them would answer yes anyway, but slowly and for
-    // the wrong reason.
-    if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
-    if (source.empty()) return true;
+namespace {
 
-    // One occupied source tile covers about scale_x * scale_y destination
-    // tiles on its own, so a scale whose product is past the budget cannot fit
-    // however little ink there is. Asked first because it is also what keeps
-    // the arithmetic below inside an int: past this line a tile's footprint is
-    // at most a few million pixels across, and transformedBounds casts doubles
-    // to ints with nothing to catch an overflow.
+// An answer that is not a count: the numbers are past what a tile coordinate
+// can hold, so the destination cannot be described rather than merely being too
+// large. Refused either way, and kept apart from a large count so that the sum
+// across a layer cannot wrap around into a small one.
+constexpr std::size_t kUncountable = static_cast<std::size_t>(-1);
+
+// Whether the scale alone puts a commit past the budget, whatever is drawn.
+//
+// One occupied source tile covers about scale_x * scale_y destination tiles on
+// its own, so a scale whose product is past the budget cannot fit however
+// little ink there is. Asked first because it is also what keeps the arithmetic
+// below inside an int: past this line a tile's footprint is at most a few
+// million pixels across, and transformedBounds casts doubles to ints with
+// nothing to catch an overflow.
+bool scaleCouldFit(const Transform& t, std::size_t tile_budget) {
     const double widest = std::max(std::abs(t.scale_x), std::abs(t.scale_y));
     const double area = std::abs(t.scale_x) * std::abs(t.scale_y);
     const double budget = static_cast<double>(tile_budget);
-    if (!(widest <= budget) || !(area <= budget)) return false;  // false for a NaN scale too
+    return widest <= budget && area <= budget;  // false for a NaN scale too
+}
 
+// How far the filter reaches, in source pixels, the way transformTiles grows
+// the box it reads.
+int filterReach(const Transform& t) {
+    return static_cast<int>(
+               std::ceil(std::max(kernelSpread(t.scale_x), kernelSpread(t.scale_y)))) +
+           1;
+}
+
+// An upper bound on the destination tiles of one commit, from the box the
+// destination lands in, read no further than `stop_at`.
+//
+// Cheap: no tile is looked at. It is what answers most of a drag, because
+// anything comfortably under the budget needs no count at all.
+std::size_t destinationTileBound(const TileGrid& source, const Transform& t,
+                                 std::size_t stop_at) {
     const Matrix forward = matrixOf(t);
-    const int reach =
-        static_cast<int>(std::ceil(std::max(kernelSpread(t.scale_x), kernelSpread(t.scale_y)))) + 1;
 
     // Where the whole destination lands, grown the way transformTiles grows the
     // box it walks, and kept in doubles: this is asked about scales whose box
@@ -493,28 +509,40 @@ bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t 
         bottom = std::max(bottom, corner.y + grow);
     }
 
-    // Every line below this casts a double to a tile coordinate. The scale
-    // guard above catches the gestures that get anywhere near here, but a
+    // Every line that follows this casts a double to a tile coordinate. The
+    // scale guard catches the gestures that get anywhere near here, but a
     // drawing already a long way from the origin multiplied by a scale in the
     // thousands would not be one of them.
     constexpr double kFurthest = 1.0e9;
     if (!(left > -kFurthest && top > -kFurthest && right < kFurthest && bottom < kFurthest)) {
-        return false;
+        return kUncountable;
     }
 
-    // An upper bound on the tiles in that box is an upper bound on the tiles
-    // with anything under them, so anything comfortably under the budget is
-    // answered here without counting a single tile. That is most of a drag,
-    // which is what keeps this off the pen's latency path: the count below only
-    // earns its cost near the ceiling.
     const double across = std::floor(right / kTileSize) - std::floor(left / kTileSize) + 1.0;
     const double down = std::floor(bottom / kTileSize) - std::floor(top / kTileSize) + 1.0;
-    if (across * down <= budget) return true;
+    const double bound = across * down;
+    return (bound >= static_cast<double>(stop_at)) ? stop_at : static_cast<std::size_t>(bound);
+}
+
+// The destination tiles of one commit, counted exactly and no further than
+// `stop_at` -- past which the answer is only "at least this many", which is all
+// a budget ever needs to know.
+//
+// Conservative by construction, because the two ends round differently: a
+// destination tile is wanted by transformTiles if the *axis-aligned box* of its
+// inverse-mapped square reaches occupied source, and that box is wider than the
+// square it came from. So each source tile's footprint is grown before it is
+// counted, and this counts slightly more than the resampler would produce. It
+// never counts fewer, which is the direction that matters.
+std::size_t destinationTileCount(const TileGrid& source, const Transform& t,
+                                 std::size_t stop_at) {
+    const Matrix forward = matrixOf(t);
+    const int reach = filterReach(t);
 
     std::unordered_set<TileCoord, TileCoordHash> touched;
     // Sized once for the answer it can be asked to hold, because growing a hash
     // table repeatedly is most of what this costs otherwise.
-    touched.reserve(tile_budget + 1);
+    touched.reserve(stop_at + 1);
     for (const auto& [coord, tile] : source.tiles()) {
         if (!tile) continue;
 
@@ -539,12 +567,85 @@ bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t 
             for (int tx = first.x; tx <= last.x; ++tx) {
                 touched.insert({tx, ty});
                 // Inside the innermost loop, so that the work this does is
-                // bounded by the budget and not by the footprint it is walking.
-                // One source tile at a large enough scale covers more
-                // destination tiles than the whole budget by itself.
-                if (touched.size() > tile_budget) return false;
+                // bounded by what it was asked for and not by the footprint it
+                // is walking. One source tile at a large enough scale covers
+                // more destination tiles than the whole budget by itself.
+                if (touched.size() >= stop_at) return stop_at;
             }
         }
+    }
+    return touched.size();
+}
+
+}  // namespace
+
+bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t tile_budget) {
+    // The two exact paths cannot grow the grid at all: a whole-pixel
+    // translation re-keys the handles it was given and a mirror permutes them,
+    // so neither allocates a tile the source had not already got. Asking the
+    // general question about them would answer yes anyway, but slowly and for
+    // the wrong reason.
+    if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
+    if (source.empty()) return true;
+    if (!scaleCouldFit(t, tile_budget)) return false;
+
+    // An upper bound on the tiles in the destination box is an upper bound on
+    // the tiles with anything under them, so anything comfortably under the
+    // budget is answered without counting a single tile. That is most of a
+    // drag, which is what keeps this off the pen's latency path.
+    const std::size_t bound = destinationTileBound(source, t, tile_budget + 1);
+    if (bound == kUncountable) return false;
+    if (bound <= tile_budget) return true;
+
+    return destinationTileCount(source, t, tile_budget + 1) <= tile_budget;
+}
+
+bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Transform& t,
+                        std::size_t tile_budget) {
+    // The exact paths again, and the reason is stronger here than for one
+    // drawing: a registration nudge across a whole layer is the commonest thing
+    // this feature is for, and it must never be the one that will not fit.
+    if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
+
+    // Before the scale guard and not after, exactly as for one drawing: the
+    // guard is about what one occupied tile costs, and a layer with nothing on
+    // it anywhere has none. A bake of nothing fits in any budget, including one
+    // that no scale would fit in.
+    const bool anything = std::any_of(sources.begin(), sources.end(), [](const TileGrid* source) {
+        return source && !source->empty();
+    });
+    if (!anything) return true;
+    if (!scaleCouldFit(t, tile_budget)) return false;
+
+    // The budget is one total across every drawing and not one each, which is
+    // the truthful shape: each cel's destination tiles land in that cel and
+    // stay there, so the layer really does hold the sum of them. A scale that
+    // is comfortable on one drawing is not comfortable on ninety, and this is
+    // the line that says so before Enter is pressed rather than after.
+    //
+    // Summed and never de-duplicated between cels. Two drawings landing tiles
+    // at the same coordinate are two tiles: the coordinate is shared, the
+    // memory is not.
+    std::size_t bounded = 0;
+    for (const TileGrid* source : sources) {
+        if (!source || source->empty()) continue;
+        const std::size_t bound = destinationTileBound(*source, t, tile_budget + 1);
+        if (bound == kUncountable) return false;
+        bounded += bound;
+        if (bounded > tile_budget) break;
+    }
+    if (bounded <= tile_budget) return true;
+
+    // Only now, and this is the one place a layer costs more to ask about than
+    // a drawing does: the cheap bound is a box, and a hundred boxes overshoot a
+    // hundred times, so an ordinary long shot reaches the exact count where one
+    // drawing would not have. What bounds the work is still the budget --
+    // whatever is left of it -- and not the number of drawings.
+    std::size_t total = 0;
+    for (const TileGrid* source : sources) {
+        if (!source || source->empty()) continue;
+        total += destinationTileCount(*source, t, tile_budget + 1 - total);
+        if (total > tile_budget) return false;
     }
     return true;
 }

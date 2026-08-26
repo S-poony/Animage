@@ -13,6 +13,7 @@
 #include "command.h"
 #include "ctg_fill.h"
 #include "scene.h"
+#include "transform.h"
 
 namespace animage {
 
@@ -145,6 +146,41 @@ public:
     // Detaches the cel from this (image, layer). The cel itself survives as
     // long as the history can bring it back.
     void clearCel(TrackId track, ImageId image, LayerId layer);
+
+    // Every drawing of one layer, moved by the same numbers, in one command.
+    // Issue #25. Returns how many drawings were written.
+    //
+    // **It bakes, and that is the decision.** The other shape -- an affine
+    // stored on the Layer and applied at composite time -- is free, lossless
+    // and adjustable afterwards, and it makes every other thing that reads a
+    // layer's pixels read them through a matrix: the brush, the eyedropper,
+    // ctgBarrier, celBounds, fit-to-drawing and export. Baking leaves all of
+    // those alone, and it leaves the saved format alone, at the price of one
+    // resample per drawing and a command that journals the layer twice over.
+    // The user chose the price. See "transforming a layer through time" in
+    // docs/handover.md.
+    //
+    // **Distinct drawings and not slots.** A drawing held over ten frames is
+    // one cel and is resampled once; walking `slots` would resample it ten
+    // times over, each pass reading what the last one left. That is the trap
+    // docs/lasso-and-transform.md parked here, and it is the whole of why this
+    // walks `images`.
+    //
+    // An identity writes nothing, for the same reason it writes nothing on one
+    // drawing: a commit softens line art, so one that changed nothing would be
+    // a pure loss. Nothing here asks whether the layer is locked, hidden or a
+    // colour layer -- those are refusals about a gesture and belong where the
+    // gesture is.
+    std::size_t transformLayer(TrackId track, LayerId layer, const Transform& t);
+
+    // The grids `transformLayer` would move, in the order it would move them.
+    //
+    // Exposed because two other things have to agree with the bake about
+    // exactly which drawings are in it and must not work it out for themselves:
+    // the budget, which sums the destination tiles across all of them, and the
+    // ghost picture the live gesture shows. The pointers are the document's and
+    // are good for exactly as long as it is not edited.
+    std::vector<const TileGrid*> layerGrids(TrackId track, LayerId layer) const;
 
     std::size_t celCount() const { return cels_.size(); }
 

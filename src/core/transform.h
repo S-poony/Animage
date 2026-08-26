@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cmath>
+#include <vector>
 
 #include "tile.h"
 
@@ -206,6 +207,22 @@ inline constexpr std::size_t kCommitTileBudget = 16384;
 // yes. It never says yes to a commit the resampler would take past the budget,
 // which is the direction that matters.
 bool commitFitsInBudget(const TileGrid& source, const Transform& t,
+                        std::size_t tile_budget = kCommitTileBudget);
+
+// The same question about a bake across a whole layer: every drawing of it,
+// moved by the same numbers, in one command.
+//
+// **One budget in total, and not one for each drawing.** Each cel's destination
+// tiles land in that cel and stay there, so the layer really does end up
+// holding the sum of them -- a scale that is comfortable on one drawing is not
+// comfortable on ninety, and this is what says so before Enter is pressed
+// rather than after. Nothing is de-duplicated between cels: two drawings
+// landing a tile at the same coordinate are two tiles, because the coordinate
+// is shared and the memory is not.
+//
+// Null and empty grids are skipped rather than refused, so a layer that is
+// simply absent at some drawings costs nothing to ask about.
+bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Transform& t,
                         std::size_t tile_budget = kCommitTileBudget);
 
 }  // namespace animage

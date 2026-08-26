@@ -581,7 +581,8 @@ void Framebuffer::release() {
 }
 
 void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_id,
-                           const PixelRect& region, Framebuffer& out, SampleStep step) const {
+                           const PixelRect& region, Framebuffer& out, SampleStep step,
+                           const SubstitutedLayer& substituted) const {
     const Track* track = doc.scene().findTrack(track_id);
     if (!track) {
         out.clear();
@@ -592,7 +593,7 @@ void Compositor::composite(const Document& doc, TrackId track_id, ImageId image_
     layers.reserve(track->layers.size());
     for (const Layer& layer : track->layers) layers.push_back(layer.id);
 
-    compositeLayers(doc, track_id, image_id, layers, region, out, step);
+    compositeLayers(doc, track_id, image_id, layers, region, out, step, substituted);
 }
 
 // Resolving layer ids to pixels and properties. The only part of compositing
@@ -657,9 +658,10 @@ static void collectPasses(const Document& doc, TrackId track_id, ImageId image_i
 
 void Compositor::compositeLayers(const Document& doc, TrackId track_id, ImageId image_id,
                                  const std::vector<LayerId>& layers, const PixelRect& region,
-                                 Framebuffer& out, SampleStep step) const {
+                                 Framebuffer& out, SampleStep step,
+                                 const SubstitutedLayer& substituted) const {
     std::vector<LayerPass> passes;
-    collectPasses(doc, track_id, image_id, layers, passes);
+    collectPasses(doc, track_id, image_id, layers, passes, substituted);
 
     // An image that is not there is an empty picture and not a missing one, and
     // compositeGrids says so by clearing -- but it has to be told the size, and

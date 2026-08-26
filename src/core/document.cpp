@@ -617,6 +617,65 @@ void Document::clearCel(TrackId track_id, ImageId image_id, LayerId layer_id) {
     releaseCelRef(cel_id);
 }
 
+// Which drawings a bake of this layer is about, in one place, because the bake,
+// the budget and the ghost picture all have to be about exactly the same set
+// and none of them may work it out for itself.
+//
+// Sorted, and that is not tidiness: `images` is an unordered_map, so its walk
+// order is not the timeline's and is not even stable between two runs of the
+// same program. A bake that journalled its tiles in a different order each time
+// would be a bake no test could assert anything about.
+static std::vector<ImageId> drawingsWithACel(const Track& track, LayerId layer) {
+    std::vector<ImageId> drawings;
+    drawings.reserve(track.images.size());
+    for (const auto& [id, image] : track.images) {
+        if (image.celFor(layer) != kNoId) drawings.push_back(id);
+    }
+    std::sort(drawings.begin(), drawings.end());
+    return drawings;
+}
+
+std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId layer_id) const {
+    std::vector<const TileGrid*> grids;
+    const Track* track = scene_.findTrack(track_id);
+    if (!track) return grids;
+
+    for (const ImageId image : drawingsWithACel(*track, layer_id)) {
+        if (const Cel* found = celAt(track_id, image, layer_id)) grids.push_back(&found->tiles());
+    }
+    return grids;
+}
+
+std::size_t Document::transformLayer(TrackId track_id, LayerId layer_id, const Transform& t) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track || !track->findLayer(layer_id)) return 0;
+    if (t.isIdentity()) return 0;
+
+    const std::vector<ImageId> drawings = drawingsWithACel(*track, layer_id);
+    if (drawings.empty()) return 0;
+
+    // One command for the whole layer, which is what makes it one undo step.
+    // What that costs is a journal holding every tile of every drawing it
+    // displaced -- the history's byte budget is the thing that notices, and on
+    // a long shot it will drop older commands to stay inside it. The newest is
+    // never dropped, so the bake itself always undoes. See "what the history is
+    // allowed to cost" in docs/handover.md.
+    ScopedCommand command(*this, "Transform layer through time");
+
+    std::size_t written = 0;
+    for (const ImageId image : drawings) {
+        Cel* cel = celForWriting(track_id, image, layer_id);
+        if (!cel) continue;
+        // Nothing is created here: every drawing in the list already has a cel,
+        // which is what keeps this off the inheriting path a colour layer would
+        // take. Read into a new grid and swapped in one step, so no drawing is
+        // ever half moved.
+        cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
+        ++written;
+    }
+    return written;
+}
+
 // The track is not part of the key: ImageIds come from one counter per
 // document, so a drawing names itself unambiguously without it. It stays in the
 // signature because every caller has one and reads better for saying so.
