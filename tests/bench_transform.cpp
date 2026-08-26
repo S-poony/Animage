@@ -264,7 +264,7 @@ int main() {
 
             const std::size_t before = doc.historyBytes();
             const auto layer_start = Clock::now();
-            const std::size_t written = doc.transformLayer(track, layer, turn);
+            const std::size_t written = doc.transformLayer(track, layer, turn).drawings;
             const double took = milliseconds(layer_start, Clock::now());
             const std::size_t retained = doc.historyBytes() - before;
 

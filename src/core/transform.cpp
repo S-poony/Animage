@@ -607,45 +607,75 @@ bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Trans
     // this feature is for, and it must never be the one that will not fit.
     if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
 
+    // What the layer already holds, which is what the ceiling below is built
+    // from. Counted rather than taken from tileCount(), which counts entries
+    // and not ink: an over-count here would *raise* the ceiling, and this is
+    // the one number in the expression that has to lean the other way.
+    std::size_t occupied = 0;
+    for (const TileGrid* source : sources) {
+        if (!source) continue;
+        for (const auto& [coord, tile] : source->tiles()) {
+            if (tile) ++occupied;
+        }
+    }
     // Before the scale guard and not after, exactly as for one drawing: the
     // guard is about what one occupied tile costs, and a layer with nothing on
     // it anywhere has none. A bake of nothing fits in any budget, including one
     // that no scale would fit in.
-    const bool anything = std::any_of(sources.begin(), sources.end(), [](const TileGrid* source) {
-        return source && !source->empty();
-    });
-    if (!anything) return true;
-    if (!scaleCouldFit(t, tile_budget)) return false;
+    if (occupied == 0) return true;
 
-    // The budget is one total across every drawing and not one each, which is
-    // the truthful shape: each cel's destination tiles land in that cel and
-    // stay there, so the layer really does hold the sum of them. A scale that
-    // is comfortable on one drawing is not comfortable on ninety, and this is
-    // the line that says so before Enter is pressed rather than after.
+    // **The ceiling bounds the growth and not the total, and that is a
+    // decision.** The total is what a layer bake was first bounded by, and it
+    // was wrong in a way the benchmark showed straight away: a plain seven
+    // degrees on a forty-drawing 4K layer wants about 23,700 destination tiles
+    // and was refused, so the feature did not work at all on the shots it is
+    // most wanted for. The message it produced was wrong three ways over --
+    // nothing was scaled, it was not a drawing, and scaling down would not have
+    // helped.
     //
+    // What actually has no bound is the *scale*. The bar goes to 10000% and a
+    // handle drag is bounded only by where the pointer can reach, and the
+    // destination grows as the square, so a drawing that previews perfectly
+    // well can ask for hundreds of gigabytes. The number of drawings is not
+    // that: forty cels at 100% ask for about what the layer already holds, and
+    // the layer is in memory now or there would be nothing to look at. So the
+    // ceiling is `kLayerGrowth` times what is there -- a bound measured against
+    // a quantity this machine has already proved it can hold -- or the
+    // single-drawing budget, whichever is larger, so that a small layer can
+    // still be scaled up as far as one drawing could.
+    //
+    // It is not a guarantee, and the caller must not treat it as one. A bake's
+    // peak is the new tiles plus the old ones, which the journal is holding for
+    // undo, so it is about (1 + kLayerGrowth) times the layer -- and a large
+    // enough layer can still exhaust a machine. What makes that survivable is
+    // at the other end: Document::transformLayer catches the failure and puts
+    // back every drawing it had already written.
+    const std::size_t allowed = std::max(tile_budget, kLayerGrowth * occupied);
+    if (!scaleCouldFit(t, allowed)) return false;
+
     // Summed and never de-duplicated between cels. Two drawings landing tiles
     // at the same coordinate are two tiles: the coordinate is shared, the
     // memory is not.
     std::size_t bounded = 0;
     for (const TileGrid* source : sources) {
         if (!source || source->empty()) continue;
-        const std::size_t bound = destinationTileBound(*source, t, tile_budget + 1);
+        const std::size_t bound = destinationTileBound(*source, t, allowed + 1);
         if (bound == kUncountable) return false;
         bounded += bound;
-        if (bounded > tile_budget) break;
+        if (bounded > allowed) break;
     }
-    if (bounded <= tile_budget) return true;
+    if (bounded <= allowed) return true;
 
     // Only now, and this is the one place a layer costs more to ask about than
     // a drawing does: the cheap bound is a box, and a hundred boxes overshoot a
     // hundred times, so an ordinary long shot reaches the exact count where one
-    // drawing would not have. What bounds the work is still the budget --
+    // drawing would not have. What bounds the work is still the ceiling --
     // whatever is left of it -- and not the number of drawings.
     std::size_t total = 0;
     for (const TileGrid* source : sources) {
         if (!source || source->empty()) continue;
-        total += destinationTileCount(*source, t, tile_budget + 1 - total);
-        if (total > tile_budget) return false;
+        total += destinationTileCount(*source, t, allowed + 1 - total);
+        if (total > allowed) return false;
     }
     return true;
 }

@@ -147,8 +147,20 @@ public:
     // long as the history can bring it back.
     void clearCel(TrackId track, ImageId image, LayerId layer);
 
+    // What a layer bake did, which is two facts and not one: how many drawings
+    // it wrote, and whether it ran out of memory partway and put them back.
+    //
+    // A count alone could not say that. Nothing written is the answer for an
+    // identity, for a layer with no drawings on it and for a layer that would
+    // not fit -- and the last of those is the only one anybody has to be told
+    // about.
+    struct LayerBake {
+        std::size_t drawings = 0;
+        bool ran_out_of_memory = false;
+    };
+
     // Every drawing of one layer, moved by the same numbers, in one command.
-    // Issue #25. Returns how many drawings were written.
+    // Issue #25.
     //
     // **It bakes, and that is the decision.** The other shape -- an affine
     // stored on the Layer and applied at composite time -- is free, lossless
@@ -171,7 +183,35 @@ public:
     // a pure loss. Nothing here asks whether the layer is locked, hidden or a
     // colour layer -- those are refusals about a gesture and belong where the
     // gesture is.
-    std::size_t transformLayer(TrackId track, LayerId layer, const Transform& t);
+    //
+    // **It survives running out of memory, and that is why it is written this
+    // way.** commitFitsInBudget bounds the ask against what the layer already
+    // occupies, which is a bound measured against something this machine has
+    // proved it can hold -- but a bake's peak is the new tiles plus the old
+    // ones the journal is keeping for undo, and a large enough layer can still
+    // exhaust a machine. Everywhere else in this program an allocation failure
+    // on the interface thread is a crash, and here it would be a crash with the
+    // layer half rewritten inside an open command. So the failure is caught,
+    // every drawing already written is put back, and the caller is told. The
+    // one other place that swallows a bad_alloc is CtgSolver, and its comment
+    // says why it could afford to: nothing in the document is half written when
+    // a solve throws. This is the opposite case, which is why it undoes rather
+    // than merely shrugging.
+    LayerBake transformLayer(TrackId track, LayerId layer, const Transform& t);
+
+    // Makes the next bake fail after `drawings` of them, so the rescue above
+    // can be asserted rather than merely written.
+    //
+    // A hook in `core` for a test to pull is not free, and it is here because
+    // the alternative is worse: the rescue is what makes bounding the growth
+    // rather than the total defensible, and an untested rescue is a rescue that
+    // stops working quietly. Running out of memory on purpose is not something
+    // a test can arrange -- a machine with room to swap succeeds and is merely
+    // slow, and one without it takes the test process down with it.
+    //
+    // Nothing in the interface reaches this, and it resets itself when the bake
+    // it armed has run.
+    void failLayerBakeAfterForTesting(std::size_t drawings) { fail_bake_after_ = drawings; }
 
     // The grids `transformLayer` would move, in the order it would move them.
     //
@@ -369,6 +409,10 @@ private:
     std::vector<Command> redo_stack_;
     std::uint64_t command_stamps_ = 0;
     std::size_t history_budget_ = kDefaultHistoryBudget;
+
+    // Armed only by failLayerBakeAfterForTesting, and cleared by the bake it
+    // armed. Absent means what it says: nothing is going to be made to fail.
+    std::optional<std::size_t> fail_bake_after_;
 
     CtgFillCache ctg_cache_;
     CtgCarries ctg_carries_;

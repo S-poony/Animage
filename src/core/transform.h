@@ -209,16 +209,48 @@ inline constexpr std::size_t kCommitTileBudget = 16384;
 bool commitFitsInBudget(const TileGrid& source, const Transform& t,
                         std::size_t tile_budget = kCommitTileBudget);
 
+// How much larger than itself a whole layer may be made in one bake.
+//
+// The ceiling for a layer is this times what the layer already holds, or
+// `kCommitTileBudget`, whichever is larger -- so a small layer can still be
+// scaled up as far as one drawing could, and a large one can be turned, nudged
+// or adjusted without being refused for being large.
+//
+// Three, and it was two until the tests said what the count actually does.
+//
+// The number is not the growth an animator would recognise, because what it
+// bounds is the *counted* destination, and that count is conservative on
+// purpose: every source tile's footprint is grown by a whole tile before it is
+// counted. On a large drawing that margin is a rim and the count of a plain
+// rotation comes out near 1.2; on a small one the rim is most of the answer and
+// the same rotation counts near 1.9. At two, whether you could turn your layer
+// depended on how big the drawings were, which is not a rule anybody could hold
+// in their head.
+//
+// Three clears a rotation at any size and still refuses a scale to 200%, which
+// is four times the pixels before the margin is added -- so the two cases this
+// has to tell apart stay on opposite sides of it. What it costs is the peak: a
+// bake at the ceiling holds the new tiles plus the old ones the journal keeps
+// for undo, so about four times the layer at once.
+inline constexpr std::size_t kLayerGrowth = 3;
+
 // The same question about a bake across a whole layer: every drawing of it,
 // moved by the same numbers, in one command.
 //
-// **One budget in total, and not one for each drawing.** Each cel's destination
-// tiles land in that cel and stay there, so the layer really does end up
-// holding the sum of them -- a scale that is comfortable on one drawing is not
-// comfortable on ninety, and this is what says so before Enter is pressed
-// rather than after. Nothing is de-duplicated between cels: two drawings
+// **It bounds the growth and not the total**, and `tile_budget` is a floor
+// under that rather than a cap on it -- see the definition for why the total
+// was tried first and what the benchmark said about it. What has no bound of
+// its own is the scale; the number of drawings is bounded by what is already in
+// memory.
+//
+// Counted per cel and summed, never de-duplicated between them: two drawings
 // landing a tile at the same coordinate are two tiles, because the coordinate
 // is shared and the memory is not.
+//
+// **True is not a promise that the bake will succeed.** It bounds the ask
+// against what the machine is already holding, which is a good bound and not a
+// guarantee. `Document::transformLayer` is the other half: it catches the
+// allocation failing and puts back every drawing it had already written.
 //
 // Null and empty grids are skipped rather than refused, so a layer that is
 // simply absent at some drawings costs nothing to ask about.

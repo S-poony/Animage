@@ -2,6 +2,7 @@
 #include "document.h"
 
 #include <algorithm>
+#include <new>
 #include <unordered_set>
 #include <utility>
 
@@ -646,34 +647,71 @@ std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId laye
     return grids;
 }
 
-std::size_t Document::transformLayer(TrackId track_id, LayerId layer_id, const Transform& t) {
+Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
+                                             const Transform& t) {
     Track* track = scene_.findTrack(track_id);
-    if (!track || !track->findLayer(layer_id)) return 0;
-    if (t.isIdentity()) return 0;
+    if (!track || !track->findLayer(layer_id)) return {};
+    if (t.isIdentity()) return {};
 
     const std::vector<ImageId> drawings = drawingsWithACel(*track, layer_id);
-    if (drawings.empty()) return 0;
+    if (drawings.empty()) return {};
 
-    // One command for the whole layer, which is what makes it one undo step.
-    // What that costs is a journal holding every tile of every drawing it
-    // displaced -- the history's byte budget is the thing that notices, and on
-    // a long shot it will drop older commands to stay inside it. The newest is
-    // never dropped, so the bake itself always undoes. See "what the history is
-    // allowed to cost" in docs/handover.md.
-    ScopedCommand command(*this, "Transform layer through time");
+    // Where the history stood before any of this, so that the rescue below can
+    // tell whether there is anything to put back. A depth would not do: the
+    // history trims itself from the bottom, so it can gain a command and lose
+    // one in the same breath and read the same either way. A stamp is unique to
+    // the command that got it and the newest command is never trimmed.
+    const std::uint64_t before = historyStamp();
 
-    std::size_t written = 0;
-    for (const ImageId image : drawings) {
-        Cel* cel = celForWriting(track_id, image, layer_id);
-        if (!cel) continue;
-        // Nothing is created here: every drawing in the list already has a cel,
-        // which is what keeps this off the inheriting path a colour layer would
-        // take. Read into a new grid and swapped in one step, so no drawing is
-        // ever half moved.
-        cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
-        ++written;
+    LayerBake done;
+    {
+        // One command for the whole layer, which is what makes it one undo
+        // step. What that costs is a journal holding every tile of every
+        // drawing it displaced -- the history's byte budget is the thing that
+        // notices, and on a long shot it will drop older commands to stay
+        // inside it. The newest is never dropped, so the bake itself always
+        // undoes. See "what the history is allowed to cost" in
+        // docs/handover.md.
+        ScopedCommand command(*this, "Transform layer through time");
+        try {
+            for (const ImageId image : drawings) {
+                if (fail_bake_after_ && done.drawings >= *fail_bake_after_) throw std::bad_alloc();
+                Cel* cel = celForWriting(track_id, image, layer_id);
+                if (!cel) continue;
+                // Nothing is created here: every drawing in the list already
+                // has a cel, which is what keeps this off the inheriting path a
+                // colour layer would take. Read into a new grid and swapped in
+                // one step, so no drawing is ever half moved.
+                cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
+                ++done.drawings;
+            }
+        } catch (const std::bad_alloc&) {
+            // Caught inside the command's own scope on purpose. Letting it out
+            // would unwind through ~ScopedCommand, and an exception escaping a
+            // destructor during unwinding is a terminate rather than an error.
+            done.ran_out_of_memory = true;
+        }
+        fail_bake_after_.reset();
     }
-    return written;
+
+    if (!done.ran_out_of_memory) return done;
+
+    // Put back whatever landed. Every drawing written is journalled, so this is
+    // exact rather than approximate -- and it is the whole reason the bake is
+    // one command: a rescue that had to unwind forty of them would have forty
+    // chances to go wrong.
+    //
+    // Only if a command was actually pushed. A failure before the first write
+    // leaves an empty command, which endCommand does not put on the stack at
+    // all, and undoing then would undo whatever the person did *before* this.
+    done.drawings = 0;
+    if (historyStamp() != before && undo()) {
+        // And it must not be redoable. Undo moves the command to the redo
+        // stack, and a redo of a bake that ran out of memory would put the
+        // layer back into the half-written state this just rescued it from.
+        redo_stack_.pop_back();
+    }
+    return done;
 }
 
 // The track is not part of the key: ImageIds come from one counter per

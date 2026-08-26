@@ -189,6 +189,16 @@ public:
         NothingCopied,
         DifferentLayerKind,
         TooLargeToCommit,  // the scale asks for more tiles than a commit may hold
+        // The same ceiling, reached by a layer bake, and a separate reason
+        // because the advice differs and the advice is most of the message.
+        // "Scale it down" is what to do about one drawing; a layer can be over
+        // the ceiling at a scale of one, where what is large is the layer.
+        LayerTooLargeToCommit,
+        // And the ceiling held but the machine did not. Nothing was changed --
+        // every drawing already written was put back -- which is the part that
+        // has to be said, because a bake that stopped halfway would otherwise
+        // be indistinguishable from one that did nothing.
+        RanOutOfMemory,
     };
     static QString explain(Refusal refusal);
 

@@ -1919,6 +1919,19 @@ QString CanvasWidget::explain(Refusal refusal) {
         case Refusal::TooLargeToCommit:
             return QStringLiteral("it is scaled too large to bake into a drawing -- scale it "
                                   "down, or cancel it");
+        case Refusal::LayerTooLargeToCommit:
+            // Deliberately not "scale it down", which is the advice for one
+            // drawing and can be wrong here in every clause: a layer bake can
+            // be over the ceiling at a scale of one, where there is nothing
+            // scaled and nothing to scale back. See issue #65 on the message
+            // this is a sibling of.
+            return QStringLiteral("this layer is too large to bake at that size -- a bake may "
+                                  "grow a layer to about three times what it already takes, "
+                                  "and every drawing in it is written at once");
+        case Refusal::RanOutOfMemory:
+            return QStringLiteral("there was not enough memory to bake the whole layer -- every "
+                                  "drawing it had already written has been put back, so nothing "
+                                  "has changed");
         case Refusal::ColourLayer:
             return QStringLiteral("a colour layer holds labels rather than paint, so there is "
                                   "nothing here that can be resampled");
@@ -2255,7 +2268,8 @@ bool CanvasWidget::applyTransform() {
     // that path and nothing is allocated, and a transform that has not moved
     // cannot be the one that will not fit.
     if (!transform_fits_ && !transform_->values.isIdentity()) {
-        Q_EMIT transformRefused(Refusal::TooLargeToCommit);
+        Q_EMIT transformRefused(transform_->whole_layer ? Refusal::LayerTooLargeToCommit
+                                                        : Refusal::TooLargeToCommit);
         return false;
     }
 
@@ -2287,13 +2301,24 @@ bool CanvasWidget::applyTransform() {
     if (live.whole_layer) {
         if (!live.values.isIdentity()) {
             QGuiApplication::setOverrideCursor(Qt::WaitCursor);
-            const std::size_t written = doc_.transformLayer(live.track, live.layer, live.values);
+            const Document::LayerBake baked =
+                doc_.transformLayer(live.track, live.layer, live.values);
             QGuiApplication::restoreOverrideCursor();
             clearSelection();
             refreshAll();
             refreshPointer();
             Q_EMIT documentChanged();
-            Q_EMIT layerTransformed(static_cast<int>(written));
+            // The ceiling is a bound and not a promise -- see commitFitsInBudget
+            // -- so this is the case where it held and the machine did not.
+            // The transform is already gone and is not put back up: the bake
+            // undid itself, so what is on screen is what was there before, and
+            // offering a box over it again would invite the same failure with
+            // no reason to expect a different answer.
+            if (baked.ran_out_of_memory) {
+                Q_EMIT transformRefused(Refusal::RanOutOfMemory);
+            } else {
+                Q_EMIT layerTransformed(static_cast<int>(baked.drawings));
+            }
             Q_EMIT transformEnded();
             return true;
         }

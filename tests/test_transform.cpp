@@ -65,6 +65,28 @@ std::size_t drawnPixels(const TileGrid& grid) {
 
 const Rgba kInk{0.0f, 0.0f, 0.0f, 1.0f};
 
+// A grid occupying `across` by `down` whole tiles, one pixel marked in each.
+//
+// What the budget reads is which tiles are occupied and how far apart they are,
+// never how much ink is in them -- so this is the cheap way to ask a question
+// about a drawing-sized grid. Filling them would be a hundred times the writes
+// for the same answer.
+TileGrid gridOfTiles(int across, int down) {
+    Document doc;
+    const TrackId track = doc.addTrack("t");
+    const LayerId layer = doc.addLayer(track, "l");
+    const ImageId image = doc.insertImage(track, 0);
+
+    ScopedCommand command(doc, "Fill");
+    Cel* cel = doc.celForWriting(track, image, layer);
+    for (int ty = 0; ty < down; ++ty) {
+        for (int tx = 0; tx < across; ++tx) {
+            cel->writableTile({tx, ty}, doc.journal())->setPixel(64, 64, kInk);
+        }
+    }
+    return cel->tiles();
+}
+
 void identityReturnsTheSameBits() {
     TEST("an identity transform returns the same bits");
     const TileGrid source = gridWith({40, 40, 30, 20}, kInk);
@@ -739,7 +761,7 @@ void bakingALayerTouchesEveryDrawingOnce() {
     t.dx = 300.0;
     t.dy = 200.0;
     // Two drawings and not five slots, which is the number this returns for.
-    CHECK_EQ(doc.transformLayer(track, ink, t), std::size_t{2});
+    CHECK_EQ(doc.transformLayer(track, ink, t).drawings, std::size_t{2});
     CHECK_EQ(doc.undoDepth(), before + 1);
 
     for (const ImageId image : {held, second}) {
@@ -772,7 +794,7 @@ void bakingAnIdentityWritesNothing() {
     const std::size_t before = doc.undoDepth();
     const std::uint64_t revision = doc.celAt(track, image, ink)->revision();
 
-    CHECK_EQ(doc.transformLayer(track, ink, Transform{}), std::size_t{0});
+    CHECK_EQ(doc.transformLayer(track, ink, Transform{}).drawings, std::size_t{0});
     CHECK_EQ(doc.undoDepth(), before);
     // Not resampled and not even touched: a commit softens line art, so one
     // that changed nothing would be a pure loss.
@@ -781,29 +803,51 @@ void bakingAnIdentityWritesNothing() {
     // And a layer that is not there at all is not an error.
     Transform moved;
     moved.dx = 10.0;
-    CHECK_EQ(doc.transformLayer(track, 9999, moved), std::size_t{0});
-    CHECK_EQ(doc.transformLayer(9999, ink, moved), std::size_t{0});
+    CHECK_EQ(doc.transformLayer(track, 9999, moved).drawings, std::size_t{0});
+    CHECK_EQ(doc.transformLayer(9999, ink, moved).drawings, std::size_t{0});
     CHECK_EQ(doc.undoDepth(), before);
 }
 
-void theLayerBudgetIsOneTotalAndNotOneEach() {
-    TEST("the budget for a layer bake is the sum across its drawings");
+void theLayerCeilingBoundsGrowthAndNotTheTotal() {
+    TEST("a layer bake is bounded by how much larger it makes the layer");
 
-    const TileGrid grid = gridWith({0, 0, 300, 300}, kInk);
+    // Drawing-sized rather than token-sized, and that is load-bearing: the
+    // count grows every source tile's footprint by a whole tile, so on a grid
+    // of nine tiles the margin is most of the answer and any ratio measured
+    // there is a ratio about the fixture.
+    const TileGrid grid = gridOfTiles(16, 9);
+    const std::vector<const TileGrid*> forty(40, &grid);
 
-    Transform scaled;
-    scaled.scale_x = 4.0;
-    scaled.scale_y = 4.0;
+    // The case the first version of this got wrong, and the reason the rule
+    // changed: turning a layer asks for about what the layer already holds, so
+    // it has to go through however many drawings there are. Bounded by the
+    // total it was refused, which made the feature useless on exactly the long
+    // shots it is for.
+    Transform turn;
+    turn.rotation = 7.0;
+    CHECK(commitFitsInBudget(forty, turn, 8));
+    CHECK(commitFitsInBudget(forty, turn));
 
-    // A budget one drawing fits inside comfortably.
-    const std::size_t one = 200;
-    CHECK(commitFitsInBudget(grid, scaled, one));
+    // What is still refused is growth, because that is the thing with no bound
+    // of its own: the bar goes to 10000%.
+    Transform huge;
+    huge.scale_x = 8.0;
+    huge.scale_y = 8.0;
+    CHECK(!commitFitsInBudget(forty, huge, 8));
 
-    // Ten of them do not, and that is the point: each cel's destination tiles
-    // land in that cel and stay there, so the layer really does hold the sum.
-    const std::vector<const TileGrid*> ten(10, &grid);
-    CHECK(!commitFitsInBudget(ten, scaled, one));
-    CHECK(commitFitsInBudget(ten, scaled, one * 10));
+    // And `tile_budget` is a floor under the ceiling rather than a cap on it,
+    // so a small layer can still be scaled up as far as one drawing could.
+    Transform doubled;
+    doubled.scale_x = 2.0;
+    doubled.scale_y = 2.0;
+    const TileGrid small = gridOfTiles(3, 3);
+    const std::vector<const TileGrid*> one(1, &small);
+    CHECK(commitFitsInBudget(one, doubled, kCommitTileBudget));
+
+    // And the rule holds at both ends of the size range, which is what two did
+    // not do: a rotation goes through on a small layer as well as a large one.
+    const std::vector<const TileGrid*> forty_small(40, &small);
+    CHECK(commitFitsInBudget(forty_small, turn, 8));
 
     // A nudge across the layer is never refused, however many drawings there
     // are: it is a block copy, and refusing a registration nudge would be
@@ -812,11 +856,85 @@ void theLayerBudgetIsOneTotalAndNotOneEach() {
     nudge.dx = 7.0;
     nudge.dy = -3.0;
     CHECK(nudge.isWholePixelTranslation());
-    CHECK(commitFitsInBudget(ten, nudge, 1));
+    CHECK(commitFitsInBudget(forty, nudge, 1));
 
-    // Nothing to move costs nothing to ask about.
+    // Nothing to move costs nothing to ask about, and is not refused by a
+    // ceiling no scale could fit under.
     const std::vector<const TileGrid*> nothing;
-    CHECK(commitFitsInBudget(nothing, scaled, 1));
+    CHECK(commitFitsInBudget(nothing, huge, 1));
+}
+
+void aBakeThatRunsOutOfMemoryPutsEveryDrawingBack() {
+    TEST("a layer bake that runs out of memory changes nothing and cannot be redone");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+
+    std::vector<ImageId> drawings;
+    for (int d = 0; d < 4; ++d) {
+        drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(d)));
+        drawBox(doc, track, drawings.back(), ink, {40, 40, 40, 20});
+    }
+
+    std::vector<TileGrid> before;
+    for (const ImageId image : drawings) before.push_back(doc.celAt(track, image, ink)->tiles());
+    const std::size_t depth = doc.undoDepth();
+    const std::uint64_t stamp = doc.historyStamp();
+
+    Transform t;
+    t.dx = 300.0;
+    t.dy = 200.0;
+
+    // Two in, so that some drawings really have been written by the time it
+    // gives up -- a rescue tested only from the first drawing would pass
+    // against code that put nothing back.
+    doc.failLayerBakeAfterForTesting(2);
+    const Document::LayerBake baked = doc.transformLayer(track, ink, t);
+
+    CHECK(baked.ran_out_of_memory);
+    CHECK_EQ(baked.drawings, std::size_t{0});
+
+    // Every drawing exactly as it was, including the two that had been done.
+    for (std::size_t i = 0; i < drawings.size(); ++i) {
+        CHECK(sameBits(before[i], doc.celAt(track, drawings[i], ink)->tiles(), 0, 0,
+                       {0, 0, 600, 500}));
+    }
+
+    // And no trace in the history: not a step to undo past, and above all not
+    // one to redo into -- a redo of a half-written bake would put the layer
+    // back into the state this just rescued it from.
+    CHECK_EQ(doc.undoDepth(), depth);
+    CHECK_EQ(doc.historyStamp(), stamp);
+    CHECK(!doc.canRedo());
+
+    // The hook disarms itself, so the next bake is an ordinary one.
+    const Document::LayerBake again = doc.transformLayer(track, ink, t);
+    CHECK(!again.ran_out_of_memory);
+    CHECK_EQ(again.drawings, drawings.size());
+}
+
+void aBakeThatFailsBeforeWritingUndoesNothingElse() {
+    TEST("a layer bake that fails before its first write leaves earlier history alone");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId image = doc.insertImage(track, 0);
+    drawBox(doc, track, image, ink, {40, 40, 40, 20});
+
+    const std::size_t depth = doc.undoDepth();
+
+    // The trap this pins: nothing written means no command was pushed, and a
+    // rescue that undid anyway would undo whatever the person did *before* the
+    // bake -- here, the drawing itself.
+    Transform t;
+    t.dx = 300.0;
+    doc.failLayerBakeAfterForTesting(0);
+    CHECK(doc.transformLayer(track, ink, t).ran_out_of_memory);
+
+    CHECK_EQ(doc.undoDepth(), depth);
+    CHECK(doc.celAt(track, image, ink)->pixel(50, 50).a > 0.9f);
 }
 
 }  // namespace
@@ -845,6 +963,8 @@ int main() {
     committingATransformUndoesInOneStep();
     bakingALayerTouchesEveryDrawingOnce();
     bakingAnIdentityWritesNothing();
-    theLayerBudgetIsOneTotalAndNotOneEach();
+    theLayerCeilingBoundsGrowthAndNotTheTotal();
+    aBakeThatRunsOutOfMemoryPutsEveryDrawingBack();
+    aBakeThatFailsBeforeWritingUndoesNothingElse();
     return testing::summarise("transform");
 }
