@@ -896,6 +896,32 @@ const std::vector<Situation>& situations() {
              s.settle();
          }},
 
+        {"a-layer-being-baked",
+         "the status bar while a layer bake is running: it blocks the interface thread for "
+         "seconds on a long shot, so what it is doing has to be on screen before it starts "
+         "rather than after it finishes -- this is photographed from inside the wait",
+         [](Stage& s) {
+             for (int d = 0; d < 6; ++d) {
+                 s.circle(s.centre() + QPointF(d * 20.0 - 50.0, 0.0), 70.0);
+                 if (d < 5) s.press(Id::InsertDrawing);
+             }
+             s.choose("Transform layer through time");
+             Transform placed = s.canvas->transformValues();
+             placed.rotation = 10.0;
+             s.canvas->setTransformValues(placed);
+             s.settle();
+
+             // Photographed from inside the bake, which is the only moment this
+             // situation is about. Connected after the window's own handler, so
+             // the message it puts up is already there when this runs -- and it
+             // has to be a grab rather than a settle, because nothing will run
+             // an event loop until the bake returns.
+             QObject::connect(s.canvas, &CanvasWidget::layerTransformStarted, &s.window,
+                              [&s](int) { s.picture = s.window.grab().toImage(); });
+             s.canvas->applyTransform();
+             s.settle();
+         }},
+
         {"a-colour-layer-cannot-move-through-time",
          "the layer panel's button is greyed out on a colour layer rather than absent, and "
          "its tooltip is what says why -- a mark on one is a label, and interpolating two "

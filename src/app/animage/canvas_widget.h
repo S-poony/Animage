@@ -446,6 +446,16 @@ Q_SIGNALS:
     // so a return value would not reach the status bar from any of them.
     void transformRefused(Refusal why);
 
+    // A layer bake is about to start, and how many drawings it will write.
+    //
+    // Emitted *before* the work rather than after it, and that is the whole
+    // point of it being a second signal: the bake blocks the interface thread
+    // for as long as it takes -- seconds, on a long shot -- and a wait cursor
+    // over a status bar that has not said anything yet is a program that has
+    // stopped for no stated reason. Whoever listens has to force its own
+    // repaint; nothing will run an event loop until this returns.
+    void layerTransformStarted(int drawings);
+
     // A layer bake landed, and how many drawings it wrote.
     //
     // The number is the whole point of saying anything: one stroke of a hand

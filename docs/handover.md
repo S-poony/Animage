@@ -2894,6 +2894,37 @@ rule anybody could hold in their head. Three clears a rotation at either size
 and still refuses a scale to 200%, which is four times the pixels before the
 margin — so the two cases it has to tell apart stay on opposite sides of it.
 
+### The wait, and what is on screen during it
+
+Seconds, on a long shot, with the interface thread held the whole time. Two
+things have to be true through it, and neither was at first.
+
+**The status bar has to say what is happening before it happens.** Reported: a
+bake said nothing until it was over. The message goes up on
+`layerTransformStarted`, which is emitted *before* the work rather than after
+it, and the listener calls `statusBar()->repaint()` — not `update`, which would
+queue a paint that runs after the wait it was meant to explain, so the message
+would appear and vanish in the same frame having described nothing; and not
+`processEvents`, which would paint but would also deliver input into the middle
+of a gesture that is halfway through committing itself.
+
+**And the float has to stay up.** `applyTransform` clears `transform_` before it
+commits, because committing repaints and a repaint that still saw a live
+transform would draw the float over the pixels it had just become. That is right
+for one drawing, where the commit is over before anything could paint, and wrong
+for a layer: the document has not changed yet, so what is still true is exactly
+what was on screen before Apply, and a repaint arriving with the transform
+already gone would draw the layer omitted and nothing over it. A blank canvas,
+for seconds, which reads as work lost rather than work happening. So the layer
+path resets it *after* the bake instead.
+
+Nothing repaints the canvas during a bake today, so that one survived either way
+and would have gone on surviving until something did. What found it was
+`a-layer-being-baked` in `shots`, which photographs the window from inside the
+wait — and grabbing the window *is* that something. Worth remembering as the
+shape of thing that harness catches: not a wrong pixel, but a state nobody would
+think to look at because it is not supposed to last long enough to see.
+
 ### Running out of memory, and why that is a rescue rather than a crash
 
 The ceiling is a bound and not a promise. A bake's peak is the new tiles plus

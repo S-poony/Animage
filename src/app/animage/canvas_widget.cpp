@@ -2276,8 +2276,19 @@ bool CanvasWidget::applyTransform() {
     // Taken and cleared before anything below runs. Committing writes the
     // document, which repaints, and a repaint that still saw a live transform
     // would draw the float over the pixels it had just become.
+    //
+    // **Except a layer bake, which holds the interface thread for seconds.**
+    // There the float has to stay up for the whole wait: the document has not
+    // changed yet, so what is still true is exactly what was on screen before
+    // Apply, and anything that repaints in the meantime should draw that. With
+    // the transform already gone it would draw the layer omitted and nothing
+    // over it -- a blank canvas, for seconds, which reads as work lost rather
+    // than work happening. Nothing repaints the canvas during the bake today,
+    // so this survives either way and would go on surviving until something
+    // did; the shot that photographs the wait is what showed it, because
+    // grabbing the window *is* that something.
     const LiveTransform live = *transform_;
-    transform_.reset();
+    if (!live.whole_layer) transform_.reset();
     // Belt and braces: `beginTransform` has already ended any stroke, and the
     // cost of being wrong about that is a stroke that resumes on the next hover
     // and draws a straight line from wherever the nib left off. See #78.
@@ -2300,10 +2311,20 @@ bool CanvasWidget::applyTransform() {
     // through a two-second stall reads as a program that has stopped.
     if (live.whole_layer) {
         if (!live.values.isIdentity()) {
+            // Said before the wait and not after it. The count comes from
+            // layerGrids, which is the list transformLayer itself walks, so the
+            // number promised here and the number reported at the end cannot
+            // come apart -- except when the bake gives up partway, which is
+            // exactly when they should differ.
+            const int coming = static_cast<int>(doc_.layerGrids(live.track, live.layer).size());
+            Q_EMIT layerTransformStarted(coming);
             QGuiApplication::setOverrideCursor(Qt::WaitCursor);
             const Document::LayerBake baked =
                 doc_.transformLayer(live.track, live.layer, live.values);
             QGuiApplication::restoreOverrideCursor();
+            // Now, and not before: the float stood in for the document for as
+            // long as the document was not the truth yet.
+            transform_.reset();
             clearSelection();
             refreshAll();
             refreshPointer();
@@ -2322,6 +2343,9 @@ bool CanvasWidget::applyTransform() {
             Q_EMIT transformEnded();
             return true;
         }
+        // An identity bakes nothing, and falls through to the generic path
+        // below -- which expects the transform to be gone already.
+        transform_.reset();
     }
 
     if (!live.values.isIdentity() || live.pasted) {

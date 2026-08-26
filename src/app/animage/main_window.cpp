@@ -307,6 +307,23 @@ MainWindow::MainWindow() {
         statusBar()->showMessage(
             QStringLiteral("Cannot bake this: %1").arg(CanvasWidget::explain(why)));
     });
+    // What is about to happen, put up before it happens.
+    //
+    // `repaint` and not `update`, and not processEvents either. The bake holds
+    // the interface thread until it is done, so an ordinary update would queue a
+    // paint that runs after the wait it was meant to explain -- the message
+    // would appear and vanish in the same frame, having described nothing.
+    // repaint paints now, synchronously. processEvents would paint too, and
+    // would also deliver input into the middle of a gesture that is halfway
+    // through committing itself, which is a re-entry this has no need to invite.
+    connect(canvas_, &CanvasWidget::layerTransformStarted, this, [this](int drawings) {
+        statusBar()->showMessage(
+            (drawings == 1)
+                ? QStringLiteral("Transforming 1 drawing on this layer...")
+                : QStringLiteral("Transforming %1 drawings on this layer...").arg(drawings));
+        statusBar()->repaint();
+    });
+
     // How many drawings one press wrote. The number is the whole point of
     // saying anything at all: a layer bake is the one gesture in this program
     // where a single Apply rewrites work you are not looking at, and counting
