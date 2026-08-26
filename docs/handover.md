@@ -33,6 +33,7 @@ the shape of the program. Those five maps are.
 | [The lasso](#the-lasso) | and what a selection is here |
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
+| [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -2272,9 +2273,12 @@ of being a special case in it.
 writes the hole immediately and puts the pixels back if you cancel, which means
 Escape has to unwind a command and there is an undo entry for something that did
 not happen. Instead the layer is left out of the composite —
-`compositeScene` takes a `lifted` layer id — and drawn on top through a
-`QTransform`, so the source region looks empty because it is not being drawn,
-not because anything was erased. `Cel::replaceTiles` is what commits, journalling
+`compositeScene` takes a `SubstitutedLayer`, whose null `tiles` means "do not
+draw this layer at all" — and drawn on top through a `QTransform`, so the source
+region looks empty because it is not being drawn, not because anything was
+erased. (This used to say `compositeScene` takes a "lifted layer id". It does
+not and never did: `lifted` is the grid a transform picked up, on
+`SelectionSplit` and `LiveTransform`, and the two are unrelated.) `Cel::replaceTiles` is what commits, journalling
 both sides so undo puts the drawing back exactly; an identity writes nothing at
 all, because picking a drawing up and putting it back is not an edit.
 
@@ -2743,6 +2747,188 @@ a way these numbers do not explain, that is where to look first.
 Those numbers are the ones the box filter ran at. What replaced it costs more,
 and [the next section](#what-a-commit-does-to-a-line) is why that was worth
 paying.
+
+## Transforming a layer through time
+
+Issue [#25](https://github.com/S-poony/Animage/issues/25): moving, turning or
+scaling **one layer across every drawing in it**, the way layer opacity already
+applies across time. The row under "drawing" in the taxonomy at the top of
+[lasso-and-transform.md](lasso-and-transform.md).
+
+**It bakes, and the issue argued for the opposite.** #25 was written for a
+stored affine on the `Layer`, applied at composite time — free, lossless,
+adjustable afterwards, undoing through `LayerListOp` without touching the tile
+journal at all. That is a genuinely better shape in every respect except one:
+a transformed layer stops being a plain grid, so everything that reads a layer's
+pixels has to go through the matrix — the brush, the eyedropper, `ctgBarrier`
+(an ink layer that is a CTG source has to be flattened *through* its transform
+or the barrier stops matching the drawing it is cut against), `celBounds`,
+fit-to-drawing and export. And it needs an answer to "what happens when you draw
+on one", which #25 gave as "the first stroke bakes it anyway".
+
+Baking on Apply leaves all of that alone. `compositeScene` is still a flat list
+of untransformed grids, `scene.json` gained nothing, `LayerPass` was not
+widened, and the drawing question does not arise because there is never a
+transformed layer to draw on. **The price is one resample per drawing and a
+command that journals the layer twice over**, and both are in `bench_transform`.
+The trade was made deliberately by the person whose drawings they are.
+
+### The two doors, and why there is no switch
+
+The Transform tool takes the drawing in front of you. **"Transform layer through
+time"**, in the layer panel beside Add and Remove, takes the layer. Which door
+you came through is fixed for the gesture and the bar says which — a label, not
+a control.
+
+That is `lasso-and-transform.md`'s own argument one gesture further along. It
+refused a persistent scope checkbox because one that is off by default is a trap
+*because* it is off by default: you forget it is on in the one session where it
+is, and an ordinary drag then rewrites the whole shot. A switch on the transform
+bar is the same trap with a shorter fuse — it would let you change what a
+gesture already on screen is about. Two entry points and no switch is also the
+shape the tool already had: there is no "transform selection" button because the
+tool is the button, and this is the same sentence about a layer.
+
+The button is **greyed out with a tooltip that says which reason it is**, rather
+than absent: a control that comes and goes as you move between layers is one
+nobody can find twice, and "why can I not do this here" is the question a
+disabled control exists to answer. The order of reasons is `refuseHere`'s order,
+and that is not cosmetic — the layer kind is asked ahead of the lock, because
+unlocking a colour layer would not make this work and naming the lock would send
+somebody to fix the wrong thing.
+
+Locked layers refuse. Worth knowing because [importing.md](importing.md) plans
+an imported modelsheet as a *locked* layer placed with this very box, so #31
+will have to unlock to place or argue for an exception.
+
+### The box is the union, and the rest of the layer is under it
+
+**The box is every drawing's painted bounds united, not the one you are looking
+at.** A box taken from whichever drawing the playhead happened to be on would
+put the playhead into the arithmetic: turning the layer from the first drawing
+and from the twentieth would give different answers, because the pivot is the
+middle of the box. It also means there is a box at all on a frame where this
+layer is empty, which on a layer that starts late is the first frame you would
+try it from.
+
+**And every other drawing is under the float at low opacity, moving with it.**
+What is being placed is the layer, so there is no other way to see whether it
+has landed. Three things about that picture:
+
+- **One grid, merged, not one blit per drawing.** They all move by the same
+  matrix, so they are merged once with `mergeOver` and blitted once. Forty
+  separate low-opacity blits would pile up into black everywhere the character
+  stayed still, which is most of a held drawing.
+- **Their own colours, not a tint.** The onion skin throws a ghost's colour away
+  and tints it warm or cool because what it is saying is *when* that drawing is.
+  These are all one layer at one moment, so there is no when to say, and what is
+  worth seeing is what will actually land.
+- **The same rectangle and step as the float**, so both go through one matrix and
+  cannot drift apart.
+
+**The box is green.** Two doors into one gesture that write amounts two orders of
+magnitude apart should not look identical, and the ghosts do not say it on their
+own — a layer of two drawings barely has ghosts. Red still beats green: whether
+it can be committed at all is the more urgent of the two things that colour
+carries.
+
+### And the onion skin has to leave the layer out
+
+Otherwise a neighbouring drawing is on screen twice — once still, where the
+document still has it, and once moving under the float — and the two are in the
+same place only until the first drag. `Compositor::composite` and
+`compositeLayers` took a `SubstitutedLayer` for this, forwarding to the
+`collectPasses` parameter that already implemented the omit case; no new logic
+in `core` at all.
+
+**It is carried on `OnionState` and not by setting `onion_dirty_` at the three
+places that change it**, and that distinction is the whole reason the field
+exists. Starting a layer transform, committing one and cancelling one each
+change what the ghosts are made of while no drawing has moved, so nothing else
+in the state would notice — and the first version of this did set the flag by
+hand at all three. That is invalidation by signalling, which is the thing
+[what refreshAll does not refresh](#what-refreshall-does-not-refresh-and-the-buffer-nobody-was-invalidating)
+already records a bug from: there are twenty-six calls to `refreshAll`, and a
+rule every future one has to remember is a rule that gets forgotten.
+
+### What it costs, and the bound that had to change
+
+`bench_transform` grew a whole-layer row, and it decided two things.
+
+| a layer of 40 | PAL | HD | 4K |
+|---|---|---|---|
+| rotated 7° | 375 ms | 1225 ms | 3959 ms |
+| retained by the history | 260 MB | 880 MB | 2960 MB |
+
+**The history number is the one to know.** One command now retains a whole
+layer, so at HD and above a single bake is past the 512 MB budget on its own and
+the history drops everything older to stay inside it. The bake itself always
+undoes — the newest command is never dropped — but the rest of the session's
+history goes with it. That is inherent to baking rather than a fault: undo has
+to hold the old pixels, and there is no cheaper correct answer.
+
+**And the commit ceiling had to stop being a total.** It was one budget across
+the whole bake at first, which is the truthful-sounding shape and was wrong
+immediately: a plain seven degrees on a forty-drawing 4K layer wants about
+23,700 destination tiles against a ceiling of 16,384, so the feature did not
+work at all on the shots it is most wanted for. The message it produced was
+wrong three ways over — nothing was scaled, it was not a drawing, and scaling
+down would not have helped — which is
+[#65](https://github.com/S-poony/Animage/issues/65)'s fourth bullet made
+ordinary.
+
+What actually has no bound is the **scale**: the bar goes to 10000%, a handle
+drag is bounded only by where the pointer can reach, and the destination grows
+as the square. The number of drawings is not that — forty cels at 100% ask for
+about what the layer already holds, and the layer is in memory now or there
+would be nothing to look at. So the ceiling is `kLayerGrowth` times what is
+there, or the single-drawing budget, whichever is larger.
+
+`kLayerGrowth` is **three, and it was two until the tests said what the count
+actually does**. What the ceiling bounds is the *counted* destination, and that
+count grows every source tile's footprint by a whole tile on purpose. On a large
+drawing that margin is a rim and a rotation counts near 1.2; on a small one the
+rim is most of the answer and the same rotation counts near 1.9. At two, whether
+you could turn your layer depended on how big the drawings were, which is not a
+rule anybody could hold in their head. Three clears a rotation at either size
+and still refuses a scale to 200%, which is four times the pixels before the
+margin — so the two cases it has to tell apart stay on opposite sides of it.
+
+### Running out of memory, and why that is a rescue rather than a crash
+
+The ceiling is a bound and not a promise. A bake's peak is the new tiles plus
+the old ones the journal is keeping for undo — about four times the layer at the
+ceiling — and a large enough layer can still exhaust a machine.
+
+Everywhere else in this program an allocation failure on the interface thread is
+a crash, and here it would be a crash **with the layer half rewritten inside an
+open command**. So `Document::transformLayer` catches the `bad_alloc`, puts back
+every drawing it had already written, and says so. The one other place that
+swallows a `bad_alloc` is `CtgSolver`, and its comment says exactly why it could
+afford to: nothing in the document is half written when a solve throws. This is
+the opposite case, which is why it undoes rather than merely shrugging.
+
+Three details, each of which would be a bug without it:
+
+- **The catch is inside the command's own scope.** Letting the exception out
+  would unwind through `~ScopedCommand`, and an exception escaping a destructor
+  during unwinding is a `terminate` rather than an error.
+- **The rollback is guarded on the history stamp**, not on a depth and not
+  unconditionally. A failure before the first write leaves an empty command,
+  which `endCommand` does not push at all — and undoing then would undo whatever
+  the person did *before* the bake. A depth would not do either: the history
+  trims from the bottom, so it can gain a command and lose one in the same breath
+  and read the same.
+- **The rescued command is dropped from the redo stack.** `undo` moves a command
+  across rather than discarding it, and a redo of a bake that ran out of memory
+  would put the layer back into the state the rescue had just taken it out of.
+
+Both are pinned by tests, through a hook on `Document`, because running out of
+memory for real is not something a test can arrange: a machine with room to swap
+succeeds and is merely slow, and one without it takes the test process down
+along with the assertion. The hook is a cost worth paying — the rescue is what
+licenses bounding the growth instead of the total, and an untested rescue is one
+that stops working quietly.
 
 ## What a pan costs
 
@@ -5503,7 +5689,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_carry         # how far a mark survives being carried
 ./build/tests/bench_shapes        # what an estimator does to a family of shapes
 ./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]  # against a hand
-./build/tests/bench_transform     # what moving a drawing costs, and what it costs the history
+./build/tests/bench_transform     # what moving a drawing -- or a whole layer -- costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault Qt's?
@@ -5806,12 +5992,14 @@ come off it since the first build, with where the reasoning went:
    a quarter and two fifths of its frames, so this is a 4K deliverable and not a
    general one. It does not answer the coloured case at all: the max-flow stays
    on the CPU, and what breaks there is the fill cache, not the compositing.
-5. **The rest of the open issues.** One came out of designing lasso and
-   transform and is one small piece with the groundwork already under it:
-   transforming a layer across time
-   ([#25](https://github.com/S-poony/Animage/issues/25)), which wants `LayerPass`
-   widened from an offset to an affine — the same widening the live preview
-   already needed.
+5. **The rest of the open issues.** Transforming a layer across time
+   ([#25](https://github.com/S-poony/Animage/issues/25)) is done, and it did
+   *not* want `LayerPass` widened from an offset to an affine, which is what
+   this entry used to say it needed. It bakes instead — see
+   [transforming a layer through time](#transforming-a-layer-through-time) —
+   so `compositeScene` is still a flat list of untransformed grids and the
+   widening is still nobody's job. What it left behind is #65's fourth bullet,
+   which it made worse before making it better.
 
    The rest are older: showing a track's end behaviour on the track itself (#22),
    deleting every layer of a drawing (#2), a non-modal colour panel (the parked

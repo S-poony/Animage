@@ -72,6 +72,23 @@ the drawing in front of you rewrites its cel, because that is what "move this
 drawing" means. The row below it should not bake — see #25 for why, and for what
 happens when you then draw on it.
 
+> **Correction: the layer row bakes too, and that was the user's call.** #25 was
+> written arguing for a stored affine on the `Layer`, applied at composite time —
+> free, lossless, adjustable afterwards, and undoing through `LayerListOp`
+> without touching the tile journal at all. What it costs is that a transformed
+> layer stops being a plain grid, so the brush, the eyedropper, `ctgBarrier`,
+> `celBounds`, fit-to-drawing and export all have to read a layer's pixels
+> through a matrix; and it needs an answer to "what happens when you draw on
+> one", which #25 answered with "the first stroke bakes it".
+>
+> Baking on Apply instead leaves every one of those alone, leaves the saved
+> format alone, and makes the drawing question disappear rather than answer it —
+> there is never a transformed layer to draw on. What it costs is one resample
+> per drawing and a command that journals the layer twice over, which is
+> measured in `bench_transform` and written up in handover.md under
+> "transforming a layer through time". The two shapes trade quality and memory
+> against reach into the rest of the program, and the trade was made knowingly.
+
 The consequence worth stating plainly: **a transform always acts on exactly one
 layer, the active one.** There is no "which layers" question anywhere in this
 feature. Moving a character drawn on an ink layer and a rough layer is two
@@ -505,3 +522,10 @@ code makes and a decision can be asserted exactly.
 > drawing of one layer — so the trap it guards against, iterating slots rather
 > than distinct drawings, cannot be reached from this feature. It belongs to #25,
 > which is where the whole-track pass is.
+>
+> **And that is where it went.** `Document::transformLayer` walks `images` and
+> not `slots`, for exactly the reason parked here: a drawing held over ten frames
+> is one cel, and walking slots would resample it ten times over with each pass
+> reading what the last one left. It is asserted directly — a drawing is held
+> across three slots in the fixture and the test checks it landed at the offset
+> once rather than three times.

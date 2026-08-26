@@ -349,6 +349,16 @@ with one ordinary `Layer` and one `Image`, its cel holding the decoded pixels.
   1:1 with the top-left at the origin, since the canvas is the only rectangle in
   the model and drawing outside it is already allowed.
 
+  > **Update: #25 is built, and it has one clause this has to answer.** The box
+  > is "Transform layer through time" in the layer panel, and it is green rather
+  > than blue — see "transforming a layer through time" in handover.md. But it
+  > **refuses a locked layer**, and the line above says an imported modelsheet
+  > lands locked. So placing an import is either unlock, place, relock, or an
+  > exception argued for here. It also *bakes* rather than storing a transform,
+  > which for an import is a different question than it was for drawn work: what
+  > is being placed came off disk at a known size, and resampling it into cels on
+  > placement is a decision this note should make rather than inherit.
+
 **The cost, once:** a tile is 128×128 RGBA half = exactly 128 KB. A 300 dpi A4
 scan (2480×3508) is 20×28 = 560 tiles = **70 MB**. An HD still is 15×9 = 135
 tiles = **17 MB**. That is fine for a thing you import one of.
