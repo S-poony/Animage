@@ -572,6 +572,28 @@ void CanvasWidget::setActiveLayer(LayerId layer) {
 void CanvasWidget::setTool(Tool tool) {
     if (tool_ == Tool::Transform && tool != Tool::Transform) settleTransform();
     if (tool_ == tool) return;
+
+    // **A stroke belongs to the tool that started it, so picking another ends
+    // it.** Issue #78, which is three reports of one fault: reaching for the
+    // eraser mid-stroke left the pen drawing with the brush; reaching for the
+    // transform and then applying it continued the stroke to wherever the
+    // pointer had got to, in one straight line; and either of those left
+    // `stroking_` set with the pen off the tablet, so the *hover* drew. That
+    // last one is the dangerous shape -- `moveTo` extends a stroke whenever
+    // `stroking_` is true, and nothing about a hover says it should not.
+    //
+    // Ended rather than refused. Refusing the tool change while the pen is down
+    // is the other way to close this, and it is worse: the key would do nothing
+    // and say nothing, and a pen that is resting rather than drawing looks
+    // identical from here. Ending is also what `abandonGesture` already does for
+    // every other way a gesture can be cut short, and for the same reason --
+    // what is drawn is drawn, and one undo takes it back.
+    //
+    // The pen stays down afterwards and draws nothing more until it is lifted
+    // and put back, which is the honest reading of "you asked for a different
+    // tool halfway through".
+    endStroke();
+
     tool_ = tool;
     // The pen cannot still be drawing a loop with the lasso put down.
     drawing_lasso_ = false;
@@ -1795,6 +1817,17 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
     const Refusal refusal = refuseHere();
     if (refusal != Refusal::None) return refusal;
 
+    // **The three functions that set `tool_` by hand rather than through
+    // `setTool` have to end the stroke themselves.** This is one of them, and
+    // missing them is why the first fix for #78 closed two of its three reports
+    // and left the third: `setTool` grew the guard, and the transform never goes
+    // near `setTool` on the way in or on the way out.
+    //
+    // Before the lift, so the pixels picked up are a finished stroke and the
+    // command that stroke opened is closed before `applyTransform` opens its
+    // own. After the refusal, so a transform that cannot start changes nothing.
+    endStroke();
+
     // The selection, or the whole cel if there is none. One path and not two,
     // which is exactly what "the tool is the button" buys.
     Lift split = liftForTransform();
@@ -1965,6 +1998,10 @@ bool CanvasWidget::applyTransform() {
     // would draw the float over the pixels it had just become.
     const LiveTransform live = *transform_;
     transform_.reset();
+    // Belt and braces: `beginTransform` has already ended any stroke, and the
+    // cost of being wrong about that is a stroke that resumes on the next hover
+    // and draws a straight line from wherever the nib left off. See #78.
+    endStroke();
     tool_ = Tool::Brush;
     grab_ = Grab::None;
 
@@ -2009,6 +2046,7 @@ void CanvasWidget::settleTransform() {
 void CanvasWidget::cancelTransform() {
     if (!transform_) return;
     transform_.reset();
+    endStroke();  // the other way out, and the same reason. See #78.
     tool_ = Tool::Brush;
     grab_ = Grab::None;
     refreshAll();

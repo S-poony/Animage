@@ -6657,6 +6657,120 @@ void theResizeGestureShowsWhatItIsSetting() {
     CHECK_EQ(shapeOf(&f.canvas), shape(Qt::BitmapCursor));
 }
 
+// Issue #78, which arrived as three reports and is one fault.
+//
+// A stroke was not ended when the tool changed under it, so `stroking_` stayed
+// set. Everything downstream followed from that, and the worst of it is not the
+// mark that goes astray but **the pen drawing while it is in the air**:
+// `moveTo` extends a stroke whenever `stroking_` is true, and a hover is a
+// `TabletMove` like any other. Reaching for the transform or the lasso mid-stroke
+// and coming back left the canvas drawing on every hover until the nib was put
+// down and lifted again.
+//
+// Each of the three is checked here, because a fix for one of them that leaves
+// `stroking_` set would still pass the other two.
+void changingToolEndsTheStrokeUnderIt() {
+    TEST("changing tool mid-stroke ends the stroke, and the hover does not draw");
+    Fixture f;
+
+    QPointingDevice stylus(QStringLiteral("test stylus"), 1, QInputDevice::DeviceType::Stylus,
+                           QPointingDevice::PointerType::Pen,
+                           QInputDevice::Capability::Position | QInputDevice::Capability::Pressure,
+                           1, 0);
+
+    // Puts the nib down and draws a little, leaving the stroke open.
+    const auto startAStroke = [&](QPointF at) {
+        QTabletEvent down(QEvent::TabletPress, &stylus, at, f.canvas.mapToGlobal(at), 1.0, 0, 0, 0,
+                          0, 0, Qt::NoModifier, Qt::LeftButton, Qt::LeftButton);
+        QCoreApplication::sendEvent(&f.canvas, &down);
+        const QPointF on = at + QPointF(20, 0);
+        QTabletEvent move(QEvent::TabletMove, &stylus, on, f.canvas.mapToGlobal(on), 1.0, 0, 0, 0,
+                          0, 0, Qt::NoModifier, Qt::NoButton, Qt::LeftButton);
+        QCoreApplication::sendEvent(&f.canvas, &move);
+        QCoreApplication::processEvents();
+        CHECK(f.canvas.isStroking());
+    };
+
+    // A move with no button and no pressure: the nib is off the tablet. Nothing
+    // may be drawn by one, whatever else is going on.
+    const auto hoverFarAway = [&](QPointF at) {
+        QTabletEvent hover(QEvent::TabletMove, &stylus, at, f.canvas.mapToGlobal(at), 0.0, 0, 0, 0,
+                           0, 0, Qt::NoModifier, Qt::NoButton, Qt::NoButton);
+        QCoreApplication::sendEvent(&f.canvas, &hover);
+        QCoreApplication::processEvents();
+    };
+
+    // --- the eraser, which is the report that named the fault ----------------
+    startAStroke(QPointF(200, 200));
+    f.canvas.setTool(CanvasWidget::Tool::Eraser);
+    CHECK(!f.canvas.isStroking());
+
+    const QImage after_the_switch = f.render();
+    hoverFarAway(QPointF(600, 500));
+    hoverFarAway(QPointF(300, 150));
+    CHECK(f.render() == after_the_switch);
+
+    // --- the transform ------------------------------------------------------
+    //
+    // Through beginTransform and applyTransform and *not* through setTool,
+    // because that is the route the program takes: the transform sets `tool_`
+    // by hand at both ends and never calls setTool at all. A first version of
+    // this test used setTool and passed against a fix that left the real path
+    // broken, which is the whole reason this comment is here.
+    f.canvas.setTool(CanvasWidget::Tool::Brush);
+    startAStroke(QPointF(250, 300));
+    f.canvas.beginTransform();
+    CHECK(f.canvas.transformIsLive());
+    CHECK(!f.canvas.isStroking());
+
+    // Applying is what puts the brush back. The stroke must not resume: what
+    // used to happen here is a straight line stamped from where the nib left off
+    // to wherever the pointer had wandered.
+    CHECK(f.canvas.applyTransform());
+    CHECK(!f.canvas.isStroking());
+    const QImage after_the_transform = f.render();
+    hoverFarAway(QPointF(700, 600));
+    hoverFarAway(QPointF(120, 480));
+    CHECK(f.render() == after_the_transform);
+
+    // And the way out that writes nothing: cancel sets `tool_` by hand too.
+    startAStroke(QPointF(280, 330));
+    f.canvas.beginTransform();
+    CHECK(f.canvas.transformIsLive());
+    CHECK(!f.canvas.isStroking());
+    f.canvas.cancelTransform();
+    CHECK(!f.canvas.isStroking());
+    const QImage after_the_cancel = f.render();
+    hoverFarAway(QPointF(660, 520));
+    CHECK(f.render() == after_the_cancel);
+
+    // --- the lasso ----------------------------------------------------------
+    startAStroke(QPointF(320, 360));
+    f.canvas.setTool(CanvasWidget::Tool::Lasso);
+    CHECK(!f.canvas.isStroking());
+    f.canvas.setTool(CanvasWidget::Tool::Brush);
+    CHECK(!f.canvas.isStroking());
+    const QImage after_the_lasso = f.render();
+    hoverFarAway(QPointF(800, 200));
+    CHECK(f.render() == after_the_lasso);
+
+    // The nib is still down as far as the program knows, and lifting it must be
+    // harmless -- `endStroke` has already run, and running it again on nothing
+    // is what keeps a release from either device safe to deliver.
+    const QPointF up(800, 200);
+    QTabletEvent lift(QEvent::TabletRelease, &stylus, up, f.canvas.mapToGlobal(up), 0.0, 0, 0, 0, 0,
+                      0, Qt::NoModifier, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::sendEvent(&f.canvas, &lift);
+    QCoreApplication::processEvents();
+    CHECK(!f.canvas.isStroking());
+    CHECK(f.render() == after_the_lasso);
+
+    // And the brush still works afterwards: the guard ends a stroke, it does not
+    // disarm the tool.
+    startAStroke(QPointF(400, 420));
+    CHECK(f.canvas.isStroking());
+}
+
 // Issue #76, and the shape of it is the reason it is worth a test.
 //
 // **A tablet gesture is not one device's.** The pen's barrel button reaches Qt
@@ -8368,6 +8482,7 @@ int main(int argc, char** argv) {
     turningThePenOverShowsTheEraser();
     theResizeGestureShowsWhatItIsSetting();
     restingTheNibDoesNotInterruptTheResizeGesture();
+    changingToolEndsTheStrokeUnderIt();
     theHandDoesNotGetStuckClosed();
     shiftDrawsAStraightLineAtAnyAngle();
     withoutShiftTheSameGestureFollowsTheHand();
