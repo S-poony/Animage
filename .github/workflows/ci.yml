@@ -49,18 +49,27 @@ jobs:
             # the fix was never picked to 6.8. Nothing in this repository caused
             # it and nothing here could fix it.
             #
-            # 6.11 rather than 6.10.1 because 6.10 leaves standard support in
-            # October 2026, and because 6.11 is what MSYS2 gives a local Windows
-            # build: the download and the desk now draw the same program, which
-            # is the thing whose absence hid #75 for a session. Exact rather than
-            # 6.11.*, because a patch release arriving unannounced is how that
-            # happened -- and 6.11.1 in particular carries the dock-drag
-            # regression in #58.
+            # 6.10.3 is the newest Qt that can actually be installed here, and
+            # the ceiling is the installer rather than Qt. `install-qt-action`
+            # fetches through aqtinstall; its newest release is 3.3.0, from June
+            # 2025, and 3.3.0 cannot read the repository layout Qt uses for 6.11
+            # -- `aqt list-qt windows desktop --arch 6.11.2` errors while 6.10.3
+            # answers. 6.11.2 was tried first and the job died before it built.
+            # **Check that before raising this**, with those two commands; the
+            # version being listed by `list-qt` is not enough.
+            #
+            # So the download runs 6.10 and a local build runs 6.11. That gap is
+            # smaller than the one that hid #75 and it is not closed.
+            #
+            # Exact rather than 6.10.*, because a patch release arriving
+            # unannounced is the shape of #75. 6.10 leaves Qt's standard support
+            # in October 2026, which is a reason to revisit and not a reason to
+            # stay on a version with the bug.
             #
             # Linux and macOS stay on 6.8: neither draws this control and
             # neither has a bug that a bump would fix. That they are frozen on a
             # dead-end Qt is real and is #82, not this.
-            qt: '6.11.2'
+            qt: '6.10.3'
           - name: macos
             os: macos-14
             generator: Ninja

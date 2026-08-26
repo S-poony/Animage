@@ -3385,7 +3385,7 @@ still differs:
 | | yours, per the README | the download |
 |---|---|---|
 | compiler | GCC, MSYS2 UCRT64 | MSVC 19, Visual Studio 2022 |
-| Qt | whatever MSYS2 has today — 6.11 at the time of writing | pinned per platform in `ci.yml`: Windows 6.11.2, Linux and macOS 6.8.\* ([#82](https://github.com/S-poony/Animage/issues/82)) |
+| Qt | whatever MSYS2 has today — 6.11 at the time of writing | pinned per platform in `ci.yml`: Windows 6.10.3, Linux and macOS 6.8.\* ([#82](https://github.com/S-poony/Animage/issues/82)) |
 | sanitizers | none with MinGW; the probe fails, see [where it got to](#where-it-got-to) | off, deliberately |
 | C runtime | UCRT via MinGW | MSVC's |
 | Qt libraries | MSYS2's DLLs on `PATH` | whatever `windeployqt` copied |
@@ -3866,9 +3866,10 @@ theme hands over `WindowText` at `#e4000000` — alpha 228. The palette the
 timeline reads is *already* one with transparency in it; which roles carry it is
 Qt's business and moves between Qt versions. Local was Qt 6.11 from MSYS2 and CI
 built against 6.8, which is the entire difference between the two pictures.
-Windows is pinned to 6.11 now, so that particular pair has closed; Linux and macOS
-are still built against 6.8 ([#82](https://github.com/S-poony/Animage/issues/82)),
-and the palette a download reads is still not a thing this repository can pin.
+Windows is pinned to 6.10 now, which narrows that particular pair without closing
+it; Linux and macOS are still built against 6.8
+([#82](https://github.com/S-poony/Animage/issues/82)), and the palette a download
+reads is still not a thing this repository can pin.
 
 **The suite is green through all of it, and always was.** All fifteen tests pass
 with either bug present — they pin arithmetic, and this is a colour arriving from
@@ -4645,11 +4646,11 @@ So it is a regression with a narrow blast radius: a commit called "Code cleanup
 in QMainWindowLayout" replaced a defaulted `bool keepSavedState` with a
 `QInternal::SaveStateRule` enum, and one call site got the wrong enumerator.
 **Nothing that ships has ever had it**, and that is now a pin rather than an
-accident: `ci.yml` builds Windows against 6.11.2 — chosen over 6.10.1 and over a
-floating `6.11.*` for this reason — and Linux and macOS against 6.8. So it was
-only ever visible to somebody building locally against MSYS2's Qt while it sat on
-6.11.1. **If the Windows pin ever moves back to 6.11.1, a download gets this bug**,
-which is what the version check below is for.
+accident: `ci.yml` builds Windows against 6.10.3 and Linux and macOS against 6.8,
+and this is a 6.11.1 bug. So it was only ever visible to somebody building locally
+against MSYS2's Qt while it sat on 6.11.1. **A Windows pin of 6.11.1 would ship it
+for the first time**, which is what the version check below is for, and is one
+reason that pin is exact rather than `6.11.*`.
 
 `MainWindow::wakeLayout` is therefore scoped to exactly that release, through
 `QLibraryInfo::version()` rather than `QT_VERSION`, because Qt is a DLL here and
@@ -5466,10 +5467,16 @@ timeline. It was not opened.
 `ci.yml` says what a download gets, per platform. If those two differ, the
 difference is a suspect before anything in this repository is.
 
-Windows now builds against 6.11.2, so for that platform the gap is closed and the
-download draws what the desk draws. Linux and macOS still build against 6.8.3,
-which is a version that can no longer receive a fix —
-[#82](https://github.com/S-poony/Animage/issues/82).
+Windows now builds against **6.10.3**, which carries the fix. Not 6.11, and the
+reason is worth knowing before anyone tries: `install-qt-action` fetches through
+aqtinstall, whose newest release cannot read the repository layout Qt uses for
+6.11, so the pin's ceiling is the installer rather than Qt. 6.11.2 was pushed
+first and the job died before it compiled a line. `ci.yml` carries the two
+commands that tell the difference.
+
+So the gap is narrowed and not closed: the download runs 6.10, the desk runs 6.11.
+Linux and macOS still build against 6.8.3, which is a version that can no longer
+receive a fix — [#82](https://github.com/S-poony/Animage/issues/82).
 
 ## How to work on it
 
