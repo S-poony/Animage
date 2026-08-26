@@ -463,8 +463,10 @@ navigation gesture (Space-drag, held Z, Alt and the right button); is Alt down
 
 `beginStroke` refuses where there is nothing to draw on — no cel, a locked layer,
 a hidden one — then copies the brush's or the eraser's settings, overrides them
-on a CTG layer so the mark is a hard label rather than paint, opens a
-`ScopedCommand`, and hands the stroke to `Brush`.
+on a CTG layer so the mark is a hard label rather than paint, opens a command
+directly (`Document::beginCommand`, closed in `endStroke` — a stroke outlives the
+statement that starts it, so not the `ScopedCommand` that cut, paste and
+transform use), and hands the stroke to `Brush`.
 
 **Into the document.** `Brush` asks `Document::celForWriting`, which creates the
 cel on first use and records that so undo removes it, then `Cel::writableTile`
@@ -477,13 +479,18 @@ a repaint of it.
 however many edits arrived since the last one. `ensureCacheCoversView` settles
 `cache_step_` — one cache entry per *screen* pixel, so the cache is the size of
 the window at every zoom — and the region it covers. `requestCtgFills` asks for
-any colour that has gone stale and computes none of it. Then either the whole
-cached region or the accumulated dirty rectangle goes through `refreshRegion`,
-which calls `Compositor::compositeScene` into `scratch_` and converts paper,
-onion skin and drawing to sRGB in `display_` across a short-lived thread pool.
-That conversion loop is the larger half of a refresh by a wide margin — see the
-traps. Finally `display_` is blitted through one `QRectF`, nearest-neighbour only
-above 3× magnification, and the canvas frame is drawn over it.
+any colour that has gone stale and computes none of it. If the onion skin has
+moved or changed, `rebuildOnion`/`paintOnion` refresh its own screen-sized buffer
+first, because the sRGB loop reads one onion entry per cache entry. Then either
+the whole cached region or the accumulated dirty rectangle goes through
+`refreshRegion`. With no onion that is one `Compositor::compositeScene` into
+`scratch_`; with one, the layer stack is split at `onionSplit` and composited in
+two pieces — `scratch_` above the drawn layer, `under_` below it, which is issue
+#77. Either way the conversion loop then merges paper, `under_`, onion skin and
+drawing to sRGB in `display_` across a short-lived thread pool. That conversion
+loop is the larger half of a refresh by a wide margin — see the traps. Finally
+`display_` is blitted through one `QRectF`, nearest-neighbour only above 3×
+magnification, and the canvas frame is drawn over it.
 
 **The pen lifts.** `endStroke` closes the command — which is where
 `Document::endCommand` drops the tiles the stroke emptied — refreshes everything
@@ -513,9 +520,11 @@ a copy of the marks, the ink and the canvas, in shared tile handles — and hand
 it to `CtgSolver`. Nothing is computed on the interface thread; the paint
 finishes with whatever fill is in the cache, which is the last answer.
 
-A worker runs `solveCtgJob`: estimate how far the drawing has moved since the
-marks were made (`estimateCtgShift`), flatten the ink into a barrier
-(`ctgBarrier`), read the marks through that shift into seeds, and run the
+A worker runs `solveCtgJob`: estimate how far the marks' drawing has moved since
+they were made (`estimateCtgWarp`, matching the two drawings' ink coarse-to-fine
+with `estimateCtgShift` underneath; the answer can be a per-mark field, not just
+one translation), move the marks through it once (`ctgCarriedMarks`), flatten the
+ink into a barrier (`ctgBarrier`), read the moved marks into seeds, and run the
 max-flow (`solveLazyBrush` over `GridFlow`). What it keeps is the labelling
 itself — one label per solved cell, the palette, and the marks it was solved
 from — and not a picture of it. A 16 ms poll on the canvas collects the result,
