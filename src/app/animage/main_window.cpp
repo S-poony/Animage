@@ -2057,6 +2057,12 @@ void MainWindow::afterProjectLoaded() {
 
     rebuildLayerList();
     syncTrackMenu();
+    // A load changes the track count as surely as Add track does, and nothing
+    // else here would tell the dock. Issue #74: without this, a three-track
+    // project opened into a one-track window kept the height for one row and
+    // hid the other two behind a scrollbar, until the next refresh -- an undo,
+    // which is what the report found -- put them back.
+    syncTimelineHeight();
     timeline_widget_->refresh();
     canvas_->refreshAll();
     canvas_->fitToCanvas();

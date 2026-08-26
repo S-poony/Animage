@@ -495,6 +495,71 @@ void theTimelineDockFollowsTheTrackCount() {
     }
 }
 
+// The third way the track count can change, and the one nothing was telling the
+// dock about: opening a project.
+//
+// Issue #74. `syncTimelineHeight` works in differences, so a load that replaces
+// a one-track scene with a three-track one has to be announced or the strip
+// keeps the height for one row and hides the other two behind a scrollbar. What
+// gave it away is that undo fixed it -- undo goes through `refreshEverything`,
+// which is the next thing that would have called `syncTimelineHeight` at all.
+//
+// The height for three rows is measured rather than written down, for the same
+// reason as the test above: it belongs to the style and the font.
+void openingAProjectSizesTheTimelineForItsTracks() {
+    TEST("opening a project with several tracks opens the timeline at their height");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("three.animage"));
+
+    int one_row = 0;
+    int three_rows = 0;
+    {
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QCoreApplication::processEvents();
+
+        QDockWidget* dock = nullptr;
+        for (QDockWidget* d : window.findChildren<QDockWidget*>()) {
+            if (d->windowTitle() == QStringLiteral("Timeline")) dock = d;
+        }
+        QAction* add = actionCalled(window, QStringLiteral("Add track"));
+        CHECK(dock != nullptr && add != nullptr);
+        if (!dock || !add) return;
+
+        one_row = dock->height();
+        // One at a time, with the layout run in between. Two triggers back to
+        // back both ask for "the height you are now, plus a row" and the height
+        // has not moved yet, so they collapse into one row of growth.
+        add->trigger();
+        QCoreApplication::processEvents();
+        add->trigger();
+        QCoreApplication::processEvents();
+        three_rows = dock->height();
+        CHECK(three_rows > one_row);
+
+        CHECK(ProjectIO::save(window.documentForTesting(), folder, nullptr));
+    }
+
+    MainWindow window;
+    window.resize(1400, 900);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QDockWidget* dock = nullptr;
+    for (QDockWidget* d2 : window.findChildren<QDockWidget*>()) {
+        if (d2->windowTitle() == QStringLiteral("Timeline")) dock = d2;
+    }
+    CHECK(dock != nullptr);
+    if (!dock) return;
+    CHECK_EQ(dock->height(), one_row);
+
+    CHECK(window.openProjectAt(folder, nullptr));
+    QCoreApplication::processEvents();
+    CHECK_EQ(dock->height(), three_rows);
+}
+
 // The other half: the track count chooses where the dock starts, and after that
 // it is the animator's. Pinning the minimum and maximum to the wanted height
 // sized it correctly and welded it shut, which is what this catches.
@@ -8302,6 +8367,7 @@ int main(int argc, char** argv) {
     theTimelineIsAsLongAsTheLongestTrack();
     pastATracksEndYouCanSeeItButNotDrawOnIt();
     theTimelineDockFollowsTheTrackCount();
+    openingAProjectSizesTheTimelineForItsTracks();
     theTimelineDockCanBeResizedByHand();
     aLongShotsPanSliderLeavesTheTrackRowWhole();
     theInsertButtonObeysTheOverwriteSetting();

@@ -103,12 +103,17 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
 
 `-- Sanitizers: AddressSanitizer` and `-- Qt 6 not found: building the core
-library and tests only` is it working. All ten core tests pass under it. Two
+library and tests only` is it working. Every core test passes under it. Two
 things to know: the binaries only run inside that shell, because MSVC links ASan
 dynamically and `clang_rt.asan_dynamic-x86_64.dll` lives beside the compiler — a
 test dying instantly with `0xC0000135` is a missing DLL and not a bug you just
 wrote. And MSVC has no UBSan, so undefined behaviour is still the Linux job's to
-catch. The `sanitizers (windows, core)` job in `ci.yml` runs exactly this.
+catch. The `sanitizers (windows, core)` job in `ci.yml` runs exactly this, with
+its own Developer Command Prompt rather than an action's — and with
+`-DANIMAGE_REQUIRE_SANITIZERS=ON`, which is the flag that turns the quiet
+fallback above into a refusal. Both sanitizer jobs pass it. A run that cannot
+link the sanitizer it is named for now fails to configure instead of going green
+having proved nothing, which was issue #80's real worry.
 
 **Saving is incremental, and autosave rests on that.** A cel's revision is
 bumped by every write to it, undo included, so a `ProjectIO::SaveState` — a
@@ -3599,6 +3604,7 @@ trap.
 | [The gap coordinates that built an open box out of plausible numbers](#the-gap-coordinates-that-built-an-open-box-out-of-plausible-numbers) | drawGappedBox takes coordinates, not offsets |
 | [Four tool states in three booleans, and the pair a handler half-cleared](#four-tool-states-in-three-booleans-and-the-pair-a-handler-half-cleared) | Mutually exclusive state in separate flags drifts apart |
 | [What the tests for a failed swap do and do not prove](#what-the-tests-for-a-failed-swap-do-and-do-not-prove) | The recovery is tested; the rename that triggers it never was |
+| [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -5294,6 +5300,33 @@ measurement that says a fault is gone has said it about the paths it exercised
 and about nothing else**, and the path most likely to be missed is the one with
 an extra parameter, because that is the one a straightforward fixture does not
 build.
+
+### Every route that changes the input to a differencing function
+**`syncTimelineHeight` does not size the timeline dock, it moves it by the rows
+that came or went** — deliberately, because measuring the wrapping round the
+strip was wrong twice. The cost of working in differences is that every route
+that changes the track count has to say so, and one did not:
+[#74](https://github.com/S-poony/Animage/issues/74), where opening a
+three-track project into a one-track window left the strip at the height for one
+row. `afterProjectLoaded` rebinds the canvas, the timeline and the panels and
+never called it.
+
+**What made it look mysterious is what pointed at the cause.** The report was
+"Ctrl+Z puts it back up", which sounds like undo knowing something about docks.
+It does not: undo goes through `refreshEverything`, which is the next thing in
+the program that calls `syncTimelineHeight` at all. It was still holding
+`timeline_rows_shown_ = 1` from before the load, so it saw a difference of two
+rows and spent it. **A fix that arrives on an unrelated action is a function that
+was never called on the path that needed it.**
+
+**And the same shape caught the test that was written for it.** Two
+`Add track` triggers back to back grow the dock by *one* row, not two: both ask
+for "the height you are now, plus a row", and the height has not moved between
+them because the layout has not run. The test read 179 where it wanted 225 and
+looked for a while like the fix overshooting. `processEvents` between the
+triggers is the whole of it — but the lesson is that a differencing call and a
+deferred layout are two ways of saying the same thing, and a test that drives the
+first has to pump the second.
 
 ## How to work on it
 
