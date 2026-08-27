@@ -2010,29 +2010,32 @@ void aLayerShowingItsMarksIsStillSolved() {
     CHECK_NEAR(own->pixel(130, 100).a, 0.0, 0.001);
 }
 
-// One scribble on the first drawing of a shot, and it has to reach the last one.
+// One scribble on the first drawing of a shot, and it has to reach every other.
 //
-// A reported project, in the tree because no pair of shapes written here
-// reproduces it. The failure needs two drawings that share no ink *and* are
-// different enough that lining them up scores within a few percent of
+// Two reported projects, in the tree because no pair of shapes written here
+// reproduces what they do. The failure needs two drawings that share no ink
+// *and* are different enough that lining them up scores no better than
 // abandoning them -- ordinary between two drawings of a moving shape, and not
 // something a box translated 400 px does, because a box matches its own
-// translation almost exactly and wins by a mile.
+// translation almost exactly and wins by a mile. `aMarkFollowsAShapeThatMoved
+// ClearOfItself` in test_ctg is that box, and it passes with the bug in.
 //
-// The margin on the drawing this was reported from was 1%: the lattice cannot
-// see a shape that has moved clear of itself, so it starts from rung two's
-// answer, and there it scored 406.2 against staying put at 410.5 -- then the
-// push step settled it to 464.9 and the floor threw it out. See "what the
-// fallback was being compared against" in docs/handover.md.
+// They are two projects and not one because they fail differently, and a fix
+// that reads only the first of them is a fix that is half wrong -- which is
+// what happened. On `moved-clear-of-itself` the right answer loses by 1%
+// (406.2 against 410.5) and only after the push step has settled it, so
+// comparing the poses before settling appears to fix it. On
+// `moved-clear-and-smaller` the shape shrinks as it goes, so lining it up
+// costs *more* than abandoning it from the start (221.2 against 212.7) and
+// that reading is no fix at all. See "what the lattice fallback was being
+// compared against" in docs/handover.md.
 //
-// Every drawing, not only the one that failed: what an artist is owed here is
-// that the colour is on the shape, and the shot is eleven drawings of one shape
-// crossing the frame with a single mark on the first of them.
-void oneScribbleReachesTheEndOfTheShot() {
-    TEST("a mark carries onto every drawing of a shot, including one moved clear");
+// Every drawing, not only the one that failed. What an artist is owed here is
+// that the colour is on the shape.
+void everyDrawingGetsItsMarksOnTheShape(const QString& fixture) {
     const QDir here(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath());
     const QString folder = QDir::cleanPath(
-        here.absoluteFilePath(QStringLiteral("projects/moved-clear-of-itself.animage")));
+        here.absoluteFilePath(QStringLiteral("projects/") + fixture));
 
     Document doc;
     QString error;
@@ -2089,6 +2092,15 @@ void oneScribbleReachesTheEndOfTheShot() {
         CHECK(!marks.isEmpty());
         CHECK(!intersect(marks, ink).isEmpty());
     }
+}
+
+void oneScribbleReachesTheEndOfTheShot() {
+    TEST("a mark carries onto every drawing of a shot, on both reported shots");
+    // Eleven drawings, a shape crossing the frame, one mark on the first.
+    everyDrawingGetsItsMarksOnTheShape(QStringLiteral("moved-clear-of-itself.animage"));
+    // Five, and the shape gets smaller as it goes, which is what makes lining
+    // it up cost more than giving up on it.
+    everyDrawingGetsItsMarksOnTheShape(QStringLiteral("moved-clear-and-smaller.animage"));
 }
 
 // The solve is off the interface thread, so a paint no longer waits for one.
