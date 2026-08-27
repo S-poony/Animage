@@ -1908,6 +1908,108 @@ void theFillWaitsForTheStrokeToFinish() {
     CHECK_EQ(doc.ctgFillFor(track, image, colour)->inputs, resolved);
 }
 
+// A colour layer showing its marks is solved like every other one, because a
+// picture is not all a solve produces.
+//
+// Reported as marks that do not carry when the Marks column is ticked. They
+// carried: they were drawn where they were made rather than where they are
+// used. requestCtgFills used to skip a layer showing its scribbles, on the
+// grounds that its fill would be computed and then not drawn -- true, and it
+// also left ctgCarryAt on the default it answers with before anything has
+// solved a drawing, which is indistinguishable from "the marks did not move".
+// So the one view whose job is to show what the solver saw was the one view
+// that could not, and a stroke made there copied the wrong position into the
+// drawing for good.
+void aLayerShowingItsMarksIsStillSolved() {
+    TEST("a layer showing its marks is solved, so they land where they are used");
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId first = doc.insertImage(track, 0);
+    const ImageId second = doc.insertImage(track, 1);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        // The gesture in the report: the Marks column ticked. The other two are
+        // defaults and are checked rather than set, because the bug is only
+        // reachable with them on and a default that moved would take the test
+        // with it.
+        settings.show_scribbles = true;
+        CHECK(settings.ctg_inherit);
+        CHECK(settings.ctg_follow_motion);
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto strokeOn = [&](ImageId image, LayerId layer, float x0, float y0, float x1,
+                              float y1, float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    const auto boxOn = [&](ImageId image, float left, float top, float right, float bottom,
+                           float gap_from, float gap_to) {
+        strokeOn(image, ink, left, top, right, top, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, top, left, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, right, top, right, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, bottom, gap_from, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, gap_to, bottom, right, bottom, 2.5f, 0, 0, 0);
+    };
+
+    // The same shape on both drawings, 260 px along on the second, and one mark
+    // inside it on the first. test_ctg's geometry, where the estimator is known
+    // to find this shift: a shape this test invented could fail for being a
+    // closed loop of straight walls rather than for the reason it is about.
+    boxOn(first, 60, 60, 200, 180, 120, 140);
+    boxOn(second, 320, 60, 460, 180, 380, 400);
+    strokeOn(first, colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+    canvas.setFrame(1);
+    canvas.grab();  // the paint is what asks for the colour
+    CHECK(canvas.settleColour());
+
+    // A solve ran, and it says the marks moved with the drawing. This is the
+    // whole of what the skip took away.
+    CHECK(!doc.ctgCarryAt(second, colour).isZero());
+    CHECK(std::abs(doc.ctgCarryAt(second, colour).overall.x - 260) <= 12);
+
+    // So the Marks column draws them on the shape rather than where they were
+    // made. Read the way the compositor reads them: from the rectangle the
+    // offset moves, which is what a pass with an offset does.
+    const Document::CarriedMarks shown = doc.ctgCarriedMarksAt(track, second, colour);
+    CHECK(shown.tiles != nullptr);
+    if (!shown.tiles) return;
+    const auto markAt = [&](int x, int y) {
+        return shown.tiles->pixel(x - shown.offset.x, y - shown.offset.y).a;
+    };
+    CHECK(markAt(390, 100) > 0.5f);
+    CHECK_NEAR(markAt(130, 100), 0.0, 0.001);
+
+    // And drawing here, which is the rest of the reported gesture, takes the
+    // drawing over with the marks where they were being used. This is the half
+    // that outlives the view: copied unmoved, the wrong position stops being
+    // what you are looking at and becomes what the file holds.
+    strokeOn(second, colour, 340, 170, 350, 170, 4.0f, 1.0f, 0.0f, 0.0f);
+    const Cel* own = doc.celAt(track, second, colour);
+    CHECK(own != nullptr);
+    if (!own) return;
+    CHECK(own->pixel(390, 100).a > 0.5f);
+    CHECK_NEAR(own->pixel(130, 100).a, 0.0, 0.001);
+}
+
 // The solve is off the interface thread, so a paint no longer waits for one.
 // What is on screen in the meantime has to be the last answer rather than
 // nothing: the colour blinking out on every stroke would be a worse thing to
@@ -8848,6 +8950,7 @@ int main(int argc, char** argv) {
     theScribbleBoxCanBeClicked();
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
+    aLayerShowingItsMarksIsStillSolved();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
     movedMarksAgreeWithThemselvesInTheWindow();

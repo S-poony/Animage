@@ -185,11 +185,17 @@ bool resolveSequences(const Document& doc, std::vector<Sequence>* out, QString* 
     return true;
 }
 
-// Which layers the compositor will need a fill for. A CTG layer showing its
-// scribbles is drawing the marks rather than the fill, so solving one would be
-// computing a picture and then not using it.
+// Which layers need a solve before the drawing can be composited.
+//
+// Every visible CTG layer, including one showing its scribbles. That one used
+// to be left out -- it draws the marks rather than the fill, so the fill would
+// be computed and then not used -- and the picture is not all a solve produces.
+// Where a carried mark ended up comes out of the solve and nowhere else, and
+// the marks pass reads it (see the two writes below, and Compositor's). Left
+// out, an exported drawing showed its carried marks where they were drawn
+// instead of where the fill beside them says they are.
 bool needsFill(const Layer& layer) {
-    return layer.kind == LayerKind::Ctg && layer.visible && !layer.show_scribbles;
+    return layer.kind == LayerKind::Ctg && layer.visible;
 }
 
 // The fills one drawing needs before it can be composited, and whether each of
