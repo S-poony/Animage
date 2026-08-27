@@ -9061,7 +9061,10 @@ void anImportSurvivesSavingAndOpening() {
     CHECK(track != nullptr && layer != nullptr);
     if (!track || !layer) return;
 
-    CHECK_EQ(layer->reference_source, std::string("modelsheet.png"));
+    CHECK_EQ(layer->reference_sources.size(), std::size_t{1});
+    if (!layer->reference_sources.empty()) {
+        CHECK_EQ(layer->reference_sources.front(), std::string("modelsheet.png"));
+    }
     // The name coming back is not enough: it is the derived pixels that decide
     // whether anything is on screen, and a layer whose file did not survive
     // looks exactly like one whose file did until you ask for them.
@@ -9184,7 +9187,8 @@ void twoImportsOfOneFileAreToldApart() {
         for (const Layer& layer : track.layers) {
             if (layer.kind != LayerKind::Reference) continue;
             track_names.push_back(track.name);
-            sources.push_back(layer.reference_source);
+            sources.push_back(layer.reference_sources.empty() ? std::string()
+                                                             : layer.reference_sources.front());
         }
     }
 

@@ -771,6 +771,27 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
     return (found && found->valid) ? found : nullptr;
 }
 
+void Document::setSourceFrame(TrackId track_id, ImageId image_id, LayerId layer_id, int frame) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return;
+    Image* image = track->findImage(image_id);
+    if (!image) return;
+    if (image->sourceFrameFor(layer_id) == frame) return;  // nothing to record
+
+    ScopedCommand command(*this, "Point at a frame");
+    // The whole record, because the map is on it and ImageOp is what swaps one.
+    // It costs a copy of two small hash maps and no pixels at all -- the cels
+    // it carries are ids, so an undo entry for this weighs nothing against the
+    // history budget, which is what makes it affordable per drawing.
+    recordOp(std::make_unique<ImageOp>(track_id, image_id, *image));
+
+    if (frame == Image::kNoSourceFrame) {
+        image->source_frames.erase(layer_id);
+    } else {
+        image->source_frames[layer_id] = frame;
+    }
+}
+
 const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id,
                                             const Transform& under) const {
     auto found = reference_frames_.find(CtgKey{image_id, layer_id});

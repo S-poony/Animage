@@ -2971,10 +2971,15 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
         if (const Track* track = doc_.scene().findTrack(added)) {
             if (const Layer* layer = track->findLayer(layer_id)) {
                 Layer updated = *layer;
-                updated.reference_source = import_name;
+                updated.reference_sources = {import_name};
                 doc_.updateLayer(added, layer_id, updated);
             }
         }
+        // Which of the layer's files this drawing shows: the first, there being
+        // one. Said rather than assumed even here, because absence is what makes
+        // a reference layer empty at a drawing, and a still that did not say so
+        // would be a layer pointed at a file and showing nothing.
+        doc_.setSourceFrame(added, drawing, layer_id, 0);
 
         // Held past its last drawing, or the modelsheet is on frame 0 and
         // nowhere else -- which is not a reference, it is a flash.
@@ -3041,8 +3046,12 @@ QString MainWindow::importPathFor(const std::string& name) const {
 // precedent is LayerFootprint, which owns copies of its grids rather than
 // pointing at the document's; the alternative here is a second permanent grid
 // per import, which is the memory the reference shape exists not to spend.
-TileGrid MainWindow::importAtOneToOne(const Layer& layer, QString* trouble) const {
-    const QString path = importPathFor(layer.reference_source);
+TileGrid MainWindow::importAtOneToOne(const Layer& layer, int frame, QString* trouble) const {
+    if (frame < 0 || static_cast<std::size_t>(frame) >= layer.reference_sources.size()) {
+        if (trouble) *trouble = QStringLiteral("this drawing shows no frame of the import");
+        return {};
+    }
+    const QString path = importPathFor(layer.reference_sources[static_cast<std::size_t>(frame)]);
     if (path.isEmpty()) {
         if (trouble) *trouble = QStringLiteral("the imported file is not where the project left it");
         return {};
@@ -3070,45 +3079,54 @@ void MainWindow::refreshReferenceFrames() {
 
     for (const Track& track : doc_.scene().tracks) {
         for (const Layer& layer : track.layers) {
-            if (layer.kind != LayerKind::Reference || layer.reference_source.empty()) continue;
+            if (layer.kind != LayerKind::Reference || layer.reference_sources.empty()) continue;
 
-            // Nothing to do is the ordinary case and has to be the cheap one.
-            // Asked at the layer's current placement, so this is also what
-            // notices a placement that was changed or undone -- neither of
-            // which touches a cel, and so neither of which anything else here
-            // would see.
-            bool complete = true;
+            // Per drawing, because a sequence shows a different frame at each
+            // one. Two drawings pointed at the same frame decode it twice and
+            // hold two entries, which is the honest cost of a key that names
+            // the drawing -- and the tiles under them are shared handles, so
+            // what is paid twice is the decode and not the pixels.
             for (const auto& [id, image] : track.images) {
-                if (!doc_.referenceFrameFor(track.id, id, layer.id, layer.placement)) {
-                    complete = false;
-                    break;
+                const int frame = image.sourceFrameFor(layer.id);
+                // Absent means the layer is empty at this drawing, exactly as a
+                // missing cel does. Nothing to derive and nothing to complain
+                // about.
+                if (frame == Image::kNoSourceFrame) continue;
+
+                // Nothing to do is the ordinary case and has to be the cheap
+                // one. Asked at the layer's current placement, so this is also
+                // what notices a placement that was changed or undone --
+                // neither of which touches a cel, and so neither of which
+                // anything else here would see.
+                if (doc_.referenceFrameFor(track.id, id, layer.id, layer.placement)) continue;
+
+                QString trouble;
+                // **From the file every time, and never from what is already
+                // derived.** This is the whole of why a placement is stored
+                // rather than baked: a picture nudged, scaled and nudged again
+                // has been resampled once, from the bytes that came off disk.
+                // Re-deriving from the last derived grid would be a resample of
+                // a resample, and would look identical until the third or
+                // fourth adjustment.
+                const TileGrid source = importAtOneToOne(layer, frame, &trouble);
+                if (source.empty() && !trouble.isEmpty()) {
+                    const std::size_t at = static_cast<std::size_t>(frame);
+                    const std::string named = at < layer.reference_sources.size()
+                                                  ? layer.reference_sources[at]
+                                                  : std::string();
+                    const QString said =
+                        QStringLiteral("%1 (%2)").arg(QString::fromStdString(named), trouble);
+                    // One line per file and not one per drawing: a sequence
+                    // whose folder has gone would otherwise report the same
+                    // hundred files in a message box nobody can read.
+                    if (!unreadable.contains(said)) unreadable.append(said);
+                    continue;
                 }
-            }
-            if (complete) continue;
 
-            QString trouble;
-            const TileGrid source = importAtOneToOne(layer, &trouble);
-            if (source.empty() && !trouble.isEmpty()) {
-                unreadable.append(QStringLiteral("%1 (%2)").arg(
-                    QString::fromStdString(layer.reference_source), trouble));
-                continue;
-            }
-
-            // **From the file every time, and never from what is already
-            // derived.** This is the whole of why a placement is stored rather
-            // than baked: a picture nudged, scaled and nudged again has been
-            // resampled once, from the bytes that came off disk. Re-deriving
-            // from the last derived grid would be a resample of a resample, and
-            // would look identical until the third or fourth adjustment.
-            TileGrid placed = layer.placement.isIdentity()
-                                  ? source
-                                  : transformTiles(source, layer.placement);
-
-            // Every drawing of the track, not only the one at frame 0. A still
-            // is one drawing today; walking them is what stops this being
-            // rewritten the moment a sequence has several.
-            for (const auto& [id, image] : track.images) {
-                doc_.setReferenceFrame(track.id, id, layer.id, layer.placement, placed);
+                TileGrid placed = layer.placement.isIdentity()
+                                      ? source
+                                      : transformTiles(source, layer.placement);
+                doc_.setReferenceFrame(track.id, id, layer.id, layer.placement, std::move(placed));
             }
         }
     }
@@ -3922,7 +3940,18 @@ void MainWindow::transformLayerThroughTime() {
     if (const Layer* layer = currentLayer();
         layer && layer->kind == LayerKind::Reference) {
         QString trouble;
-        unplaced = importAtOneToOne(*layer, &trouble);
+        // The frame in front of you, because that is the picture the box is
+        // drawn round. A placement is a property of the whole layer, so which
+        // frame is floated changes nothing about what Apply stores -- but a box
+        // fitted to a different frame than the one on screen would be a box
+        // round nothing.
+        int frame = Image::kNoSourceFrame;
+        if (const Track* track = doc_.scene().findTrack(track_)) {
+            if (const Image* image = track->findImage(canvas_->currentImage())) {
+                frame = image->sourceFrameFor(layer->id);
+            }
+        }
+        unplaced = importAtOneToOne(*layer, frame, &trouble);
         if (unplaced.empty()) {
             statusBar()->showMessage(
                 QStringLiteral("Cannot place this picture: %1")

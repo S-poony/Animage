@@ -178,6 +178,80 @@ void aTruncatedMultiTileCelIsRefusedAsTruncated() {
     CHECK(error.find("truncated") != std::string::npos);
 }
 
+// A reference layer names its files in a list and each drawing names one of
+// them by position. Both halves are numbers a file gets to choose, and a frame
+// index is the one that would be *used* as an offset -- so it is the one worth
+// being hostile about.
+//
+// Three shapes in one scene, because the reader has to survive all of them
+// together the way a real bad file would present them: an index past the end of
+// the list, a negative one, and one of 1e300 which no int can hold. None is
+// refused, because none of them makes the project unreadable -- what they make
+// is a drawing that shows nothing, which is what a reference layer with no
+// entry already means. What must not happen is any of them reaching a lookup.
+void hostileSourceFrameIndicesAreDropped() {
+    TEST("a source frame index a file invented reads as no frame at all");
+    const char* text = R"({
+  "format": "animage-scene",
+  "version": 2,
+  "framerate": 24,
+  "canvas": {"width": 1920, "height": 1080},
+  "tracks": [
+    {
+      "id": 1, "name": "import", "opacity": 1.0, "blend": "normal",
+      "time_offset": 0,
+      "layers": [{"id": 1, "name": "board", "kind": "reference", "opacity": 1.0,
+                  "visible": true, "locked": false, "blend": "normal",
+                  "reference_sources": ["a.png", "b.png"]}],
+      "slots": [1, 2, 3, 4],
+      "images": [
+        {"id": 1, "number": 1, "cels": [],
+         "source_frames": [{"layer": 1, "frame": 99}]},
+        {"id": 2, "number": 2, "cels": [],
+         "source_frames": [{"layer": 1, "frame": -4}]},
+        {"id": 3, "number": 3, "cels": [],
+         "source_frames": [{"layer": 1, "frame": 1e300}]},
+        {"id": 4, "number": 4, "cels": [],
+         "source_frames": [{"layer": 1, "frame": 1}]}
+      ]
+    }
+  ]
+})";
+    Document doc;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, doc, &error));
+
+    const Track* track = doc.scene().findTrack(1);
+    CHECK(track != nullptr);
+    if (!track) return;
+
+    // Asked through a lambda so that an image the reader dropped is a failed
+    // check rather than a null dereference, this being the file whose subject
+    // is not crashing on input somebody wrote to make it.
+    const auto frameAt = [&](ImageId image) {
+        const Image* record = track->findImage(image);
+        CHECK(record != nullptr);
+        return record ? record->sourceFrameFor(1) : Image::kNoSourceFrame;
+    };
+
+    // 99 is kept, and that is deliberate rather than an oversight: the list a
+    // frame indexes is on the layer, and a layer is entitled to be pointed at
+    // more files later -- so the bound belongs where the file is opened, which
+    // is the application, and not here where it would be a rule about a number
+    // read before the list it applies to. What is checked is that it stays the
+    // number the file said and does not become an offset by any other route.
+    CHECK_EQ(frameAt(1), 99);
+
+    // The two that cannot mean anything at all are dropped to absent, which is
+    // what a reference layer with nothing on this drawing already looks like.
+    CHECK_EQ(frameAt(2), Image::kNoSourceFrame);
+    CHECK_EQ(frameAt(3), Image::kNoSourceFrame);
+
+    // And an ordinary one still reads, so the guards above are refusing the bad
+    // numbers rather than the key.
+    CHECK_EQ(frameAt(4), 1);
+}
+
 }  // namespace
 
 int main() {
@@ -187,5 +261,6 @@ int main() {
     sceneIdsOutOfRangeAreRefused();
     aCelWithTooManyTilesIsRefused();
     aTruncatedMultiTileCelIsRefusedAsTruncated();
+    hostileSourceFrameIndicesAreDropped();
     return testing::summarise("hostile");
 }

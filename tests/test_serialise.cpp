@@ -38,7 +38,7 @@ Document buildScene() {
     const TrackId sheet = doc.addTrack("modelsheet");
     const LayerId imported = doc.addLayer(sheet, "modelsheet", 0, LayerKind::Reference);
     Layer reference = *doc.scene().findTrack(sheet)->findLayer(imported);
-    reference.reference_source = "model-sheet.png";
+    reference.reference_sources = {"model-sheet.png"};
     // And where it was put. Every field away from its default, including the
     // two that look decorative: a flip is a sign the matrix carries, and the
     // pivot decides where the rotation happens, so a placement that came back
@@ -55,10 +55,31 @@ Document buildScene() {
     reference.placement.pivot_x = 640.0;
     reference.placement.pivot_y = 360.0;
     doc.updateLayer(sheet, imported, reference);
-    doc.insertImage(sheet, 0);
+    const ImageId sheet_drawing = doc.insertImage(sheet, 0);
+    doc.setSourceFrame(sheet, sheet_drawing, imported, 0);
     TrackProperties held = doc.scene().findTrack(sheet)->properties();
     held.end = TrackEnd::HoldLast;
     doc.updateTrack(sheet, held);
+
+    // And an imported *sequence*, which is the same layer kind with more than
+    // one file. Three drawings pointed at three frames, and deliberately not in
+    // file order: nothing indexes the list by slot, so a file that reads the
+    // frames back by counting would pass on a straight 0,1,2 and be wrong here.
+    // The last drawing is pointed at no frame at all, which is what an empty
+    // drawing on a reference layer looks like -- absent, exactly as a missing
+    // cel is.
+    const TrackId animatic = doc.addTrack("animatic");
+    const LayerId shots = doc.addLayer(animatic, "animatic", 0, LayerKind::Reference);
+    Layer frames = *doc.scene().findTrack(animatic)->findLayer(shots);
+    frames.reference_sources = {"board_0001.png", "board_0002.png", "board_0003.png"};
+    doc.updateLayer(animatic, shots, frames);
+    const ImageId a0 = doc.insertImage(animatic, 0);
+    const ImageId a1 = doc.insertImage(animatic, 1);
+    const ImageId a2 = doc.insertImage(animatic, 2);
+    doc.insertImage(animatic, 3);
+    doc.setSourceFrame(animatic, a0, shots, 2);
+    doc.setSourceFrame(animatic, a1, shots, 0);
+    doc.setSourceFrame(animatic, a2, shots, 1);
 
     Layer settings = *doc.scene().findTrack(front)->findLayer(colour);
     settings.ctg_sources = {rough, clean};
@@ -130,10 +151,17 @@ void checkSameScene(const Document& a, const Document& b) {
             for (std::size_t s = 0; s < la.ctg_sources.size(); ++s) {
                 CHECK_EQ(la.ctg_sources[s], lb.ctg_sources[s]);
             }
-            // Which file a reference layer shows. It holds no cels, so this is
-            // the only thing standing between the layer and drawing nothing --
-            // losing it here would look exactly like an import that went blank.
-            CHECK_EQ(la.reference_source, lb.reference_source);
+            // Which files a reference layer shows, and in what order. It holds
+            // no cels, so this is the only thing standing between the layer and
+            // drawing nothing -- losing it here would look exactly like an
+            // import that went blank. The order is checked and not only the
+            // set: a drawing names its picture by position in this list, so a
+            // list that came back shuffled is every frame on the wrong drawing.
+            CHECK_EQ(la.reference_sources.size(), lb.reference_sources.size());
+            for (std::size_t s = 0; s < la.reference_sources.size() &&
+                                    s < lb.reference_sources.size(); ++s) {
+                CHECK_EQ(la.reference_sources[s], lb.reference_sources[s]);
+            }
             // And where that picture goes. This is the one transform in the
             // program that outlives the gesture that made it -- everywhere else
             // a transform is committed into pixels and forgotten -- so it is
@@ -161,6 +189,14 @@ void checkSameScene(const Document& a, const Document& b) {
             CHECK_EQ(image.number, other->number);
             CHECK_EQ(image.cels.size(), other->cels.size());
             for (const auto& [layer, cel] : image.cels) CHECK_EQ(other->celFor(layer), cel);
+            // Which frame of an import each drawing shows. Both directions,
+            // because the two failures are different: a lost entry is a drawing
+            // that goes blank, and an entry that arrived where there was none
+            // is a drawing showing a picture nobody put there.
+            CHECK_EQ(image.source_frames.size(), other->source_frames.size());
+            for (const auto& [layer, frame] : image.source_frames) {
+                CHECK_EQ(other->sourceFrameFor(layer), frame);
+            }
         }
     }
 }
@@ -463,7 +499,7 @@ void anImportContributesNoCels() {
     const TrackId track = doc.addTrack("another import");
     const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
     Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
-    settings.reference_source = "background.jpg";
+    settings.reference_sources = {"background.jpg"};
     doc.updateLayer(track, layer, settings);
     for (int i = 0; i < 5; ++i) doc.insertImage(track, 0);
 
@@ -480,7 +516,7 @@ void everyImportedFileIsNamedOnce() {
     const auto point = [&](TrackId track, const std::string& at) {
         const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
         Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
-        settings.reference_source = at;
+        settings.reference_sources = {at};
         doc.updateLayer(track, layer, settings);
     };
     point(first, "sky.png");

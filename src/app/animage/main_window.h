@@ -333,10 +333,12 @@ private:
     // saved, and at the path it came from until then. Empty when neither.
     QString importPathFor(const std::string& name) const;
 
-    // The imported picture with no placement applied, which is what a placement
-    // gesture floats. See the definition: the stored placement is absolute, so
-    // the pixels under it have to be the unplaced ones.
-    animage::TileGrid importAtOneToOne(const animage::Layer& layer,
+    // One frame of an import with no placement applied, which is what a
+    // placement gesture floats. `frame` indexes `Layer::reference_sources`, so
+    // it is a drawing's `Image::sourceFrameFor` and never a slot. See the
+    // definition: the stored placement is absolute, so the pixels under it have
+    // to be the unplaced ones.
+    animage::TileGrid importAtOneToOne(const animage::Layer& layer, int frame,
                                        QString* trouble = nullptr) const;
 
     // Derives the pixels of every reference layer whose picture is missing or

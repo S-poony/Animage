@@ -303,6 +303,20 @@ public:
 
     // --- imported pictures -----------------------------------------------
 
+    // Which frame of its source a Reference layer shows at one drawing.
+    //
+    // **An edit, unlike everything else in this section.** The pixels below are
+    // derived and cost a decode to lose; this is a fact about the shot that
+    // only the file remembers, so it is journaled, undone and saved like any
+    // other. `Image::kNoSourceFrame` removes the entry, which is what makes the
+    // layer empty at that drawing.
+    //
+    // It rides on ImageOp, which swaps a whole Image record: the map lives on
+    // the Image and there is nothing smaller to swap. One command per call, so
+    // an import of two hundred frames wraps the lot in a ScopedCommand rather
+    // than leaving two hundred steps on the stack.
+    void setSourceFrame(TrackId track, ImageId image, LayerId layer, int frame);
+
     // The derived pixels of a Reference layer at one drawing, or null if they
     // have not been built yet. Const for exactly the reason `ctgFillFor` is:
     // **compositing is not the place to start a decode**, so a paint draws

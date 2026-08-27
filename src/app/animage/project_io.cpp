@@ -313,7 +313,11 @@ QJsonObject writeLayer(const Layer& layer) {
         out.insert("ctg_follow_motion", layer.ctg_follow_motion);
     }
     if (layer.kind == LayerKind::Reference) {
-        out.insert("reference_source", QString::fromStdString(layer.reference_source));
+        QJsonArray files;
+        for (const std::string& name : layer.reference_sources) {
+            files.append(QString::fromStdString(name));
+        }
+        out.insert("reference_sources", files);
         // Under the same version gate as the line above and for the same
         // reason: a build that does not know `reference` reads the layer as
         // raster, finds no cels on it, and saves the emptiness back. The
@@ -344,7 +348,20 @@ Layer readLayer(const QJsonObject& json) {
     layer.ctg_inherit = asBool(json.value("ctg_inherit"), true);
     layer.ctg_direction = directionFromName(asText(json.value("ctg_direction"), "forward"));
     layer.ctg_follow_motion = asBool(json.value("ctg_follow_motion"), true);
-    layer.reference_source = asText(json.value("reference_source"));
+    for (const QJsonValue& file : json.value("reference_sources").toArray()) {
+        // Kept even when it is empty, because the position in this list is what
+        // Image::source_frames names. Dropping an unreadable entry would shift
+        // every frame after it onto the wrong picture, which is worse than one
+        // frame that draws nothing.
+        layer.reference_sources.push_back(asText(file));
+    }
+    // A single `reference_source` is what version 2 wrote before a sequence
+    // existed, and a still is a sequence of one. Read here rather than migrated,
+    // because there is nothing to migrate: the shapes mean the same thing.
+    if (layer.reference_sources.empty()) {
+        const std::string one = asText(json.value("reference_source"));
+        if (!one.empty()) layer.reference_sources.push_back(one);
+    }
     layer.placement = readTransform(json.value("placement").toObject());
     return layer;
 }
@@ -368,6 +385,21 @@ QJsonObject writeImage(const Image& image, const std::vector<Layer>& layers) {
         cels.append(entry);
     }
     out.insert("cels", cels);
+
+    // And which frame of its file a reference layer shows here, which is the
+    // same sparse shape and written the same way: layer order, absent means the
+    // layer is empty at this drawing. Only written when there is one, so a
+    // project with no imports in it looks exactly as it did.
+    QJsonArray sources;
+    for (const Layer& layer : layers) {
+        const int frame = image.sourceFrameFor(layer.id);
+        if (frame == Image::kNoSourceFrame) continue;
+        QJsonObject entry;
+        entry.insert("layer", jsonNumber(static_cast<double>(layer.id)));
+        entry.insert("frame", jsonNumber(frame));
+        sources.append(entry);
+    }
+    if (!sources.isEmpty()) out.insert("source_frames", sources);
     return out;
 }
 
@@ -383,6 +415,15 @@ Image readImage(const QJsonObject& json) {
         const LayerId layer = asId(entry.toObject().value("layer"), kNoId);
         const CelId cel = asId(entry.toObject().value("cel"), kNoId);
         if (layer != kNoId && cel != kNoId) image.cels[layer] = cel;
+    }
+    const QJsonArray sources = json.value("source_frames").toArray();
+    for (const QJsonValue& entry : sources) {
+        const LayerId layer = asId(entry.toObject().value("layer"), kNoId);
+        const int frame = asInt(entry.toObject().value("frame"), Image::kNoSourceFrame);
+        // A negative index is what "no entry" is written as, so a file saying
+        // one is saying nothing and is treated as such rather than reaching
+        // backwards off the front of the source list.
+        if (layer != kNoId && frame >= 0) image.source_frames[layer] = frame;
     }
     return image;
 }
@@ -1100,9 +1141,14 @@ std::vector<std::string> ProjectIO::importsReferencedBy(const Document& doc) {
             // A reference layer with no source is not an error to a save: it
             // draws nothing, and there is no file to carry. It is what a layer
             // looks like between being created and being pointed at a file.
-            if (layer.reference_source.empty()) continue;
-            if (seen.insert(layer.reference_source).second) {
-                names.push_back(layer.reference_source);
+            //
+            // De-duplicated across the whole list and not only across layers,
+            // because a sequence is allowed to name one file twice -- a hold
+            // that was flattened into the files somebody handed over -- and
+            // that is one file to copy, not two.
+            for (const std::string& name : layer.reference_sources) {
+                if (name.empty()) continue;
+                if (seen.insert(name).second) names.push_back(name);
             }
         }
     }

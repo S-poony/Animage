@@ -104,18 +104,28 @@ struct Layer {
     // which of the two you are looking at.
     bool show_scribbles = false;
 
-    // For a Reference layer: which imported file it shows, named relative to
-    // the project's `imports/` folder and never as a path.
+    // For a Reference layer: which imported files it shows, in order, each
+    // named relative to the project's `imports/` folder and never as a path.
     //
-    // A name rather than a path because a project is a self-contained folder
-    // and has to survive being moved -- a stored absolute path is the one thing
-    // in this format that would break when it was. Resolving the name against a
+    // Names rather than paths because a project is a self-contained folder and
+    // has to survive being moved -- a stored absolute path is the one thing in
+    // this format that would break when it was. Resolving a name against a
     // folder is the application's job; `core` knows nothing about either.
+    //
+    // **A list, and a still is a list of one.** Making the single image the one
+    // thing that is not a sequence would mean answering placement, locking,
+    // export, save cost and colouring twice, with two answers, for two features
+    // a user thinks of as one. A still *is* a sequence of one frame and there is
+    // no cheaper way to say that than to make it one.
+    //
+    // Nothing indexes this by slot. Which of these a drawing shows is
+    // `Image::source_frames`, which is a fact recorded on the drawing -- see the
+    // comment there for why position cannot answer it.
     //
     // This is not provenance. It is read every time the picture is built, and
     // the layer draws nothing without it -- which is the test docs/importing.md
     // sets for a field of this shape under "where an import lands".
-    std::string reference_source;
+    std::vector<std::string> reference_sources;
 
     // For a Reference layer: where the imported picture sits, applied when its
     // pixels are derived from the file.
