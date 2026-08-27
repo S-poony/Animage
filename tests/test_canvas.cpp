@@ -913,6 +913,22 @@ void theLayerTransformButtonSaysWhichReasonItIs() {
     CHECK(button->toolTip().contains(QStringLiteral("colour layer")));
 }
 
+// The refusal that quotes a number, checked against the number it quotes.
+//
+// kLayerGrowth was two before the tests said what the count actually does, and
+// the message used to spell "three" out in words -- so the next adjustment
+// would have left a refusal describing a ceiling the code had stopped using.
+void theLayerCeilingRefusalQuotesTheCeiling() {
+    TEST("the layer-too-large message says the growth the code actually allows");
+
+    const QString said = CanvasWidget::explain(CanvasWidget::Refusal::LayerTooLargeToCommit);
+    CHECK(said.contains(QString::number(static_cast<qulonglong>(kLayerGrowth))));
+    CHECK(said.contains(QStringLiteral("times what it already takes")));
+    // And it is not the single-drawing advice, which is wrong in every clause
+    // here: a layer can be over the ceiling at a scale of one.
+    CHECK(!said.contains(QStringLiteral("scale it down")));
+}
+
 // Issue #9 through the button that does it, because the button is where the
 // track's setting has to be read.
 void theInsertButtonObeysTheOverwriteSetting() {
@@ -8903,6 +8919,7 @@ int main(int argc, char** argv) {
     aWholeLayerTransformSurvivesAChangeOfFrame();
     anOrdinaryTransformStillCommitsOnAChangeOfFrame();
     theLayerTransformButtonSaysWhichReasonItIs();
+    theLayerCeilingRefusalQuotesTheCeiling();
     theTimelineDockFollowsTheTrackCount();
     openingAProjectSizesTheTimelineForItsTracks();
     theTimelineDockCanBeResizedByHand();
