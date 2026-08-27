@@ -34,6 +34,7 @@ the shape of the program. Those five maps are.
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
 | [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
+| [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -3079,6 +3080,188 @@ that stops working quietly. The hook is taken by the next call to
 `transformLayer` whatever that call does, so one armed before an identity cannot
 lie in wait and go off on a real bake later.
 
+## Importing a picture
+
+**File ▸ Import ▸ Image.** A picture comes in as a `LayerKind::Reference`
+layer: one that holds **no cels at all** and whose pixels are derived from the
+imported file and memoised. Why it is that rather than an ordinary layer with a
+drawing in it, and what a sequence and a video will be, is
+[importing.md](importing.md). This is what was built and what it cost.
+
+Read the section above this one first if you have not. Everything here is a
+contrast with it: a layer transform **bakes**, and this is the one gesture in the
+program that does not.
+
+### Where an imported picture's pixels come from, in order
+
+A sixth path, in the register of [how the program fits
+together](#how-the-program-fits-together), because like the others it is not
+written down in any one file it passes through.
+
+**In.** `MainWindow::importImageFrom` decodes the file
+(`image_import::decode` — QImage, colour-converted to sRGB and linearised into
+half), makes a new track with one `Reference` layer and one drawing,
+`TrackEnd::HoldLast`, and records the file under a name inside the project. The
+picture is installed with `Document::setReferenceFrame`, which is **not an
+edit**: no cel, no journal entry, no undo step. The menu item is a file dialog
+and a recap in front of that function, and nothing else — which is what lets
+`shots` and the tests drive an import without answering a dialog.
+
+**Out.** `Compositor`'s `collectPasses` is the one place in the program that
+resolves a layer to pixels, and the reference branch sits beside the colour
+layer's and has the same shape: ask the document, draw what is there, start
+nothing. What comes back is an ordinary `TileGrid`, so **nothing below
+`collectPasses` knows this kind exists** — `compositeGrids`, the export's
+per-layer path and the eyedropper all work with no changes at all.
+
+**Kept.** `refreshEverything` calls `MainWindow::refreshReferenceFrames`, which
+re-derives any layer whose picture is missing or was made at a placement the
+layer no longer has. Cheap when there is nothing to do, which is nearly always:
+the test is a hash lookup per drawing.
+
+**On disk.** `imports/` in the project folder, carried forward by every save.
+See the trap below, which is the one thing here that would have gone wrong
+silently.
+
+### It stores where the picture goes, and does not bake it
+
+The section above spends its length on why a layer transform bakes: a stored
+affine would force everything that reads a layer's pixels through a matrix —
+the brush, the eyedropper, `ctgBarrier`, `celBounds`, fit-to-drawing, export.
+
+**That argument is entirely about layers whose pixels are the truth.** A
+reference layer's are derived, so its placement is applied in the *derive step*
+— decode, colour-convert, tile, `transformTiles`, cache — and what reaches
+`collectPasses` is a plain, already-placed grid. `compositeScene` is still a flat
+list of untransformed grids and `LayerPass` is still not widened. The thing #25
+refused is still refused.
+
+What it buys is that **the loss never compounds**: adjusting a placement
+re-derives from the original file, so a picture nudged, scaled and nudged again
+has been resampled once, from the bytes that came off disk. A baked one would be
+a resample of a resample of a resample, and would look fine until the third
+adjustment.
+
+**The box opens at the placement the layer already has**, and that is not only a
+courtesy. `Transform` holds `scale_x` and `scale_y` separately, so two of them do
+not compose into a third — rotate, then scale non-uniformly, and the result is a
+shear the struct cannot express. Absolute numbers that the drag *edits* avoid
+composition altogether. A design that started the box at the identity and
+composed onto the stored value would have hit that wall after the arithmetic was
+written.
+
+**The cache is keyed on the placement, and absent beats stale.** A frame derived
+at an earlier placement is not a slightly-out-of-date picture, it is a picture of
+where the import used to be — and it would go on being drawn, convincingly, until
+something happened to refresh it. `Document::referenceFrameFor` therefore takes
+the placement and reports a mismatch as *nothing here*. Same lesson as [why a
+cache key of cel revisions serves wrong fills, not slow
+ones](#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones), from
+the other end.
+
+### What the box's colour means, which changed
+
+**Blue is what you pointed at — your selection, or the drawing in front of you.
+Green is more than that.**
+
+It used to be blue for the tool and green for the layer button, on the grounds
+that the two doors "write amounts two orders of magnitude apart". That reason
+does not survive this feature in either direction: a placement writes *nothing*
+and can still move forty drawings, and a one-drawing layer came through the layer
+door and moved exactly the drawing in front of you — the blue case wearing green.
+
+So the rule is about scope, and the cost signal it used to carry is left to red,
+which is the urgent one anyway.
+
+**What the colour deliberately does not carry is whether the lasso applies.**
+That already announces itself and better: a gesture that ignores a loop clears
+it, so the loop visibly goes. One signal per fact — and the drawing count has no
+other signal, since a layer of two drawings barely has ghosts.
+
+### A layer of one drawing is the Transform tool's job
+
+`beginLayerTransform` hands over to `beginTransform` when the layer has one
+drawing, and **that is what gave the lasso back**. The whole-layer path clears
+the selection because a loop describes a shape on this drawing and nothing at all
+on the other forty; with one drawing there are no other forty, and refusing the
+lasso there while honouring it in the tool was a difference with no reason behind
+it.
+
+Everything else already agreed — the box is that drawing's bounds either way,
+Apply writes one cel either way — and the ordinary path does it without the
+bake's rescue, its deferred trim or its history cost.
+
+Not for a reference layer, whatever the drawing count: there is no cel for the
+tool to lift, and a placement is a property of the whole file. **There is no
+lasso on an import for that reason and not because of the drawing count**, which
+is a different sentence and needs to stay one.
+
+### The Transform tool works on an import, and the doors do not disagree
+
+`chooseTransformTool` routes a reference layer to the placement. Both doors mean
+one thing when there is one picture, and refusing with a message pointing at the
+other button would be a rule with no consequence behind it.
+
+"Two doors and no switch" is untouched by this: what that refuses is a control
+that changes the scope of a gesture *already on screen*, and this is decided
+before there is one.
+
+### Four labels that would have been false
+
+Worth listing because each was true before this feature and silently stopped
+being, which is the shape of thing this file exists to catch:
+
+| | said | says |
+|---|---|---|
+| the transform bar | "Whole layer" | "Placing — nothing is written" |
+| the panel button | "Transform layer through time" | "Place this picture" |
+| Apply's tooltip | "Bake it into the drawing" | "Put the picture down here. Nothing is written" |
+| `refuseToEditHere`'s comment | "The layer kind is not here" | which kind is, and why the rest are not |
+
+The last one is the important one. That comment explained a deliberate decision —
+the brush puts scribbles on a colour layer, so nothing on that list has to care
+what kind of mark it is carrying — and a reference layer is the first kind the
+brush itself must refuse, because there is nowhere to put a mark rather than
+because of what kind of mark it would be. The reasoning is intact and still
+decides the colour layer; the comment now says which is which.
+
+Apply's tooltip is composed from the keyed-tooltip table like every other, so it
+still names the right key after a rebinding. `setKeyedTipText` is how a tooltip
+that changes with the gesture reaches into that table rather than around it.
+
+### What it costs, and where the next line is
+
+Nothing measurable yet, and that is the point: an imported picture contributes
+**no cels**, so it costs a save nothing, costs the undo history nothing, and adds
+nothing to `totalTileCount`. `an-imported-picture-placed-and-applied` in `shots`
+photographs `tiles 0  undo 2 (0 MB)` after a placement, which is the whole claim
+in one line.
+
+**The re-derive runs on the interface thread**, from `refreshEverything`. That is
+affordable for a still and will not be for a sequence: a decode you can feel on a
+300 dpi scan is a decode per frame on an animatic. That is the line where this
+grows a worker and the request path becomes `requestCtgFills`' — paint asks, a
+worker computes, a poll installs — which is what [importing.md](importing.md)
+already specifies and what `CtgFillCache` is the template for, bound and
+generation counter included.
+
+### What is not built
+
+- **Sequences and video.** The shape is settled in [importing.md](importing.md)
+  and the still is deliberately the smallest instance of it: `Image` gains a
+  sparse `LayerId → source frame index` map, the cache gains a bound, the decode
+  moves to a worker.
+- **Convert to drawings**, which is the way back — an import cannot be a CTG
+  barrier, so colouring imported line art needs it. Whole layer, on a popup, and
+  it is `Document::transformLayer`'s loop with a decode where the resample is:
+  one command, the `bad_alloc` rescue, the deferred trim, the redo stack held
+  aside. All four are bugs if omitted and all four were found the expensive way
+  once already.
+- **Telling a reference layer from an ordinary one in the panel**, which is
+  [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
+  sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
+  layers.
+
 ## What a pan costs
 
 Reported as the program going heavy after a while at work — panning, with
@@ -3980,6 +4163,9 @@ trap.
 | [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
 | [A tablet gesture is not one device's](#a-tablet-gesture-is-not-one-devices) | The barrel button presses as a mouse and the drag arrives as tablet moves |
 | [Three explanations for a bug nobody here had](#three-explanations-for-a-bug-nobody-here-had) | #75 was Qt 6.8's, and every instrument was running 6.11 |
+| [What a save deletes that the document cannot write again](#what-a-save-deletes-that-the-document-cannot-write-again) | The swap replaces every entry; an imported file has no second copy |
+| [A `shots` situation that presses an id nothing bound](#a-shots-situation-that-presses-an-id-nothing-bound) | `press` on an id with no QAction does nothing, silently |
+| [Which Qt classes answer "what are you" and which only answer "are you this"](#which-qt-classes-answer-what-are-you-and-which-only-answer-are-you-this) | `QColorSpace` compares against a named space and never names one |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -5832,6 +6018,79 @@ event the canvas is offered and what the canvas made of each. It writes one
 synthetic event through its own filter first, so an empty log means the probe is
 broken rather than the pen.
 
+### What a save deletes that the document cannot write again
+**A save builds a new folder and renames it into place, so every directory entry
+in the project is replaced on every save** — and anything the build step did not
+put into the new folder is gone. That is fine for a cel: its pixels are in the
+document, so a save can always write it out again. It is not fine for an
+imported file, because what the document holds is a **name**.
+
+Nothing about getting this wrong announces itself at the time. The import looks
+right, the save reports success, and the picture is missing the next time the
+project is opened — or two minutes later, when autosave has fired and written
+the folder without it.
+
+So `ProjectIO::save` carries `imports/` forward, looking in three places in
+order: the folder the last successful save wrote them to (`SaveState::folder`,
+which is where they are for every save after the first, Save As included); the
+path an import came from, for a project that has never been saved; and the
+target folder, for a re-save whose state was lost. A name in none of them fails
+the save **loudly**, while the original is still wherever the person imported it
+from — a save that quietly dropped it would be discovered somewhere else, later,
+by somebody who no longer has the file.
+
+`anImportSurvivesSavingAndOpening` in `test_canvas` saves, saves again over the
+same folder, does a Save As, **deletes the original picture** and reopens. The
+deletion is the half that matters: without it the test passes on a project that
+is still leaning on a path outside itself.
+
+The general shape: **anything the project folder holds that the document cannot
+regenerate has to be carried across the swap by name.** Cels are the exception
+here, not the rule, and they are the only thing that was ever in that folder
+before.
+
+
+### A `shots` situation that presses an id nothing bound
+**`Stage::press` takes a shortcut id, looks up the `QAction` the window made for
+it, and does nothing at all if there is none** — silently, because an id with no
+action is indistinguishable from an action that ran and changed nothing.
+
+`Id::TransformApply` is such an id. Apply is a button on the transform bar and
+its key is handled elsewhere; `makeAction` is never called for it. So
+`s.press(Id::TransformApply)` is a no-op, and a situation that used it
+photographed the transform still live — a picture that looks like a placement
+that failed to commit, which is a bug you can spend a while looking for in the
+committing code.
+
+Use `s.choose("Apply")`, which finds the button by its label and clicks it.
+
+**The general rule is the one this harness already has written down**: a shot is
+only worth what the run behind it set up, and a situation that quietly did less
+than it says is worse than no situation, because the picture is evidence. Before
+believing a shot that shows something *not* happening, check that the step which
+was supposed to make it happen actually ran. See [what the screenshot showed, and
+what the run had never set
+up](#what-the-screenshot-showed-and-what-the-run-had-never-set-up), which is the
+same lesson one layer out.
+
+
+### Which Qt classes answer "what are you" and which only answer "are you this"
+**`QColorSpace` has no accessor that hands back which named colour space it is.**
+There is `QColorSpace::NamedColorSpace` and there is a constructor taking one,
+but a space read from a file is a set of primaries and a transfer function and
+usually matches none of them exactly — so Qt offers equality against a named one
+and not a name.
+
+Naming a file's colour space for a message therefore means comparing against the
+handful that are worth naming and falling back to `description()`. That is what
+`image_import`'s `nameOfSpace` does, and it is worth a comment there because
+"ask it which one it is" is the obvious thing to reach for and compiles into a
+different error every Qt version.
+
+Small, and here because it is the cheap end of a habit worth having: a Qt class
+that models something continuous will let you *test* a value and often will not
+*tell* you one.
+
 ### Three explanations for a bug nobody here had
 **Issue #75 was a bug in Qt 6.8, and every instrument pointed at it was running
 Qt 6.11.** Nothing in this repository ever caused it, nothing here ever fixed it,
@@ -6177,8 +6436,30 @@ come off it since the first build, with where the reasoning went:
 | One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
 | A screenshot target (#28) | "looking at the interface" |
 | Capping the undo history (#23) | "what the history is allowed to cost" |
+| Importing a single image, and placing it | "importing a picture" |
 
-1. **TIFF export**, which is the half of the format list still missing. It is
+1. **The rest of importing**, which is the thing in flight and the only entry
+   here with a design note of its own: [importing.md](importing.md) settles the
+   shape and "importing a picture" above records what is built. In order, and
+   each is the one before it with one thing added:
+
+   - **An image sequence.** `Image` gains a sparse `LayerId → source frame
+     index` map -- which is not a retiming feature, it is what makes the mapping
+     survive an ordinary hold or deletion -- the reference cache gains a bound
+     in bytes with `CtgFillCache`'s shape, and the decode moves off the
+     interface thread onto the request path `requestCtgFills` already models.
+   - **A video**, which is a sequence with a decoder in front and no new
+     storage: extracted to frames once, at import, so the decoder never reaches
+     the paint path.
+   - **Audio**, which is what the shot is for and is blocked on nothing here.
+     The deployment spike comes first and is the highest-risk item in the whole
+     note: Qt Multimedia must not go in the root `find_package` (see the trap),
+     and three packaging tools have to bundle a backend before a line of audio
+     code is worth writing.
+   - **Convert to drawings**, the way back from a reference layer, without which
+     imported line art cannot be coloured at all.
+
+2. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the
    lossless one and is built — and keeping that straight is what stops it being
    argued about twice.
@@ -6207,7 +6488,7 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **Rung four is the default and the queue moved on.** What it took is in
+3. **Rung four is the default and the queue moved on.** What it took is in
    "colour through time, part three" and "what the push step is allowed to see";
    the defect that held it up was [#69](https://github.com/S-poony/Animage/issues/69)
    and it is fixed. Two things it left behind, both reported from use rather
@@ -6225,7 +6506,7 @@ come off it since the first build, with where the reasoning went:
    It matters less the moment rung four is the default, which is a reason to
    settle that first rather than to do them together.
 
-3. **A flag that means something.** There was one, built on `spread`, and it came
+4. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the
    drawing a mark came from, so it needs a correspondence between regions on two
@@ -6234,13 +6515,13 @@ come off it since the first build, with where the reasoning went:
    went — so the thing this was waiting for exists. It still has to be computed
    for drawings nobody has opened, which is what the audit did and what
    `CtgSolver`'s second priority is still there for.
-4. **GPU compositing**, if `bench_playback` says it is worth it — not
+5. **GPU compositing**, if `bench_playback` says it is worth it — not
    `bench_composite`, which watches the half that is not the problem. What it
    says today is that HD is comfortable at any track count and 4K drops between
    a quarter and two fifths of its frames, so this is a 4K deliverable and not a
    general one. It does not answer the coloured case at all: the max-flow stays
    on the CPU, and what breaks there is the fill cache, not the compositing.
-5. **The rest of the open issues.** Transforming a layer across time
+6. **The rest of the open issues.** Transforming a layer across time
    ([#25](https://github.com/S-poony/Animage/issues/25)) is done, and it did
    *not* want `LayerPass` widened from an offset to an affine, which is what
    this entry used to say it needed. It bakes instead — see

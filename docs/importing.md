@@ -1,6 +1,6 @@
 # Importing
 
-Written before anything is built, in the register of
+Written before anything was built, in the register of
 [scribbles-through-time.md](scribbles-through-time.md): what is being decided,
 why, and what would change each decision. Anything still **not settled** is
 marked, and the unsettled ones are collected again at the end so nobody has to
@@ -10,6 +10,22 @@ The two large questions the first draft left open — which audio library, and
 what shape a sequence is stored in — have both been answered, and the answer to
 the first changed the answer to the second. They are settled in place below
 rather than in an appendix, with what decided them.
+
+> **The first item is built: a single image imports, and can be placed.** This
+> note stays a plan and is not rewritten into a description — what was built is
+> recorded in ["importing a picture"](handover.md#importing-a-picture), which is
+> where a reader who wants the code should start. Read this one for *why*, and
+> that one for *what*.
+>
+> Two things this note predicted are worth knowing before trusting the rest of
+> it, because they are the evidence its remaining predictions rest on. The
+> compositor really did cost three lines: `collectPasses` is the one place that
+> resolves a layer to pixels and it already had the branch shape. And a stored
+> placement really is free — a picture moved and scaled shows `tiles 0` and
+> `undo 2 (0 MB)`, which is the claim under "placement is stored" made visible.
+>
+> One thing it got wrong in the cheap direction is fixed above: the still is a
+> reference layer, not ordinary cels.
 
 The French documents in [fr/](fr/) are still the specification. This note fills
 in something the specification reserved a place for and deferred:
@@ -73,11 +89,15 @@ Three things follow from that and they are worth stating before anything else:
 ## The order of work
 
 1. **Audio**, because it is what the shot is for.
-2. **A single image**, because it is the smallest instance of the shape
-   everything else uses, and building it builds most of 3.
-3. **An image sequence**, which is 2 with more frames — plus the two things one
-   frame never needs: a bound on what is resident, and a decode that does not
-   happen on the interface thread.
+2. ~~**A single image**~~ — **built**, and it did build most of 3: the layer
+   kind, the derive step, the cache, the placement, the format and the
+   `imports/` folder all exist. See
+   ["importing a picture"](handover.md#importing-a-picture).
+3. **An image sequence**, which is 2 with more frames — plus the three things
+   one frame never needs: the per-image source frame map, a bound on what is
+   resident, and a decode that does not happen on the interface thread. The
+   third is not an optimisation to reach for later: a still re-derives on the
+   interface thread today and a sequence cannot.
 4. **A video**, which is 3 with a decoder in front of it and no new storage at
    all.
 5. **Video export**, last and deliberately so. It is the only item here that
