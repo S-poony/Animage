@@ -98,6 +98,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
+#include <QTemporaryDir>
 #include <QStyleOptionSlider>
 #include <QDir>
 #include <QDockWidget>
@@ -113,6 +114,7 @@
 #include <QKeyEvent>
 #include <QLayout>
 #include <QMouseEvent>
+#include <QColorSpace>
 #include <QPainter>
 #include <QPixmap>
 #include <QLineEdit>
@@ -258,6 +260,11 @@ struct Stage {
         QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
         loop.exec();
     }
+
+    // Somewhere to put a file a situation needs to exist -- a picture to
+    // import, a project to open. Removed with the Stage, so a situation that
+    // writes one leaves nothing behind and two runs cannot see each other's.
+    QString scratch() const { return scratch_.path(); }
 
     // --- doing things ------------------------------------------------------
 
@@ -541,7 +548,44 @@ private:
     // Where the pointer was last put, so a drag continues from it rather than
     // making every situation say twice where it started.
     QPointF pointer_;
+    QTemporaryDir scratch_;
 };
+
+// A picture to import: colour swatches over a grid, at a size that reads as a
+// modelsheet rather than as a test pattern.
+//
+// The swatches are the point. An imported palette being eyedropped is a stated
+// use, and the conversion an import does -- sRGB in, linear half out, through a
+// widening step when the file carries any other profile -- is exactly the kind
+// of thing that is wrong by a little and invisible in a screenshot of a drawing.
+// Flat saturated patches beside each other are where a wrong conversion shows.
+bool writeSwatchGrid(const QString& path) {
+    QImage sheet(640, 400, QImage::Format_RGBA8888);
+    sheet.fill(QColor(246, 244, 238));
+
+    QPainter painter(&sheet);
+    const QColor swatches[] = {QColor(220, 40, 40),  QColor(240, 160, 30), QColor(240, 220, 60),
+                              QColor(60, 170, 80),   QColor(50, 120, 210), QColor(120, 70, 180),
+                              QColor(20, 20, 24),    QColor(255, 255, 255)};
+    const int across = 4;
+    const int patch = 120;
+    const int margin = 40;
+    for (int i = 0; i < 8; ++i) {
+        const int x = margin + (i % across) * (patch + 20);
+        const int y = margin + (i / across) * (patch + 20);
+        painter.fillRect(QRect(x, y, patch, patch), swatches[i]);
+        painter.setPen(QColor(120, 120, 128));
+        painter.drawRect(QRect(x, y, patch, patch));
+    }
+    painter.setPen(QColor(40, 40, 46));
+    painter.drawRect(sheet.rect().adjusted(0, 0, -1, -1));
+    painter.end();
+
+    // Tagged sRGB rather than left untagged, so that what this exercises is the
+    // ordinary path and not the "no profile, read it as sRGB" fallback.
+    sheet.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return sheet.save(path, "PNG");
+}
 
 // The cursors, side by side, each on paper and on ink -- because the rule they
 // follow is light under dark, and a cursor crosses both by definition. A glyph
@@ -799,6 +843,20 @@ const std::vector<Situation>& situations() {
         {"the-window-as-it-opens",
          "menus, tools, layer panel, timeline and status bar, all in their places",
          [](Stage&) {}},
+
+        {"an-imported-picture",
+         "the picture is on the canvas from a file and not from a cel: a second track at the "
+         "bottom of the timeline, its layer listed, and the status bar saying the brush will "
+         "not draw there because it is imported rather than because it is locked",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settle();
+         }},
 
         {"a-transform-box-round-a-drawing",
          "the box should sit on the ink: #28 was raised on one drawn 128 px clear of "

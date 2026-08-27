@@ -196,10 +196,19 @@ TrackEnd endFromName(const std::string& name) {
     return TrackEnd::Nothing;
 }
 
-const char* kindName(LayerKind kind) { return kind == LayerKind::Ctg ? "ctg" : "raster"; }
+const char* kindName(LayerKind kind) {
+    switch (kind) {
+        case LayerKind::Ctg: return "ctg";
+        case LayerKind::Reference: return "reference";
+        case LayerKind::Raster: break;
+    }
+    return "raster";
+}
 
 LayerKind kindFromName(const std::string& name) {
-    return name == "ctg" ? LayerKind::Ctg : LayerKind::Raster;
+    if (name == "ctg") return LayerKind::Ctg;
+    if (name == "reference") return LayerKind::Reference;
+    return LayerKind::Raster;
 }
 
 const char* directionName(CtgDirection direction) {
@@ -254,6 +263,9 @@ QJsonObject writeLayer(const Layer& layer) {
         out.insert("ctg_direction", QString::fromLatin1(directionName(layer.ctg_direction)));
         out.insert("ctg_follow_motion", layer.ctg_follow_motion);
     }
+    if (layer.kind == LayerKind::Reference) {
+        out.insert("reference_source", QString::fromStdString(layer.reference_source));
+    }
     return out;
 }
 
@@ -278,6 +290,7 @@ Layer readLayer(const QJsonObject& json) {
     layer.ctg_inherit = asBool(json.value("ctg_inherit"), true);
     layer.ctg_direction = directionFromName(asText(json.value("ctg_direction"), "forward"));
     layer.ctg_follow_motion = asBool(json.value("ctg_follow_motion"), true);
+    layer.reference_source = asText(json.value("reference_source"));
     return layer;
 }
 
@@ -576,8 +589,8 @@ bool ProjectIO::save(const Document& doc, const QString& folder, QString* error)
     return save(doc, folder, nothing, error);
 }
 
-bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& state,
-                     QString* error) {
+bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& state, QString* error,
+                     const Imports& imports) {
     const QString scratch = scratchFolderFor(folder);
     if (!removeTree(scratch)) {
         if (error) *error = QStringLiteral("cannot clear %1").arg(scratch);
@@ -630,6 +643,41 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
         if (!writeFile(scratch + QStringLiteral("/cels/") + name, packed, &why)) {
             return giveUp(why);
         }
+    }
+
+    // The imported files, which the swap would otherwise delete. Nothing in the
+    // document can rebuild these -- a reference layer holds a name, not pixels
+    // -- so a folder assembled without them is a folder that has lost the
+    // picture. See ProjectIO::Imports for where they are looked for and why in
+    // that order.
+    for (const std::string& name : importsReferencedBy(doc)) {
+        const QString file = QString::fromStdString(name);
+        if (!root.mkpath(scratch + QStringLiteral("/imports"))) {
+            return giveUp(QStringLiteral("cannot create %1/imports").arg(scratch));
+        }
+        const QString into = scratch + QStringLiteral("/imports/") + file;
+
+        QStringList tried;
+        const auto attempt = [&](const QString& from) {
+            if (from.isEmpty()) return false;
+            tried.append(from);
+            return carryForward(from, into);
+        };
+
+        const auto pending = imports.pending.find(name);
+        if (attempt(state.folder.isEmpty() ? QString()
+                                           : state.folder + QStringLiteral("/imports/") + file)) {
+            continue;
+        }
+        if (pending != imports.pending.end() && attempt(pending->second)) continue;
+        if (attempt(folder + QStringLiteral("/imports/") + file)) continue;
+
+        // Said rather than skipped, and said now: the original is still
+        // wherever it was imported from, and a save that quietly dropped it
+        // would be discovered when the project was next opened somewhere else.
+        return giveUp(QStringLiteral("cannot find the imported file \"%1\". Looked in: %2")
+                          .arg(file, tried.isEmpty() ? QStringLiteral("nowhere it could be")
+                                                     : tried.join(QStringLiteral(", "))));
     }
 
     const std::string text = writeSceneJson(doc);
@@ -986,6 +1034,25 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
     // check above leaves whatever was open alone.
     doc.loadScene(std::move(scene));
     return true;
+}
+
+std::vector<std::string> ProjectIO::importsReferencedBy(const Document& doc) {
+    std::vector<std::string> names;
+    std::unordered_set<std::string> seen;
+    for (const Track& track : doc.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference) continue;
+            // A reference layer with no source is not an error to a save: it
+            // draws nothing, and there is no file to carry. It is what a layer
+            // looks like between being created and being pointed at a file.
+            if (layer.reference_source.empty()) continue;
+            if (seen.insert(layer.reference_source).second) {
+                names.push_back(layer.reference_source);
+            }
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 std::vector<CelId> ProjectIO::celsReferencedBy(const Document& doc) {

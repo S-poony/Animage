@@ -650,6 +650,19 @@ static void collectPasses(const Document& doc, TrackId track_id, ImageId image_i
             continue;
         }
 
+        // An imported picture, which has no cel and is derived from a file. The
+        // same bargain as the fill above and for the same reason: if it has not
+        // been decoded yet the layer simply does not draw, because compositing
+        // is not the place to start a decode. What arrives is an ordinary
+        // TileGrid, so everything below this function is untouched -- it cannot
+        // tell a decoded frame from a drawn one, and must not have to.
+        if (layer->kind == LayerKind::Reference) {
+            if (const TileGrid* frame = doc.referenceFrameFor(track_id, image_id, *it)) {
+                passes.push_back({frame, layer});
+            }
+            continue;
+        }
+
         const Cel* cel = doc.cel(image->celFor(*it));
         if (!cel) continue;  // no cel means the layer is empty here
         passes.push_back({&cel->tiles(), layer});

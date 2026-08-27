@@ -11,6 +11,16 @@ namespace animage {
 enum class LayerKind {
     Raster,
     Ctg,  // stores scribbles, not pixels; the fill is regenerated
+    // Shows a file that was imported, and holds no pixels of its own at all.
+    // Its cels do not exist -- not "are empty": there is nothing in
+    // Image::cels for this layer and nothing for a save to write. What is on
+    // screen is derived from the file each time it is needed and cached, the
+    // same bargain a CTG fill makes, and losing the cache costs a decode.
+    //
+    // See docs/importing.md. The short version of why it is a kind rather than
+    // a locked raster layer: what the brush refuses here it must refuse for a
+    // reason unlocking cannot fix.
+    Reference,
 };
 
 // Which way a CTG layer carries scribbles to drawings that have none.
@@ -92,6 +102,19 @@ struct Layer {
     // a property of the drawing: what is on the layer does not change, only
     // which of the two you are looking at.
     bool show_scribbles = false;
+
+    // For a Reference layer: which imported file it shows, named relative to
+    // the project's `imports/` folder and never as a path.
+    //
+    // A name rather than a path because a project is a self-contained folder
+    // and has to survive being moved -- a stored absolute path is the one thing
+    // in this format that would break when it was. Resolving the name against a
+    // folder is the application's job; `core` knows nothing about either.
+    //
+    // This is not provenance. It is read every time the picture is built, and
+    // the layer draws nothing without it -- which is the test docs/importing.md
+    // sets for a field of this shape under "where an import lands".
+    std::string reference_source;
 
     // Defaulted, so a field added above is compared without anybody having to
     // remember. The canvas holds a copy of the layer list the onion skin was

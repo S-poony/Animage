@@ -301,6 +301,38 @@ public:
     const CtgFill* ctgFillFor(TrackId track, ImageId image, LayerId layer) const;
     std::size_t totalTileCount() const;
 
+    // --- imported pictures -----------------------------------------------
+
+    // The derived pixels of a Reference layer at one drawing, or null if they
+    // have not been built yet. Const for exactly the reason `ctgFillFor` is:
+    // **compositing is not the place to start a decode**, so a paint draws
+    // whatever is here and asks for what is missing somewhere it is allowed to
+    // wait. See docs/importing.md.
+    //
+    // `core` never opens a file. What derives these is the application, which
+    // knows about `imports/` and about QImage; this class only holds the
+    // answer, exactly as it holds a fill somebody else solved.
+    const TileGrid* referenceFrameFor(TrackId track, ImageId image, LayerId layer) const;
+
+    // Installs derived pixels. Not an edit: no command, no journal, no undo
+    // entry and no cel -- the document is not changed by this, only the
+    // memo of what a file decodes to. That is why it is allowed to be called
+    // from a paint.
+    void setReferenceFrame(TrackId track, ImageId image, LayerId layer, TileGrid tiles);
+
+    // Throws the derived pixels away. Everything a reference frame depends on
+    // that is not in its key says so by calling this -- the layer's source
+    // being repointed, a document being replaced by another whose drawings
+    // answer to the same ids.
+    //
+    // Not bounded yet, and deliberately not: one still is one entry, and a
+    // bound whose only entry can never be evicted is machinery pretending to
+    // be a policy. Sequences are what make it a cache; the shape here is the
+    // one a bound goes into. See CtgFillCache for what that looks like once it
+    // matters, including the part where a lookup and not a store is what keeps
+    // an entry alive.
+    void forgetReferenceFrames();
+
     // --- history ---------------------------------------------------------
 
     // Nested calls join the outermost command, so a high-level edit built from
@@ -464,6 +496,13 @@ private:
     };
     static constexpr std::size_t kCarriedMarksKept = 16;
     mutable std::unordered_map<CtgKey, CarriedMarksEntry, CtgKeyHash> carried_marks_;
+
+    // What imported files decoded to, per drawing and layer. Derived: nothing
+    // here is written to disk and losing it costs a decode. Keyed the same way
+    // a fill is -- see "why a cache key of cel revisions serves wrong fills,
+    // not slow ones" in docs/handover.md for why the key names the drawing and
+    // the layer rather than anything with a revision in it.
+    std::unordered_map<CtgKey, TileGrid, CtgKeyHash> reference_frames_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

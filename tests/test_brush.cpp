@@ -565,6 +565,92 @@ void halfLookupMatchesTheComputation() {
     }
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A grid holding one flat colour over a rectangle, which is what an imported
+// file decodes to as far as the compositor is concerned. Built here rather than
+// decoded, because what these tests are about is the path from a derived grid
+// to the screen and not the decoder -- and `core` has no decoder.
+TileGrid flatGrid(const PixelRect& area, const Rgba& colour) {
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+    for (int y = area.y; y < area.y + area.height; ++y) {
+        for (int x = area.x; x < area.x + area.width; ++x) {
+            auto& tile = built[tileCoordFor(x, y)];
+            if (!tile) tile = std::make_shared<Tile>();
+            tile->setPixel(tileLocal(x), tileLocal(y), colour);
+        }
+    }
+    TileGrid grid;
+    for (auto& [coord, tile] : built) grid.set(coord, std::move(tile));
+    return grid;
+}
+
+void aReferenceLayerDrawsWhatWasDerived() {
+    TEST("a reference layer composites its derived frame and holds no cel");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    Compositor compositor;
+    Framebuffer frame;
+    const PixelRect region{495, 495, 10, 10};
+
+    // Nothing derived yet, and this is the case that has to be right rather
+    // than merely not crash: compositing may not start a decode, so the honest
+    // answer while a picture is being worked out is that the layer does not
+    // draw. Silently transparent, exactly as a CTG layer with no fill is.
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.0, 1e-3);
+
+    f.doc.setReferenceFrame(f.track, f.image, reference,
+                            flatGrid({490, 490, 20, 20}, {0.0f, 0.0f, 1.0f, 1.0f}));
+
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    const Rgba centre = frame.pixel(5, 5);
+    CHECK_NEAR(centre.a, 1.0, 1e-2);
+    CHECK_NEAR(centre.b, 1.0, 1e-2);
+
+    // And it is a layer in every other respect. Opacity and visibility are
+    // properties of a Layer and the pass carries them, so nothing about them
+    // had to know this kind exists -- which is the claim worth pinning, because
+    // the alternative design would have needed both taught about it.
+    Layer faded = *f.tl().findLayer(reference);
+    faded.opacity = 0.5f;
+    f.doc.updateLayer(f.track, reference, faded);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.5, 1e-2);
+
+    Layer hidden = *f.tl().findLayer(reference);
+    hidden.visible = false;
+    f.doc.updateLayer(f.track, reference, hidden);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.0, 1e-3);
+}
+
+void aDerivedFrameIsNotDocumentState() {
+    TEST("deriving a frame allocates no cel, records no undo step, and is forgettable");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    const std::size_t tiles_before = f.doc.totalTileCount();
+    const bool could_undo = f.doc.canUndo();
+
+    f.doc.setReferenceFrame(f.track, f.image, reference,
+                            flatGrid({0, 0, 300, 300}, {1.0f, 1.0f, 1.0f, 1.0f}));
+
+    // The picture is a memo and not an edit. This is what makes an import free
+    // to a save and to the undo history -- a 240-frame sequence would otherwise
+    // be gigabytes in the journal -- and it is the property the whole reference
+    // shape rests on.
+    CHECK_EQ(f.doc.totalTileCount(), tiles_before);
+    CHECK_EQ(f.doc.canUndo(), could_undo);
+    CHECK(f.doc.scene().findTrack(f.track)->findImage(f.image)->celFor(reference) == kNoId);
+
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference) != nullptr);
+    f.doc.forgetReferenceFrames();
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference) == nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -583,5 +669,7 @@ int main() {
     compositorRespectsOrderAndOpacity();
     compositorHandlesEmptyAndBounds();
     compositorWorksLeftOfTheOrigin();
+    aReferenceLayerDrawsWhatWasDerived();
+    aDerivedFrameIsNotDocumentState();
     return testing::summarise("brush");
 }

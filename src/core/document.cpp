@@ -91,6 +91,11 @@ void Document::loadScene(Scene scene) {
     ctg_cache_.clear();
     ctg_carries_.clear();
     carried_marks_.clear();
+    // The keys are drawing and layer ids, and the document arriving here hands
+    // out its own from one -- so an entry kept across a load would answer to an
+    // id belonging to a drawing that no longer exists, with a picture from the
+    // project that was open before.
+    reference_frames_.clear();
     undo_stack_.clear();
     redo_stack_.clear();
     pending_ = Command{};
@@ -765,6 +770,17 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
     const CtgFill* found = ctg_cache_.find(CtgKey{image_id, layer_id});
     return (found && found->valid) ? found : nullptr;
 }
+
+const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id) const {
+    auto found = reference_frames_.find(CtgKey{image_id, layer_id});
+    return (found == reference_frames_.end()) ? nullptr : &found->second;
+}
+
+void Document::setReferenceFrame(TrackId, ImageId image_id, LayerId layer_id, TileGrid tiles) {
+    reference_frames_[CtgKey{image_id, layer_id}] = std::move(tiles);
+}
+
+void Document::forgetReferenceFrames() { reference_frames_.clear(); }
 
 void Document::setCtgCarry(const CtgKey& key, const CtgWarp& warp) {
     ctg_carries_[key] = warp;

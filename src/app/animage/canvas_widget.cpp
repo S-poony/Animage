@@ -1825,17 +1825,32 @@ void CanvasWidget::drawSelection(QPainter& painter) const {
 
 // --- clipboard -----------------------------------------------------------
 
-// Everything the brush checks before it lays a dab down, and nothing else. The
-// layer kind is not here: the brush puts scribbles on a colour layer, the
-// eraser rubs them out again, and so does a Backspace through a loop. Nothing
-// on this list moves a mark from one place to another, so nothing on it has to
-// care which kind of mark it is.
+// Everything the brush checks before it lays a dab down, and nothing else.
+//
+// **One layer kind is here and the others deliberately are not**, which is a
+// finer distinction than this list used to draw. It said the kind was never
+// asked, because the brush puts scribbles on a colour layer, the eraser rubs
+// them out again, and so does a Backspace through a loop -- nothing on this
+// list moves a mark from one place to another, so nothing on it had to care
+// which kind of mark it was. That reasoning is intact and still decides the
+// colour layer.
+//
+// A reference layer is a different case and is the first of its sort: it holds
+// no pixels at all. There is no cel to write into and no cel that could be
+// created, so the question is not what kind of mark this would be but whether
+// there is anywhere to put one. See docs/importing.md.
 CanvasWidget::Refusal CanvasWidget::refuseToEditHere() const {
     if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
     if (!layer) return Refusal::NoLayer;
+    // Ahead of the lock, which is the order refuseHere already uses and for the
+    // reason it gives: unlocking would not make this work, so naming the lock
+    // would send somebody to fix the wrong thing. An import is not locked --
+    // the kind is what refuses -- but a person is free to lock one, and then
+    // the true reason still has to be the one that is said.
+    if (layer->kind == LayerKind::Reference) return Refusal::ReferenceLayer;
     if (layer->locked) return Refusal::LockedLayer;
     if (!layer->visible) return Refusal::HiddenLayer;
     return Refusal::None;
@@ -1972,6 +1987,9 @@ QString CanvasWidget::explain(Refusal refusal) {
         case Refusal::ColourLayer:
             return QStringLiteral("a colour layer holds labels rather than paint, so there is "
                                   "nothing here that can be resampled");
+        case Refusal::ReferenceLayer:
+            return QStringLiteral("this is an imported picture, which is shown from its file "
+                                  "rather than drawn -- convert it to drawings first");
         case Refusal::NothingDrawn:
             return QStringLiteral("nothing is drawn on this layer");
         case Refusal::NothingSelected: return QStringLiteral("nothing is selected");

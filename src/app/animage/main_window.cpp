@@ -59,6 +59,7 @@
 
 #include "canvas_widget.h"
 #include "ctg_solver.h"
+#include "image_import.h"
 #include "layer_list.h"
 #include "export_sequence.h"
 #include "project_io.h"
@@ -848,6 +849,12 @@ void MainWindow::buildMenus() {
     file->addAction(makeAction(Id::OpenProject, [this] { openProject(); }));
     file->addAction(makeAction(Id::SaveProject, [this] { saveProject(); }));
     file->addAction(makeAction(Id::SaveProjectAs, [this] { saveProjectAs(); }));
+    file->addSeparator();
+    // A submenu with one item in it, because the others are coming and the
+    // place they go should not move once people have found it. See
+    // docs/importing.md for what "Image sequence" and "Video" will ask.
+    QMenu* import = file->addMenu(QStringLiteral("&Import"));
+    import->addAction(QStringLiteral("&Image..."), this, &MainWindow::importImage);
     file->addSeparator();
     // No key, so no row: the table is what the keyboard does, and an action with
     // nothing bound to it has nothing to say there.
@@ -1949,7 +1956,7 @@ bool MainWindow::leaveCurrentDocument() {
 
     if (!project_folder_.isEmpty()) {
         QString error;
-        if (ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
+        if (ProjectIO::save(doc_, project_folder_, save_state_, &error, imports_)) {
             saved_history_stamp_ = doc_.historyStamp();
             updateTitle();
             return true;
@@ -2127,6 +2134,15 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
     doc_ = std::move(loaded);
     save_state_ = std::move(state);
     project_folder_ = home;
+    // Anything the previous project's imports were reachable under belonged to
+    // that project. Kept, a name that both projects happen to use would resolve
+    // to the wrong file on the next save.
+    imports_ = ProjectIO::Imports();
+    // Before afterProjectLoaded, so the first paint has the pictures. A
+    // reference layer with nothing derived draws nothing at all -- correctly,
+    // since compositing may not start a decode -- and the canvas would come up
+    // blank and then fill in, which reads as a bug.
+    deriveReferenceFrames(home);
     afterProjectLoaded();
     return true;
 }
@@ -2392,7 +2408,7 @@ bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flat
 
 bool MainWindow::saveTo(const QString& folder) {
     QString error;
-    if (!ProjectIO::save(doc_, folder, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, folder, save_state_, &error, imports_)) {
         QMessageBox::warning(this, QStringLiteral("Cannot save"), error);
         return false;
     }
@@ -2420,7 +2436,7 @@ void MainWindow::onAutosaveTick() {
     }
 
     QString error;
-    if (!ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, project_folder_, save_state_, &error, imports_)) {
         // Deliberately not a dialog. A failing autosave would otherwise
         // interrupt drawing every two minutes, which is worse than the failure
         // it is reporting -- and Save still says so properly when asked.
@@ -2609,6 +2625,13 @@ void MainWindow::syncStatus() {
             case CanvasWidget::Refusal::NoLayer:
                 past = QStringLiteral("   no layer is selected");
                 break;
+            case CanvasWidget::Refusal::ReferenceLayer:
+                // Named as what it is rather than as "locked", which is what
+                // this would have said before the kind was asked ahead of the
+                // lock: unlocking would not help, and sending somebody to try
+                // is worse than saying nothing.
+                past = QStringLiteral("   this is an imported picture");
+                break;
             default: break;
         }
     }
@@ -2730,6 +2753,208 @@ void MainWindow::refreshEverything() {
     canvas_->setFrame(timeline_widget_->currentSlot());
     rebuildLayerList();
     syncStatus();
+}
+
+// --- importing -----------------------------------------------------------
+
+namespace {
+
+// What an imported file is called inside the project, given what it is called
+// outside it.
+//
+// Two things happen here. The name is reduced to something a folder on any of
+// the three platforms will take, and it is made unique against the imports the
+// scene already names -- because two modelsheets from two folders are very
+// often both called `model.png`, and the second one silently becoming the first
+// is a picture quietly replaced.
+std::string importNameFor(const Document& doc, const QString& path) {
+    QString stem = QFileInfo(path).completeBaseName();
+    QString suffix = QFileInfo(path).suffix().toLower();
+    // Everything that is not a letter, a digit, a dash or a dot becomes a dash,
+    // which is the rule the export already uses for track and layer names.
+    for (QChar& c : stem) {
+        if (!c.isLetterOrNumber() && c != QLatin1Char('-')) c = QLatin1Char('-');
+    }
+    if (stem.isEmpty()) stem = QStringLiteral("import");
+    if (suffix.isEmpty()) suffix = QStringLiteral("png");
+
+    std::unordered_set<std::string> taken;
+    for (const std::string& name : ProjectIO::importsReferencedBy(doc)) taken.insert(name);
+
+    const QString base = stem + QLatin1Char('.') + suffix;
+    if (!taken.count(base.toStdString())) return base.toStdString();
+    for (int n = 2;; ++n) {
+        const QString candidate =
+            QStringLiteral("%1-%2.%3").arg(stem).arg(n).arg(suffix);
+        if (!taken.count(candidate.toStdString())) return candidate.toStdString();
+    }
+}
+
+// What a picture of this size will cost, in the units somebody can act on.
+QString costOf(int width, int height) {
+    const std::size_t tiles = image_import::tileCountFor(width, height);
+    // A tile is 128x128 RGBA half = exactly 128 KB, so tiles/8 is megabytes.
+    const double megabytes = static_cast<double>(tiles) / 8.0;
+    return QStringLiteral("%1 x %2 pixels, %3 tiles, about %4 MB in memory")
+        .arg(width)
+        .arg(height)
+        .arg(tiles)
+        .arg(megabytes, 0, 'f', megabytes < 10.0 ? 1 : 0);
+}
+
+}  // namespace
+
+// File ▸ Import ▸ Image.
+//
+// The picture lands as a **reference layer**: a layer that holds no cels at all
+// and shows the imported file, derived and memoised rather than stored. What
+// that buys and what it gives up is docs/importing.md; the two consequences
+// visible from here are that the brush refuses on the layer's kind, and that a
+// save writes the file rather than a drawing.
+//
+// Placed at 1:1 with its top-left at the origin, which is where this stops
+// short of the plan: positioning it is the transform box, and on a reference
+// layer that box has to store its answer instead of baking it. Until then the
+// canvas is the only rectangle in the model and drawing outside it is already
+// allowed, so a modelsheet larger than the frame is visible and usable, just
+// not yet movable.
+void MainWindow::importImage() {
+    stopPlayback();
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import image"), QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    // Asked before anything is decoded, so that "this is 70 MB" arrives before
+    // the wait rather than after it.
+    const image_import::Survey survey = image_import::survey(path);
+    if (!survey.ok) {
+        QMessageBox::warning(this, QStringLiteral("Import image"),
+                             QStringLiteral("%1 cannot be read: %2")
+                                 .arg(QFileInfo(path).fileName(), survey.trouble));
+        return;
+    }
+
+    const QString recap = QStringLiteral("%1\n\n%2\n\nIt will be shown from its file rather "
+                                         "than drawn, so it cannot be painted on until it is "
+                                         "converted to drawings.")
+                              .arg(QFileInfo(path).fileName(), costOf(survey.width, survey.height));
+    if (QMessageBox::question(this, QStringLiteral("Import image"), recap,
+                              QMessageBox::Ok | QMessageBox::Cancel,
+                              QMessageBox::Ok) != QMessageBox::Ok) {
+        return;
+    }
+
+    QString trouble;
+    if (!importImageFrom(path, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import image"),
+                             QStringLiteral("%1 cannot be read: %2")
+                                 .arg(QFileInfo(path).fileName(), trouble));
+    }
+}
+
+bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
+    QString why;
+    image_import::Converted converted;
+    TileGrid pixels = image_import::decode(path, &why, &converted);
+    if (pixels.empty() && !why.isEmpty()) {
+        if (trouble) *trouble = why;
+        return false;
+    }
+
+    const std::string import_name = importNameFor(doc_, path);
+    const QString shown = QFileInfo(path).completeBaseName();
+
+    TrackId added = kNoId;
+    ImageId drawing = kNoId;
+    LayerId layer_id = kNoId;
+    {
+        // One command, so that an import undoes in one step. The decoded pixels
+        // are deliberately not in it: they are derived, no cel holds them, and
+        // there is nothing for the journal to put back.
+        doc_.beginCommand("Import image");
+        added = doc_.addTrack(shown.toStdString());
+        layer_id = doc_.addLayer(added, shown.toStdString(), 0, LayerKind::Reference);
+        drawing = doc_.insertImage(added, 0);
+
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            if (const Layer* layer = track->findLayer(layer_id)) {
+                Layer updated = *layer;
+                updated.reference_source = import_name;
+                doc_.updateLayer(added, layer_id, updated);
+            }
+        }
+
+        // Held past its last drawing, or the modelsheet is on frame 0 and
+        // nowhere else -- which is not a reference, it is a flash.
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            TrackProperties properties = track->properties();
+            properties.end = TrackEnd::HoldLast;
+            doc_.updateTrack(added, properties);
+        }
+        doc_.endCommand();
+    }
+
+    doc_.setReferenceFrame(added, drawing, layer_id, std::move(pixels));
+    imports_.pending[import_name] = path;
+
+    setCurrentTrack(added);
+    // An import adds a track, which is one of the routes that has to say so:
+    // syncTimelineHeight moves the dock by the rows that came or went rather
+    // than sizing it, so a route that does not call it leaves the strip at the
+    // height for the track count before. refreshEverything calls it.
+    refreshEverything();
+
+    // A colour conversion that nobody is told about is the failure this whole
+    // colour path exists to avoid: the picture arrives, it looks plausible, and
+    // every swatch in it is a different colour from the one the artist chose.
+    // Converting is right; doing it silently is not.
+    if (!converted.from.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Imported %1 and converted its colours from %2 to sRGB")
+                .arg(QFileInfo(path).fileName(), converted.from),
+            8000);
+    }
+    return true;
+}
+
+void MainWindow::deriveReferenceFrames(const QString& folder) {
+    QStringList unreadable;
+
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference || layer.reference_source.empty()) continue;
+
+            const QString file = folder + QStringLiteral("/imports/") +
+                                 QString::fromStdString(layer.reference_source);
+            QString trouble;
+            TileGrid pixels = image_import::decode(file, &trouble);
+            if (pixels.empty() && !trouble.isEmpty()) {
+                unreadable.append(QStringLiteral("%1 (%2)")
+                                      .arg(QString::fromStdString(layer.reference_source), trouble));
+                continue;
+            }
+
+            // Every drawing of the track, not only the one at frame 0. A still
+            // is one drawing today; walking them is what stops this being
+            // rewritten the moment a sequence has several.
+            for (const auto& [id, image] : track.images) {
+                doc_.setReferenceFrame(track.id, id, layer.id, pixels);
+            }
+        }
+    }
+
+    if (unreadable.isEmpty()) return;
+    // Said, and the project still opens. An import that will not read costs
+    // that picture; the drawings are untouched, and refusing to open a shot
+    // because a modelsheet has gone would be a worse trade than any this
+    // program makes elsewhere.
+    QMessageBox::warning(this, QStringLiteral("Imported pictures"),
+                         QStringLiteral("This project could not read %1 of its imported "
+                                        "pictures, and those layers will be blank:\n\n%2")
+                             .arg(unreadable.size())
+                             .arg(unreadable.join(QStringLiteral("\n"))));
 }
 
 // --- tracks --------------------------------------------------------------
@@ -3447,6 +3672,22 @@ void MainWindow::syncLayerTransformButton() {
                                  "A mark on one is a label rather than paint, and turning or\n"
                                  "scaling it would blend two labels into a third colour that\n"
                                  "then competes for regions on its own account.");
+    } else if (layer->kind == LayerKind::Reference) {
+        // Beside the colour layer and ahead of the lock, which is where this
+        // function's own rule puts a reason about the kind -- and it earns its
+        // place rather than merely fitting: without it a reference layer greys
+        // the button out anyway, on "nothing is drawn on this layer yet",
+        // because it has no cels. True, useless, and it sends somebody looking
+        // for a drawing to make. This one names what is actually in the way.
+        //
+        // What it says about baking is a promise this button cannot keep yet.
+        // A reference layer's pixels are derived from a file, so its placement
+        // wants storing rather than baking -- see docs/importing.md -- and
+        // until that exists an import sits at 1:1 at the origin.
+        refusal = QStringLiteral("an imported picture cannot be transformed yet.\n"
+                                 "It is shown from its file rather than stored as drawings,\n"
+                                 "so there is nothing here to bake. Placing one without\n"
+                                 "resampling it is still to be built.");
     } else if (layer->locked) {
         refusal = QStringLiteral("this layer is locked");
     } else if (!layer->visible) {

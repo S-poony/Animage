@@ -32,6 +32,19 @@ Document buildScene() {
     const LayerId colour = doc.addLayer(front, "colour", 2, LayerKind::Ctg);
     doc.addLayer(back, "sky");
 
+    // An imported picture on a track of its own, held past its last drawing --
+    // which is what an import lands as. It has no cels, deliberately: a
+    // reference layer's pixels are derived from the file named below.
+    const TrackId sheet = doc.addTrack("modelsheet");
+    const LayerId imported = doc.addLayer(sheet, "modelsheet", 0, LayerKind::Reference);
+    Layer reference = *doc.scene().findTrack(sheet)->findLayer(imported);
+    reference.reference_source = "model-sheet.png";
+    doc.updateLayer(sheet, imported, reference);
+    doc.insertImage(sheet, 0);
+    TrackProperties held = doc.scene().findTrack(sheet)->properties();
+    held.end = TrackEnd::HoldLast;
+    doc.updateTrack(sheet, held);
+
     Layer settings = *doc.scene().findTrack(front)->findLayer(colour);
     settings.ctg_sources = {rough, clean};
     settings.opacity = 0.6f;
@@ -102,6 +115,10 @@ void checkSameScene(const Document& a, const Document& b) {
             for (std::size_t s = 0; s < la.ctg_sources.size(); ++s) {
                 CHECK_EQ(la.ctg_sources[s], lb.ctg_sources[s]);
             }
+            // Which file a reference layer shows. It holds no cels, so this is
+            // the only thing standing between the layer and drawing nothing --
+            // losing it here would look exactly like an import that went blank.
+            CHECK_EQ(la.reference_source, lb.reference_source);
         }
 
         CHECK_EQ(ta.images.size(), tb.images.size());
@@ -393,6 +410,86 @@ void acorruptCelIsRefused() {
     refused(cut, "truncated");
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A reference layer's whole connection to its picture is a name, so the file
+// has to carry it and a save has to know to bring the bytes along. Both halves
+// fail the same way from the outside -- the layer draws nothing -- and neither
+// is visible in a document that was never written to disk.
+
+void anImportContributesNoCels() {
+    TEST("a reference layer writes no cels, however many drawings it has");
+    Document doc = buildScene();
+
+    // The manifest a save writes is one file per cel the scene refers to. An
+    // imported picture must not be in it: it has no cel to write, and a
+    // manifest that named one would have the save encoding pixels that do not
+    // exist.
+    const std::size_t before = ProjectIO::celsReferencedBy(doc).size();
+
+    const TrackId track = doc.addTrack("another import");
+    const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
+    Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
+    settings.reference_source = "background.jpg";
+    doc.updateLayer(track, layer, settings);
+    for (int i = 0; i < 5; ++i) doc.insertImage(track, 0);
+
+    CHECK_EQ(ProjectIO::celsReferencedBy(doc).size(), before);
+}
+
+void everyImportedFileIsNamedOnce() {
+    TEST("the import manifest lists each file once, sorted, and skips the unset");
+    Document doc;
+    const TrackId first = doc.addTrack("one");
+    const TrackId second = doc.addTrack("two");
+    const TrackId third = doc.addTrack("three");
+
+    const auto point = [&](TrackId track, const std::string& at) {
+        const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
+        Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
+        settings.reference_source = at;
+        doc.updateLayer(track, layer, settings);
+    };
+    point(first, "sky.png");
+    point(second, "animatic.png");
+    // The same file on two layers is one file to carry, not two.
+    point(third, "sky.png");
+    // And a reference layer that has not been pointed at anything yet is not a
+    // missing file. It is what a layer looks like before the import finishes.
+    doc.addLayer(first, "empty reference", 0, LayerKind::Reference);
+
+    const std::vector<std::string> named = ProjectIO::importsReferencedBy(doc);
+    CHECK_EQ(named.size(), std::size_t{2});
+    if (named.size() == 2) {
+        CHECK_EQ(named[0], std::string("animatic.png"));
+        CHECK_EQ(named[1], std::string("sky.png"));
+    }
+}
+
+// The version gate, from the direction that matters.
+//
+// A build that does not know this kind reads "reference" as raster -- that is
+// what kindFromName does with any word it has not heard of -- finds no cels,
+// concludes the layer is empty, and autosaves over the project having dropped
+// the import. Nothing about that fails loudly, which is exactly why the number
+// exists. This pins that the number moved.
+void importsRaisedTheFormatVersion() {
+    TEST("scene.json says version 2, which is what stops an older build eating an import");
+    const std::string text = ProjectIO::writeSceneJson(buildScene());
+    CHECK(text.find("\"version\": 2") != std::string::npos);
+    CHECK(ProjectIO::kSceneFormatVersion >= 2);
+
+    // And a file from the future is still refused rather than half-read.
+    std::string tampered = text;
+    const std::size_t at = tampered.find("\"version\": 2");
+    if (at != std::string::npos) tampered.replace(at, 12, "\"version\": 99");
+    Document loaded;
+    std::string error;
+    CHECK(!ProjectIO::readSceneJson(tampered, loaded, &error));
+    CHECK(!error.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -407,5 +504,8 @@ int main() {
     transparentTilesAreNotWritten();
     celBytesAreStable();
     acorruptCelIsRefused();
+    anImportContributesNoCels();
+    everyImportedFileIsNamedOnce();
+    importsRaisedTheFormatVersion();
     return testing::summarise("serialise");
 }

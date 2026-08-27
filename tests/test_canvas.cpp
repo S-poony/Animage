@@ -30,6 +30,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QColorSpace>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QCheckBox>
@@ -8972,11 +8973,153 @@ void shiftErasesInAStraightLineToo() {
     CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350), 0.0f);
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A picture on disk to import. Flat, opaque, and a colour nothing else in the
+// program produces, so "did that reach the canvas" is one pixel read.
+bool writeATestPicture(const QString& path, const QColor& colour) {
+    QImage image(200, 150, QImage::Format_RGBA8888);
+    image.fill(colour);
+    image.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return image.save(path, "PNG");
+}
+
+// The one that would go wrong quietly.
+//
+// A save does not edit the project folder, it builds a new one alongside and
+// renames it into place -- so **every directory entry is replaced on every
+// save**, and anything the build step did not put into the new folder is gone.
+// A cel survives that because its pixels are in the document and can always be
+// written out again. An imported file cannot: the document holds a name.
+//
+// So this is the test for a failure with no symptom at the time. The import
+// looks right, the save reports success, and the picture is missing the next
+// time the project is opened -- or two minutes later, when autosave has fired.
+void anImportSurvivesSavingAndOpening() {
+    TEST("an imported picture is still there after a save, a reopen, and a Save As");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 0, 255)));
+
+    const QString first = dir.filePath(QStringLiteral("first.animage"));
+    const QString second = dir.filePath(QStringLiteral("second.animage"));
+
+    {
+        MainWindow window;
+        window.resize(1000, 700);
+        window.show();
+        QCoreApplication::processEvents();
+
+        QString trouble;
+        CHECK(window.importImageFrom(picture, &trouble));
+        CHECK(trouble.isEmpty());
+
+        // Saved through the window rather than through ProjectIO directly,
+        // because what is being tested includes the window knowing where the
+        // bytes are before the project has a folder to hold them.
+        CHECK(window.saveTo(first));
+        CHECK(QFileInfo::exists(first + QStringLiteral("/imports/modelsheet.png")));
+
+        // A second save over the same folder. This is the one the swap eats:
+        // the file is now only in the project, so a save that does not carry it
+        // forward deletes the copy it was meant to preserve.
+        CHECK(window.saveTo(first));
+        CHECK(QFileInfo::exists(first + QStringLiteral("/imports/modelsheet.png")));
+
+        // And Save As, which writes a project that has to stand on its own --
+        // reaching back to a folder it is no longer saving into.
+        CHECK(window.saveTo(second));
+        CHECK(QFileInfo::exists(second + QStringLiteral("/imports/modelsheet.png")));
+    }
+
+    // The original picture goes. A project is a self-contained folder, so
+    // opening it must not depend on where the file was imported from -- and
+    // deleting it is the only way to prove the folder is standing on its own
+    // rather than on a path that happens to still resolve.
+    CHECK(QFile::remove(picture));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(second, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const Track* track = nullptr;
+    const Layer* layer = nullptr;
+    for (const Track& t : doc.scene().tracks) {
+        for (const Layer& l : t.layers) {
+            if (l.kind == LayerKind::Reference) {
+                track = &t;
+                layer = &l;
+            }
+        }
+    }
+    CHECK(track != nullptr && layer != nullptr);
+    if (!track || !layer) return;
+
+    CHECK_EQ(layer->reference_source, std::string("modelsheet.png"));
+    // The name coming back is not enough: it is the derived pixels that decide
+    // whether anything is on screen, and a layer whose file did not survive
+    // looks exactly like one whose file did until you ask for them.
+    const TileGrid* frame = doc.referenceFrameFor(track->id, track->imageAtSlot(0), layer->id);
+    CHECK(frame != nullptr);
+    if (frame) CHECK_NEAR(frame->pixel(10, 10).b, 1.0, 1e-2);
+}
+
+void animportedLayerRefusesTheBrushAsItself() {
+    TEST("the brush refuses an imported layer as imported, not as locked or empty");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importImageFrom(picture, &trouble));
+    QCoreApplication::processEvents();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // **Which** refusal, and not merely that there is one. Every wrong answer
+    // here is a plausible one that sends somebody somewhere useless: "locked"
+    // sends them to unlock it, "nothing is drawn" sends them to draw on it, and
+    // both are reachable -- the layer really does have no cels, and a person is
+    // free to lock it. See refuseToEditHere, where the kind is asked first for
+    // exactly this reason.
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
+
+    // Still the same answer once it is locked as well, which is the ordering
+    // this is really pinning.
+    // The import lands at the bottom of the stack, so it is the last track.
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const Track& track = doc.scene().tracks.back();
+    CHECK(!track.layers.empty());
+    if (track.layers.empty()) return;
+    Layer locked = track.layers.front();
+    locked.locked = true;
+    doc.updateLayer(track.id, locked.id, locked);
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    anImportSurvivesSavingAndOpening();
+    animportedLayerRefusesTheBrushAsItself();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();

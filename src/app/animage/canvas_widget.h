@@ -184,6 +184,12 @@ public:
         LockedLayer,
         HiddenLayer,
         ColourLayer,   // a mark there is a label; interpolating one invents colours
+        // An imported picture. Not "locked" and not "empty": there is no cel
+        // here and none that could be made, because what is on screen is
+        // derived from a file. The way to draw on one is to convert it to
+        // drawings first, and the message says so -- a refusal that does not
+        // name its remedy is the disabled control nobody can find twice.
+        ReferenceLayer,
         NothingDrawn,
         NothingSelected,  // erase takes a loop as its argument and had none
         NothingCopied,

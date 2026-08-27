@@ -55,6 +55,16 @@ public:
     // has happened at all.
     bool openProjectAt(const QString& folder, QString* error = nullptr);
 
+    // Writes the project to `folder` and makes that the project's home, which
+    // is what Save and Save As both end in. Public for the same reason
+    // openProjectAt is: the paths that reach it in the program go through a
+    // file dialog, and a test cannot answer one.
+    //
+    // Reports a failure in a message box rather than to the caller, so a test
+    // driving it is asserting that saving worked and never inspecting why it
+    // did not.
+    bool saveTo(const QString& folder);
+
     // What the autosave timer does when it fires. Public for the same reason as
     // openProjectAt: the interval is two minutes, so a test that waited for it
     // would not be a test. Writes over the project without asking and without a
@@ -70,6 +80,20 @@ public:
     // The document this window is editing. For tests that need to build a
     // situation the interface can only reach with a tablet in somebody's hand.
     animage::Document& documentForTesting() { return doc_; }
+
+    // Brings a picture in from `path` and puts it on a new track as a reference
+    // layer. Everything File ▸ Import ▸ Image does except ask: no file dialog,
+    // no recap, no message box.
+    //
+    // Public because the asking and the doing want separating anyway --
+    // docs/importing.md asks for each import to be "a function the drop handler
+    // can call", and a modal file dialog is not something `shots` or a test can
+    // drive. This is that function, and the menu item is a dialog in front of
+    // it.
+    //
+    // False with `trouble` filled in when the file cannot be read; the document
+    // is untouched in that case.
+    bool importImageFrom(const QString& path, QString* trouble = nullptr);
 
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
@@ -284,6 +308,21 @@ private:
     enum class Clipboard { Cut, Copy, Paste };
     void clipboard(Clipboard what);
 
+    // Importing. One item per kind of thing being imported rather than one
+    // that sniffs the file, because they arrive at different times and ask
+    // different questions. See docs/importing.md.
+    void importImage();
+
+    // Decodes every imported file the scene names, from `folder`. A reference
+    // layer holds no pixels, so this is what makes an opened project show its
+    // imports -- without it the layers are there and draw nothing.
+    //
+    // Reports what it could not read rather than failing the load. A missing
+    // import costs that picture; the drawings are not affected, and refusing
+    // the whole project over a reference would be worse than opening it with
+    // the reference blank and saying so.
+    void deriveReferenceFrames(const QString& folder);
+
     // Tracks. Adding one puts it at the bottom of the stack and makes it
     // current, because the thing you do next is draw on it.
     void addTrack();
@@ -331,7 +370,6 @@ private:
     bool clearTheWayFor(const QString& folder, const QString& called);
     void saveProject();
     void saveProjectAs();
-    bool saveTo(const QString& folder);
     // Points everything at the document that was just loaded: the canvas, the
     // timeline and the layer panel all hold ids from the old one.
     void afterProjectLoaded();
@@ -489,6 +527,17 @@ private:
     // describes this document in that folder and nothing outside the pair
     // means anything.
     ProjectIO::SaveState save_state_;
+
+    // Files imported this session that are not inside a project folder yet,
+    // by the name the layer knows them as.
+    //
+    // This exists for one moment and no other: between importing into a
+    // project that has never been saved, and that project's first save. After
+    // that the bytes are in `imports/` and the folder is what a save reads
+    // them from -- which is the whole point of copying them in. Entries are
+    // kept rather than pruned because a Save As has to be able to reach back
+    // to the same original, and one path per import is nothing.
+    ProjectIO::Imports imports_;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;
