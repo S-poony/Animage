@@ -1223,6 +1223,12 @@ struct LatticeFit {
     // means the run saw nothing: every node tied at every offset it could
     // reach, which is what "the two drawings do not overlap here" looks like
     // from inside the push step.
+    //
+    // `agreement` above says the same thing more directly -- a rest pose over
+    // bare paper agrees with nothing, exactly zero -- and the fallback reads
+    // both: this one to know a run found nothing, that one to know there was
+    // nothing to find. They are not interchangeable, because a run can also
+    // move nothing by already being right.
     bool moved = false;
 };
 
@@ -1565,12 +1571,16 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
     // node at all" detects is not a worse answer, it is *no evidence*, which is
     // what insufficient overlap looks like from inside the push step.
     //
-    // The cost is still compared, as a floor rather than as the choice: a
+    // A floor is still compared rather than taking the fallback outright: a
     // fallback that matches worse than the run it replaces is not an
-    // improvement, and this is the only thing standing between an aliased rung
-    // two and a lattice that had correctly found nothing to do. Reaching here
-    // at all means the first run moved nothing, so two-circles never sees this
-    // branch and the comparison cannot bring its failure back.
+    // improvement, and it is what stands between an aliased rung two and a
+    // lattice that had correctly found nothing to do. Reaching here at all
+    // means the first run moved nothing, so two-circles never sees this branch
+    // and the comparison cannot bring its failure back.
+    //
+    // *Which measure that floor is taken in is not a free choice*, and neither
+    // a difference nor agreement answers it alone. That is at the comparison
+    // itself, below, where somebody about to change it will be standing.
     //
     // Rung two is worked out here rather than above, because on the ordinary
     // path it is never wanted: it is an exhaustive coarse-to-fine search plus

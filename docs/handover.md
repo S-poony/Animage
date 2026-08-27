@@ -5571,6 +5571,11 @@ fallback that matches worse than the run it replaces is not an improvement —
 which is a third thing: the measurement that killed the old design did not kill
 the quantity it was measured on.
 
+The floor then turned out to need a second quantity beside it, and this section
+came within one paragraph of repeating its own lesson: the sentence above was
+written when the cost was the whole rule, and it stopped being the whole rule.
+See "what the lattice fallback was being compared against".
+
 ### What a default member initialiser reaches that you did not mean it to
 **`ANIMAGE_CARRY` was the default of `CtgSettings::carry`, so it reached the
 tests.** It was added as temporary scaffolding, so that a person could run the
