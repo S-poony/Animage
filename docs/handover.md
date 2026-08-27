@@ -2797,6 +2797,18 @@ and that is not cosmetic — the layer kind is asked ahead of the lock, because
 unlocking a colour layer would not make this work and naming the lock would send
 somebody to fix the wrong thing.
 
+**A reason missing from that list is worse than one in the wrong place**, and
+two were missing. `beginLayerTransform` refuses where there is no drawing at
+this frame — past a track's last drawing there is no cel to float — and where
+nothing has been drawn on the layer at all; the button knew about neither, so it
+stayed pressable and the answer arrived as a status line that goes away instead
+of a tooltip that is there when you look for it. They are also the two that
+change on a different signal from the rest: the frame one moves with the
+playhead, so `refreshLayerFlags` asks again; the ink one arrives with the first
+stroke, so `documentChanged` does. Cheap in both cases — `layerDrawings` counts
+cels, never pixels. `test_canvas` asserts each reason's wording, which is the
+half of this a screenshot cannot show.
+
 Locked layers refuse. Worth knowing because [importing.md](importing.md) plans
 an imported modelsheet as a *locked* layer placed with this very box, so #31
 will have to unlock to place or argue for an exception.
@@ -2815,22 +2827,66 @@ try it from.
 What is being placed is the layer, so there is no other way to see whether it
 has landed. Three things about that picture:
 
-- **One grid, merged, not one blit per drawing.** They all move by the same
-  matrix, so they are merged once with `mergeOver` and blitted once. Forty
-  separate low-opacity blits would pile up into black everywhere the character
-  stayed still, which is most of a held drawing.
+- **One picture, not one blit per drawing.** They all move by the same matrix,
+  so what has to come out of this is a single image: forty separate low-opacity
+  blits would pile up into black everywhere the character stayed still, which is
+  most of a held drawing. It is `compositeGrids` that makes it, handed the
+  drawings as forty passes. The first version merged the grids into one with
+  `mergeOver` and composited that — the same picture arrived at the expensive
+  way, because `mergeOver` alpha-blends every overlapping tile at full tile
+  resolution and by the third drawing almost every tile overlaps. Forty drawings
+  of an HD character measured **817 ms**, on the interface thread, with nothing
+  on screen to say why — the same freeze the bake at the other end of the
+  gesture is so careful to announce, at the moment the button is pressed.
+  Through the compositor it is **59 ms**: it works at the step the picture is
+  actually drawn at rather than at tile resolution, and it splits by rows across
+  every core.
 - **Their own colours, not a tint.** The onion skin throws a ghost's colour away
   and tints it warm or cool because what it is saying is *when* that drawing is.
   These are all one layer at one moment, so there is no when to say, and what is
   worth seeing is what will actually land.
 - **The same rectangle and step as the float**, so both go through one matrix and
   cannot drift apart.
+- **In `Document::layerDrawings`' order, which is sorted.** `Track::images` is an
+  `unordered_map`: its walk order is not the timeline's and is not stable
+  between two runs of the same program. Merged in that order the ghost picture
+  came out different every time it was drawn, because `mergeOver` alpha-composites
+  and which drawing wins a shared pixel depends on which came last. There is no
+  "nearest" among these to put in front — they are all one layer at one moment —
+  so the order is fixed rather than meaningful. Fixed is the whole requirement.
 
 **The box is green.** Two doors into one gesture that write amounts two orders of
 magnitude apart should not look identical, and the ghosts do not say it on their
 own — a layer of two drawings barely has ghosts. Red still beats green: whether
 it can be committed at all is the more urgent of the two things that colour
 carries.
+
+### And it survives the playhead, which the Transform tool does not
+
+`setFrame` commits a live transform, and for the tool that is right: a float
+that follows you to another drawing is a paste onto the wrong drawing waiting to
+happen, and there is nothing useful it could mean out there.
+
+**A whole-layer transform inherited that rule and should never have.** The
+reasoning is entirely about a float belonging to one drawing, and it inverts for
+a gesture whose whole claim is that every drawing moves together — scrubbing to
+see how the layer sits on a later drawing is part of placing it, not the end of
+placing it. What it did instead was bake: a click on the timeline rewrote every
+drawing in the layer, seconds of work, no Apply pressed, and nothing anywhere
+that would have led you to expect it. The most natural thing to do with the
+gesture was the one thing that ended it.
+
+So the gesture survives, and the playhead changes exactly one thing about it:
+which drawing is the float and which are the ghosts. `rebindLayerTransform`
+re-splits the list and rebuilds the two pictures. The box, the pivot and the
+five numbers do not move — they are about the layer, and the union of every
+drawing's bounds is what makes that true whatever frame you are standing on.
+`a-layer-moved-through-time-from-another-drawing` in `shots` is the picture of
+it, and `test_canvas` asserts both halves: that the layer transform survives and
+that an ordinary one still commits.
+
+Changing *track* or *layer* still commits, and those keep their reason: a
+transform is of one layer of one track, so leaving either says you are done.
 
 ### And the onion skin has to leave the layer out
 
@@ -2867,6 +2923,22 @@ undoes — the newest command is never dropped — but the rest of the session's
 history goes with it. That is inherent to baking rather than a fault: undo has
 to hold the old pixels, and there is no cheaper correct answer.
 
+**It is inherent to a bake that *lands*, and that distinction was missing.** A
+bake that runs out of memory undoes itself (below) — and the trim had already
+happened by then, at the moment the command closed. So a failed bake dropped the
+session's undo history to make room for a command it then threw away, and said
+"nothing has changed" over the top of it. Measured on a fixture with a small
+budget: fourteen commands before, none after, and the first drawing no longer
+reachable by Ctrl+Z. On a real HD layer the numbers in that table say the trim
+fires every time.
+
+So `endCommand` skips the trim while `defer_trim_` is set, `transformLayer` sets
+it for the length of its own command, and trims itself once it knows the
+outcome: on the way out if the bake landed, not at all if it was rescued. The
+redo stack is held aside and put back the same way — a bake that changed nothing
+must not be the thing that took away a redo. `transformLayer` is the only caller
+that sets it and it is cleared before that function returns.
+
 **And the commit ceiling had to stop being a total.** It was one budget across
 the whole bake at first, which is the truthful-sounding shape and was wrong
 immediately: a plain seven degrees on a forty-drawing 4K layer wants about
@@ -2893,6 +2965,29 @@ you could turn your layer depended on how big the drawings were, which is not a
 rule anybody could hold in their head. Three clears a rotation at either size
 and still refuses a scale to 200%, which is four times the pixels before the
 margin — so the two cases it has to tell apart stay on opposite sides of it.
+
+**And asking the ceiling had to stop being a per-move question.** Everything
+above is asked again on every pointer move of a drag, because the answer is what
+turns the box red. For one drawing that is 0.3 ms and was measured; for a layer
+it was **10.9 ms a move** on a forty-drawing shot of ordinary line art — on the
+interface thread, once per tablet event, on a gesture the pen is holding.
+
+Almost all of it was `drawnBounds`, which asks every tile whether it is fully
+transparent and so reads pixels until it finds one. Sixteen milliseconds for
+forty drawings, and *none of it depends on the five numbers being dragged*. So
+`LayerFootprint` gathers it when the gesture starts — the grids, each one's
+drawn bounds, and the occupied-tile count — and the drag reads the same answer
+back on every move: **0.17 ms**. The footprint owns copies of the grids rather
+than pointing at the document's, which costs a hash map of shared tile handles
+and buys a thing a live gesture can hold without a dangling pointer being
+possible.
+
+The exact count underneath it also stopped hashing. `destinationTileCount` marks
+a dense bitmap over the box the destination lands in, where that box is small
+enough to address, and keeps the hash set for the ones that are not. Same
+coordinates, same answers — 24,000 random transforms across five grid shapes
+were compared against the old implementation to be sure — and it helps the
+single-drawing path too.
 
 ### The wait, and what is on screen during it
 
@@ -2953,13 +3048,20 @@ Three details, each of which would be a bug without it:
 - **The rescued command is dropped from the redo stack.** `undo` moves a command
   across rather than discarding it, and a redo of a bake that ran out of memory
   would put the layer back into the state the rescue had just taken it out of.
+- **The history is not trimmed for it, and the redo stack it found is put
+  back.** See "what it costs" above: closing the command was spending the
+  session's undo on a command that was about to be thrown away. This is the one
+  of the four that was found by reading rather than by using, and it is the one
+  that made the refusal message untrue.
 
-Both are pinned by tests, through a hook on `Document`, because running out of
-memory for real is not something a test can arrange: a machine with room to swap
-succeeds and is merely slow, and one without it takes the test process down
+All four are pinned by tests, through a hook on `Document`, because running out
+of memory for real is not something a test can arrange: a machine with room to
+swap succeeds and is merely slow, and one without it takes the test process down
 along with the assertion. The hook is a cost worth paying — the rescue is what
 licenses bounding the growth instead of the total, and an untested rescue is one
-that stops working quietly.
+that stops working quietly. The hook is taken by the next call to
+`transformLayer` whatever that call does, so one armed before an identity cannot
+lie in wait and go off on a real bake later.
 
 ## What a pan costs
 
@@ -3152,6 +3254,14 @@ number is typed into the field, which is the other route in. So the line goes up
 when the ceiling is crossed and comes down when it is crossed back, with no
 timeout in between: it describes a state, and a timed message says the box is
 red after it has gone blue again.
+
+**Except where there is no box left**, which is one refusal and only one: a
+layer bake that ran out of memory has already put the layer back and taken its
+own transform down, so nothing will ever call `syncTransformFields` again and
+the standing message would stand for the rest of the session. The handler asks
+`transformIsLive()` rather than asking which reason it is — what decides it is
+whether there is still something on screen the message is about — and gives the
+other case a timeout.
 
 Four things about it were decisions rather than mechanics.
 
