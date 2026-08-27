@@ -83,6 +83,10 @@ cancelling leaves no undo step; moving by a whole number of pixels does not
 resample, so registration nudges never soften a line. Colour layers are excluded:
 a mark there is a label rather than paint, and interpolating one invents colours.
 
+This is the drawing in front of you and nothing else. To move a layer across a
+whole shot at once, see
+[transforming a whole layer through time](#transforming-a-whole-layer-through-time).
+
 **Flip X and Flip Y** are on the same bar, and they mirror about the middle of the
 box. A flip is a state of the transform rather than something that happens to the
 drawing — press it twice and you are exactly where you started — and it is exact:
@@ -98,6 +102,56 @@ it wherever the view happens to be — and it arrives as a float you can place
 before applying it, so nothing is written until you press Enter. The clipboard is
 the program's own and not the system one: a 16-bit-per-channel image handed to
 another program would lose precision, and it would be a different feature.
+
+## Transforming a whole layer through time
+
+**"Transform layer through time"**, in the layer panel beside Add and Remove,
+moves, turns or scales *every drawing of one layer at once* — a whole character
+shifted left across a shot, a background nudged into register, a layer scaled to
+match a new canvas. The `T` tool takes the drawing in front of you; this button
+takes the layer. There is no switch between them: which one you came through is
+fixed for the gesture, and the bar says which — *This drawing* or *Whole layer*.
+
+What is different once the box is up:
+
+- **The box is green**, and it is drawn round every drawing of the layer united,
+  not the one you are looking at. So turning the layer means the same thing
+  wherever the playhead is, and there is a box to grab even on a frame where
+  this layer happens to be empty.
+- **The rest of the layer is under the float, faintly, moving with it.** Those
+  are the layer's other drawings in their own colours — not onion skin, which
+  tints warm and cool to say *when* a drawing is. There is no when to say here:
+  they are all one layer, and what is worth seeing is what is going to land.
+- **You can scrub while it is up.** Walking the playhead along the shot moves
+  the solid drawing to whichever one you have arrived at and puts the one you
+  left back among the faint ones. Nothing is written, and the box does not move
+  — looking at the placement on another drawing is part of placing it.
+- **A lasso is ignored**, and cleared when the gesture starts. A loop describes a
+  shape on the drawing you drew it on and nothing at all on the other forty.
+
+Everything else is the ordinary transform: the same handles, the same numeric
+fields, `Shift` to constrain, Enter to apply and Escape to cancel.
+
+**Apply writes every drawing, and that is the thing to know before you press
+it.** It is one undo step, so one Ctrl+Z takes the whole thing back. But it is a
+real edit to every drawing in the layer: moving by a whole number of pixels or
+flipping is exact, and turning or scaling resamples each drawing once, the same
+softening a transform of a single drawing costs. On a long shot it takes a few
+seconds, during which the program stops and the status bar says how many
+drawings it is writing; when it is done it says how many it wrote.
+
+**A big bake can push older steps out of the undo history.** Undo has to hold
+the drawings as they were, and a whole HD layer is more than the history's whole
+budget, so the bake itself will always undo but the steps before it may be
+dropped to make room. Nothing is lost from the drawing — only from what you can
+take back. If the program runs out of memory partway it puts every drawing back
+and tells you so, and there the history is left alone.
+
+**When the button is greyed out, its tooltip says why.** A colour layer cannot
+be transformed at all — a mark on one is a label rather than paint, and turning
+or scaling it would blend two labels into a third colour. Nor can a locked or
+hidden layer, a layer nothing has been drawn on yet, or a frame past the end of
+this track, where there is no drawing to place.
 
 ## The keyboard
 
@@ -353,8 +407,9 @@ Cancelling halfway would splice two shots together at the seam. A folder that is
 *not* an export — the project folder itself, most obviously — is never offered
 for deletion; it asks for another name instead.
 
-The layer panel on the right adds, removes, hides and fades layers, and layers
-are restacked by dragging a row up or down the list — the top row is the top of
-the stack. Layers belong to the track rather than to the image, which is the
-point of the whole model: adding a layer touches no drawing, and a drawing held
-over five frames holds every one of its layers for those five frames.
+The layer panel on the right adds, removes, hides, fades and
+[transforms](#transforming-a-whole-layer-through-time) layers, and layers are
+restacked by dragging a row up or down the list — the top row is the top of the
+stack. Layers belong to the track rather than to the image, which is the point of
+the whole model: adding a layer touches no drawing, and a drawing held over five
+frames holds every one of its layers for those five frames.

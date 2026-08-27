@@ -2762,7 +2762,9 @@ paying.
 Issue [#25](https://github.com/S-poony/Animage/issues/25): moving, turning or
 scaling **one layer across every drawing in it**, the way layer opacity already
 applies across time. The row under "drawing" in the taxonomy at the top of
-[lasso-and-transform.md](lasso-and-transform.md).
+[lasso-and-transform.md](lasso-and-transform.md). What it does, for somebody
+using it rather than changing it, is
+[in the manual](manual.md#transforming-a-whole-layer-through-time).
 
 **It bakes, and the issue argued for the opposite.** #25 was written for a
 stored affine on the `Layer`, applied at composite time — free, lossless,
