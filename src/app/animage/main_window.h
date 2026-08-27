@@ -504,6 +504,19 @@ private:
     // main text changing length cannot shuffle it sideways: what it says has to
     // be readable out of the corner of an eye that is watching the canvas.
     QLabel* playback_rate_ = nullptr;
+    // Beside it, and to its left, while a sequence is still being decoded.
+    //
+    // A permanent widget for the same reason the rate is one, and it is the
+    // reason it stopped being a phrase in the middle of `status_`: what this
+    // says has to be readable out of the corner of an eye that is watching a
+    // blank canvas and wondering whether the program has stopped. Buried
+    // between the zoom and the tile count it was neither findable nor legible.
+    //
+    // Added *before* the rate so the rate stays the right-most thing. The
+    // permanent area is right-aligned as a group, so a widget appearing to the
+    // left of the rate widens the group leftwards and leaves the rate exactly
+    // where it was -- which is the promise the comment above makes.
+    QLabel* pictures_loading_ = nullptr;
     // Enabled per layer rather than per program: a colour layer cannot be
     // transformed at all, and a locked or hidden one is not being edited.
     QPushButton* layer_transform_ = nullptr;

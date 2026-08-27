@@ -2561,6 +2561,26 @@ void MainWindow::buildStatusBar() {
     status_ = new QLabel(this);
     statusBar()->addWidget(status_);
 
+    // Before the rate, so that the rate stays the right-most thing and keeps
+    // the position its own comment promises: the permanent area is right
+    // aligned as a group, so this appearing widens the group leftwards.
+    //
+    // Red, and the same red the rate uses when it is dropping and the shortcuts
+    // dialog uses for a colliding key -- there is one colour in this program
+    // for "what you are looking at is not right" and a second would only invite
+    // a third. It earns that here: the canvas is blank or part-blank while this
+    // is up, and a shot you cannot see is exactly that state.
+    //
+    // Set once rather than on a transition, because unlike the rate this label
+    // is never anything but red -- it is either saying something wrong is on
+    // screen, or it is hidden.
+    pictures_loading_ = new QLabel(this);
+    QPalette loading = pictures_loading_->palette();
+    loading.setColor(QPalette::WindowText, QColor(190, 40, 40));
+    pictures_loading_->setPalette(loading);
+    pictures_loading_->hide();
+    statusBar()->addPermanentWidget(pictures_loading_);
+
     // Permanent, so it sits at the right-hand end and the main text growing or
     // shrinking cannot move it. Hidden until something is playing: it has
     // nothing to say otherwise, and appearing at the start of a take and going
@@ -2688,12 +2708,25 @@ void MainWindow::syncStatus() {
     // outstanding, because during a take every frame is visited and the climb
     // from 1 to 151 is the progress somebody is actually waiting on. "How many
     // are being worked out right now" would read 1 for the whole of it.
-    const MainWindow::ImportsReady pictures =
-        canvas_->referenceFramesPending() ? importsReady() : ImportsReady{};
-    const QString loading =
-        pictures.wanted > 0
-            ? QStringLiteral("   pictures %1/%2").arg(pictures.ready).arg(pictures.wanted)
-            : QString();
+    //
+    // Its own widget at the right-hand end rather than a phrase in the middle
+    // of this line, and worded rather than abbreviated. `pictures 43/151` was
+    // both: it sat between the zoom and the tile count where nobody watching
+    // the canvas would find it, and it named a number without saying what the
+    // number was about. The form is the rate's -- "N of M" after a colon --
+    // because the two sit next to each other and read as one instrument.
+    if (pictures_loading_) {
+        const MainWindow::ImportsReady pictures =
+            canvas_->referenceFramesPending() ? importsReady() : ImportsReady{};
+        if (pictures.wanted > 0) {
+            pictures_loading_->setText(QStringLiteral("loading imported pictures: %1 of %2")
+                                           .arg(pictures.ready)
+                                           .arg(pictures.wanted));
+            pictures_loading_->show();
+        } else {
+            pictures_loading_->hide();
+        }
+    }
 
     // Past this track's last drawing there is no slot and no cel, so there is
     // nothing to draw on -- while the canvas may still be showing something,
@@ -2778,7 +2811,7 @@ void MainWindow::syncStatus() {
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3 (%4)   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   %10   %11 fps%12%13%14%15%16")
+                       "tiles %9   %10   %11 fps%12%13%14%15")
             .arg(slot + 1)
             .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
@@ -2791,7 +2824,6 @@ void MainWindow::syncStatus() {
             .arg(history)
             .arg(doc_.scene().framerate)
             .arg(colouring)
-            .arg(loading)
             .arg(past)
             .arg(outside)
             .arg(selected));
