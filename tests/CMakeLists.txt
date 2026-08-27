@@ -156,6 +156,12 @@ if(TARGET animage_ui)
   add_executable(bench_zoom bench_zoom.cpp)
   target_link_libraries(bench_zoom PRIVATE animage_ui)
 
+  # What one imported frame costs to decode, which is the number that decides
+  # whether a reference sequence can be scrubbed over and whether it can be
+  # played. Takes a folder on the command line and measures the real files.
+  add_executable(bench_import bench_import.cpp)
+  target_link_libraries(bench_import PRIVATE animage_ui)
+
   # Whether the canvas gets slower the longer a session runs, and what makes it
   # come back. bench_zoom times a pan on a document that was just built; this
   # one times the same pan on a document that has been drawn on for a while,

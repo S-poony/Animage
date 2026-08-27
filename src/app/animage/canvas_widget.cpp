@@ -904,7 +904,7 @@ void CanvasWidget::requestReferenceFrames() {
     if (stroking_) return;
     if (!locate_import_) return;  // nothing can be resolved, so nothing is asked
 
-    dropStaleReferenceRequests(/*only_this_frame=*/true);
+    dropStaleReferenceRequests();
 
     const std::uint64_t generation = doc_.referenceCache().generation();
     for (const Track& track_here : doc_.scene().tracks) {
@@ -981,16 +981,33 @@ void CanvasWidget::noteReferencePending() {
     if (!pending) reference_poll_->stop();
 }
 
-// Requests whose answer nobody is waiting for any more: a frame that has been
-// left, or -- on screen or not -- one about a cache that has since been emptied.
+// Requests about a cache that has since been emptied, which are the only ones
+// worth calling off.
 //
-// Playing a shot with an animatic under it is twenty-four of the first a second,
-// and a queue that fills faster than it drains never catches up.
-void CanvasWidget::dropStaleReferenceRequests(bool only_this_frame) {
+// **Leaving the frame is deliberately not a reason, and this used to say it
+// was.** The colour's version drops a request the moment its drawing goes off
+// screen, and copying that here was wrong in both halves of the argument.
+//
+// It made playback show nothing at all. A paint runs this and then asks, so at
+// twenty-four frames a second every decode was called off forty-one
+// milliseconds after it started -- and a frame that takes longer than that to
+// decode, which a large one does, never finished. Every pass over the shot
+// decoded every frame and threw all of them away, which is what a log full of
+// the same warning from the same file was really reporting.
+//
+// And the reason the colour drops is not a reason here. A CtgJob holds copies
+// of the tile grids it will solve from, so a queue of them that fills faster
+// than it drains is real memory; a decode job is a path and nine numbers. What
+// is more, **a decoded frame is worth having even for a drawing you have
+// left** -- it is the frame you will be on again next time round, and the cache
+// it lands in is bounded, so keeping it cannot cost more than the bound.
+//
+// An emptied cache is different in kind: those answers are not early, they are
+// about a layer that no longer exists in that form.
+void CanvasWidget::dropStaleReferenceRequests() {
     const std::uint64_t generation = doc_.referenceCache().generation();
     for (auto it = reference_asked_.begin(); it != reference_asked_.end();) {
-        const bool left = only_this_frame && !isShownNow(it->first.first);
-        if (!left && it->second.generation == generation) {
+        if (it->second.generation == generation) {
             ++it;
             continue;
         }
@@ -1007,7 +1024,7 @@ void CanvasWidget::dropStaleReferenceRequests(bool only_this_frame) {
 // happen where the document may be edited. See ReferenceCache.
 void CanvasWidget::collectReferenceFrames() {
     bool arrived = false;
-    dropStaleReferenceRequests(/*only_this_frame=*/false);
+    dropStaleReferenceRequests();
 
     for (ReferenceDecoder::Result& result : reference_decoder_.collect()) {
         const std::pair<ImageId, LayerId> key{result.key.image, result.key.layer};

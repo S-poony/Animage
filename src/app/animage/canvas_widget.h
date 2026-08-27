@@ -637,7 +637,7 @@ private:
     void requestCtgFills();
     void dropStaleColourRequests(bool only_this_frame);
     void requestReferenceFrames();
-    void dropStaleReferenceRequests(bool only_this_frame);
+    void dropStaleReferenceRequests();
     void noteReferencePending();
     void giveUpOnFrame(const animage::CtgKey& key, const animage::Transform& under,
                        const QString& name, const QString& trouble);

@@ -6,6 +6,7 @@
 #include <QImageReader>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <unordered_map>
 
@@ -69,6 +70,37 @@ QImage inSrgb(QImage source, Converted* converted) {
     source.convertTo(QImage::Format_RGBA64);
     source.convertToColorSpace(QColorSpace(QColorSpace::SRgb));
     return source;
+}
+
+// srgbToLinear for every 16-bit value there is, worked out once.
+//
+// **This is a memo of color.h's function and not a second version of it**, and
+// that distinction is the whole reason it is safe. Every entry is exactly
+// `srgbToLinear(i / 65535.0f)`, so a decoded frame is bit for bit what it was
+// before the table existed -- which it has to be: the derive step must be
+// deterministic, or a frame that is evicted and decoded again comes back
+// different and the picture changes while somebody scrubs over it.
+//
+// It is here because the cost was measured and it is the whole of it.
+// `srgbToLinear` is a branch and a `std::pow`, three of them per pixel, and
+// `bench_import` puts an HD frame at 145 ms of tiling against 21 ms of actually
+// reading the PNG. Six million transcendentals is that number. A 256 KB table
+// is the same arithmetic with the pow paid 65536 times instead of per pixel.
+//
+// Sized by the source rather than by the destination on purpose: the image has
+// already been widened to 16 bits a channel by the time this is read -- see
+// decodeImage, where the widening is what stops an 8-bit colour conversion
+// banding -- so 16 bits in is every input that can arrive.
+const std::array<float, 65536>& srgbTable() {
+    static const std::array<float, 65536> table = [] {
+        std::array<float, 65536> built{};
+        for (int i = 0; i < 65536; ++i) {
+            built[static_cast<std::size_t>(i)] =
+                animage::srgbToLinear(static_cast<float>(i) / 65535.0f);
+        }
+        return built;
+    }();
+    return table;
 }
 
 // One file's name, cut where the ordering rule cuts it.
@@ -216,28 +248,50 @@ TileGrid decodeImage(const QImage& source, Converted* converted) {
     // afterwards, and no reason to want one.
     std::unordered_map<TileCoord, std::shared_ptr<Tile>, animage::TileCoordHash> built;
 
+    const std::array<float, 65536>& to_linear = srgbTable();
+
+    // A row at a time, cut where the tiles are.
+    //
+    // The version before this looked the tile up in the map **per pixel**,
+    // which is a hash of two ints and a shared_ptr dereference for every one of
+    // two million. Here the lookup happens once per tile per row -- a hundred
+    // and twenty-eight times less often -- and it still happens lazily, so a
+    // span that turns out to be entirely transparent allocates nothing and the
+    // sparseness this relies on is untouched.
     for (int y = 0; y < height; ++y) {
         const auto* row = reinterpret_cast<const quint16*>(image.constScanLine(y));
         const int tile_y = y / kTileSize;
         const int local_y = y % kTileSize;
-        for (int x = 0; x < width; ++x) {
-            const quint16* p = row + static_cast<std::size_t>(x) * 4;
-            const float a = static_cast<float>(p[3]) / 65535.0f;
-            if (a <= 0.0f) continue;  // sparse: a transparent pixel makes no tile
 
-            // sRGB is an encoding of the *colour* and never of the alpha, so
-            // the three channels go through srgbToLinear and the fourth does
-            // not. Getting that wrong is invisible on an opaque image and wrong
-            // on every other one.
-            const Rgba colour = animage::premultiply(
-                animage::srgbToLinear(static_cast<float>(p[0]) / 65535.0f),
-                animage::srgbToLinear(static_cast<float>(p[1]) / 65535.0f),
-                animage::srgbToLinear(static_cast<float>(p[2]) / 65535.0f), a);
+        for (int x = 0; x < width;) {
+            const int local_x = x % kTileSize;
+            const int span = std::min(kTileSize - local_x, width - x);
 
-            const TileCoord coord{x / kTileSize, tile_y};
-            auto& tile = built[coord];
-            if (!tile) tile = std::make_shared<Tile>();
-            tile->setPixel(x % kTileSize, local_y, colour);
+            // A reference into the map, taken at most once for this span. Safe
+            // across the span because the map is node-based -- an insertion can
+            // rehash and still not move an element -- and nothing else inserts
+            // while it is held.
+            std::shared_ptr<Tile>* tile = nullptr;
+
+            for (int i = 0; i < span; ++i) {
+                const quint16* p = row + static_cast<std::size_t>(x + i) * 4;
+                const float a = static_cast<float>(p[3]) / 65535.0f;
+                if (a <= 0.0f) continue;  // sparse: a transparent pixel makes no tile
+
+                // sRGB is an encoding of the *colour* and never of the alpha,
+                // so the three channels go through the table and the fourth
+                // does not. Getting that wrong is invisible on an opaque image
+                // and wrong on every other one.
+                const Rgba colour = animage::premultiply(to_linear[p[0]], to_linear[p[1]],
+                                                         to_linear[p[2]], a);
+
+                if (!tile) {
+                    tile = &built[TileCoord{x / kTileSize, tile_y}];
+                    if (!*tile) *tile = std::make_shared<Tile>();
+                }
+                (*tile)->setPixel(local_x + i, local_y, colour);
+            }
+            x += span;
         }
     }
 
