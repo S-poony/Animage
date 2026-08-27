@@ -11,21 +11,32 @@ what shape a sequence is stored in — have both been answered, and the answer t
 the first changed the answer to the second. They are settled in place below
 rather than in an appendix, with what decided them.
 
-> **The first item is built: a single image imports, and can be placed.** This
-> note stays a plan and is not rewritten into a description — what was built is
-> recorded in ["importing a picture"](handover.md#importing-a-picture), which is
-> where a reader who wants the code should start. Read this one for *why*, and
-> that one for *what*.
+> **The first two items are built: a single image imports and can be placed, and
+> so can a sequence.** This note stays a plan and is not rewritten into a
+> description — what was built is recorded in ["importing a
+> picture"](handover.md#importing-a-picture) and ["importing a
+> sequence"](handover.md#importing-a-sequence), which is where a reader who
+> wants the code should start. Read this one for *why*, and those for *what*.
 >
-> Two things this note predicted are worth knowing before trusting the rest of
+> Three things this note predicted are worth knowing before trusting the rest of
 > it, because they are the evidence its remaining predictions rest on. The
 > compositor really did cost three lines: `collectPasses` is the one place that
-> resolves a layer to pixels and it already had the branch shape. And a stored
+> resolves a layer to pixels and it already had the branch shape. A stored
 > placement really is free — a picture moved and scaled shows `tiles 0` and
 > `undo 2 (0 MB)`, which is the claim under "placement is stored" made visible.
+> And a sequence really was the still with three things added and nothing
+> reshaped.
 >
-> One thing it got wrong in the cheap direction is fixed above: the still is a
-> reference layer, not ordinary cels.
+> **Two it got wrong**, both in the cheap direction. The still is a reference
+> layer, not ordinary cels — fixed above. And the decode moving off the
+> interface thread is described here as an optimisation a sequence forces; it is
+> not, it is the only route by which a sequence can notice the playhead has
+> moved at all, because a frame change never calls `refreshEverything`.
+>
+> **And one thing it said would need measuring turned out to matter more than
+> the thing it was measured for.** `bench_import` exists now; the decode it
+> found was four times slower than it needed to be, and that was our own tiling
+> loop rather than anything about a file. See the section on benchmarking.
 
 The French documents in [fr/](fr/) are still the specification. This note fills
 in something the specification reserved a place for and deferred:
@@ -93,11 +104,13 @@ Three things follow from that and they are worth stating before anything else:
    kind, the derive step, the cache, the placement, the format and the
    `imports/` folder all exist. See
    ["importing a picture"](handover.md#importing-a-picture).
-3. **An image sequence**, which is 2 with more frames — plus the three things
-   one frame never needs: the per-image source frame map, a bound on what is
-   resident, and a decode that does not happen on the interface thread. The
-   third is not an optimisation to reach for later: a still re-derives on the
-   interface thread today and a sequence cannot.
+3. ~~**An image sequence**~~ — **built**, and all three of the things one frame
+   never needed are in: the per-image source frame map, a bound on what is
+   resident, and a decode off the interface thread. The third was not an
+   optimisation to reach for later and the reason turned out to be sharper than
+   this note guessed — a frame change never calls `refreshEverything` at all, so
+   there was no route by which a sequence could notice the playhead had moved.
+   See ["importing a sequence"](handover.md#importing-a-sequence).
 4. **A video**, which is 3 with a decoder in front of it and no new storage at
    all.
 5. **Video export**, last and deliberately so. It is the only item here that
@@ -782,11 +795,19 @@ this](#what-the-handover-already-knows-about-this).
 ### What is still worth benchmarking, and what is not
 
 `bench_import` was proposed to size a door that is now closed, and most of what
-it was for has gone with it. What is left is worth measuring and is different:
+it was for went with it. **It exists anyway, and it was worth more than this
+section expected** — not because it sized anything, but because a report arrived
+that nothing could otherwise answer, and it turned two guesses with different
+fixes into a number. It takes a folder, so it measures the files somebody
+actually reported about; what a PNG costs depends on what wrote it.
 
-- **Decode time per frame, per format**, because it is what decides whether the
-  cache can keep up with scrubbing. JPEG and PNG are not close.
-- **What a cache bound should be**, in bytes, against a realistic scrub.
+- ~~**Decode time per frame, per format**~~ — **measured, and the first answer
+  was about us.** The tiling loop was paying three `std::pow` per pixel and a
+  hash lookup per pixel: 145 ms against 21 ms of actually reading an HD PNG. A
+  table and a hoist took it to 35. What is left on a large frame is the file
+  reader, which is not ours.
+- **What a cache bound should be**, in bytes, against a realistic scrub. Still
+  open: 512 MB is a number with arithmetic behind it and no measurement.
 - **Time to convert a layer to drawings**, because that one *does* write cels and
   is bounded by the history budget.
 

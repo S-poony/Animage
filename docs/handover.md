@@ -35,6 +35,7 @@ the shape of the program. Those five maps are.
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
 | [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
 | [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
+| [**Importing a sequence**](#importing-a-sequence) | which frame a drawing shows, a bounded cache, and a decode the paint asks for |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -3247,10 +3248,220 @@ generation counter included.
 
 ### What is not built
 
-- **Sequences and video.** The shape is settled in [importing.md](importing.md)
-  and the still is deliberately the smallest instance of it: `Image` gains a
-  sparse `LayerId → source frame index` map, the cache gains a bound, the decode
-  moves to a worker.
+- **Video.** A sequence with a decoder in front of it and no new storage at all:
+  extracted to frames once, at import, so `QMediaPlayer` never reaches the paint
+  path. The shape is settled in [importing.md](importing.md).
+- **Audio**, which is what the shot is for and is blocked on nothing here. The
+  deployment spike comes first and is the highest-risk item in that note.
+- **Convert to drawings**, which is the way back — an import cannot be a CTG
+  barrier, so colouring imported line art needs it. Whole layer, on a popup, and
+  it is `Document::transformLayer`'s loop with a decode where the resample is:
+  one command, the `bad_alloc` rescue, the deferred trim, the redo stack held
+  aside. All four are bugs if omitted and all four were found the expensive way
+  once already.
+- **Telling a reference layer from an ordinary one in the panel**, which is
+  [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
+  sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
+  layers.
+
+## Importing a sequence
+
+**File ▸ Import ▸ Image sequence.** The still was deliberately the smallest
+instance of this and the shape did not change: the same `LayerKind::Reference`,
+the same no cels, the same derived-and-memoised pixels. What a sequence added is
+three things one frame never needed, and each of them turned out to be a
+different kind of problem.
+
+### Which frame a drawing shows, and why position cannot answer it
+
+`Image` has a second sparse map beside `cels`: `LayerId → source frame index`,
+absent meaning the layer is empty at this drawing exactly as a missing cel does.
+`Layer::reference_source` became `reference_sources`, a list, and **a still is a
+list of one** — making the single picture the one thing that is not a sequence
+would have meant answering placement, export, save cost and colouring twice for
+two features a user thinks of as one.
+
+**It is not a retiming feature and it is not provenance.** Without it, "which
+frame of the source does this drawing show" has to be derived from where the
+drawing sits, and position moves: add a hold and two drawings share a slot
+index, delete a frame and everything after it shifts. The very first hold breaks
+it, and adding the field afterwards would be a migration of every project with
+an import in it. It is not keyed on `Image::number`, which
+[track.h](../src/core/track.h) says is reused after a deletion.
+
+`setSourceFrame` is an edit — journaled, undone, saved — unlike everything else
+in that part of `Document`, because the pixels are derived and cost a decode to
+lose while this is a fact only the file remembers. It rides on `ImageOp`, which
+already swaps a whole `Image` and fixes the cel refcounts on both sides.
+
+### A bound, and the rule that is not obvious
+
+`ReferenceCache` is `CtgFillCache` with the words changed, and the resemblance
+is the point rather than a coincidence: both are derived data, bounded in bytes,
+kept on the `Document` rather than on the thing they describe, precisely because
+losing an entry costs a rebuild and nothing else.
+
+**A lookup renews an entry and a store does not.** That is the whole rule. A
+scrub goes back and forth over a handful of frames, so the frames being *looked
+at* are the ones that must survive; renewing on store would hold whatever was
+decoded most recently, which during a scrub is exactly the frame you are
+leaving. `aLookupIsWhatKeepsAFrameResident` drives it against a budget small
+enough to fill, which is the only reason the bound is settable at all.
+
+**Absent still beats stale.** An entry records the placement it was derived at
+and a lookup at any other reports *nothing here* — a frame derived under an old
+placement is not slightly out of date, it is a picture of where the import used
+to be, and it would go on being drawn convincingly.
+
+**And eviction may only happen where the document may be edited**, which does
+not look like an invariant and so is written where the class is: `LayerPass`
+holds raw pointers into these grids and `compositeGrids` reads them from several
+threads.
+
+The budget is 512 MB and is **not measured**. The arithmetic is on the constant
+so it can be argued with.
+
+### Where an imported picture's pixels come from, in order — and what changed
+
+The still's version of this path had the derive step running from
+`refreshEverything`. **That could not survive a sequence, and the reason is a
+fact about the program rather than about cost:** a frame change goes
+`TimelineWidget::setCurrentSlot` → `onSlotChanged` → `canvas_->setFrame` and
+never touches `refreshEverything` at all. A still did not care, because every
+drawing of its track showed the same picture and the only thing that changed it
+was a placement, which does arrive there. A sequence shows a different frame at
+every drawing, so scrubbing one would have shown frame 1 for ever.
+
+So the ask moved to the paint, which is the one thing that reliably happens when
+what is on screen changes — the shape [importing.md](importing.md) specified and
+the one the colour layer already uses. `refreshEverything` now touches imports
+not at all, and the absence has a comment on it saying so.
+
+`ReferenceDecoder` is `CtgSolver` with a decode in it. Its header lists the
+three places they differ rather than pretending they do not: a job names a path
+instead of a document, nothing is abandoned mid-decode, and there is one kind of
+question so a request is identified by the drawing and the layer alone. It takes
+**newest first** off its queue, which is the opposite of the solver and is right
+here — a queue that backed up during a scrub is a list of frames already dragged
+past.
+
+**The canvas still never works out a path.** Where an import lives depends on
+whether the project has been saved and into which folder, which is MainWindow
+state that moves on the interface thread — so the canvas is given a locator it
+calls once, on the interface thread, at the moment a job is queued, and never
+inspects what comes back.
+
+### Three things that were wrong, and what each one taught
+
+**A frame that will not read is remembered as an empty picture.** Not tidiness:
+the paint asks for whatever is not in the cache, so a failed decode that left
+nothing behind would be asked for again on the next paint and every sixteen
+milliseconds after that, for as long as the window is open — a decode a frame,
+on a worker, for ever. `aFileThatWillNotReadIsAskedForOnce` pins it.
+
+**Leaving a frame is not a reason to cancel a decode, and copying the colour's
+rule said it was.** A paint drops stale requests and then asks, so at
+twenty-four frames a second every decode was called off forty-one milliseconds
+after it started — and a frame that takes longer than that never finished.
+Reported as a libpng warning repeating during playback; the warning was the
+file's, and the *repetition* was every pass decoding every frame and throwing
+all of them away. The import was never visible during a take at all.
+
+The colour's reason does not transfer either. A `CtgJob` carries copies of the
+tile grids it will solve from, so a queue of them that fills faster than it
+drains is real memory; a decode job is a path and nine numbers. And **a decoded
+frame is worth having even for a drawing you have left** — it is the frame you
+will be on again next time round, and the cache it lands in is bounded.
+
+**The colour has the same bug and it is worse there**, because `abandoned()` is
+checked *inside* the max-flow: the solve gives up partway and produces nothing,
+so no fill ever completes during playback and the cache never accumulates. It is
+also why `colouring...` says nothing during a take — the cancel erases the
+`ctg_asked_` entry, so the program has in effect stopped asking.
+[#85](https://github.com/S-poony/Animage/issues/85), with the two things that
+make it not simply the same change.
+
+### What it costs, measured
+
+`bench_import` exists because a report arrived that nothing here could answer,
+and it takes a folder so it measures the real files rather than made-up ones —
+what a PNG costs depends on what wrote it.
+
+It found the tiling loop paying three `std::pow` per pixel through
+`srgbToLinear`, and a hash-map lookup per pixel as well. Six million
+transcendentals for an HD frame: **145 ms of tiling against 21 ms of actually
+reading the PNG.** A 65536-entry table — every 16-bit value there is, which is
+every input that can arrive once the image has been widened — and the tile
+lookup hoisted to once per tile per row take that to **35 ms**.
+
+**Every pixel is bit for bit what it was**, and that is required rather than
+nice: the table is a memo of `color.h`'s function and not a second version of
+it, because the derive step must be deterministic — a frame that is evicted and
+decoded again has to come back the same or the picture changes while somebody
+scrubs over it.
+
+On the 4000×2250 sequence that was reported: 94 ms a frame, of which **70 is
+libpng reading a 3.7 MB file and is not ours**. Those frames are mostly
+transparent, so each is 18 tiles rather than 576 — all 151 come to 339 MB
+against the budget, and every pass after the first is cached.
+
+### Saying so, which is not optional at these speeds
+
+An import whose frames are not decoded draws nothing — correctly, since
+compositing may not start a decode — so a take that runs before they are in
+shows the playhead advancing over a blank canvas. **That is indistinguishable
+from the program being broken**, and it was reported as exactly that.
+
+The status bar gains `loading imported pictures: 43 of 151`, its own permanent
+widget beside the playback rate and in the same red. Three decisions in it:
+
+- **Shown while a decode is outstanding, not while frames are merely missing.** A
+  frame is only asked for when it is on screen, so a sequence somebody scrubbed
+  part of sits at 40 of 151 with nothing happening — and a number that does not
+  move is worse than none, being exactly what stuck looks like.
+- **The denominator is the whole sequence**, because during a take every frame
+  is visited and the climb is the progress being waited on. "How many are being
+  worked out right now" would read 1 throughout.
+- **`ReferenceCache::has` exists because asking is not using.** The count asks
+  about every frame at once, and going through `find` would renew all of them on
+  every status update — flattening the eviction order that keeps a scrub's own
+  frames resident, from the one place whose whole job is to report and change
+  nothing.
+
+### What the dialog asks, and the one thing it will not offer
+
+Order is **numeric and not correctable**: the last run of digits in the name,
+padding not part of the group, files that surround their number differently kept
+as separate runs, and a name with no digits at all put last. So there is no list
+to drag rows about in — and what replaces it is the recap *saying what the rule
+did*, which is this program's house rule for input it will not refuse and will
+not silently pick over.
+
+Three things it says rather than offers, because none is a choice: a new track,
+one drawing per file on 1s, and `TrackEnd::Nothing`. That last is deliberately
+not the still's `HoldLast` — a modelsheet is meant to stay up for the whole shot
+and an animatic is a stretch of timing that ends where it ends.
+
+Two it offers: a start frame defaulting to 1, and half size — which is a
+*placement* of 50% and not a separate mechanism, so it is undoable, adjustable
+afterwards through Place this picture, and cheaper rather than dearer, the
+derive step applying the scale so a frame caches a quarter of the tiles.
+
+A file that will not read is kept in the list rather than dropped, because
+position in that list is what each drawing points at: removing one would move
+every frame after it onto the wrong picture. Same reason a missing number leaves
+a gap.
+
+**And it does not ask which track to land in.** That was settled the other way
+in [importing.md](importing.md) and reversed on the user's call: the argument
+was that `ctg_sources` resolve inside the track, so a colour layer could not cut
+against an import that landed elsewhere — and it never asked where the colour
+layer is. `addColourLayer` acts on whichever track is current and an import
+makes its track current, so the whole chain sits inside one track. What that
+gives up is named there rather than dropped.
+
+### What is not built
+
 - **Convert to drawings**, which is the way back — an import cannot be a CTG
   barrier, so colouring imported line art needs it. Whole layer, on a popup, and
   it is `Document::transformLayer`'s loop with a decode where the resample is:
@@ -6188,6 +6399,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]  # against a hand
 ./build/tests/bench_transform     # what moving a drawing -- or a whole layer -- costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
+./build/tests/bench_import -platform offscreen [dir]   # what one imported frame costs to decode
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault Qt's?
 ./build/tests/window_probe            # the same readings from the real window: is it ours?
@@ -6437,17 +6649,13 @@ come off it since the first build, with where the reasoning went:
 | A screenshot target (#28) | "looking at the interface" |
 | Capping the undo history (#23) | "what the history is allowed to cost" |
 | Importing a single image, and placing it | "importing a picture" |
+| Importing an image sequence | "importing a sequence" |
 
 1. **The rest of importing**, which is the thing in flight and the only entry
    here with a design note of its own: [importing.md](importing.md) settles the
-   shape and "importing a picture" above records what is built. In order, and
-   each is the one before it with one thing added:
+   shape, and "importing a picture" and "importing a sequence" above record
+   what is built. In order, and each is the one before it with one thing added:
 
-   - **An image sequence.** `Image` gains a sparse `LayerId → source frame
-     index` map -- which is not a retiming feature, it is what makes the mapping
-     survive an ordinary hold or deletion -- the reference cache gains a bound
-     in bytes with `CtgFillCache`'s shape, and the decode moves off the
-     interface thread onto the request path `requestCtgFills` already models.
    - **A video**, which is a sequence with a decoder in front and no new
      storage: extracted to frames once, at import, so the decoder never reaches
      the paint path.
