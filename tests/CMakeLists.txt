@@ -54,6 +54,13 @@ if(TARGET animage_ui)
   target_include_directories(test_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_render COMMAND test_render -platform offscreen)
 
+  # A report rather than a test: what the colour layer did on every drawing of a
+  # real project, through the canvas so that the ladder and the budgets are the
+  # ones a person gets. For "the scribble does not reach that drawing".
+  add_executable(carry_probe carry_probe.cpp)
+  target_link_libraries(carry_probe PRIVATE animage_ui)
+  target_include_directories(carry_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
   # The shortcut table, which needs Qt for QKeySequence and an application for
   # the platform's standard keys -- but no window at all.
   add_executable(test_shortcuts test_shortcuts.cpp)

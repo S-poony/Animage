@@ -2010,6 +2010,99 @@ void aLayerShowingItsMarksIsStillSolved() {
     CHECK_NEAR(own->pixel(130, 100).a, 0.0, 0.001);
 }
 
+// One scribble on the first drawing of a shot, and it has to reach every other.
+//
+// Two reported projects, in the tree because no pair of shapes written here
+// reproduces what they do. The failure needs two drawings that share no ink
+// *and* are different enough that lining them up scores no better than
+// abandoning them -- ordinary between two drawings of a moving shape, and not
+// something a box translated 400 px does, because a box matches its own
+// translation almost exactly and wins by a mile. `aMarkFollowsAShapeThatMoved
+// ClearOfItself` in test_ctg is that box, and it passes with the bug in.
+//
+// They are two projects and not one because they fail differently, and a fix
+// that reads only the first of them is a fix that is half wrong -- which is
+// what happened. On `moved-clear-of-itself` the right answer loses by 1%
+// (406.2 against 410.5) and only after the push step has settled it, so
+// comparing the poses before settling appears to fix it. On
+// `moved-clear-and-smaller` the shape shrinks as it goes, so lining it up
+// costs *more* than abandoning it from the start (221.2 against 212.7) and
+// that reading is no fix at all. See "what the lattice fallback was being
+// compared against" in docs/handover.md.
+//
+// Every drawing, not only the one that failed. What an artist is owed here is
+// that the colour is on the shape.
+void everyDrawingGetsItsMarksOnTheShape(const QString& fixture) {
+    const QDir here(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath());
+    const QString folder = QDir::cleanPath(
+        here.absoluteFilePath(QStringLiteral("projects/") + fixture));
+
+    Document doc;
+    QString error;
+    CHECK(ProjectIO::load(doc, folder, &error));
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+
+    const TrackId track_id = doc.scene().tracks.front().id;
+    LayerId colour = kNoId;
+    for (const Layer& layer : doc.scene().tracks.front().layers) {
+        if (layer.kind == LayerKind::Ctg) colour = layer.id;
+    }
+    CHECK(colour != kNoId);
+    if (colour == kNoId) return;
+
+    CanvasWidget canvas(doc);
+    canvas.resize(1200, 800);
+    canvas.setTrack(track_id);
+
+    const std::size_t frames = doc.scene().tracks.front().slots.size();
+    CHECK(frames > 1);
+    for (std::size_t slot = 0; slot < frames; ++slot) {
+        const Track& track = doc.scene().tracks.front();
+        const ImageId image = track.imageShownAt(slot);
+        const Image* record = track.findImage(image);
+        if (!record) continue;
+
+        canvas.setFrame(static_cast<int>(slot));
+        canvas.grab();  // the paint is what asks for the colour
+        CHECK(canvas.settleColour(20000));
+
+        // Where this drawing's line art is.
+        PixelRect ink{};
+        for (const Layer& layer : track.layers) {
+            if (layer.kind == LayerKind::Ctg) continue;
+            if (const Cel* cel = doc.cel(record->celFor(layer.id))) {
+                ink = unite(ink, drawnBounds(cel->tiles()));
+            }
+        }
+        CHECK(!ink.isEmpty());
+
+        // And where the marks it is showing ended up, in the same coordinates
+        // the compositor draws them in.
+        const Document::CarriedMarks shown = doc.ctgCarriedMarksAt(track_id, image, colour);
+        CHECK(shown.tiles != nullptr);
+        if (!shown.tiles || ink.isEmpty()) continue;
+        PixelRect marks = drawnBounds(*shown.tiles);
+        marks.x += shown.offset.x;
+        marks.y += shown.offset.y;
+
+        // The whole of what a colourist is promised by carrying: the mark is on
+        // the drawing. Left where it was made it is on bare paper, and the fill
+        // it seeds is worth nothing.
+        CHECK(!marks.isEmpty());
+        CHECK(!intersect(marks, ink).isEmpty());
+    }
+}
+
+void oneScribbleReachesTheEndOfTheShot() {
+    TEST("a mark carries onto every drawing of a shot, on both reported shots");
+    // Eleven drawings, a shape crossing the frame, one mark on the first.
+    everyDrawingGetsItsMarksOnTheShape(QStringLiteral("moved-clear-of-itself.animage"));
+    // Five, and the shape gets smaller as it goes, which is what makes lining
+    // it up cost more than giving up on it.
+    everyDrawingGetsItsMarksOnTheShape(QStringLiteral("moved-clear-and-smaller.animage"));
+}
+
 // The solve is off the interface thread, so a paint no longer waits for one.
 // What is on screen in the meantime has to be the last answer rather than
 // nothing: the colour blinking out on every stroke would be a worse thing to
@@ -8951,6 +9044,7 @@ int main(int argc, char** argv) {
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
     aLayerShowingItsMarksIsStillSolved();
+    oneScribbleReachesTheEndOfTheShot();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
     movedMarksAgreeWithThemselvesInTheWindow();

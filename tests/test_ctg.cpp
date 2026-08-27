@@ -1856,6 +1856,50 @@ void theShiftIsMeasuredFromTheInkAlone() {
 // and for the ink it leaves uncovered -- while sliding the drawing clean off the
 // edge is charged once. "Disappear entirely" beat "line them up", and the search
 // answered with the far corner of its own search window.
+// The other end of the same question: a shape that moved so far the two
+// drawings share no ink at all.
+//
+// This is the case rung four cannot see by itself -- a node walks a few cells
+// at a time and keeps the position in hand whenever two places tie, so with
+// nothing under any node every offset ties and the run reports that nothing
+// moved. It is the whole reason the lattice asks rung two where to start.
+//
+// Nothing else in tests/ reaches that fallback: every other fixture moves a
+// shape that still overlaps itself, and bench_carry, bench_shapes and bench_hand
+// on all three projects were byte for byte identical across the change that
+// fixed the reported failure. So this is coverage of a branch that had none.
+//
+// **It is not a test of that failure**, and it passes with the bug put back.
+// What that one needs is two shapes far enough apart *and* different enough
+// that lining them up scores within a few percent of abandoning them, which is
+// ordinary between two drawings of a moving shape and is not something a pair
+// of boxes here reproduces. See docs/handover.md.
+void aMarkFollowsAShapeThatMovedClearOfItself() {
+    TEST("a mark follows a shape that moved further than its own width");
+    Sequence s(2);
+    s.followTheMotion();
+
+    // 400 px apart, twice the box's own width, so the two share no ink -- and
+    // not the same box twice. A shape redrawn identically matches its own
+    // translation almost exactly, which wins by a mile and hides everything
+    // this is about; two drawings of a moving shape never coincide, and it is
+    // that near-tie the comparison has to get right.
+    s.box(0, 100, 100, 300, 300, 180, 220);
+    s.box(1, 500, 140, 700, 260, 580, 620);
+    s.stroke(0, s.colour, 150, 200, 250, 200, 12.0f, 1.0f, 0.0f, 0.0f);
+
+    const CtgFill& carried = s.fillOf(1);
+    CHECK(carried.valid);
+    CHECK(carried.inherited);
+
+    // It followed, and roughly the right distance.
+    CHECK(std::abs(carried.carried_by.overall.x - 400) <= 80);
+    CHECK(std::abs(carried.carried_by.overall.y) <= 80);
+
+    // And the colour is on the shape, not on the paper the shape left behind.
+    CHECK_NEAR(fillAt(carried, 600, 200).r, 1.0, 0.02);
+}
+
 void aShapeRedrawnInPlaceHasNotMoved() {
     TEST("a shape redrawn in the same place is not reported as having moved");
     Sequence s(2);
@@ -2725,6 +2769,7 @@ int main() {
     theShiftIsMeasuredFromTheInkAlone();
     theShiftGuardCountsInkAndNotCells();
     aShapeRedrawnInPlaceHasNotMoved();
+    aMarkFollowsAShapeThatMovedClearOfItself();
     whatIsShownAgreesWithWhatWasSolved();
 
     aLiftedSolveAgreesWithTheDocument();
