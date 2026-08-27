@@ -2685,8 +2685,25 @@ void MainWindow::syncStatus() {
     // moment behind the drawing and there would otherwise be nothing to say so.
     // It is the whole of the visible difference: the program does not stop, and
     // what you are looking at is the last answer until the next one lands.
-    const QString colouring =
-        canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
+    // `colouring...` said a solve was happening and never how much was left,
+    // which was enough while only the drawing in front of you was ever solved.
+    // With fills accumulating across a take -- issue #85 -- there is a
+    // quantity, and it is the one somebody watching a take wants: how much of
+    // the shot has colour on it yet.
+    //
+    // Same rule as the imported pictures one line down, and the same reason for
+    // it: shown while a solve is outstanding rather than while fills are merely
+    // missing, because a drawing is only solved once it has been looked at and
+    // a number standing still reads as stuck.
+    QString colouring;
+    if (canvas_->colourPending()) {
+        const ImportsReady coloured = drawingsColoured();
+        colouring = coloured.wanted > 0
+                        ? QStringLiteral("   colouring %1/%2")
+                              .arg(coloured.ready)
+                              .arg(coloured.wanted)
+                        : QStringLiteral("   colouring...");
+    }
 
     // How much of an imported sequence is on hand, and only while some of it is
     // not. A number rather than a word, because the complaint this answers is
@@ -3344,6 +3361,28 @@ MainWindow::ImportsReady MainWindow::importsReady() const {
                 // every status update and flatten the order that keeps a
                 // scrub's own frames resident.
                 if (cache.has(CtgKey{id, layer.id}, layer.placement)) ++out.ready;
+            }
+        }
+    }
+    return out;
+}
+
+MainWindow::ImportsReady MainWindow::drawingsColoured() const {
+    ImportsReady out;
+    const CtgFillCache& cache = doc_.ctgCache();
+
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Ctg) continue;
+            // A hidden layer is never solved, so counting it would put a
+            // denominator up that nothing can reach. Same rule as importsReady,
+            // and wrong in the same way without it.
+            if (!layer.visible) continue;
+
+            for (const auto& [id, image] : track.images) {
+                ++out.wanted;
+                // Asked without renewing it: see CtgFillCache::has.
+                if (cache.has(CtgKey{id, layer.id})) ++out.ready;
             }
         }
     }

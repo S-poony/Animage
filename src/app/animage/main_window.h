@@ -141,6 +141,18 @@ public:
     };
     ImportsReady importsReady() const;
 
+    // How much of the shot has colour on it, in the same shape and for the same
+    // reason. A shot is coloured by scribbling one drawing and letting the marks
+    // carry, so every other drawing has no fill until something solves it --
+    // and until issue #85 nothing ever did during a take. With fills
+    // accumulating, this is what says how far along a take has got.
+    //
+    // Counts a fill that exists rather than one that is up to date. A fill whose
+    // inputs have moved still draws, and asking each one whether it is current
+    // would mean hashing every barrier cel of every drawing, four times a
+    // second.
+    ImportsReady drawingsColoured() const;
+
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
     // the window building its actions from the table is exactly the thing that
