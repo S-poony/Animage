@@ -140,6 +140,15 @@ float asFloat(const QJsonValue& value, float fallback) {
     return value.isDouble() ? static_cast<float>(value.toDouble()) : fallback;
 }
 
+// Wanted for exactly one thing: a reference layer's placement, whose fields are
+// doubles. Reading those through asFloat would narrow them, and a placement is
+// compared exactly -- see Transform::operator== -- so a number that came back
+// slightly different would not be a slightly different picture, it would be a
+// cache key that never matches and a layer that re-derives on every refresh.
+double asDouble(const QJsonValue& value, double fallback) {
+    return value.isDouble() ? value.toDouble() : fallback;
+}
+
 int asInt(const QJsonValue& value, int fallback) {
     if (!value.isDouble()) return fallback;
     const double d = value.toDouble();
@@ -240,6 +249,46 @@ Rgba readColour(const QJsonArray& array) {
     return colour;
 }
 
+// Where an imported picture sits, which is the one transform in the program
+// that outlives the gesture that made it. Everywhere else a transform is
+// committed into pixels and forgotten; a reference layer has no pixels of its
+// own, so this *is* the picture's position and losing it loses the placing.
+//
+// All nine fields, and the pivot is not padding. Transform::operator== compares
+// every one of them because the derived pixels are keyed on the placement they
+// were derived under, and two placements agreeing everywhere but the pivot put
+// a rotation somewhere else. Writing eight of them would reopen the project
+// with the picture in a different place and nothing on screen to say why.
+QJsonObject writeTransform(const Transform& t) {
+    QJsonObject out;
+    out.insert("dx", jsonNumber(t.dx));
+    out.insert("dy", jsonNumber(t.dy));
+    out.insert("rotation", jsonNumber(t.rotation));
+    out.insert("scale_x", jsonNumber(t.scale_x));
+    out.insert("scale_y", jsonNumber(t.scale_y));
+    out.insert("flip_x", t.flip_x);
+    out.insert("flip_y", t.flip_y);
+    out.insert("pivot_x", jsonNumber(t.pivot_x));
+    out.insert("pivot_y", jsonNumber(t.pivot_y));
+    return out;
+}
+
+// The fallbacks are the identity, member by member, so an object with keys
+// missing reads as "not placed" rather than as a scale of zero.
+Transform readTransform(const QJsonObject& json) {
+    Transform t;
+    t.dx = asDouble(json.value("dx"), 0.0);
+    t.dy = asDouble(json.value("dy"), 0.0);
+    t.rotation = asDouble(json.value("rotation"), 0.0);
+    t.scale_x = asDouble(json.value("scale_x"), 1.0);
+    t.scale_y = asDouble(json.value("scale_y"), 1.0);
+    t.flip_x = asBool(json.value("flip_x"), false);
+    t.flip_y = asBool(json.value("flip_y"), false);
+    t.pivot_x = asDouble(json.value("pivot_x"), 0.0);
+    t.pivot_y = asDouble(json.value("pivot_y"), 0.0);
+    return t;
+}
+
 QJsonObject writeLayer(const Layer& layer) {
     QJsonObject out;
     out.insert("id", jsonNumber(static_cast<double>(layer.id)));
@@ -265,6 +314,11 @@ QJsonObject writeLayer(const Layer& layer) {
     }
     if (layer.kind == LayerKind::Reference) {
         out.insert("reference_source", QString::fromStdString(layer.reference_source));
+        // Under the same version gate as the line above and for the same
+        // reason: a build that does not know `reference` reads the layer as
+        // raster, finds no cels on it, and saves the emptiness back. The
+        // picture and where it goes are lost together or not at all.
+        out.insert("placement", writeTransform(layer.placement));
     }
     return out;
 }
@@ -291,6 +345,7 @@ Layer readLayer(const QJsonObject& json) {
     layer.ctg_direction = directionFromName(asText(json.value("ctg_direction"), "forward"));
     layer.ctg_follow_motion = asBool(json.value("ctg_follow_motion"), true);
     layer.reference_source = asText(json.value("reference_source"));
+    layer.placement = readTransform(json.value("placement").toObject());
     return layer;
 }
 

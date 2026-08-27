@@ -39,6 +39,21 @@ Document buildScene() {
     const LayerId imported = doc.addLayer(sheet, "modelsheet", 0, LayerKind::Reference);
     Layer reference = *doc.scene().findTrack(sheet)->findLayer(imported);
     reference.reference_source = "model-sheet.png";
+    // And where it was put. Every field away from its default, including the
+    // two that look decorative: a flip is a sign the matrix carries, and the
+    // pivot decides where the rotation happens, so a placement that came back
+    // with either of them missing would be a different picture. Nine numbers
+    // that are only ever compared exactly -- see Transform::operator== -- which
+    // is why they are pinned here rather than left to a round-trip of the ones
+    // somebody thought were interesting.
+    reference.placement.dx = 37.0;
+    reference.placement.dy = -12.0;
+    reference.placement.rotation = 22.5;
+    reference.placement.scale_x = 0.5;
+    reference.placement.scale_y = 1.25;
+    reference.placement.flip_x = true;
+    reference.placement.pivot_x = 640.0;
+    reference.placement.pivot_y = 360.0;
     doc.updateLayer(sheet, imported, reference);
     doc.insertImage(sheet, 0);
     TrackProperties held = doc.scene().findTrack(sheet)->properties();
@@ -119,6 +134,23 @@ void checkSameScene(const Document& a, const Document& b) {
             // the only thing standing between the layer and drawing nothing --
             // losing it here would look exactly like an import that went blank.
             CHECK_EQ(la.reference_source, lb.reference_source);
+            // And where that picture goes. This is the one transform in the
+            // program that outlives the gesture that made it -- everywhere else
+            // a transform is committed into pixels and forgotten -- so it is
+            // the file's job to keep it, and the picture reopens at the origin
+            // if it does not. Field by field so a failure says which one, and
+            // exactly rather than within a tolerance, because the derived
+            // pixels are keyed on this and a placement that is nearly right is
+            // a cache that never matches.
+            CHECK_EQ(la.placement.dx, lb.placement.dx);
+            CHECK_EQ(la.placement.dy, lb.placement.dy);
+            CHECK_EQ(la.placement.rotation, lb.placement.rotation);
+            CHECK_EQ(la.placement.scale_x, lb.placement.scale_x);
+            CHECK_EQ(la.placement.scale_y, lb.placement.scale_y);
+            CHECK_EQ(la.placement.flip_x, lb.placement.flip_x);
+            CHECK_EQ(la.placement.flip_y, lb.placement.flip_y);
+            CHECK_EQ(la.placement.pivot_x, lb.placement.pivot_x);
+            CHECK_EQ(la.placement.pivot_y, lb.placement.pivot_y);
         }
 
         CHECK_EQ(ta.images.size(), tb.images.size());
