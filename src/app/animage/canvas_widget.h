@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <utility>
@@ -21,6 +22,7 @@ class QTimer;
 #include "ctg.h"
 #include "ctg_solver.h"
 #include "document.h"
+#include "reference_decoder.h"
 #include "selection.h"
 #include "transform.h"
 
@@ -156,6 +158,34 @@ public:
     // Whether any colour is being worked out. The interface has no business
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
+
+    // --- imported pictures ------------------------------------------------
+
+    // Where an imported file's bytes are, given the name a layer stores.
+    //
+    // **The canvas must not answer this itself and does not try.** Where an
+    // import lives depends on whether the project has been saved and on which
+    // folder it was saved into, which is MainWindow's business -- and it moves,
+    // on the interface thread, while this widget is painting. So the answer is
+    // asked for here, once, on the interface thread, at the moment a decode is
+    // queued; what comes back is put in the job and never looked at.
+    //
+    // Without one, a reference layer simply does not draw. That is the same
+    // answer as a decode that has not finished, which is what makes it safe to
+    // be unset -- a test that never installs one gets a blank import rather
+    // than a crash.
+    void setImportLocator(std::function<QString(const std::string&)> locate);
+
+    // Installs anything the decoder has finished. On a timer while decodes are
+    // outstanding; public so a test can drive it directly.
+    void collectReferenceFrames();
+
+    // Waits for every outstanding decode and installs it. For tests, and for
+    // anything that must not run ahead of the picture -- an export, which has
+    // to write the frames nobody looked at. Never during ordinary drawing.
+    bool settleReferenceFrames(int timeout_ms = 30000);
+
+    bool referenceFramesPending() const { return !reference_asked_.empty(); }
 
     // How many times this widget has actually painted.
     //
@@ -444,6 +474,17 @@ public:
 Q_SIGNALS:
     void viewChanged();
     void documentChanged();
+
+    // An imported file could not be turned into a picture: it is not where the
+    // project left it, or it is there and will not decode.
+    //
+    // A signal rather than a message box from in here, because how often to say
+    // it is not this widget's question. A paint asks for what is missing, so
+    // this can fire for several frames of one sequence in one go, and it fires
+    // again whenever the cache is emptied -- deciding that a person should be
+    // told once per document is MainWindow's, which is where the document is
+    // opened and where the last such decision already lives.
+    void importUnreadable(const QString& name, const QString& trouble);
     void brushSizeChanged(double radius);
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
@@ -595,6 +636,11 @@ private:
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
     void dropStaleColourRequests(bool only_this_frame);
+    void requestReferenceFrames();
+    void dropStaleReferenceRequests(bool only_this_frame);
+    void noteReferencePending();
+    void giveUpOnFrame(const animage::CtgKey& key, const animage::Transform& under,
+                       const QString& name, const QString& trouble);
     // Whether any track shows this drawing at the frame the playhead is on.
     bool isShownNow(animage::ImageId image) const;
     void noteColourPending();
@@ -771,6 +817,26 @@ private:
     };
     animage::CtgSolver ctg_solver_;
     std::map<ColourAsked, ColourWanted> ctg_asked_;
+
+    // The same bookkeeping for imported frames, and it is the same shape
+    // because it is the same problem: a widget repaints many times a second,
+    // and without a record of what is already being worked out every paint
+    // would supersede the answer the last paint was waiting for and nothing
+    // would ever finish.
+    //
+    // What is recorded is the placement the frame was asked for *at*, alongside
+    // the cache generation. Two things a decode depends on are not in its key --
+    // the placement is on the layer and so is the file list -- and an answer
+    // that lands after either moved is not a late answer, it is one about a
+    // layer that no longer exists in that form.
+    struct ReferenceWanted {
+        animage::Transform under;
+        std::uint64_t generation = 0;
+    };
+    ReferenceDecoder reference_decoder_;
+    std::map<std::pair<animage::ImageId, animage::LayerId>, ReferenceWanted> reference_asked_;
+    QTimer* reference_poll_ = nullptr;
+    std::function<QString(const std::string&)> locate_import_;
 
     // Runs only while something is outstanding.
     //

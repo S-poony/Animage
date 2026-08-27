@@ -95,19 +95,13 @@ public:
     // is untouched in that case.
     bool importImageFrom(const QString& path, QString* trouble = nullptr);
 
-    // Re-derives any imported picture whose pixels were made at a placement its
-    // layer no longer has. Cheap when there is nothing to do, which is nearly
-    // always; see the definition for why it runs from refreshEverything rather
-    // than from the paint.
-    //
-    // Reports what it could not read rather than failing. A missing import
-    // costs that picture; the drawings are not affected, and refusing the whole
-    // project over a reference would be worse than opening it with the
-    // reference blank and saying so.
+    // Waits for every imported picture on screen to be decoded and installed.
     //
     // Public so a test can change a placement directly and then ask for the
-    // consequence, which is otherwise only reachable through a live gesture.
-    void refreshReferenceFrames();
+    // consequence, which is otherwise only reachable through a live gesture and
+    // a wait. **Never on an ordinary path** -- the decode runs on a worker
+    // precisely so that nothing on the interface thread waits for one.
+    bool settleReferenceFrames(int timeout_ms = 30000);
 
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
@@ -205,6 +199,12 @@ private:
     void rebuildLayerList();
     void syncStatus();
     void refreshEverything();
+
+    // An imported file the canvas could not turn into a picture. Gathered, and
+    // said once per document; see the definitions for why the saying is queued
+    // out of the paint that found it.
+    void onImportUnreadable(const QString& name, const QString& trouble);
+    void reportUnreadableImports();
     // Asks the timeline dock for a height that suits the number of tracks, up
     // to four rows. A request and not a constraint: the dock stays draggable in
     // both directions afterwards.
@@ -575,9 +575,16 @@ private:
     ProjectIO::Imports imports_;
 
     // Whether this document has already been told about imports it cannot read.
-    // refreshReferenceFrames runs on every refresh and a missing file stays
+    // The paint asks for every frame on screen and a missing file stays
     // missing, so without this the message box would come back for ever.
     bool reported_missing_imports_ = false;
+    // What could not be read, gathered so that one folder going missing is one
+    // box naming every file rather than a box per frame.
+    QStringList unreadable_imports_;
+    // Whether the box is already on its way. See onImportUnreadable: the report
+    // is queued out of the paint that found it, and several frames of one
+    // sequence fail in the same paint.
+    bool import_report_queued_ = false;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;

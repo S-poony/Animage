@@ -38,6 +38,8 @@ add_library(animage_ui STATIC
   animage/shortcuts_dialog.h
   animage/image_import.cpp
   animage/image_import.h
+  animage/reference_decoder.cpp
+  animage/reference_decoder.h
   animage/project_io.cpp
   animage/project_io.h
   animage/export_sequence.cpp

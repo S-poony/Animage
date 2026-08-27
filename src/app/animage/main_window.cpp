@@ -261,6 +261,12 @@ MainWindow::MainWindow() {
     canvas_->setTrack(track_);
     canvas_->setFrame(0);
     canvas_->setActiveLayer(first);
+    // Where an import's bytes are is this window's business -- it depends on
+    // whether the project has been saved and into which folder -- so the canvas
+    // asks rather than working it out. See CanvasWidget::setImportLocator.
+    canvas_->setImportLocator(
+        [this](const std::string& name) { return importPathFor(name); });
+    connect(canvas_, &CanvasWidget::importUnreadable, this, &MainWindow::onImportUnreadable);
     setCentralWidget(canvas_);
 
     playback_timer_ = new QTimer(this);
@@ -2196,11 +2202,7 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
     imports_ = ProjectIO::Imports();
     // A different document, so what it could not read has not been said yet.
     reported_missing_imports_ = false;
-    // Before afterProjectLoaded, so the first paint has the pictures. A
-    // reference layer with nothing derived draws nothing at all -- correctly,
-    // since compositing may not start a decode -- and the canvas would come up
-    // blank and then fill in, which reads as a bug.
-    refreshReferenceFrames();
+    unreadable_imports_.clear();
     afterProjectLoaded();
     return true;
 }
@@ -2806,11 +2808,20 @@ void MainWindow::syncTimelineHeight() {
 }
 
 void MainWindow::refreshEverything() {
-    // First, because everything below it draws. A placement that has just
-    // changed -- or been undone -- leaves the derived picture keyed on the old
-    // one, and a refresh that painted before re-deriving would show the layer
-    // blank for a frame.
-    refreshReferenceFrames();
+    // Nothing about imported pictures happens here any more, and the absence is
+    // worth a line because a call used to be first in this function.
+    //
+    // Re-deriving ran on the interface thread and could afford to, because
+    // every drawing of a still's track showed the same picture and the only
+    // thing that changed it was a placement -- which arrives here. A sequence
+    // shows a different frame at every drawing and the playhead never comes
+    // through this function at all, so the ask moved to the paint, which is the
+    // one thing that reliably happens when what is on screen changes. See
+    // CanvasWidget::requestReferenceFrames.
+    //
+    // What that costs is that a picture arrives a frame or two after the
+    // placement does, instead of within this call. That is the same bargain the
+    // colour already makes and for the same reason.
     syncTimelineHeight();
     timeline_widget_->refresh();
     canvas_->setFrame(timeline_widget_->currentSlot());
@@ -2834,7 +2845,11 @@ std::string importNameFor(const Document& doc, const QString& path) {
     QString stem = QFileInfo(path).completeBaseName();
     QString suffix = QFileInfo(path).suffix().toLower();
     // Everything that is not a letter, a digit, a dash or a dot becomes a dash,
-    // which is the rule the export already uses for track and layer names.
+    // which is the rule the export already uses for track and layer names --
+    // and the underscore is not an oversight in that list. It is the export's
+    // separator and nothing else is, so a name that kept one would put an extra
+    // field in a file name; see export_sequence.h. One rule rather than two, so
+    // that nothing has to remember which names are allowed what.
     for (QChar& c : stem) {
         if (!c.isLetterOrNumber() && c != QLatin1Char('-')) c = QLatin1Char('-');
     }
@@ -3059,94 +3074,59 @@ TileGrid MainWindow::importAtOneToOne(const Layer& layer, int frame, QString* tr
     return image_import::decode(path, trouble);
 }
 
-// Derives the pixels of every reference layer whose picture is missing or was
-// derived at a placement that is no longer the layer's.
+// Says, once per document, that some imported pictures could not be read.
 //
-// **Called from refreshEverything and not from the paint**, which is the one
-// decision here worth arguing. A paint-time request is what the colour layer
-// does, and it is the right shape once a decode has to happen on a worker --
-// which a sequence will need and a still does not. Until then this runs where
-// the program already admits something has changed, and it is cheap when
-// nothing has: the test is a hash lookup per drawing, and every one of them
-// hits on every frame where nothing moved.
+// This is what is left of a function that used to derive every frame here. The
+// deriving moved to a worker the paint asks -- see
+// CanvasWidget::requestReferenceFrames -- and reporting stayed behind, because
+// how often a person should be told is a question about the document and the
+// canvas has no view of one.
 //
-// It costs a decode on the interface thread when something *has* moved, which
-// on a 300 dpi scan is noticeable and on a sequence would not be acceptable.
-// That is the line where this grows a worker, and it is the same line where
-// docs/importing.md says the request path has to become requestCtgFills'.
-void MainWindow::refreshReferenceFrames() {
-    QStringList unreadable;
+// **Gathered rather than shown as they arrive.** A paint asks for every frame
+// on screen, so one folder going missing is several reports in the same
+// instant, and the cache being emptied brings them all back. So they are
+// collected and one box is shown, and the flag is what stops a second one --
+// a missing file stays missing, and a message box on every refresh would make
+// the program unusable rather than informative.
+//
+// The project still opens either way. An import that will not read costs that
+// picture; the drawings are untouched, and refusing to open a shot because a
+// modelsheet has gone would be a worse trade than any this program makes
+// elsewhere.
+void MainWindow::onImportUnreadable(const QString& name, const QString& trouble) {
+    const QString said = QStringLiteral("%1 (%2)").arg(name, trouble);
+    if (unreadable_imports_.contains(said)) return;
+    unreadable_imports_.append(said);
 
-    for (const Track& track : doc_.scene().tracks) {
-        for (const Layer& layer : track.layers) {
-            if (layer.kind != LayerKind::Reference || layer.reference_sources.empty()) continue;
+    // Not in the same turn of the event loop as the paint that found it: this
+    // arrives from requestReferenceFrames, which runs inside paintEvent, and a
+    // modal dialog opened from inside a paint re-enters the widget it is
+    // painting. Queued to the next turn, by which time the rest of the
+    // sequence's failures have been gathered too, so the box says all of them.
+    if (import_report_queued_) return;
+    import_report_queued_ = true;
+    QTimer::singleShot(0, this, &MainWindow::reportUnreadableImports);
+}
 
-            // Per drawing, because a sequence shows a different frame at each
-            // one. Two drawings pointed at the same frame decode it twice and
-            // hold two entries, which is the honest cost of a key that names
-            // the drawing -- and the tiles under them are shared handles, so
-            // what is paid twice is the decode and not the pixels.
-            for (const auto& [id, image] : track.images) {
-                const int frame = image.sourceFrameFor(layer.id);
-                // Absent means the layer is empty at this drawing, exactly as a
-                // missing cel does. Nothing to derive and nothing to complain
-                // about.
-                if (frame == Image::kNoSourceFrame) continue;
-
-                // Nothing to do is the ordinary case and has to be the cheap
-                // one. Asked at the layer's current placement, so this is also
-                // what notices a placement that was changed or undone --
-                // neither of which touches a cel, and so neither of which
-                // anything else here would see.
-                if (doc_.referenceFrameFor(track.id, id, layer.id, layer.placement)) continue;
-
-                QString trouble;
-                // **From the file every time, and never from what is already
-                // derived.** This is the whole of why a placement is stored
-                // rather than baked: a picture nudged, scaled and nudged again
-                // has been resampled once, from the bytes that came off disk.
-                // Re-deriving from the last derived grid would be a resample of
-                // a resample, and would look identical until the third or
-                // fourth adjustment.
-                const TileGrid source = importAtOneToOne(layer, frame, &trouble);
-                if (source.empty() && !trouble.isEmpty()) {
-                    const std::size_t at = static_cast<std::size_t>(frame);
-                    const std::string named = at < layer.reference_sources.size()
-                                                  ? layer.reference_sources[at]
-                                                  : std::string();
-                    const QString said =
-                        QStringLiteral("%1 (%2)").arg(QString::fromStdString(named), trouble);
-                    // One line per file and not one per drawing: a sequence
-                    // whose folder has gone would otherwise report the same
-                    // hundred files in a message box nobody can read.
-                    if (!unreadable.contains(said)) unreadable.append(said);
-                    continue;
-                }
-
-                TileGrid placed = layer.placement.isIdentity()
-                                      ? source
-                                      : transformTiles(source, layer.placement);
-                doc_.setReferenceFrame(track.id, id, layer.id, layer.placement, std::move(placed));
-            }
-        }
-    }
-
-    if (unreadable.isEmpty()) return;
-    // Said, and the project still opens. An import that will not read costs
-    // that picture; the drawings are untouched, and refusing to open a shot
-    // because a modelsheet has gone would be a worse trade than any this
-    // program makes elsewhere.
-    //
-    // Reported once per document rather than once per refresh: this runs on
-    // every refresh, and a missing file stays missing, so a message box each
-    // time would make the program unusable rather than informative.
-    if (reported_missing_imports_) return;
+void MainWindow::reportUnreadableImports() {
+    import_report_queued_ = false;
+    if (reported_missing_imports_ || unreadable_imports_.isEmpty()) return;
     reported_missing_imports_ = true;
     QMessageBox::warning(this, QStringLiteral("Imported pictures"),
                          QStringLiteral("This project could not read %1 of its imported "
                                         "pictures, and those layers will be blank:\n\n%2")
-                             .arg(unreadable.size())
-                             .arg(unreadable.join(QStringLiteral("\n"))));
+                             .arg(unreadable_imports_.size())
+                             .arg(unreadable_imports_.join(QStringLiteral("\n"))));
+}
+
+// Waits for every imported picture on screen to be decoded and installed.
+//
+// **Never on an ordinary path.** It is here for tests, which change a placement
+// directly and then want the consequence, and for anything that must not run
+// ahead of the picture. Waiting for a decode on the interface thread is the
+// thing the worker exists to stop.
+bool MainWindow::settleReferenceFrames(int timeout_ms) {
+    return canvas_ && canvas_->settleReferenceFrames(timeout_ms);
 }
 
 // --- tracks --------------------------------------------------------------

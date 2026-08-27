@@ -473,6 +473,14 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     ctg_poll_->setInterval(16);
     connect(ctg_poll_, &QTimer::timeout, this, &CanvasWidget::collectColour);
 
+    // A second poll rather than a branch in the first, because the two run for
+    // different lengths of time: a decode is tens of milliseconds and a solve is
+    // a second and a half, so a shared timer would be kept alive by whichever
+    // was slower and would tick over the other for nothing.
+    reference_poll_ = new QTimer(this);
+    reference_poll_->setInterval(16);
+    connect(reference_poll_, &QTimer::timeout, this, &CanvasWidget::collectReferenceFrames);
+
     // The one place the cursor is set, from the start. Nothing else in this
     // file calls setCursor.
     refreshPointer();
@@ -486,6 +494,7 @@ CanvasWidget::~CanvasWidget() {
     // has not been told the window is closing goes on running for a second or
     // two after it has, and the process stays up with nothing on screen.
     ctg_solver_.cancelAll();
+    reference_decoder_.cancelAll();
 }
 
 void CanvasWidget::setTrack(TrackId track) {
@@ -871,6 +880,204 @@ void CanvasWidget::collectColour() {
     dirty_everything_ = true;
     update();
     Q_EMIT colourChanged();
+}
+
+void CanvasWidget::setImportLocator(std::function<QString(const std::string&)> locate) {
+    locate_import_ = std::move(locate);
+}
+
+// Asks for any imported frame that is on screen and has not been decoded.
+//
+// The same shape as requestCtgFills and for the same reason, which docs/
+// importing.md predicted and the frame-change path confirms: **nothing calls
+// refreshEverything when the playhead moves.** A still could re-derive from
+// there because every drawing of its track showed the same picture; a sequence
+// shows a different frame at every drawing, so the only thing that reliably
+// happens when what is on screen changes is the paint.
+//
+// Nothing is decoded here. What arrives is whatever the decoder had finished by
+// the time this ran, and a frame landing later brings the paint on itself.
+void CanvasWidget::requestReferenceFrames() {
+    // Not during a stroke, for a smaller reason than the colour's: a stroke
+    // cannot change what an import shows, so anything asked here would be a
+    // question already asked. Skipping keeps the per-dab path clear.
+    if (stroking_) return;
+    if (!locate_import_) return;  // nothing can be resolved, so nothing is asked
+
+    dropStaleReferenceRequests(/*only_this_frame=*/true);
+
+    const std::uint64_t generation = doc_.referenceCache().generation();
+    for (const Track& track_here : doc_.scene().tracks) {
+        // What is on screen, wherever in its own time it came from -- a track
+        // holding or cycling past its last drawing shows a picture out there
+        // and that picture has to be decoded like any other.
+        const ImageId image = track_here.imageShownAt(slot_);
+        if (image == kNoId) continue;
+        const Image* record = track_here.findImage(image);
+        if (!record) continue;
+
+        for (const Layer& layer : track_here.layers) {
+            if (layer.kind != LayerKind::Reference || !layer.visible) continue;
+
+            const int frame = record->sourceFrameFor(layer.id);
+            if (frame < 0 || static_cast<std::size_t>(frame) >= layer.reference_sources.size()) {
+                continue;  // the layer is empty at this drawing
+            }
+            if (doc_.referenceFrameFor(track_here.id, image, layer.id, layer.placement)) {
+                continue;  // already decoded, at the placement it is asked for
+            }
+
+            const std::pair<ImageId, LayerId> asked{image, layer.id};
+            const auto already = reference_asked_.find(asked);
+            // Asked at the same placement means the question in flight is this
+            // question. Asked at a different one means the layer moved while a
+            // decode was running, and the newer question has to supersede it.
+            if (already != reference_asked_.end() && already->second.under == layer.placement &&
+                already->second.generation == generation) {
+                continue;
+            }
+
+            const std::string& named = layer.reference_sources[static_cast<std::size_t>(frame)];
+            const QString path = locate_import_(named);
+            if (path.isEmpty()) {
+                giveUpOnFrame({image, layer.id}, layer.placement,
+                              QString::fromStdString(named),
+                              QStringLiteral("it is not where the project left it"));
+                continue;
+            }
+
+            reference_asked_[asked] = {layer.placement, generation};
+            reference_decoder_.request({image, layer.id},
+                                       {path, QString::fromStdString(named), layer.placement});
+        }
+    }
+
+    noteReferencePending();
+}
+
+// Records that a frame cannot be had, as an empty picture, and says so once.
+//
+// **The empty picture is the load-bearing half and it is not a tidy-up.** A
+// paint asks for whatever is not in the cache, so a file that will not read
+// would be asked for again on the very next paint, and again sixteen
+// milliseconds later, for as long as the window is open -- a decode a frame, on
+// a worker, for ever. Remembering the failure as an answer is what makes asking
+// stop. It costs nothing: an empty grid has no tiles, so it weighs nothing
+// against the cache's budget and evicts nobody.
+//
+// It comes back on the next `forgetReferenceFrames`, which is what a project
+// being loaded or replaced already does -- so a file that has been put back is
+// not shut out for the life of the process.
+void CanvasWidget::giveUpOnFrame(const animage::CtgKey& key, const Transform& under,
+                                 const QString& name, const QString& trouble) {
+    doc_.setReferenceFrame(kNoId, key.image, key.layer, under, TileGrid{});
+    Q_EMIT importUnreadable(name, trouble);
+}
+
+void CanvasWidget::noteReferencePending() {
+    if (!reference_poll_) return;
+    const bool pending = !reference_asked_.empty();
+    if (pending && !reference_poll_->isActive()) reference_poll_->start();
+    if (!pending) reference_poll_->stop();
+}
+
+// Requests whose answer nobody is waiting for any more: a frame that has been
+// left, or -- on screen or not -- one about a cache that has since been emptied.
+//
+// Playing a shot with an animatic under it is twenty-four of the first a second,
+// and a queue that fills faster than it drains never catches up.
+void CanvasWidget::dropStaleReferenceRequests(bool only_this_frame) {
+    const std::uint64_t generation = doc_.referenceCache().generation();
+    for (auto it = reference_asked_.begin(); it != reference_asked_.end();) {
+        const bool left = only_this_frame && !isShownNow(it->first.first);
+        if (!left && it->second.generation == generation) {
+            ++it;
+            continue;
+        }
+        reference_decoder_.cancel({it->first.first, it->first.second});
+        it = reference_asked_.erase(it);
+    }
+}
+
+// Takes what the decoder has finished and puts it in the document.
+//
+// On the interface thread, and it is the only place a decoded frame enters the
+// document -- which is the whole of the threading discipline here, and also the
+// whole of the eviction rule: installing is what evicts, and evicting may only
+// happen where the document may be edited. See ReferenceCache.
+void CanvasWidget::collectReferenceFrames() {
+    bool arrived = false;
+    dropStaleReferenceRequests(/*only_this_frame=*/false);
+
+    for (ReferenceDecoder::Result& result : reference_decoder_.collect()) {
+        const std::pair<ImageId, LayerId> key{result.key.image, result.key.layer};
+        const auto asked = reference_asked_.find(key);
+        // An answer to a question that has since been asked again, about a
+        // drawing that has since been left, or about a placement the layer has
+        // since moved off. All ordinary, and all dropped -- and the last of
+        // those is the one that matters: installing it would put a picture of
+        // where the import used to be on screen, convincingly, until something
+        // happened to refresh it.
+        if (asked == reference_asked_.end() || !(asked->second.under == result.under)) continue;
+
+        reference_asked_.erase(asked);
+        if (!result.ok) {
+            giveUpOnFrame(result.key, result.under, result.name, result.trouble);
+            continue;
+        }
+
+        // kNoId for the track, which that function ignores: a frame is keyed on
+        // the drawing and the layer, and ImageIds come from one counter per
+        // document so a drawing names itself. Every other caller happens to
+        // have a track to hand and reads better for saying so; this one does
+        // not, because a result carries only what the question did.
+        doc_.setReferenceFrame(kNoId, result.key.image, result.key.layer, result.under,
+                               std::move(result.tiles));
+        arrived = true;
+    }
+
+    if (!arrived) {
+        noteReferencePending();
+        return;
+    }
+    noteReferencePending();
+
+    // A frame that has arrived is a whole layer appearing where there was
+    // nothing, nowhere near wherever the pen was, so all of it is redrawn --
+    // the same reason a regenerated fill marks everything dirty rather than the
+    // stroke's own rectangle.
+    dirty_everything_ = true;
+    // And the ghosts, which nothing else here would reach. OnionState compares
+    // layer lists and cel revisions, and a reference layer has neither a cel nor
+    // a field that moves when its picture arrives -- so a ghost composited
+    // before the decode landed would go on showing a blank import until some
+    // unrelated thing rebuilt the buffer. See "what refreshAll does not refresh"
+    // in docs/handover.md, which is this bug found from the other end.
+    onion_dirty_ = true;
+    update();
+}
+
+bool CanvasWidget::settleReferenceFrames(int timeout_ms) {
+    QElapsedTimer clock;
+    clock.start();
+    while (true) {
+        requestReferenceFrames();
+        if (reference_asked_.empty()) return true;
+        if (clock.elapsed() > timeout_ms) return false;
+        reference_decoder_.waitUntilIdle();
+        collectReferenceFrames();
+
+        // A decode that came back to nobody -- superseded, or about a drawing
+        // that has been left -- leaves its entry behind, and waiting for an
+        // answer that will never arrive is a hang. Nothing outstanding at the
+        // decoder means nothing more is coming.
+        if (!reference_asked_.empty() && reference_decoder_.idle()) {
+            reference_asked_.clear();
+            noteReferencePending();
+            return false;
+        }
+    }
+    return true;
 }
 
 bool CanvasWidget::settleColour(int timeout_ms) {
@@ -1542,6 +1749,12 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // whatever was solved by the time this ran; a fill landing later brings the
     // paint on itself.
     requestCtgFills();
+
+    // And the same bargain for an imported picture, which is the reason this is
+    // in the paint at all: nothing calls refreshEverything when the playhead
+    // moves, so a sequence has no other route to notice that the frame on screen
+    // has changed.
+    requestReferenceFrames();
 
     // Asked only when the whole cache is being composited again, which is what
     // every path that can change the ghosts does -- refreshAll is how a layer

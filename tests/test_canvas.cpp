@@ -9068,10 +9068,187 @@ void anImportSurvivesSavingAndOpening() {
     // The name coming back is not enough: it is the derived pixels that decide
     // whether anything is on screen, and a layer whose file did not survive
     // looks exactly like one whose file did until you ask for them.
+    //
+    // Waited for, because a project that has just opened has decoded nothing.
+    // The decode happens on a worker that the paint asks, so a freshly opened
+    // import is blank for as long as one takes -- which is the same thing a
+    // freshly opened colour layer does, and is why this settles rather than
+    // asserting straight after the load.
+    CHECK(window.settleReferenceFrames());
     const TileGrid* frame =
         doc.referenceFrameFor(track->id, track->imageAtSlot(0), layer->id, layer->placement);
     CHECK(frame != nullptr);
     if (frame) CHECK_NEAR(frame->pixel(10, 10).b, 1.0, 1e-2);
+}
+
+// A sequence shows a different picture at every drawing, which is the whole of
+// what the source frame map is for and the thing a still could never show.
+//
+// Built by hand rather than through an import dialog, because what is under
+// test is the model and the decode path and not a file picker: three files, one
+// reference layer naming all three, three drawings pointed at one each.
+//
+// The colours are what make it an assertion rather than a smoke test. Every
+// drawing having *a* picture would pass with one file decoded three times; only
+// reading the colour back says each drawing got its own.
+void aSequenceShowsADifferentFrameAtEachDrawing() {
+    TEST("each drawing of an imported sequence shows its own frame of the source");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    for (int i = 0; i < 3; ++i) {
+        CHECK(writeATestPicture(dir.filePath(QStringLiteral("board_%1.png").arg(i)), colours[i]));
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    // All three go through the real import, which is what puts them on the
+    // window's list of where imports are -- the canvas asks this window for a
+    // path and gets nothing for a file it has never heard of.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(window.importImageFrom(dir.filePath(QStringLiteral("board_%1.png").arg(i)), nullptr));
+        QCoreApplication::processEvents();
+    }
+
+    Document& doc = window.documentForTesting();
+
+    // What each landed as, read back rather than worked out. An import's file
+    // is renamed on the way in -- `board_0.png` arrives as `board-0.png` --
+    // and the reason is `importNameFor`'s rather than this test's to state. A
+    // test that rebuilt the rule would be checking its own copy of it, and
+    // would go quietly wrong the day the real one changed.
+    std::vector<std::string> named;
+    TrackId track = kNoId;
+    LayerId layer = kNoId;
+    for (const Track& t : doc.scene().tracks) {
+        for (const Layer& l : t.layers) {
+            if (l.kind != LayerKind::Reference || l.reference_sources.empty()) continue;
+            named.push_back(l.reference_sources.front());
+            if (track == kNoId) {
+                track = t.id;
+                layer = l.id;
+            }
+        }
+    }
+    CHECK_EQ(named.size(), std::size_t{3});
+    if (named.size() != 3) return;
+
+    // The first import's track becomes the sequence; the other two exist only
+    // so that their files are known to the window, and their tracks are left
+    // alone.
+    Layer sequence = *doc.scene().findTrack(track)->findLayer(layer);
+    sequence.reference_sources = named;
+    doc.updateLayer(track, layer, sequence);
+
+    // Two more drawings after the one the import made, and each pointed at its
+    // own frame. Deliberately not in file order for the last two, because a
+    // decode that recovered the frame by counting drawings would pass on 0,1,2
+    // and be wrong here.
+    const ImageId first = doc.scene().findTrack(track)->imageAtSlot(0);
+    const ImageId second = doc.insertImage(track, 1);
+    const ImageId third = doc.insertImage(track, 2);
+    doc.setSourceFrame(track, first, layer, 0);
+    doc.setSourceFrame(track, second, layer, 2);
+    doc.setSourceFrame(track, third, layer, 1);
+
+    // Everything derived under the old one-file layer is about a layer that no
+    // longer exists in that form, and the way that is said is by emptying.
+    doc.forgetReferenceFrames();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // The blue channel of each, because the three test colours differ in it in
+    // a way one comparison can tell apart: red is 0, green is 0, blue is 1.
+    const auto frameAt = [&](ImageId drawing) -> const TileGrid* {
+        const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+        return doc.referenceFrameFor(track, drawing, layer, now->placement);
+    };
+
+    // One drawing at a time, because the paint asks for what is *on screen* --
+    // which is one drawing of this track -- and that is the whole request path
+    // rather than a walk of the document.
+    const int wanted[3] = {0, 2, 1};
+    const ImageId drawings[3] = {first, second, third};
+    for (int slot = 0; slot < 3; ++slot) {
+        canvas->setFrame(static_cast<std::size_t>(slot));
+        CHECK(window.settleReferenceFrames());
+
+        const TileGrid* frame = frameAt(drawings[slot]);
+        CHECK(frame != nullptr);
+        if (!frame) continue;
+        const Rgba pixel = frame->pixel(10, 10);
+        CHECK_NEAR(pixel.a, 1.0, 1e-2);
+        // Blue is the third file, and only the drawing pointed at it may be it.
+        CHECK_NEAR(pixel.b, wanted[slot] == 2 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(pixel.r, wanted[slot] == 0 ? 1.0 : 0.0, 1e-2);
+    }
+}
+
+// A file that will not read is asked for once, and then not again.
+//
+// **This is a hang rather than a cosmetic defect, which is why it is pinned.**
+// The paint asks for every frame on screen that is not in the cache, so a
+// decode that fails and leaves nothing behind is asked for again on the next
+// paint, and again sixteen milliseconds later, for as long as the window is
+// open. Remembering the failure as an empty picture is what makes asking stop.
+void aFileThatWillNotReadIsAskedForOnce() {
+    TEST("an import that cannot be decoded is remembered as blank rather than asked for again");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    // The same name, no longer a picture. The project has not been saved, so
+    // the window still resolves this import to where it was imported from --
+    // which means the bytes under the name can be changed without touching the
+    // document at all.
+    {
+        QFile file(picture);
+        CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("this is not a picture");
+    }
+    doc.forgetReferenceFrames();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    CHECK(window.settleReferenceFrames());
+
+    // Present, and empty. Present is what stops the asking; empty is what makes
+    // the layer draw nothing, which is the honest picture of a file that is not
+    // there to be drawn.
+    const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+    const TileGrid* frame = doc.referenceFrameFor(track, drawing, layer, now->placement);
+    CHECK(frame != nullptr);
+    if (frame) CHECK(frame->empty());
+
+    // And nothing is outstanding afterwards. A settle that came back with a
+    // request still in the air would be the loop this exists to stop, one turn
+    // of it at a time.
+    CHECK(!canvas->referenceFramesPending());
+    CHECK(window.settleReferenceFrames());
+    CHECK(!canvas->referenceFramesPending());
 }
 
 void animportedLayerRefusesTheBrushAsItself() {
@@ -9258,7 +9435,7 @@ void placingAnImportStoresRatherThanBakes() {
     Layer moved = *doc.scene().findTrack(track)->findLayer(layer);
     moved.placement.dx = 400.0;
     doc.updateLayer(track, layer, moved);
-    window.refreshReferenceFrames();
+    CHECK(window.settleReferenceFrames());
 
     // **No cel, and no tiles.** The picture moved and the document holds
     // exactly as many tiles as it did before -- which is none, because a
@@ -9273,7 +9450,7 @@ void placingAnImportStoresRatherThanBakes() {
     // And it undoes, because a placement is a layer property and goes through
     // the same op every other one does.
     CHECK(doc.undo());
-    window.refreshReferenceFrames();
+    CHECK(window.settleReferenceFrames());
     CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->placement.dx, 0.0);
     CHECK(opaqueAt(10, 10));
     CHECK(!opaqueAt(410, 10));
@@ -9361,6 +9538,8 @@ int main(int argc, char** argv) {
     std::printf("canvas:\n");
     anImportSurvivesSavingAndOpening();
     animportedLayerRefusesTheBrushAsItself();
+    aSequenceShowsADifferentFrameAtEachDrawing();
+    aFileThatWillNotReadIsAskedForOnce();
     removingTheOnlyLayerIsRefusedInTheOpen();
     twoImportsOfOneFileAreToldApart();
     placingAnImportStoresRatherThanBakes();
