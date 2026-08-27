@@ -9113,6 +9113,97 @@ void animportedLayerRefusesTheBrushAsItself() {
     CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
 }
 
+
+// A button that does nothing is a bug from the outside, and this one did
+// nothing on every fresh track as well as on every import: `removeCurrentLayer`
+// returns without a word when the track has one layer. The guard is right --
+// a track with no layers has nowhere to draw -- so what was missing was the
+// saying, not the allowing.
+void removingTheOnlyLayerIsRefusedInTheOpen() {
+    TEST("Remove layer is greyed out with a reason when it is the only layer");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* remove = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Remove layer")) remove = button;
+    }
+    CHECK(remove != nullptr);
+    if (!remove) return;
+
+    // A new document's track has one layer, which is the state this was silent
+    // in for as long as the button has existed.
+    CHECK(!remove->isEnabled());
+    CHECK(remove->toolTip().contains(QStringLiteral("only one on this track")));
+
+    // A second layer, and it can be pressed.
+    QAction* add = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add layer")) button->click();
+    }
+    (void)add;
+    QCoreApplication::processEvents();
+    CHECK(remove->isEnabled());
+
+    // And pressing it puts the track back to one layer, which disables it
+    // again -- the property that would break if anything stopped re-asking
+    // after the layer count changed.
+    remove->click();
+    QCoreApplication::processEvents();
+    CHECK(!remove->isEnabled());
+}
+
+// Importing the same picture twice is ordinary -- one to keep, one to move
+// about. Two tracks of the same name reach the export as two sequences claiming
+// one folder, which the export refuses: nothing is overwritten, but the job
+// stops at the end rather than at the start.
+void twoImportsOfOneFileAreToldApart() {
+    TEST("importing the same file twice gives two tracks, two names, and two files");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("model.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 200, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importImageFrom(picture, nullptr));
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    std::vector<std::string> track_names;
+    std::vector<std::string> sources;
+    for (const Track& track : doc.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference) continue;
+            track_names.push_back(track.name);
+            sources.push_back(layer.reference_source);
+        }
+    }
+
+    CHECK_EQ(track_names.size(), std::size_t{2});
+    if (track_names.size() == 2) {
+        // Different, and the second says which it is rather than being a
+        // silently identical row in the timeline gutter.
+        CHECK(track_names[0] != track_names[1]);
+        CHECK_EQ(track_names[0], std::string("model"));
+        CHECK_EQ(track_names[1], std::string("model 2"));
+    }
+
+    // The files are told apart too, and for a different reason: this rule is
+    // what stops two *different* pictures that happen to share a file name
+    // becoming one picture. Here it costs a second copy of identical bytes,
+    // which is the cheap side of the trade.
+    CHECK_EQ(sources.size(), std::size_t{2});
+    if (sources.size() == 2) CHECK(sources[0] != sources[1]);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -9120,6 +9211,8 @@ int main(int argc, char** argv) {
     std::printf("canvas:\n");
     anImportSurvivesSavingAndOpening();
     animportedLayerRefusesTheBrushAsItself();
+    removingTheOnlyLayerIsRefusedInTheOpen();
+    twoImportsOfOneFileAreToldApart();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();

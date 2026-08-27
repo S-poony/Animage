@@ -286,9 +286,9 @@ private:
     // The layer panel's button: every drawing of the active layer, moved
     // together. Issue #25.
     void transformLayerThroughTime();
-    // Whether that button can be pressed on the layer in front of you, and what
-    // its tooltip says when it cannot.
-    void syncLayerTransformButton();
+    // Whether the layer panel's two buttons that can refuse can be pressed on
+    // the layer in front of you, and what their tooltips say when they cannot.
+    void syncLayerButtons();
     void syncTransformFields();
     void onTransformFieldEdited();
 
@@ -439,6 +439,9 @@ private:
     // Enabled per layer rather than per program: a colour layer cannot be
     // transformed at all, and a locked or hidden one is not being edited.
     QPushButton* layer_transform_ = nullptr;
+    // The same, for the one other panel button that can refuse: a track must
+    // keep a layer, so the last one cannot be removed.
+    QPushButton* layer_remove_ = nullptr;
     QPushButton* colour_swatch_ = nullptr;
     QPushButton* transparent_swatch_ = nullptr;
 

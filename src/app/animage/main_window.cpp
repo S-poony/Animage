@@ -356,7 +356,7 @@ MainWindow::MainWindow() {
         // this layer yet" away, and it arrives here rather than through the
         // panel or the playhead -- so without this the button stays greyed out
         // until you happen to change layer. Cheap: it counts cels, not pixels.
-        syncLayerTransformButton();
+        syncLayerButtons();
         syncStatus();
     });
     // A fill landed. Queued, because a solve installed while the
@@ -1825,7 +1825,7 @@ void MainWindow::buildLayerPanel() {
     // No Move up and Move down. The stack is restacked by dragging a row, which
     // is one gesture for any distance where the buttons were one click per
     // position -- and it is the gesture the timeline's rows now take too.
-    panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
+    layer_remove_ = panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
 
     dock->setWidget(panel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
@@ -2790,6 +2790,33 @@ std::string importNameFor(const Document& doc, const QString& path) {
     }
 }
 
+// What to call the track and its layer, given the file's name.
+//
+// Made unique against the tracks already there, which matters more than it
+// looks. Importing the same picture twice is an ordinary thing to do -- one to
+// keep and one to move about -- and two tracks with the same name reach the
+// export as two sequences claiming one folder. The export catches that and
+// refuses with a clear message, so nothing is ever silently overwritten; what
+// it costs is an export that stops until you go and rename something, at the
+// end of the job rather than at the start of it.
+//
+// The file inside `imports/` is made unique separately, in importNameFor, and
+// for a different reason: two pictures from two folders are very often both
+// called `model.png`, and there the collision would be a picture quietly
+// replaced rather than an export refused.
+std::string trackNameFor(const Document& doc, const QString& path) {
+    const QString stem = QFileInfo(path).completeBaseName();
+    const std::string base = stem.isEmpty() ? std::string("import") : stem.toStdString();
+
+    std::unordered_set<std::string> taken;
+    for (const Track& track : doc.scene().tracks) taken.insert(track.name);
+    if (!taken.count(base)) return base;
+    for (int n = 2;; ++n) {
+        const std::string candidate = base + " " + std::to_string(n);
+        if (!taken.count(candidate)) return candidate;
+    }
+}
+
 // What a picture of this size will cost, in the units somebody can act on.
 QString costOf(int width, int height) {
     const std::size_t tiles = image_import::tileCountFor(width, height);
@@ -2864,7 +2891,7 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
     }
 
     const std::string import_name = importNameFor(doc_, path);
-    const QString shown = QFileInfo(path).completeBaseName();
+    const std::string shown = trackNameFor(doc_, path);
 
     TrackId added = kNoId;
     ImageId drawing = kNoId;
@@ -2874,8 +2901,8 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
         // are deliberately not in it: they are derived, no cel holds them, and
         // there is nothing for the journal to put back.
         doc_.beginCommand("Import image");
-        added = doc_.addTrack(shown.toStdString());
-        layer_id = doc_.addLayer(added, shown.toStdString(), 0, LayerKind::Reference);
+        added = doc_.addTrack(shown);
+        layer_id = doc_.addLayer(added, shown, 0, LayerKind::Reference);
         drawing = doc_.insertImage(added, 0);
 
         if (const Track* track = doc_.scene().findTrack(added)) {
@@ -3531,7 +3558,7 @@ void MainWindow::refreshLayerFlags() {
     // This is the frame-change path, and whether the layer in front of you can
     // be moved through time depends on the frame: past a track's last drawing
     // there is nothing to float. Nothing else here would ask.
-    syncLayerTransformButton();
+    syncLayerButtons();
 }
 
 void MainWindow::rebuildLayerList() {
@@ -3619,7 +3646,7 @@ void MainWindow::onLayerSelected() {
         // An empty panel -- a track whose last layer has just been removed --
         // and the button has to say so rather than go on offering the answer it
         // gave about a layer that is not there any more.
-        syncLayerTransformButton();
+        syncLayerButtons();
         return;
     }
     canvas_->setActiveLayer(layer->id);
@@ -3636,7 +3663,7 @@ void MainWindow::onLayerSelected() {
         syncColourControls();
     }
     syncColourLayerPanel();
-    syncLayerTransformButton();
+    syncLayerButtons();
 }
 
 // Whether the layer in front of you can be moved through time, and what to say
@@ -3656,7 +3683,7 @@ void MainWindow::onLayerSelected() {
 // at this frame" was that reason, and it is the one that changes as the
 // playhead moves rather than as the selection does -- which is why
 // refreshLayerFlags asks this again and not only onLayerSelected.
-void MainWindow::syncLayerTransformButton() {
+void MainWindow::syncLayerButtons() {
     if (!layer_transform_) return;
 
     const Layer* layer = currentLayer();
@@ -3710,6 +3737,27 @@ void MainWindow::syncLayerTransformButton() {
                              "in one undo step. A nudge or a flip is exact; turning or\n"
                              "scaling resamples every drawing, once.")
             : QStringLiteral("Cannot transform this layer through time: %1").arg(refusal));
+
+    // Remove layer, which had the same fault the button above was built to
+    // avoid and had it from the start: `removeCurrentLayer` returns without a
+    // word on a track with one layer, so the button was dead and nothing said
+    // why. Every fresh track has one layer and so does every import, which is
+    // what made it easy to meet.
+    //
+    // The guard itself is right and is not what changes here -- a track with no
+    // layers has nowhere to draw, and the answer to that is not to allow it but
+    // to say so. Greyed out rather than removed, for the reason above: a
+    // control that comes and goes is one nobody can find twice.
+    if (!layer_remove_) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    const bool last_one = !track || track->layers.size() <= 1;
+    layer_remove_->setEnabled(!last_one);
+    layer_remove_->setToolTip(
+        last_one ? QStringLiteral("Cannot remove this layer: it is the only one on this track,\n"
+                                  "and a track with no layers has nowhere to draw.\n\n"
+                                  "Add another layer first, or delete the whole track from\n"
+                                  "the Track menu.")
+                 : QStringLiteral("Remove this layer and every drawing on it, from this track."));
 }
 
 // The layer panel's button. The canvas owns the gesture; this is the door.
@@ -3774,7 +3822,7 @@ void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {
     // Hiding a layer is one of the two things that takes the layer transform
     // away, and it is the only one of them the panel can do -- so the button
     // has to be asked again here and not only when the selection moves.
-    syncLayerTransformButton();
+    syncLayerButtons();
     syncStatus();
 }
 
