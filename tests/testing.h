@@ -97,9 +97,27 @@ inline constexpr bool kSanitized = false;
 
 inline void skip(const char* why) { std::printf("    skipped: %s\n", why); }
 
+// What a passing run is not covering, said on the line that reports the pass.
+//
+// Distinct from kSanitized above and asking a different question: that one is
+// "is a clock trustworthy here", answered from compiler macros and deliberately
+// blind to UBSan. This one is "did any sanitizer link at all", which no macro
+// answers -- so it comes from the configure step, which is the only place that
+// knows. See animage_no_sanitizer in CMakeLists.txt.
+//
+// It is worth the line because the failure it prevents is silent: ANIMAGE_SANITIZE
+// defaults ON, a toolchain without the runtimes warns once at configure time and
+// then builds happily without them, and every green run afterwards reads as a
+// sanitized green run. It is not one.
+#ifdef ANIMAGE_NO_SANITIZER
+inline constexpr const char* kSanitizerNote = "  (no sanitizer in this build)";
+#else
+inline constexpr const char* kSanitizerNote = "";
+#endif
+
 inline int summarise(const char* suite) {
     if (g_failures == 0) {
-        std::printf("%s: %d checks passed\n", suite, g_checks);
+        std::printf("%s: %d checks passed%s\n", suite, g_checks, kSanitizerNote);
         return 0;
     }
     std::printf("%s: %d of %d checks FAILED\n", suite, g_failures, g_checks);

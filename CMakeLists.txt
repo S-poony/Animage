@@ -49,6 +49,16 @@ function(animage_no_sanitizer why)
     message(FATAL_ERROR "ANIMAGE_REQUIRE_SANITIZERS is ON and ${why}")
   else()
     message(WARNING "ANIMAGE_SANITIZE is ON but ${why}")
+    # And say so again where somebody is actually looking. A configure warning
+    # scrolls past once; the green test run that follows it is read many times,
+    # and on a machine with no sanitizer runtime it looks exactly like a
+    # sanitized green run. This is what testing::summarise prints it with.
+    #
+    # Set here rather than sniffed in the header because no compiler macro
+    # answers the question: __SANITIZE_ADDRESS__ covers ASan, nothing portable
+    # reports UBSan, and "neither macro is defined" would call a UBSan-only
+    # build unsanitized. This is the one place that knows what actually linked.
+    add_compile_definitions(ANIMAGE_NO_SANITIZER=1)
   endif()
 endfunction()
 
