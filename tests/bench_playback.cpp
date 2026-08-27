@@ -517,6 +517,67 @@ Played playForReal(MainWindow& window, TimelineWidget& timeline, CanvasWidget& c
     return played;
 }
 
+// Does the colour *arrive* during a take -- which is a different question from
+// the table above, and the one nobody was asking.
+//
+// `presolveColour` walks the whole shot and waits for every fill before the
+// timed pass, so that table plays a shot whose colour is entirely on hand. That
+// answers "does a solved fill survive to playback", which is the cache's
+// question and a fair one.
+//
+// **It is not how a shot is coloured.** You scribble the first drawing and let
+// `ctg_inherit` carry the marks; every drawing after it has never been looked
+// at and has no fill at all. Pressing Play is the first thing that ever asks
+// for one. So this plays the same shot *cold* and reports what is on hand after
+// each pass -- and if the answer does not climb, the colour never loads in
+// however long somebody watches.
+//
+// Reported per pass rather than as a total, because "it gets better each time
+// round" is the claim, and only a sequence of numbers can carry it.
+void coldColourPasses(const Case& shot, int passes) {
+    MainWindow window;
+    window.resize(shot.window_width, shot.window_height);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    auto* canvas = window.findChild<CanvasWidget*>();
+    if (!timeline || !canvas) return;
+
+    Document& doc = window.documentForTesting();
+    buildShot(doc, shot, /*coloured=*/true);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    const double fit = std::min(static_cast<double>(canvas->width()) / shot.canvas_width,
+                                static_cast<double>(canvas->height()) / shot.canvas_height);
+    canvas->resetView();
+    canvas->setZoom(fit, QPointF(canvas->width() / 2.0, canvas->height() / 2.0));
+    canvas->grab();
+
+    // Deliberately no presolveColour. That absence is the whole measurement.
+    const std::size_t frames = doc.scene().shotFrames();
+    const int drawings = shot.drawings * shot.tracks;
+    const int pass_ms = static_cast<int>(frames) * 1000 / kFps;
+
+    std::printf("\n%s, cold\n", shot.name);
+    std::printf("  %d drawings, one pass is %d ms\n", drawings, pass_ms);
+
+    for (int pass = 1; pass <= passes; ++pass) {
+        const std::uint64_t before = doc.ctgCache().storeCount();
+        playForReal(window, *timeline, *canvas, kFps, pass_ms);
+        // The poll that installs a finished solve needs an event loop, and
+        // playForReal's ends with the take. Without this the last solves of a
+        // pass are counted against the next one.
+        QCoreApplication::processEvents();
+        const std::uint64_t after = doc.ctgCache().storeCount();
+
+        std::printf("  pass %d: %zu of %d drawings coloured   (%llu solved this pass)\n", pass,
+                    doc.ctgCache().size(), drawings,
+                    static_cast<unsigned long long>(after - before));
+    }
+}
+
 void run(const Case& shot, bool coloured, bool print_header) {
     MainWindow window;
     window.resize(shot.window_width, shot.window_height);
@@ -626,6 +687,13 @@ int main(int argc, char** argv) {
         run(shot, false, true);
         run(shot, true, false);
     }
+
+    std::printf("\n\nDoes the colour arrive during a take? The table above plays a shot whose\n"
+                "fills are all solved already, which is the cache's question. This is the\n"
+                "other one: a shot coloured the way shots are coloured -- scribble the first\n"
+                "drawing, let the marks carry -- has no fill anywhere but that drawing, and\n"
+                "pressing Play is the first thing that ever asks for one.\n");
+    coldColourPasses(kCases[0], 4);
 
     std::printf("\nThe two right-hand columns have to agree on slots. The deterministic one is\n"
                 "what to optimise against; the real timer is the cross-check, and it is the\n"

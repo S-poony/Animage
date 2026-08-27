@@ -1922,6 +1922,92 @@ void theFillWaitsForTheStrokeToFinish() {
 // So the one view whose job is to show what the solver saw was the one view
 // that could not, and a stroke made there copied the wrong position into the
 // drawing for good.
+// A fill for a drawing you have left still lands, which is issue #85.
+//
+// **The whole of the bug is one line that used to be in
+// dropStaleColourRequests.** A paint drops stale requests and then asks, so
+// moving off a drawing called off the solve that drawing's own paint had just
+// started -- and `abandoned()` is checked inside the max-flow, so it gave up
+// partway and produced nothing at all. At twenty-four frames a second against
+// solves taking a tenth of one, that is every solve, so playing a coloured shot
+// never coloured anything and no length of watching helped.
+//
+// Constructed with two paints and no waiting between them, which is what a
+// frame change is: ask for the first drawing, leave it before the answer can
+// arrive, and then see whether the answer arrives at all.
+void aFillForADrawingYouHaveLeftStillLands() {
+    TEST("a colour solve is not called off for the drawing having gone off screen");
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId first = doc.insertImage(track, 0);
+    const ImageId second = doc.insertImage(track, 1);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto strokeOn = [&](ImageId image, LayerId layer, float x0, float y0, float x1,
+                              float y1, float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    const auto boxOn = [&](ImageId image, float left, float top, float right, float bottom) {
+        strokeOn(image, ink, left, top, right, top, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, top, left, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, right, top, right, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, bottom, right, bottom, 2.5f, 0, 0, 0);
+    };
+
+    // Line art on both, and the scribble only on the first -- which is how a
+    // shot is actually coloured, and why the second drawing has never been
+    // looked at and has no fill of its own.
+    boxOn(first, 60, 60, 200, 180);
+    boxOn(second, 60, 60, 200, 180);
+    strokeOn(first, colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+
+    // Stand on the second drawing and ask for it, then leave immediately --
+    // before anything could have been solved. This is a frame change and
+    // nothing else.
+    canvas.setFrame(1);
+    canvas.grab();
+    CHECK(canvas.colourPending());
+
+    canvas.setFrame(0);
+    canvas.grab();
+
+    // The request for the drawing that was left must still be outstanding. This
+    // is the check that fails on the old code, where the paint above cancelled
+    // it: there, only the drawing now on screen is ever being worked out.
+    CHECK(canvas.colourPending());
+
+    CHECK(canvas.settleColour());
+
+    // And the answer is in the cache, for a drawing nobody is standing on. That
+    // is the whole point of keeping it: it is the drawing you will be on again
+    // next time round the loop.
+    const CtgFill* left_behind = doc.ctgFillFor(track, second, colour);
+    CHECK(left_behind != nullptr);
+    if (left_behind) CHECK(left_behind->valid);
+}
+
 void aLayerShowingItsMarksIsStillSolved() {
     TEST("a layer showing its marks is solved, so they land where they are used");
     Document doc;
@@ -9887,6 +9973,7 @@ int main(int argc, char** argv) {
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
     aLayerShowingItsMarksIsStillSolved();
+    aFillForADrawingYouHaveLeftStillLands();
     oneScribbleReachesTheEndOfTheShot();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();

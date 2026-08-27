@@ -642,14 +642,12 @@ private:
     void fitTo(const animage::PixelRect& bounds);
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
-    void dropStaleColourRequests(bool only_this_frame);
+    void dropStaleColourRequests();
     void requestReferenceFrames();
     void dropStaleReferenceRequests();
     void noteReferencePending();
     void giveUpOnFrame(const animage::CtgKey& key, const animage::Transform& under,
                        const QString& name, const QString& trouble);
-    // Whether any track shows this drawing at the frame the playhead is on.
-    bool isShownNow(animage::ImageId image) const;
     void noteColourPending();
     void setScribblePreview(animage::LayerId layer, bool previewing);
 

@@ -720,7 +720,7 @@ void CanvasWidget::requestCtgFills() {
     // trap either way: the solve belongs at the end of the stroke.
     if (stroking_) return;
 
-    dropStaleColourRequests(/*only_this_frame=*/true);
+    dropStaleColourRequests();
 
     const std::uint64_t generation = doc_.ctgCache().generation();
     const CtgSettings settings;
@@ -764,11 +764,26 @@ void CanvasWidget::requestCtgFills() {
         // ever, arriving at the same coarse answer every time.
         const CtgFill* held = doc_.ctgFillFor(track_id, image, layer.id);
         const bool current = held && held->valid && held->inputs == wanted.hash;
-        if (current && (held->step <= std::max(1, settings.downscale) ||
+
+        // **A take does not climb the ladder, and that is what makes a take
+        // able to finish anything at all.**
+        //
+        // The coarse answer arrives in about a tenth of a second and the fine
+        // one takes a second and a half, and the ladder asks for the second as
+        // soon as the first lands. On the drawing in front of you that is
+        // exactly right. Across a shot it is forty-eight fine solves nobody
+        // asked for -- and an animator watching a take is judging *motion* and
+        // where the colour went, not an edge at full resolution. The same
+        // argument playback-resolution.md makes about giving up resolution
+        // while a take runs, one subsystem over.
+        //
+        // So while playing, a drawing that has any current answer is finished.
+        if (current && (playing_ || held->step <= std::max(1, settings.downscale) ||
                         held->budget >= kFullSolveBudget)) {
             continue;
         }
-        const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
+        const long long budget =
+            (current && !playing_) ? kFullSolveBudget : kInteractiveSolveBudget;
 
         const ColourAsked asked{image, layer.id, true};
         const auto already = ctg_asked_.find(asked);
@@ -776,9 +791,19 @@ void CanvasWidget::requestCtgFills() {
             continue;  // already being worked out
         }
 
+        // Behind anything interactive while a take is running, which is what
+        // `Whenever` is for. A take fills the queue with a drawing a frame, and
+        // those are answers wanted for the *next* pass rather than for this
+        // one; the moment somebody stops and draws, that stroke's solve has to
+        // jump every one of them. Without this it would go to the back of a
+        // queue two seconds long.
+        const CtgSolver::Priority priority =
+            playing_ ? CtgSolver::Priority::Whenever : CtgSolver::Priority::Now;
+
         ctg_asked_[asked] = {wanted.hash, generation};
         ctg_solver_.request({image, layer.id},
-                            ctgJobFor(doc_, track_id, image, layer.id, settings, budget), true);
+                            ctgJobFor(doc_, track_id, image, layer.id, settings, budget), true,
+                            priority);
       }
     }
 
@@ -803,31 +828,40 @@ void CanvasWidget::noteColourPending() {
     Q_EMIT colourChanged();
 }
 
-// Whether any track shows this drawing at the frame the playhead is on. "The
-// drawing on screen" is no longer one drawing: several tracks are composited
-// and each has its own, so leaving a frame means leaving all of them.
-bool CanvasWidget::isShownNow(ImageId image) const {
-    if (image == kNoId) return false;
-    for (const Track& track : doc_.scene().tracks) {
-        if (track.imageShownAt(slot_) == image) return true;
-    }
-    return false;
-}
-
-// Requests whose answer nobody is waiting for any more.
+// Requests about a document that has since been thrown away, which are the only
+// ones worth calling off.
 //
-// A fill for a frame that has been left, or -- fill or judgement, on screen
-// or not -- one about a document that has since been thrown away. Playing a
-// coloured shot is twenty-four of the first a second against solves taking a
-// tenth of one, and a queue that fills faster than it drains never catches up.
+// **Leaving the frame used to be a reason and is not one, and that is issue
+// #85.** The argument was that playing a coloured shot asks twenty-four
+// questions a second against solves taking a tenth of one, so a queue that
+// fills faster than it drains never catches up. Both halves were wrong.
 //
-// Judgements are not dropped for being about another drawing: being about the
-// drawings you are not looking at is the whole of what they are for.
-void CanvasWidget::dropStaleColourRequests(bool only_this_frame) {
+// It never caught up because nothing ever *finished*. A paint drops stale
+// requests and then asks, so at twenty-four frames a second every solve was
+// called off forty-one milliseconds after it started -- and `abandoned()` is
+// checked inside the max-flow, so it gave up partway and produced nothing at
+// all. `bench_playback`'s cold pass measured the result: one of forty-eight
+// drawings coloured, and no further solve in three more passes. The colour did
+// not load in slowly, it never loaded in.
+//
+// And the queue does not grow without bound anyway. A repeat about the same
+// drawing supersedes, so it holds at most one entry per drawing per layer --
+// the shot, not the take. What each entry costs is a job, and a job's grids are
+// handles to cels that exist regardless.
+//
+// **A finished fill is worth having even for a drawing you have left.** It is
+// the drawing you will be on again next time round, and the cache it lands in
+// is bounded, so keeping it cannot cost more than the bound. Judgements were
+// already kept on exactly that reasoning -- being about the drawings you are
+// not looking at is the whole of what they are for -- and fills have now joined
+// them.
+//
+// An emptied cache is different in kind: those answers are not early, they are
+// about a document that will not exist.
+void CanvasWidget::dropStaleColourRequests() {
     const std::uint64_t generation = doc_.ctgCache().generation();
     for (auto it = ctg_asked_.begin(); it != ctg_asked_.end();) {
-        const bool left = only_this_frame && it->first.tiles && !isShownNow(it->first.image);
-        if (!left && it->second.generation == generation) {
+        if (it->second.generation == generation) {
             ++it;
             continue;
         }
@@ -844,7 +878,7 @@ void CanvasWidget::dropStaleColourRequests(bool only_this_frame) {
 // to the document stays on the thread that owns it.
 void CanvasWidget::collectColour() {
     bool filled = false;
-    dropStaleColourRequests(/*only_this_frame=*/false);
+    dropStaleColourRequests();
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
         const ColourAsked key{result.key.image, result.key.layer, result.wanted_labels};
