@@ -3373,13 +3373,14 @@ drains is real memory; a decode job is a path and nine numbers. And **a decoded
 frame is worth having even for a drawing you have left** — it is the frame you
 will be on again next time round, and the cache it lands in is bounded.
 
-**The colour has the same bug and it is worse there**, because `abandoned()` is
-checked *inside* the max-flow: the solve gives up partway and produces nothing,
-so no fill ever completes during playback and the cache never accumulates. It is
-also why `colouring...` says nothing during a take — the cancel erases the
-`ctg_asked_` entry, so the program has in effect stopped asking.
-[#85](https://github.com/S-poony/Animage/issues/85), with the two things that
-make it not simply the same change.
+**The colour had the same bug and it was worse there**, because `abandoned()` is
+checked *inside* the max-flow: the solve gave up partway and produced nothing,
+so no fill ever completed during playback and the cache never accumulated. Found
+here, fixed there — [#85](https://github.com/S-poony/Animage/issues/85), and
+written up in [the answer that was called off a moment before it
+landed](#the-answer-that-was-called-off-a-moment-before-it-landed), which is
+worth reading for the part that generalises: the benchmark that should have
+caught it was warming the thing it was measuring.
 
 ### What it costs, measured
 
@@ -5666,6 +5667,69 @@ reachable by everything that draws it; this is its other half — **the thing th
 derives it has to actually run, and a view is not entitled to switch it off.**
 `aLayerShowingItsMarksIsStillSolved` in `test_canvas` constructs it.
 
+
+### The answer that was called off a moment before it landed
+**A queue that never catches up may be a queue where nothing ever finishes**,
+and the two look identical from outside. `dropStaleColourRequests` cancelled a
+fill the moment its drawing went off screen, with a reason on it: playing a
+coloured shot asks twenty-four questions a second against solves taking a tenth
+of one, and a queue that fills faster than it drains never catches up. A paint
+drops and *then* asks, so at 24 fps every solve was called off 41 ms after it
+started — and `abandoned()` is checked inside the max-flow, so it gave up
+partway and produced nothing at all. Playing a coloured shot never coloured
+anything, however long anybody watched. Issue
+[#85](https://github.com/S-poony/Animage/issues/85).
+
+**The same line, copied, did the same thing to imported pictures**, where it
+was found first: an animatic played as a blank canvas for the same reason, and
+said so through a libpng warning repeating once per file per pass. Two
+subsystems, one sentence, and neither report described the cause.
+
+Three things to take from it.
+
+**The stated reason was measurable and nobody had measured it.** The queue is
+bounded by one entry per drawing per layer, because a repeat about the same
+drawing supersedes — the shot, not the take — and a job's grids are handles to
+cels that exist regardless. So it could not fill faster than it drained in the
+way the comment claimed. What it could do, and did, was never finish.
+
+**An answer for a drawing you have left is not a wasted answer.** It is the
+drawing you will be on again next time round the loop, and the cache it lands in
+is bounded, so keeping it cannot cost more than the bound. Judgements were
+already kept on exactly that reasoning — being about the drawings you are not
+looking at is the whole of what they are for — and it took a report to notice
+that fills are the same.
+
+**And the benchmark that should have caught it was measuring the other
+question.** `bench_playback` calls `presolveColour`, which walks the shot and
+waits for every fill *before* the timed pass, so it plays a shot whose colour is
+entirely on hand. That is a fair question — does a solved fill survive to
+playback — and it is not how a shot is coloured: you scribble the first drawing
+and let `ctg_inherit` carry the marks, so every drawing after it has never been
+looked at and pressing Play is the first thing that ever asks. `coldColourPasses`
+plays without presolving and reports what is on hand after each pass, which is
+where the bug is a table rather than an opinion:
+
+| | before | after |
+|---|---|---|
+| pass 1 | 1 of 48 | 6 of 48 |
+| pass 2 | 1 of 48 | 11 of 48 |
+| pass 3 | 1 of 48 | 16 of 48 |
+| pass 4 | 1 of 48 | 21 of 48 |
+
+The one is the drawing that was scribbled. **A benchmark that warms the thing it
+is about measures the warm case**, and that is worth checking of every fixture
+here before trusting a row of it.
+
+Two things the fix needed beyond the deletion, both about not swamping the
+solver with work nobody is waiting for. **A take does not climb the ladder** —
+the coarse answer is a tenth of a second and the fine one is a second and a
+half, and asking for the second as soon as the first lands is forty-eight fine
+solves nobody asked for. An animator watching a take is judging motion and where
+the colour went, which is the argument
+[playback-resolution.md](playback-resolution.md) already makes one subsystem
+over. And **playback asks at `Whenever`**, so a stroke made after the take jumps
+a queue two seconds long rather than joining the back of it.
 
 ### What the lattice fallback was being compared against
 **A floor between two answers is a measurement, and this one was being taken in
