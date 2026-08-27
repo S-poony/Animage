@@ -429,6 +429,23 @@ struct Stage {
         settle();
     }
 
+    // The same for an imported picture, and it is wanted for the same reason
+    // one line up: the frame is asked for by a paint and decoded on a worker,
+    // so there is nothing to wait for until something has painted, and nothing
+    // on screen until the answer has been installed and painted again.
+    //
+    // **A situation that places an import and photographs it without this gets
+    // a blank canvas**, which is what happened to
+    // an-imported-picture-placed-and-applied the day the decode moved off the
+    // interface thread. It is not a bug in the placement: a placement is stored
+    // and the picture is made from the file again at it, so between the two
+    // there is a moment with no picture. The program shows that moment too; it
+    // is a frame long in use and the whole of a screenshot.
+    void settlePicture() {
+        window.settleReferenceFrames();
+        settle();
+    }
+
     // --- what to photograph ------------------------------------------------
 
     QWidget* dockCalled(const char* title) const {
@@ -856,7 +873,7 @@ const std::vector<Situation>& situations() {
              if (!s.window.importImageFrom(file, &trouble)) {
                  std::printf("  could not import: %s\n", qPrintable(trouble));
              }
-             s.settle();
+             s.settlePicture();
              // Through the tool, which for a reference layer routes to the same
              // placement the panel button reaches -- both doors mean one thing
              // when there is one picture, and this is the picture of that.
@@ -875,7 +892,7 @@ const std::vector<Situation>& situations() {
              if (!s.window.importImageFrom(file, &trouble)) {
                  std::printf("  could not import: %s\n", qPrintable(trouble));
              }
-             s.settle();
+             s.settlePicture();
              s.press(Id::Transform);
              s.settle();
              // Through the numeric fields rather than the handles, so the shot
@@ -891,7 +908,7 @@ const std::vector<Situation>& situations() {
              }());
              s.settle();
              s.choose("Apply");
-             s.settle();
+             s.settlePicture();
          }},
 
         {"an-imported-picture",
@@ -905,7 +922,7 @@ const std::vector<Situation>& situations() {
              if (!s.window.importImageFrom(file, &trouble)) {
                  std::printf("  could not import: %s\n", qPrintable(trouble));
              }
-             s.settle();
+             s.settlePicture();
          }},
 
         {"a-transform-box-round-a-drawing",
