@@ -724,9 +724,21 @@ void CanvasWidget::requestCtgFills() {
 
       for (const Layer& layer : track_here.layers) {
         if (layer.kind != LayerKind::Ctg || !layer.visible) continue;
-        // Nothing to solve for a layer showing its scribbles: the fill would be
-        // computed and then not drawn.
-        if (layer.show_scribbles) continue;
+        // A layer showing its scribbles is solved too, and this used to skip
+        // one -- the fill would be computed and then not drawn, which is true
+        // and is not the whole of what a solve produces. Where a carried mark
+        // ended up is worked out inside the solve and nowhere else, so skipping
+        // it left ctgCarryAt on the default it gives when nothing has solved a
+        // drawing yet, and that default reads as "the marks did not move".
+        //
+        // So the one view whose job is to show the marks showed them where they
+        // were drawn rather than where they are used -- and worse, the first
+        // stroke on such a drawing copies what it was showing, which made the
+        // wrong position the drawing's own for good. Reported as marks that do
+        // not carry, and it is the same lesson part two of the handover already
+        // records: a derived value that changes what is drawn has to be
+        // reachable by everything that draws it. See
+        // Document::ctgCarriedMarksAt.
 
         const CtgInputs wanted = ctgInputsFor(doc_, track_id, image, layer.id, settings);
         if (!wanted.valid) continue;

@@ -1303,9 +1303,14 @@ the whole grid now, which at these sizes costs nothing.
 
 The other two are the same lesson from different directions: **a derived value
 that changes what is drawn has to be reachable by everything that draws it.**
-The shift lives in `Document::ctgShiftAt`, written by every solve, read by the
+The shift lives in `Document::ctgShiftAt` — `ctgCarryAt` since part three turned
+the number into a field — written by every solve, read by the
 compositor's marks pass and by `celForWriting`. Any fourth thing that shows
 marks must read it too.
+
+And it has to be written before it can be read: two callers were skipping the
+solve for a layer showing its marks, on the grounds that its fill would not be
+drawn. See "what a view that skips the solve also skips" below.
 
 ## Colour through time, part three
 
@@ -3959,6 +3964,7 @@ trap.
 | [Where the first dock-width reading was taken, and why the fix shipped twice](#where-the-first-dock-width-reading-was-taken-and-why-the-fix-shipped-twice) | Both measurements landed on the same side of the growth |
 | [What emptying the fill cache does not reach while a solve is in flight](#what-emptying-the-fill-cache-does-not-reach-while-a-solve-is-in-flight) | Async solves outlive invalidation without a generation count |
 | [What went stale when the solve stopped finishing in the same call stack](#what-went-stale-when-the-solve-stopped-finishing-in-the-same-call-stack) | Refreshes that piggybacked on a synchronous re-solve now lag |
+| [What a view that skips the solve also skips](#what-a-view-that-skips-the-solve-also-skips) | No solve means no warp, and no warp reads as "the marks did not move" |
 | [The tests that construct the bug, and go red when it is fixed](#the-tests-that-construct-the-bug-and-go-red-when-it-is-fixed) | A whole fixture reddening can mean the feature works |
 | [Why a cache key of cel revisions serves wrong fills, not slow ones](#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones) | Revisions collide freely, so a shared scribble key swaps answers |
 | [Why an erased scribble left every later solve on that drawing coarser](#why-an-erased-scribble-left-every-later-solve-on-that-drawing-coarser) | Emptied tiles kept the bounds that pick solve resolution |
@@ -5237,6 +5243,30 @@ that started it; a stale panel the moment it did not. What a row says about a
 layer is about the layer, so it is said when the layer changes. Expect more of
 these: anything that was correct only because two things happened in the same
 call stack.
+
+
+### What a view that skips the solve also skips
+**Skipping a solve because its picture will not be drawn skips everything else
+that solve produces.** A colour layer with the Marks column ticked draws its
+scribbles instead of its fill, so `requestCtgFills` left it out, and the
+export's `needsFill` did the same, both saying the fill would be computed and
+then not used. True — and where a carried mark ended up is worked out inside the
+same solve and nowhere else. With no solve, `ctgCarryAt` answers with the
+default it gives before anything has solved a drawing, and that default is
+indistinguishable from "the marks did not move". So the one view whose whole job
+is to show what the solver saw was the only view that could not, and drew a
+carried mark where it was made instead of where it is used.
+
+Reported as marks that do not carry when you tick the box. The picture was the
+smaller half: the first stroke on a carrying drawing copies what it was
+*showing*, so drawing while looking at the marks wrote the wrong position into
+the cel, where unticking the box does not reach it and no re-solve will undo it.
+
+Both places solve now, and marks view costs a solve like every other view.
+Part two's rule was that a derived value which changes what is drawn has to be
+reachable by everything that draws it; this is its other half — **the thing that
+derives it has to actually run, and a view is not entitled to switch it off.**
+`aLayerShowingItsMarksIsStillSolved` in `test_canvas` constructs it.
 
 
 ### The tests that construct the bug, and go red when it is fixed
