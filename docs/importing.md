@@ -933,16 +933,18 @@ looks each one up with `line->findLayer(source)` and reads it with
 `record->celFor(source)` against an `Image` in that same track. So a CTG barrier
 must be a cel-bearing layer in the same track as the colour layer.
 
-Two consequences:
+One consequence, and it is the whole of what reference-only gives up: **a
+reference layer has no cel and cannot be a CTG barrier at all.** So **importing
+scanned line art and colouring it with LazyBrush does not work, until it is
+converted.** For an application whose headline is a colour solver, that is a
+real thing to give up, and it is why the way back is not optional.
 
-- A **reference layer has no cel and cannot be a CTG barrier at all.**
-- Even with cels, an import that always lands in a **new track** cannot be a
-  barrier for a colour layer in a different one.
-
-Which together mean: **importing scanned line art and colouring it with
-LazyBrush does not work, until it is converted.** For an application whose
-headline is a colour solver, that is a real thing to give up, and it is why the
-way back is not optional.
+This used to list a second consequence — that an import landing in a new track
+cannot be a barrier for a colour layer in a different one — and drew a feature
+out of it. The sentence is true and the feature was not needed: the colour layer
+goes in the import's track. See [landing in an existing
+track](#landing-in-an-existing-track), which is now a record of a decision
+reversed rather than an argument for one.
 
 ### Convert to drawings
 
@@ -1020,13 +1022,29 @@ instead of failing in the middle.
 
 ### Landing in an existing track
 
-**Settled: the import dialog asks, and it is in the first cut.** The first draft
-left this open as "a small addition to the import dialog rather than a change to
-the model", and what makes it first-cut rather than later is the section above:
-converting an import in its own track leaves the drawings in that track, and
-`ctg_sources` resolve inside the track — so a character's colour layer still
-cannot cut against them. The alternative to the combo box is an operation that
-moves a layer between tracks, which nobody has scoped and which is not smaller.
+**Reversed, on the user's call: an import always makes its own track, and there
+is no combo box.** This section said the dialog asks and that it was in the
+first cut, on the grounds that `ctg_sources` resolve inside the track — so a
+character's colour layer could not cut against an import that landed anywhere
+else.
+
+**The step that argument skips is that the colour layer can be added to the
+import's own track.** `addColourLayer` acts on whichever track is current, and
+an import makes its track current; the source list it builds offers every raster
+layer *of that track*, so a converted import appears in it. Import, convert, add
+a colour layer there, and the whole chain sits inside one track with nothing
+crossing between two. Nothing in the model had to change and nothing new had to
+be built — it was already the shorter route, and the combo box was machinery for
+a problem that only exists if you insist the colour layer was there first.
+
+What the reversal gives up is the case where it *was* there first, and it is
+worth naming so that this is a decision rather than an oversight: **a track you
+have already built cannot cut against a scan imported afterwards.** You would
+want that scan as a layer in that track, and it will arrive in one of its own.
+That is real. It is not the workflow the argument was made for — scanning line
+art and colouring it means the import *is* the drawings, not a second opinion
+about drawings that already exist. The way out is unchanged and still unscoped:
+an operation that moves a layer from one track to another.
 
 ## The menu, and what each dialog asks
 
@@ -1051,12 +1069,21 @@ the first cut, but each import should be a function the drop handler can call.
   `frame9.png` and nobody has ever wanted it to. Files with no number, or two
   numbering schemes in one selection, are *said* rather than guessed at — the
   house rule is to let the input in and explain it, not to silently pick.
-- **Where:** a new track, or a layer in an existing one. See [landing in an
-  existing track](#landing-in-an-existing-track) for why this is in the first cut
-  and not deferred.
+- **Where:** a new track, always. See [landing in an existing
+  track](#landing-in-an-existing-track), which argued for a combo box here and
+  was reversed — a colour layer added to the import's own track reaches the
+  converted drawings without one.
+- **When:** a start frame, defaulting to 1. The default is what anybody wants
+  and the box costs nothing over hard-coding it, which is the only reason it is
+  here rather than deferred.
 - **Exposure:** on 1s. An image sequence has no frame rate of its own; inventing
   one is inventing information. This is the sentence video does *not* inherit —
   see below.
+- **Past the last frame: nothing.** `TrackEnd::Nothing`, which is the default
+  for an animation and the opposite of what a still gets. That is not an
+  inconsistency to tidy up later: a modelsheet is meant to stay up for the whole
+  shot, and an animatic is a stretch of timing that ends where it ends. Both are
+  the track's own setting afterwards.
 - **Size:** the transform box, validated by the user, and stored rather than
   baked.
 - **Import at half size:** offered, off by default. It is a placement of 50% and
@@ -1362,12 +1389,12 @@ worth having.
    compositor needs nothing at all if the cache holds a `TileGrid`, and shape 2's
    promotion is better as a command than a state machine.
 3. ~~**Whether giving up colouring imported line art is intended**~~ — **no, and
-   both of the answers it proposed are taken.** [Convert to
+   one of the two answers it proposed turned out to be enough.** [Convert to
    drawings](#convert-to-drawings) is an explicit command over the whole layer,
-   offered by a popup when you try to draw; and an import can land as a layer in
-   an existing track, which is in the first cut *because* of this — a converted
-   import in its own track still cannot be a barrier for a colour layer in
-   another one.
+   offered by a popup when you try to draw on a reference layer. The second
+   answer — letting an import land in an existing track — was taken and then
+   [reversed](#landing-in-an-existing-track): the colour layer can be added to
+   the import's own track, so nothing has to cross between two.
 
 **What is left is two things to measure, and this note does not guess at either.**
 A guess written down here would be read later as a decision somebody took, and it
