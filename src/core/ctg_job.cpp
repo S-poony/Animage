@@ -1068,6 +1068,50 @@ double blockDifference(const InkLevel& a, const InkLevel& b, int x, int y, int d
     return total;
 }
 
+// Ink times ink over the same block, summed, and larger is better.
+//
+// **Not an alternative to the difference above, and not a second opinion about
+// the same question.** The two answer different questions and the note above
+// `blockDifference` says which one it is for: a block covers the same samples
+// at every offset, nothing shrinks as it moves, so a difference is fair there
+// and a sum of products is the thing that pulls every node towards whatever is
+// densest.
+//
+// This is for the other question, the one `agreement` is for a whole drawing:
+// comparing two *poses of the whole lattice* against each other, where the
+// amount of target ink under the source does move between them. A lattice left
+// at rest on a drawing that has moved out from under it sits over bare paper,
+// and under a difference that is charged once -- for the source ink it fails to
+// cover -- while lining the two up is charged twice, for the ink each puts
+// where the other has none. Two drawings of a moving shape never coincide, so
+// "stay on the blank paper" wins, and the marks are left where they were made.
+// That is part two's lesson arriving one rung up. See the fallback in
+// estimateCtgLattice.
+//
+// Off either grid is bare paper and earns nothing, which is the whole point:
+// under a product, ink over blank and blank over blank both score zero, so a
+// pose that covers nothing is worth nothing rather than cheap.
+double blockAgreement(const InkLevel& a, const InkLevel& b, int x, int y, int dx, int dy) {
+    double total = 0.0;
+    for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
+        const int ay = y + oy;
+        const int by = y + oy + dy;
+        const bool a_row = (ay >= 0 && ay < a.height);
+        const bool b_row = (by >= 0 && by < b.height);
+        if (!a_row || !b_row) continue;
+        const std::size_t a_base = static_cast<std::size_t>(ay) * a.width;
+        const std::size_t b_base = static_cast<std::size_t>(by) * b.width;
+        for (int ox = -kBlockReach; ox <= kBlockReach; ++ox) {
+            const int ax = x + ox;
+            const int bx = x + ox + dx;
+            if (ax < 0 || ax >= a.width || bx < 0 || bx >= b.width) continue;
+            total += static_cast<double>(a.ink[a_base + ax]) *
+                     static_cast<double>(b.ink[b_base + bx]);
+        }
+    }
+    return total;
+}
+
 // Whether there is anything under this node worth matching.
 bool inkNear(const InkLevel& a, int x, int y) {
     for (int oy = -kBlockReach; oy <= kBlockReach; ++oy) {
@@ -1169,6 +1213,11 @@ struct LatticeFit {
     // registration" -- section 3.3 computes the same average to talk about
     // convergence.
     double cost = std::numeric_limits<double>::max();
+
+    // Ink on ink over the same nodes at the same places, which is the measure
+    // two *poses* are compared by rather than the one the push step settles by.
+    // Larger is better. See blockAgreement, and the fallback below.
+    double agreement = 0.0;
 
     // Whether any pushed node ended up anywhere but where it was put. False
     // means the run saw nothing: every node tied at every offset it could
@@ -1439,6 +1488,7 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
     // What it settled on, in the measure it was settled by, and whether it
     // settled anywhere but where it began.
     double cost = 0.0;
+    double agreement = 0.0;
     for (std::size_t at = 0; at < fit.nodes.size(); ++at) {
         const Node& node = fit.nodes[at];
         if (node.anchored || !fit.in_lattice[at]) continue;
@@ -1447,9 +1497,11 @@ LatticeFit fitLattice(const InkLevel& a, const InkLevel& b, CtgShift started,
         const int dx = static_cast<int>(std::lround(node.x)) - x;
         const int dy = static_cast<int>(std::lround(node.y)) - y;
         cost += blockDifference(a, b, x, y, dx, dy);
+        agreement += blockAgreement(a, b, x, y, dx, dy);
         if (dx != started.x || dy != started.y) fit.moved = true;
     }
     fit.cost = cost;
+    fit.agreement = agreement;
     fit.ok = true;
     return fit;
 }
@@ -1534,7 +1586,39 @@ CtgWarp estimateCtgLattice(const std::vector<TileGrid>& from, const std::vector<
             static_cast<int>(std::lround(static_cast<double>(prior.y) / step))};
         if (!(started.x == 0 && started.y == 0)) {
             LatticeFit from_prior = fitLattice(a, b, started, abandon);
-            if (from_prior.ok && from_prior.cost < fit.cost) fit = std::move(from_prior);
+            // **Whether the rest pose saw anything at all decides which
+            // question this is, and the two need different measures.**
+            //
+            // Neither measure can do both, and that is not a constant waiting
+            // to be tuned. A difference charges a wrong alignment twice -- for
+            // the ink each puts where the other has none -- and charges
+            // covering nothing once, so a lattice left on bare paper beats one
+            // that lined two drawings up; two drawings of a moving shape never
+            // coincide, so that is the ordinary case and not a corner. Measured
+            // on two reported shots: rest 410.5 against 406.2 on one drawing,
+            // 212.7 against 221.2 on another. Agreement fixes exactly that and
+            // breaks the other half, because an alias agrees *better* than the
+            // truth -- the note above `agreement` has the sweep that says so,
+            // and swapping this to agreement alone put 819 px of movement onto
+            // `bench_carry`'s two shapes with one of them standing still.
+            //
+            // So ask the cheap question first. `fit.agreement` is the rest
+            // pose's ink on the target's ink, and reaching here already means
+            // no node moved. Zero says there is nothing under this lattice to
+            // have an opinion with -- no evidence, which is what insufficient
+            // overlap looks like from inside the push step, and the thing
+            // `moved` was standing in for. Then anything the fallback can find
+            // beats nothing, and a difference must not be consulted because
+            // what it would be scoring is how cheaply the source sits on blank
+            // paper.
+            //
+            // Above zero the rest pose does have an opinion -- something is
+            // under it and stayed put -- and the original floor is right: only
+            // take the fallback if it matches better than doing nothing.
+            const bool rest_saw_nothing = fit.agreement <= 0.0;
+            const bool better = rest_saw_nothing ? (from_prior.agreement > 0.0)
+                                                 : (from_prior.cost < fit.cost);
+            if (from_prior.ok && better) fit = std::move(from_prior);
         }
     }
     if (abandoned(abandon)) return warp;

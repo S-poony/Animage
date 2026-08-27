@@ -2010,6 +2010,87 @@ void aLayerShowingItsMarksIsStillSolved() {
     CHECK_NEAR(own->pixel(130, 100).a, 0.0, 0.001);
 }
 
+// One scribble on the first drawing of a shot, and it has to reach the last one.
+//
+// A reported project, in the tree because no pair of shapes written here
+// reproduces it. The failure needs two drawings that share no ink *and* are
+// different enough that lining them up scores within a few percent of
+// abandoning them -- ordinary between two drawings of a moving shape, and not
+// something a box translated 400 px does, because a box matches its own
+// translation almost exactly and wins by a mile.
+//
+// The margin on the drawing this was reported from was 1%: the lattice cannot
+// see a shape that has moved clear of itself, so it starts from rung two's
+// answer, and there it scored 406.2 against staying put at 410.5 -- then the
+// push step settled it to 464.9 and the floor threw it out. See "what the
+// fallback was being compared against" in docs/handover.md.
+//
+// Every drawing, not only the one that failed: what an artist is owed here is
+// that the colour is on the shape, and the shot is eleven drawings of one shape
+// crossing the frame with a single mark on the first of them.
+void oneScribbleReachesTheEndOfTheShot() {
+    TEST("a mark carries onto every drawing of a shot, including one moved clear");
+    const QDir here(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath());
+    const QString folder = QDir::cleanPath(
+        here.absoluteFilePath(QStringLiteral("projects/moved-clear-of-itself.animage")));
+
+    Document doc;
+    QString error;
+    CHECK(ProjectIO::load(doc, folder, &error));
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+
+    const TrackId track_id = doc.scene().tracks.front().id;
+    LayerId colour = kNoId;
+    for (const Layer& layer : doc.scene().tracks.front().layers) {
+        if (layer.kind == LayerKind::Ctg) colour = layer.id;
+    }
+    CHECK(colour != kNoId);
+    if (colour == kNoId) return;
+
+    CanvasWidget canvas(doc);
+    canvas.resize(1200, 800);
+    canvas.setTrack(track_id);
+
+    const std::size_t frames = doc.scene().tracks.front().slots.size();
+    CHECK(frames > 1);
+    for (std::size_t slot = 0; slot < frames; ++slot) {
+        const Track& track = doc.scene().tracks.front();
+        const ImageId image = track.imageShownAt(slot);
+        const Image* record = track.findImage(image);
+        if (!record) continue;
+
+        canvas.setFrame(static_cast<int>(slot));
+        canvas.grab();  // the paint is what asks for the colour
+        CHECK(canvas.settleColour(20000));
+
+        // Where this drawing's line art is.
+        PixelRect ink{};
+        for (const Layer& layer : track.layers) {
+            if (layer.kind == LayerKind::Ctg) continue;
+            if (const Cel* cel = doc.cel(record->celFor(layer.id))) {
+                ink = unite(ink, drawnBounds(cel->tiles()));
+            }
+        }
+        CHECK(!ink.isEmpty());
+
+        // And where the marks it is showing ended up, in the same coordinates
+        // the compositor draws them in.
+        const Document::CarriedMarks shown = doc.ctgCarriedMarksAt(track_id, image, colour);
+        CHECK(shown.tiles != nullptr);
+        if (!shown.tiles || ink.isEmpty()) continue;
+        PixelRect marks = drawnBounds(*shown.tiles);
+        marks.x += shown.offset.x;
+        marks.y += shown.offset.y;
+
+        // The whole of what a colourist is promised by carrying: the mark is on
+        // the drawing. Left where it was made it is on bare paper, and the fill
+        // it seeds is worth nothing.
+        CHECK(!marks.isEmpty());
+        CHECK(!intersect(marks, ink).isEmpty());
+    }
+}
+
 // The solve is off the interface thread, so a paint no longer waits for one.
 // What is on screen in the meantime has to be the last answer rather than
 // nothing: the colour blinking out on every stroke would be a worse thing to
@@ -8951,6 +9032,7 @@ int main(int argc, char** argv) {
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
     aLayerShowingItsMarksIsStillSolved();
+    oneScribbleReachesTheEndOfTheShot();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
     movedMarksAgreeWithThemselvesInTheWindow();

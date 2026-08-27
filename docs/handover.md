@@ -3965,6 +3965,7 @@ trap.
 | [What emptying the fill cache does not reach while a solve is in flight](#what-emptying-the-fill-cache-does-not-reach-while-a-solve-is-in-flight) | Async solves outlive invalidation without a generation count |
 | [What went stale when the solve stopped finishing in the same call stack](#what-went-stale-when-the-solve-stopped-finishing-in-the-same-call-stack) | Refreshes that piggybacked on a synchronous re-solve now lag |
 | [What a view that skips the solve also skips](#what-a-view-that-skips-the-solve-also-skips) | No solve means no warp, and no warp reads as "the marks did not move" |
+| [What the lattice fallback was being compared against](#what-the-lattice-fallback-was-being-compared-against) | Neither measure decides it; whether rest saw anything decides which measure |
 | [The tests that construct the bug, and go red when it is fixed](#the-tests-that-construct-the-bug-and-go-red-when-it-is-fixed) | A whole fixture reddening can mean the feature works |
 | [Why a cache key of cel revisions serves wrong fills, not slow ones](#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones) | Revisions collide freely, so a shared scribble key swaps answers |
 | [Why an erased scribble left every later solve on that drawing coarser](#why-an-erased-scribble-left-every-later-solve-on-that-drawing-coarser) | Emptied tiles kept the bounds that pick solve resolution |
@@ -5269,6 +5270,56 @@ derives it has to actually run, and a view is not entitled to switch it off.**
 `aLayerShowingItsMarksIsStillSolved` in `test_canvas` constructs it.
 
 
+### What the lattice fallback was being compared against
+**A floor between two answers is a measurement, and this one was being taken in
+the units of the wrong question.** When the rest run moves no node,
+`estimateCtgLattice` starts a second run from rung two's answer and keeps it
+only if it matches better. That floor was a sum of block differences, and on two
+reported shots it threw the right answer away: the last drawing of each was the
+only one left uncoloured, its marks sitting on the paper a shape had moved off.
+
+**A difference cannot answer it.** It charges a wrong alignment twice — for the
+ink each drawing puts where the other has none — and charges covering nothing
+once. Two drawings of a moving shape never coincide, so "stay on the blank
+paper" is a live answer and not a corner case: rest scored 410.5 against the
+fallback's 406.2 on one drawing, and 212.7 against 221.2 on another. This is
+part two's lesson about `agreement` arriving two rungs up, in a place where the
+premise above `blockDifference` — a block covers the same samples at every
+offset, so nothing shrinks — is not true. Two *poses of the whole lattice* put
+the same source over quite different amounts of the target's ink.
+
+**And agreement cannot answer it either**, which is the half worth writing down,
+because swapping the measure is the obvious fix and it is wrong. An alias agrees
+*better* than the truth — the sweep above `agreement` is exactly that
+measurement — so scoring the floor on agreement put 819 px of movement onto
+`bench_carry`'s two shapes with one of them standing still, and lost both
+colours on a row that had been keeping one.
+
+**What decides is not which measure but which question, and the rest pose's own
+agreement says which.** Reaching the fallback already means no node moved. If
+the rest pose agrees with *nothing* — zero, exactly, which is what it was on
+every one of the nine fallbacks across the two reported shots — then there is
+nothing under the lattice to have an opinion with. That is the "no evidence"
+`moved` was standing in for, said directly, and then anything the fallback finds
+beats nothing and a difference must not be consulted, because what it would be
+scoring is how cheaply the source sits on bare paper. Above zero something is
+under the lattice and stayed put, and the original difference floor is right.
+
+Both halves are load-bearing and each one alone is a regression, in opposite
+directions. All five benches are identical to before —
+`bench_carry`, `bench_shapes`, and `bench_hand` on all three projects.
+
+Two things this cost that are worth having straight. **The benches could not
+have caught the bug and cannot defend the fix on their own**: every fixture in
+`tests/` moved a shape that still overlapped itself, so nothing reached this
+branch at all, and all five were byte-identical across a change that was
+wrong. `tests/projects/moved-clear-of-itself.animage` is in the tree for that
+reason and `oneScribbleReachesTheEndOfTheShot` reads it. And **restoring a file
+with `Move-Item` keeps its old timestamp**, so ninja skips it and the next run
+measures the build you thought you had replaced — which is how the first fix
+looked verified and was not. Touch it, or check the object is newer.
+
+
 ### The tests that construct the bug, and go red when it is fixed
 **A test that constructs a failure will be repaired by the fix for it.** Several
 tests build a mark that lands in the wrong place, and moving marks with the
@@ -5876,7 +5927,17 @@ ctest --test-dir build --output-on-failure
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault Qt's?
 ./build/tests/window_probe            # the same readings from the real window: is it ours?
+./build/tests/carry_probe FOLDER -platform offscreen   # why did the colour not reach that drawing?
 ```
+
+`carry_probe` is for one report and it is a common one: "I scribbled the first
+drawing and the colour does not reach that one." It walks a project drawing by
+drawing through a real `CanvasWidget`, so the ladder and the budgets are the
+ones a person gets, and prints per drawing which drawing the marks came from,
+what the drawing's ink and the marks' bounds are, whether those two overlap at
+all, and what each rung said on its own. The line to read first is
+`ON THE DRAWING` against `ON BARE PAPER`; the rungs beside it say which of them
+gave up, which is the whole question once you know one did.
 
 `shots` is the one that is not a number. It drives the real window through a
 list of named situations and writes a PNG each, into `build/shots/` unless told

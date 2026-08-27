@@ -1,0 +1,178 @@
+{
+    "canvas": {
+        "height": 1080,
+        "width": 1920
+    },
+    "fixed_length": false,
+    "format": "animage-scene",
+    "framerate": 24,
+    "length": 100,
+    "tracks": [
+        {
+            "blend": "normal",
+            "end": "nothing",
+            "id": 1,
+            "images": [
+                {
+                    "cels": [
+                        {
+                            "cel": 11,
+                            "layer": 5
+                        },
+                        {
+                            "cel": 21,
+                            "layer": 6
+                        }
+                    ],
+                    "id": 1,
+                    "number": 1
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 15,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 6,
+                    "number": 6
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 14,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 5,
+                    "number": 5
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 16,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 7,
+                    "number": 7
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 10,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 2,
+                    "number": 2
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 17,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 8,
+                    "number": 8
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 18,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 9,
+                    "number": 9
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 19,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 10,
+                    "number": 10
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 12,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 3,
+                    "number": 3
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 20,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 11,
+                    "number": 11
+                },
+                {
+                    "cels": [
+                        {
+                            "cel": 13,
+                            "layer": 5
+                        }
+                    ],
+                    "id": 4,
+                    "number": 4
+                }
+            ],
+            "layers": [
+                {
+                    "blend": "normal",
+                    "id": 5,
+                    "kind": "raster",
+                    "locked": false,
+                    "name": "layer 1",
+                    "opacity": 1,
+                    "visible": true
+                },
+                {
+                    "blend": "normal",
+                    "ctg_direction": "forward",
+                    "ctg_follow_motion": true,
+                    "ctg_inherit": true,
+                    "ctg_sources": [
+                        5
+                    ],
+                    "id": 6,
+                    "kind": "ctg",
+                    "locked": false,
+                    "name": "colour 1",
+                    "opacity": 1,
+                    "show_scribbles": true,
+                    "visible": true
+                }
+            ],
+            "name": "track 1",
+            "opacity": 1,
+            "overwrite_drawings": true,
+            "slots": [
+                1,
+                6,
+                5,
+                7,
+                2,
+                8,
+                9,
+                10,
+                3,
+                11,
+                4
+            ],
+            "time_offset": 0
+        }
+    ],
+    "version": 1
+}
