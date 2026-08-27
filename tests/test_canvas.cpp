@@ -706,6 +706,213 @@ void pastATracksEndYouCanSeeItButNotDrawOnIt() {
     CHECK_NEAR(frame.pixel(120, 200).a, 0.0, 1e-3);
 }
 
+// Defined with the layer-panel tests further down, where it was first needed.
+QPushButton* buttonCalled(const MainWindow& window, const QString& text);
+
+// Issue #25's second door, and the trap it fell into.
+//
+// Changing frame commits a transform, and for the Transform tool that is right:
+// a float that follows you to another drawing is a paste onto the wrong drawing
+// waiting to happen. A whole-layer transform is the opposite case -- what is
+// being placed is the layer, so looking at another drawing of it is part of
+// placing it -- and it used to inherit the rule anyway, so a click on the
+// timeline silently baked every drawing in the layer.
+void aWholeLayerTransformSurvivesAChangeOfFrame() {
+    TEST("scrubbing during a layer transform moves the float rather than baking");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    std::vector<ImageId> drawings;
+    for (int d = 0; d < 4; ++d) {
+        drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(d)));
+        // Each drawing a little lower, so the union of their bounds is taller
+        // than any one of them and a pivot taken from the union is visibly not
+        // a pivot taken from whichever one the playhead is on.
+        const float y = 100.0f + static_cast<float>(d) * 20.0f;
+        strokeOn(doc, track, drawings.back(), ink, 40.0f, y, 200.0f, y);
+    }
+
+    CanvasWidget canvas(doc);
+    canvas.resize(400, 400);
+    canvas.setTrack(track);
+    canvas.setActiveLayer(ink);
+    canvas.setFrame(0);
+
+    const std::size_t depth = doc.undoDepth();
+    CHECK(canvas.beginLayerTransform() == CanvasWidget::Refusal::None);
+    CHECK(canvas.transformIsLive());
+    CHECK(canvas.transformIsWholeLayer());
+
+    Transform placed = canvas.transformValues();
+    placed.dx = 60.0;
+    placed.dy = -25.0;
+    canvas.setTransformValues(placed);
+    const Transform before = canvas.transformValues();
+
+    canvas.setFrame(2);
+
+    // Still there, still placed exactly where it was, and nothing written. The
+    // pivot especially: it is the middle of the union, so the playhead moving
+    // must not move it -- otherwise a rotation would mean two different things
+    // depending on which drawing you happened to be looking at.
+    CHECK(canvas.transformIsLive());
+    CHECK(canvas.transformIsWholeLayer());
+    CHECK_EQ(canvas.currentImage(), drawings[2]);
+    CHECK_NEAR(canvas.transformValues().dx, before.dx, 1e-9);
+    CHECK_NEAR(canvas.transformValues().dy, before.dy, 1e-9);
+    CHECK_NEAR(canvas.transformValues().pivot_x, before.pivot_x, 1e-9);
+    CHECK_NEAR(canvas.transformValues().pivot_y, before.pivot_y, 1e-9);
+    CHECK_EQ(doc.undoDepth(), depth);
+
+    // And applying from where you have ended up still bakes every drawing, in
+    // one step, exactly -- a whole-pixel move does not resample.
+    CHECK(canvas.applyTransform());
+    CHECK(!canvas.transformIsLive());
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+    for (int d = 0; d < 4; ++d) {
+        const Cel* cel = doc.celAt(track, drawings[static_cast<std::size_t>(d)], ink);
+        CHECK(cel != nullptr);
+        if (!cel) continue;
+        const int y = 100 + d * 20;
+        CHECK(cel->pixel(180, y - 25).a > 0.5f);
+        CHECK_NEAR(cel->pixel(120, y).a, 0.0, 1e-3);
+    }
+}
+
+// The other half of the same rule, which the change above must not have taken
+// away: the Transform tool is about the drawing in front of you, so leaving it
+// still commits.
+void anOrdinaryTransformStillCommitsOnAChangeOfFrame() {
+    TEST("changing frame still commits a transform of one drawing");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId first = doc.insertImage(track, 0);
+    const ImageId second = doc.insertImage(track, 1);
+    strokeOn(doc, track, first, ink, 40.0f, 100.0f, 200.0f, 100.0f);
+    strokeOn(doc, track, second, ink, 40.0f, 100.0f, 200.0f, 100.0f);
+
+    CanvasWidget canvas(doc);
+    canvas.resize(400, 400);
+    canvas.setTrack(track);
+    canvas.setActiveLayer(ink);
+    canvas.setFrame(0);
+
+    const std::size_t depth = doc.undoDepth();
+    CHECK(canvas.beginTransform() == CanvasWidget::Refusal::None);
+    CHECK(!canvas.transformIsWholeLayer());
+
+    Transform placed = canvas.transformValues();
+    placed.dx = 60.0;
+    canvas.setTransformValues(placed);
+
+    const PixelRect was = paintedBounds(doc.celAt(track, second, ink)->tiles());
+
+    canvas.setFrame(1);
+    CHECK(!canvas.transformIsLive());
+    CHECK_EQ(doc.undoDepth(), depth + 1);
+    // On the drawing it was started from, and not on the one it ended on.
+    CHECK_EQ(paintedBounds(doc.celAt(track, first, ink)->tiles()).x, was.x + 60);
+    CHECK_EQ(paintedBounds(doc.celAt(track, second, ink)->tiles()).x, was.x);
+}
+
+// The button, and the thing a screenshot of it cannot show: which reason it is.
+//
+// Greyed out and explained rather than absent, so every reason
+// beginLayerTransform can refuse for has to reach the tooltip -- a reason that
+// does not leaves the button pressable and the answer arriving as a status line
+// that goes away again.
+void theLayerTransformButtonSaysWhichReasonItIs() {
+    TEST("the layer transform button is disabled with the reason, for every reason");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* button = buttonCalled(window, QStringLiteral("Transform layer through time"));
+    CHECK(button != nullptr);
+    if (!button) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    const LayerId ink = doc.scene().findTrack(track)->layers.front().id;
+    auto* canvas = window.findChild<CanvasWidget*>();
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(canvas != nullptr && timeline != nullptr);
+    if (!canvas || !timeline) return;
+
+    // A layer nobody has drawn on has nothing to move, and beginLayerTransform
+    // refuses for that too -- so the button has to say so rather than offer it.
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("nothing is drawn")));
+
+    const ImageId first = doc.scene().findTrack(track)->imageAtSlot(0);
+    strokeOn(doc, track, first, ink, 40.0f, 100.0f, 200.0f, 100.0f);
+
+    // Back through the panel, which is the path a hand takes: add a layer, so
+    // the list rebuilds and the new one is selected, then choose the inked one
+    // again. Selecting is what asks the button the question.
+    QPushButton* add_layer = buttonCalled(window, QStringLiteral("Add layer"));
+    CHECK(add_layer != nullptr);
+    if (!add_layer) return;
+    add_layer->click();
+    QCoreApplication::processEvents();
+    CHECK(!button->isEnabled());  // the new one has nothing on it either
+
+    auto* list = window.findChild<QTreeWidget*>();
+    CHECK(list != nullptr);
+    if (!list) return;
+    const std::vector<Layer>& layers = doc.scene().findTrack(track)->layers;
+    for (int row = 0; row < list->topLevelItemCount(); ++row) {
+        if (layers[static_cast<std::size_t>(row)].id != ink) continue;
+        list->setCurrentItem(list->topLevelItem(row));
+    }
+    QCoreApplication::processEvents();
+
+    // An ordinary ink layer with a drawing under the playhead: pressable, and
+    // the tooltip says what pressing it will cost rather than why it cannot.
+    CHECK(button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("every drawing")));
+
+    // Past this track's last drawing there is no cel to float, which is what
+    // beginLayerTransform refuses for -- and it is the one reason that changes
+    // as the playhead moves rather than as the selection does, so nothing but
+    // the frame-change path would ever ask it again.
+    QAction* add = actionCalled(window, QStringLiteral("Add track"));
+    CHECK(add != nullptr);
+    if (!add) return;
+    add->trigger();
+    QCoreApplication::processEvents();
+    // The *first* track gets the length, so the one being edited -- the new one
+    // -- is the short one and frame 7 is past its end.
+    doc.extendExposure(track, 0, 9);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    timeline->setCurrentSlot(7);
+    QCoreApplication::processEvents();
+    CHECK_EQ(canvas->currentImage(), kNoId);
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("no drawing at this frame")));
+
+    timeline->setCurrentSlot(0);
+    QCoreApplication::processEvents();
+
+    // A colour layer, where the reason is the kind and has to be named as the
+    // kind: unlocking or unhiding would not make this work, so naming either
+    // would send somebody to fix the wrong thing.
+    QPushButton* add_colour = buttonCalled(window, QStringLiteral("Add colour layer"));
+    CHECK(add_colour != nullptr);
+    if (!add_colour) return;
+    add_colour->click();
+    QCoreApplication::processEvents();
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("colour layer")));
+}
+
 // Issue #9 through the button that does it, because the button is where the
 // track's setting has to be read.
 void theInsertButtonObeysTheOverwriteSetting() {
@@ -8693,6 +8900,9 @@ int main(int argc, char** argv) {
     theCanvasCompositesEveryTrack();
     theTimelineIsAsLongAsTheLongestTrack();
     pastATracksEndYouCanSeeItButNotDrawOnIt();
+    aWholeLayerTransformSurvivesAChangeOfFrame();
+    anOrdinaryTransformStillCommitsOnAChangeOfFrame();
+    theLayerTransformButtonSaysWhichReasonItIs();
     theTimelineDockFollowsTheTrackCount();
     openingAProjectSizesTheTimelineForItsTracks();
     theTimelineDockCanBeResizedByHand();

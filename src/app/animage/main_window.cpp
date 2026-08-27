@@ -303,9 +303,21 @@ MainWindow::MainWindow() {
     // that put itself up when the ceiling was crossed, so that pressing the key
     // visibly answers rather than appearing to do nothing, and syncTransformFields
     // takes whichever of the two is up back down again.
+    //
+    // Timed out where there is no box left, which is the one refusal that
+    // works the other way: a bake that ran out of memory has already put the
+    // layer back and taken its own transform down, so nothing will ever call
+    // syncTransformFields again and a standing message would stand for the rest
+    // of the session. Asked of the canvas rather than of the reason, because
+    // what decides it is whether there is still something on screen the message
+    // is about.
     connect(canvas_, &CanvasWidget::transformRefused, this, [this](CanvasWidget::Refusal why) {
-        statusBar()->showMessage(
-            QStringLiteral("Cannot bake this: %1").arg(CanvasWidget::explain(why)));
+        const QString said = QStringLiteral("Cannot bake this: %1").arg(CanvasWidget::explain(why));
+        if (canvas_->transformIsLive()) {
+            statusBar()->showMessage(said);
+        } else {
+            statusBar()->showMessage(said, 8000);
+        }
     });
     // What is about to happen, put up before it happens.
     //
@@ -339,6 +351,11 @@ MainWindow::MainWindow() {
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         timeline_widget_->refresh();
+        // The first stroke on a new layer is what takes "nothing is drawn on
+        // this layer yet" away, and it arrives here rather than through the
+        // panel or the playhead -- so without this the button stays greyed out
+        // until you happen to change layer. Cheap: it counts cels, not pixels.
+        syncLayerTransformButton();
         syncStatus();
     });
     // A fill landed. Queued, because a solve installed while the
@@ -3286,6 +3303,10 @@ void MainWindow::refreshLayerFlags() {
         applyLayerFlag(item, layer, here);
     }
     updating_list_ = false;
+    // This is the frame-change path, and whether the layer in front of you can
+    // be moved through time depends on the frame: past a track's last drawing
+    // there is nothing to float. Nothing else here would ask.
+    syncLayerTransformButton();
 }
 
 void MainWindow::rebuildLayerList() {
@@ -3369,7 +3390,13 @@ void MainWindow::rebuildLayerList() {
 
 void MainWindow::onLayerSelected() {
     Layer* layer = currentLayer();
-    if (!layer) return;
+    if (!layer) {
+        // An empty panel -- a track whose last layer has just been removed --
+        // and the button has to say so rather than go on offering the answer it
+        // gave about a layer that is not there any more.
+        syncLayerTransformButton();
+        return;
+    }
     canvas_->setActiveLayer(layer->id);
     if (opacity_) {
         const QSignalBlocker block(opacity_);
@@ -3394,15 +3421,26 @@ void MainWindow::onLayerSelected() {
 // you move between layers is a button nobody can find twice, and "why can I not
 // do this here" is exactly the question a disabled control exists to answer.
 //
-// The order is the order refuseHere asks in, and that is not cosmetic: the kind
-// is asked ahead of the lock, because unlocking a colour layer would not make
-// this work and naming the lock would send somebody to fix the wrong thing.
+// **The list is refuseHere's list, in refuseHere's order**, and both halves of
+// that matter. The order is not cosmetic -- the kind is asked ahead of the
+// lock, because unlocking a colour layer would not make this work and naming
+// the lock would send somebody to fix the wrong thing. And a reason missing
+// from here is worse than one in the wrong place: the button stays pressable,
+// the press refuses, and the answer arrives as a status line that goes away
+// instead of a tooltip that is there when you look for it. "There is no drawing
+// at this frame" was that reason, and it is the one that changes as the
+// playhead moves rather than as the selection does -- which is why
+// refreshLayerFlags asks this again and not only onLayerSelected.
 void MainWindow::syncLayerTransformButton() {
     if (!layer_transform_) return;
 
     const Layer* layer = currentLayer();
     QString refusal;
-    if (!layer) {
+    if (canvas_->currentImage() == kNoId) {
+        refusal = QStringLiteral("there is no drawing at this frame.\n"
+                                 "This track stops earlier; scrub back to a frame it has\n"
+                                 "a drawing on and the whole layer still moves together.");
+    } else if (!layer) {
         refusal = QStringLiteral("there is no layer selected");
     } else if (layer->kind == LayerKind::Ctg) {
         refusal = QStringLiteral("a colour layer cannot be transformed.\n"
@@ -3413,6 +3451,14 @@ void MainWindow::syncLayerTransformButton() {
         refusal = QStringLiteral("this layer is locked");
     } else if (!layer->visible) {
         refusal = QStringLiteral("this layer is hidden");
+    } else if (doc_.layerDrawings(track_, layer->id).empty()) {
+        // Last, because beginLayerTransform asks it last. Cels and not ink: a
+        // layer with no cel anywhere has nothing to move and is the case worth
+        // catching, which is a brand-new layer. Asking about the ink would mean
+        // paintedBounds over every drawing, which reads pixels -- too much to
+        // pay every time the playhead moves, and the answer it would add is a
+        // layer whose cels are all empty, which the grid releases anyway.
+        refusal = QStringLiteral("nothing is drawn on this layer yet");
     }
 
     layer_transform_->setEnabled(refusal.isEmpty());

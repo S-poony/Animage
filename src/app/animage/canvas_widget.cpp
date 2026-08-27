@@ -500,7 +500,17 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // Changing frame commits. A float that follows you to another drawing is a
     // paste onto the wrong drawing waiting to happen, and there is nothing
     // useful it could mean out there.
-    if (transform_ && slot != slot_) settleTransform();
+    //
+    // **Except a whole-layer transform, which is not about the drawing in front
+    // of you.** That reasoning is entirely about a float belonging to one
+    // drawing, and it inverts for a gesture whose whole claim is that every
+    // drawing moves together: scrubbing to see how the layer sits on a later
+    // drawing is part of placing it, not the end of placing it. Settling here
+    // meant a click on the timeline silently baked every drawing in the layer
+    // -- seconds of work, no Apply pressed, no way to have expected it. So the
+    // gesture survives, and only which drawing is the float changes.
+    const bool moving_a_layer = transform_ && transform_->whole_layer;
+    if (transform_ && !moving_a_layer && slot != slot_) settleTransform();
     // And the loop goes with it, while surviving a change of layer. A loop is
     // geometry in image space, so re-lifting it from another layer of the same
     // drawing is meaningful; carrying it to another drawing is how you transform
@@ -536,6 +546,11 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // drawing. Holding the pen down through playback then leaves a mark on
     // each frame it passed over, which is how you sketch a moving point.
     if (changed && stroking_) rebindStrokeToCurrentImage();
+
+    // And a whole-layer transform follows the playhead rather than ending at
+    // it: the drawing you have arrived at becomes the float and the one you
+    // left rejoins the ghosts. Nothing about the box or the numbers moves.
+    if (changed && moving_a_layer) rebindLayerTransform();
 
     // Marked, not rebuilt. Holding an arrow key produces frame changes faster
     // than a rebuild takes, and rebuilding on each one let the queue run away:
@@ -924,30 +939,40 @@ std::vector<CanvasWidget::Ghost> CanvasWidget::collectGhosts() const {
     return ghosts;
 }
 
-// Everything the buffer the ghosts are painted into depends on. See OnionState.
-// What stands in for a layer while a transform of it is live.
+// What stands in for a layer's pixels in the display cache and under the
+// eyedropper while a transform of it is live: the half that stayed.
 //
-// Three callers, and the third is why this is a function: the display cache and
-// the eyedropper have always wanted the half that stayed, and the onion skin now
-// wants the same answer for a different reason -- a layer being moved through
-// time is moving on *every* drawing, so a ghost that went on drawing it where
-// the document still has it would show the same drawing twice, once still and
-// once moving.
+// Two callers, both asking the same question about the same thing -- what the
+// document would look like now, with what was picked up taken out of it.
 //
-// Null tiles mean the layer is not drawn at all, which is what a transform with
-// no selection wants. A whole-layer transform never has a selection, so it is
-// always that case.
+// `remaining` and not a null grid, including for a whole-layer transform, where
+// it is empty: an empty grid composites to nothing, which is what "the whole
+// cel was picked up" looks like, and going through the same field for both
+// keeps this one line rather than a case.
 SubstitutedLayer CanvasWidget::substitutedLayer() const {
     if (!transform_) return {};
     return {transform_->layer, &transform_->remaining};
 }
 
+// What the onion skin leaves out. Null tiles, which is collectPasses' way of
+// saying "do not draw this layer at all".
+//
+// Only a whole-layer transform, and that is the whole content of this function:
+// a layer being moved through time is moving on *every* drawing, so a ghost
+// that went on drawing it where the document still has it would show the same
+// drawing twice, once still and once moving -- and the two are in the same
+// place only until the first drag. An ordinary transform moves the drawing in
+// front of you and the neighbours have not moved, so there is nothing to omit.
+SubstitutedLayer CanvasWidget::omittedFromGhosts() const {
+    if (!transform_ || !transform_->whole_layer) return {};
+    return {transform_->layer, nullptr};
+}
+
+// Everything the buffer the ghosts are painted into depends on. See OnionState.
 CanvasWidget::OnionState CanvasWidget::onionState() const {
     OnionState state;
     state.ghosts = collectGhosts();
-    // Not `transform_->layer`: an ordinary transform moves one drawing, and the
-    // neighbouring drawings the ghosts are made of have not moved at all.
-    if (transform_ && transform_->whole_layer) state.omitted = transform_->layer;
+    state.omitted = omittedFromGhosts().layer;
 
     const Track* track = doc_.scene().findTrack(track_);
     if (!track) return state;
@@ -1066,17 +1091,11 @@ void CanvasWidget::paintOnion(const PixelRect& region) {
         if (last > first) std::fill(onion_.row(row) + first, onion_.row(row) + last, Rgba{});
     }
 
-    // A layer being moved through time is left out of the ghosts, because the
-    // gesture is already drawing every drawing of it, moving. Without this a
-    // neighbouring drawing appears twice -- once here where the document still
-    // has it and once under the float -- and the two are only in the same place
-    // before the first drag.
-    //
-    // Only for a whole-layer transform: an ordinary one moves the drawing in
-    // front of you, and the neighbours the ghosts are made of have not moved.
-    const SubstitutedLayer omit =
-        (transform_ && transform_->whole_layer) ? SubstitutedLayer{transform_->layer, nullptr}
-                                                : SubstitutedLayer{};
+    // A layer being moved through time is left out, because the gesture is
+    // already drawing every drawing of it, moving. See omittedFromGhosts, which
+    // is also what OnionState reads, so what is painted here and what decides
+    // this buffer is stale cannot disagree.
+    const SubstitutedLayer omit = omittedFromGhosts();
 
     Framebuffer ghost_frame;
     for (const Ghost& ghost : ghosts) {
@@ -1925,9 +1944,15 @@ QString CanvasWidget::explain(Refusal refusal) {
             // be over the ceiling at a scale of one, where there is nothing
             // scaled and nothing to scale back. See issue #65 on the message
             // this is a sibling of.
+            //
+            // The number comes from `kLayerGrowth` rather than being spelled
+            // out here. It was two before the tests said what the count
+            // actually does, and a message that quotes a ceiling the code has
+            // stopped using is a message that lies about what will be allowed.
             return QStringLiteral("this layer is too large to bake at that size -- a bake may "
-                                  "grow a layer to about three times what it already takes, "
-                                  "and every drawing in it is written at once");
+                                  "grow a layer to about %1 times what it already takes, and "
+                                  "every drawing in it is written at once")
+                .arg(kLayerGrowth);
         case Refusal::RanOutOfMemory:
             return QStringLiteral("there was not enough memory to bake the whole layer -- every "
                                   "drawing it had already written has been put back, so nothing "
@@ -2046,30 +2071,41 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     live.image = image_;
     live.layer = active_layer_;
 
-    // What is in front of you, whole. `remaining` stays empty, which is what
-    // tells the compositor to leave the layer out altogether.
-    if (const Cel* cel = doc_.celAt(track_, image_, active_layer_)) live.lifted = cel->tiles();
-
-    // And every other drawing, merged into one grid. Merged rather than kept
-    // apart because they all move by the same matrix: one grid composites once
-    // and blits once, where forty separate low-opacity blits would pile up into
-    // black everywhere the character stayed still.
-    //
-    // Distinct drawings and not slots, which is Document's list and not one
-    // worked out again here -- the bake, the budget and this picture have to be
-    // about exactly the same set of drawings.
-    for (const auto& [id, image] : track->images) {
-        if (id == image_) continue;
+    // Distinct drawings and not slots, and Document's list rather than one
+    // worked out again here: the bake, the budget, the ghost picture and the
+    // number the status bar promises all have to be about exactly the same set,
+    // in the same order.
+    std::vector<const TileGrid*> grids;
+    for (const ImageId id : doc_.layerDrawings(track_, active_layer_)) {
         const Cel* cel = doc_.celAt(track_, id, active_layer_);
-        if (!cel || cel->tiles().empty()) continue;
-        live.ghost_grid = mergeOver(cel->tiles(), live.ghost_grid);
+        if (!cel) continue;
+        // Pushed together, so the two lists stay index for index -- which is
+        // what lets the float be found by image and the budget by position.
+        live.layer_images.push_back(id);
+        grids.push_back(&cel->tiles());
     }
+    // Worked out once and held, because drawnBounds reads pixels and the drag
+    // that follows asks the budget on every pointer move.
+    live.footprint = layerFootprint(grids);
+    if (live.footprint.grids.empty()) return Refusal::NothingDrawn;
 
-    // The ink's bounds and not the tiles', the same as for one drawing, and
-    // over both halves: the box has to cover everything that is going to move,
-    // which is the layer and not the part of it you can see.
-    live.bounds = unite(paintedBounds(live.lifted), paintedBounds(live.ghost_grid));
+    // The ink's bounds and not the tiles' -- the same as for one drawing, and
+    // for the same reason: a box 128 pixels bigger than the drawing on every
+    // side is a picture of the tile grid. Over every drawing rather than the
+    // one you are on, because the box has to cover everything that is going to
+    // move, and a box taken from wherever the playhead happened to be would put
+    // the playhead into the pivot.
+    for (const TileGrid& grid : live.footprint.grids) {
+        live.bounds = unite(live.bounds, paintedBounds(grid));
+    }
     if (live.bounds.isEmpty()) return Refusal::NothingDrawn;
+
+    // A loop describes a shape on *this* drawing and nothing at all on the
+    // other forty, so this gesture ignores it -- and a loop left on screen
+    // through a gesture that ignores it is the screen disagreeing with what is
+    // about to happen. Taken now rather than on Apply, which is where it used
+    // to go and which is after the bake has already written every drawing.
+    clearSelection();
 
     live.values.pivot_x = live.bounds.x + live.bounds.width / 2.0;
     live.values.pivot_y = live.bounds.y + live.bounds.height / 2.0;
@@ -2077,12 +2113,38 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     tool_ = Tool::Transform;
     refreshTransformFit();
 
-    buildTransformPicture();
-    buildTransformGhosts();
+    // What is in front of you becomes the float and the rest become the ghosts.
+    // `remaining` stays empty throughout, which is what tells the compositor to
+    // leave the layer out of the document altogether.
+    rebindLayerTransform();
     refreshAll();
     refreshPointer();
     Q_EMIT transformBegan();
     return Refusal::None;
+}
+
+// Which drawing of the layer is the float, and which are the ghosts.
+//
+// Called when the gesture starts and again whenever the playhead moves, which
+// is the only thing that can change the answer: the box, the pivot and the five
+// numbers are about the layer and do not depend on where you are standing.
+void CanvasWidget::rebindLayerTransform() {
+    if (!transform_ || !transform_->whole_layer) return;
+    LiveTransform& live = *transform_;
+
+    live.image = image_;
+    live.lifted = TileGrid{};
+    for (std::size_t i = 0; i < live.layer_images.size(); ++i) {
+        if (live.layer_images[i] != live.image) continue;
+        if (i < live.footprint.grids.size()) live.lifted = live.footprint.grids[i];
+        break;
+    }
+
+    // The float first, because it settles `covers` and `step` and the ghosts go
+    // into the same rectangle at the same step -- so the two go through one
+    // matrix and cannot drift apart.
+    buildTransformPicture();
+    buildTransformGhosts();
 }
 
 // A composited buffer as Qt wants it for a blit.
@@ -2164,11 +2226,24 @@ void CanvasWidget::buildTransformPicture() {
 // colour away and tints it warm or cool, because what it is saying is *when*
 // that drawing is; these ghosts are all one layer at one moment, so there is no
 // when to say, and what is worth seeing is what is actually going to land.
+//
+// **One picture, and the compositor is what makes it.** They all move by the
+// same matrix, so what has to come out of this is a single image -- forty
+// separate low-opacity blits would pile up into black everywhere the character
+// stayed still, which on a layer of animation is most of it. The first version
+// got that image by merging the grids into one with `mergeOver` and compositing
+// that, which is the same picture arrived at the expensive way: `mergeOver`
+// alpha-blends every overlapping tile at full tile resolution, and by the third
+// drawing almost every tile overlaps. Forty drawings of an HD character
+// measured 817 ms, on the interface thread, with nothing on screen to say why.
+// Handing the compositor the grids as forty passes is the same answer in 59 ms:
+// it works at the step the picture is actually drawn at, and it splits by rows
+// across every core.
 void CanvasWidget::buildTransformGhosts() {
     if (!transform_) return;
     LiveTransform& live = *transform_;
     live.ghosts = QImage();
-    if (!live.whole_layer || live.ghost_grid.empty()) return;
+    if (!live.whole_layer) return;
 
     const Track* track = doc_.scene().findTrack(live.track);
     const Layer* layer = track ? track->findLayer(live.layer) : nullptr;
@@ -2177,11 +2252,24 @@ void CanvasWidget::buildTransformGhosts() {
     // Opaque here too, and for the same reason as the float: the fading is what
     // this picture is drawn *with*, and a layer set to half opacity would
     // otherwise fade twice over.
-    Framebuffer pixels;
     Layer opaque = *layer;
     opaque.opacity = 1.0f;
-    const std::vector<LayerPass> pass{{&live.ghost_grid, &opaque}};
-    compositor_.compositeGrids(pass, live.covers, pixels, live.step);
+
+    // Topmost first, which is the order compositeGrids wants. Last drawing on
+    // top, which is a fixed order rather than a meaningful one -- these are all
+    // one layer at one moment, so there is no "nearest" among them to put in
+    // front. What matters is only that it *is* fixed: merged in a hash map's
+    // order, this picture came out different on every run.
+    std::vector<LayerPass> passes;
+    passes.reserve(live.footprint.grids.size());
+    for (std::size_t i = live.footprint.grids.size(); i-- > 0;) {
+        if (live.layer_images[i] == live.image || live.footprint.grids[i].empty()) continue;
+        passes.push_back({&live.footprint.grids[i], &opaque});
+    }
+    if (passes.empty()) return;
+
+    Framebuffer pixels;
+    compositor_.compositeGrids(passes, live.covers, pixels, live.step);
     if (pixels.isEmpty()) return;
 
     live.ghosts = encodeForBlitting(pixels);
@@ -2244,12 +2332,16 @@ void CanvasWidget::refreshTransformFit() {
     if (transform_->whole_layer) {
         // One budget for the whole bake, which is the truthful shape: every
         // drawing's new tiles land in that drawing and stay there, so a scale
-        // that is comfortable on one is not comfortable on ninety. Asked from
-        // the document rather than from the two grids held here, because the
-        // ghosts were merged into one and the budget is about what the *bake*
-        // will allocate, one cel at a time.
-        transform_fits_ = commitFitsInBudget(doc_.layerGrids(transform_->track, transform_->layer),
-                                             transform_->values, kCommitTileBudget);
+        // that is comfortable on one is not comfortable on ninety.
+        //
+        // From the footprint the gesture gathered when it started, and that is
+        // what keeps this off the pen's latency path. Asking the document again
+        // meant `drawnBounds` over every drawing on every pointer move -- it
+        // reads pixels until it finds one -- which measured 10.9 ms a move on a
+        // forty-drawing layer of line art against 0.3 ms for the same drag on
+        // one drawing. None of it can change while the transform is live.
+        transform_fits_ =
+            commitFitsInBudget(transform_->footprint, transform_->values, kCommitTileBudget);
         return;
     }
     transform_fits_ =
@@ -2311,12 +2403,13 @@ bool CanvasWidget::applyTransform() {
     // through a two-second stall reads as a program that has stopped.
     if (live.whole_layer) {
         if (!live.values.isIdentity()) {
-            // Said before the wait and not after it. The count comes from
-            // layerGrids, which is the list transformLayer itself walks, so the
-            // number promised here and the number reported at the end cannot
-            // come apart -- except when the bake gives up partway, which is
-            // exactly when they should differ.
-            const int coming = static_cast<int>(doc_.layerGrids(live.track, live.layer).size());
+            // Said before the wait and not after it. The count is the list the
+            // gesture gathered when it started, which came from
+            // Document::layerDrawings -- the same list transformLayer itself
+            // walks -- so the number promised here and the number reported at
+            // the end cannot come apart, except when the bake gives up partway,
+            // which is exactly when they should differ.
+            const int coming = static_cast<int>(live.layer_images.size());
             Q_EMIT layerTransformStarted(coming);
             QGuiApplication::setOverrideCursor(Qt::WaitCursor);
             const Document::LayerBake baked =

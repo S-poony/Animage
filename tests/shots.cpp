@@ -922,10 +922,35 @@ const std::vector<Situation>& situations() {
              s.settle();
          }},
 
+        {"a-layer-moved-through-time-from-another-drawing",
+         "the same gesture after scrubbing: a whole-layer transform is not about the drawing "
+         "in front of you, so changing frame moves the float to the drawing you arrive at "
+         "and puts the one you left back among the ghosts -- the box, the pivot and the "
+         "numbers do not move, and nothing has been written",
+         [](Stage& s) {
+             s.canvas->setZoom(1.0, s.centre());
+             for (int d = 0; d < 5; ++d) {
+                 s.circle(s.centre() + QPointF(d * 40.0 - 80.0, 0.0), 70.0);
+                 if (d < 4) s.press(Id::InsertDrawing);
+             }
+             // Back to the first drawing, and start the gesture from there.
+             s.timeline->setCurrentSlot(0);
+             s.settle();
+             s.choose("Transform layer through time");
+             Transform placed = s.canvas->transformValues();
+             placed.dy = -60.0;
+             placed.rotation = 10.0;
+             s.canvas->setTransformValues(placed);
+             s.settle();
+             // And now walk the playhead along it. This used to bake the layer.
+             s.timeline->setCurrentSlot(3);
+             s.settle();
+         }},
+
         {"a-colour-layer-cannot-move-through-time",
-         "the layer panel's button is greyed out on a colour layer rather than absent, and "
-         "its tooltip is what says why -- a mark on one is a label, and interpolating two "
-         "labels invents a third colour that competes for regions on its own account",
+         "the layer panel's button is greyed out on a colour layer rather than absent -- the "
+         "tooltip that says which reason it is cannot be photographed, so what this pins is "
+         "that the control is there and refuses; test_canvas asserts the wording",
          [](Stage& s) {
              s.circle(s.centre(), 120.0);
              s.choose("Add colour layer");

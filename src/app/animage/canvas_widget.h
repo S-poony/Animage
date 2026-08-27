@@ -612,18 +612,32 @@ private:
     std::array<QPointF, 8> transformHandles() const;
     void drawTransformPreview(QPainter& painter);
     void buildTransformPicture();
-    // The ghosts: every other drawing of the layer, flattened and composited
-    // once, into the same rectangle the float uses. Does nothing unless the
-    // transform is a whole-layer one.
+    // The ghosts: every other drawing of the layer, composited into the same
+    // rectangle the float uses. Does nothing unless the transform is a
+    // whole-layer one.
     void buildTransformGhosts();
-    // What the compositor should stand in for while a transform is live: the
-    // half that stayed, or nothing at all where the whole cel was picked up.
+    // The float and the ghosts, re-split for the drawing in front of you.
     //
-    // In one function because three callers need the same answer and one of
-    // them is new -- the onion skin, which has to omit a layer being moved
-    // through time or a neighbouring drawing appears twice, once still and once
-    // moving.
+    // A whole-layer transform survives a change of frame -- what is being
+    // placed is the layer, so looking at another drawing of it is part of the
+    // gesture rather than the end of it -- and which drawing is the float and
+    // which are ghosts is the only thing about it that the playhead decides.
+    // The box, the pivot and the five numbers do not move.
+    void rebindLayerTransform();
+    // What the display cache and the eyedropper should stand in for while a
+    // transform is live: the half that stayed, which is nothing at all where
+    // the whole cel was picked up.
     animage::SubstitutedLayer substitutedLayer() const;
+    // What the onion skin should leave out of its ghosts, which is a different
+    // question: only a layer being moved through *time* is left out, because
+    // only then is every neighbouring drawing of it already on screen under the
+    // float. An ordinary transform moves one drawing and the neighbours the
+    // ghosts are made of have not moved at all.
+    //
+    // In one function because two things need the same answer and must not
+    // drift: paintOnion, which acts on it, and OnionState, which is what
+    // notices it has changed.
+    animage::SubstitutedLayer omittedFromGhosts() const;
     // The middle of what was picked up, in image coordinates. Two things want
     // it: the pivot between gestures, and the pivot a symmetrical handle drag
     // scales about.
@@ -940,15 +954,22 @@ private:
         // Document::transformLayer.
         bool whole_layer = false;
 
-        // Every *other* drawing of the layer, flattened into one grid, for the
-        // ghosts. Empty unless `whole_layer`.
+        // Every drawing of the layer, and what a fit check needs about them.
+        // Empty unless `whole_layer`.
         //
-        // One grid and not one per drawing. They all move by the same matrix,
-        // so they can be merged once and blitted once -- and merged rather than
-        // blitted separately, because forty low-opacity blits pile up into
-        // black wherever the drawings overlap, which on a layer of animation is
-        // everywhere the character stayed still.
-        animage::TileGrid ghost_grid;
+        // **One list, and everything else is a view of it.** The float is the
+        // entry whose image is the one in front of you, the ghosts are the
+        // others, the budget is all of them and so is the number the status bar
+        // promises -- so none of those can come apart from the set the bake
+        // will actually walk. `layer_images` runs parallel to
+        // `footprint.grids`, in the order Document::layerDrawings gives, which
+        // is sorted: `Track::images` is an unordered_map and a picture merged
+        // in its order is a different picture on every run.
+        //
+        // Held rather than asked for again, because `drawnBounds` reads pixels
+        // and a drag asks the budget on every pointer move. See LayerFootprint.
+        std::vector<animage::ImageId> layer_images;
+        animage::LayerFootprint footprint;
 
         // The float: the layer alone, ready to be blitted through the matrix.
         //
