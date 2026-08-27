@@ -2,9 +2,14 @@
 
 Written before anything is built, in the register of
 [scribbles-through-time.md](scribbles-through-time.md): what is being decided,
-why, and what would change each decision. Several things here are **not
-settled**, and they are marked. The unsettled ones are collected again at the
-end so nobody has to hunt for them.
+why, and what would change each decision. Anything still **not settled** is
+marked, and the unsettled ones are collected again at the end so nobody has to
+hunt for them.
+
+The two large questions the first draft left open — which audio library, and
+what shape a sequence is stored in — have both been answered, and the answer to
+the first changed the answer to the second. They are settled in place below
+rather than in an appendix, with what decided them.
 
 The French documents in [fr/](fr/) are still the specification. This note fills
 in something the specification reserved a place for and deferred:
@@ -16,19 +21,23 @@ call twice over, and this note leans on it.
 | | |
 |---|---|
 | [What it is for](#what-it-is-for) | the shot somebody is trying to make |
-| [The order of work](#the-order-of-work) | audio, then a still, then a sequence |
+| [The order of work](#the-order-of-work) | audio, then a still, then a sequence, then a video |
 | [Audio is not a track](#audio-is-not-a-track) | and the specification already said so |
 | [Scrubbing comes first](#scrubbing-comes-first) | and it dodges the hard part entirely |
 | [The playback clock](#the-playback-clock) | four ways two clocks come apart, worst first |
-| [**Which audio library**](#which-audio-library-not-settled) | **not settled** — video is what decides it |
-| [A single image](#a-single-image) | the modelsheet, and the cheap case |
+| [Which library](#which-library) | Qt Multimedia, and what taking it costs |
+| [Video export, and what Qt gives free](#video-export-and-what-qt-gives-free) | cheap, not free, and not before 6.8 |
+| [A single image](#a-single-image) | the modelsheet, which is a reference layer too |
 | [Colours, which have to survive](#colours-which-have-to-survive) | the good news, and the real threat |
-| [**Sequences: three shapes**](#sequences-three-shapes-not-settled) | **not settled** — and what a benchmark would settle |
-| [What reference-only gives up](#what-reference-only-gives-up) | and the way back |
+| [How a sequence is stored](#how-a-sequence-is-stored) | a reference layer, and why the compositor needs nothing |
+| [Video is a sequence with a decoder in front](#video-is-a-sequence-with-a-decoder-in-front) | extracted once, at import |
+| [What reference-only gives up, and the way back](#what-reference-only-gives-up-and-the-way-back) | convert to drawings, whole layer, on a popup |
 | [The menu, and what each dialog asks](#the-menu-and-what-each-dialog-asks) | |
+| [When the frame rate changes](#when-the-frame-rate-changes) | both directions, and both warn |
 | [Where an import lands](#where-an-import-lands) | bottom, in import order |
 | [What the export says](#what-the-export-says) | a recap, which fixes something already broken |
 | [The project folder and the file format](#the-project-folder-and-the-file-format) | |
+| [**What the handover already knows about this**](#what-the-handover-already-knows-about-this) | the traps this note would otherwise walk into |
 | [Not in scope](#not-in-scope) | |
 | [The open questions](#the-open-questions) | collected |
 
@@ -46,25 +55,37 @@ somebody else's pencil test.
 
 Three things follow from that and they are worth stating before anything else:
 
-- **Audio quality is not a goal.** The program cannot export video and has no
-  muxer, so imported audio is a reference to animate against and never a
-  deliverable. Nothing here should be traded for fidelity.
+- **Audio quality is not a goal**, but the reason has changed and the old one
+  should not be left standing. It used to be that the program cannot export
+  video and has no muxer, so imported audio could never leave the program at
+  all. Taking Qt Multimedia takes a muxer with it — see [video
+  export](#video-export-and-what-qt-gives-free) — so that argument is gone. What
+  is left is narrower and still enough: what would carry the audio out is a
+  *preview* file, watched to check timing, and nothing about a preview is worth
+  trading the scrub for.
 - **Frame accuracy is the goal.** The whole of lipsync is deciding which frame a
   sound is on. An error that is constant and small still ruins it, because it
   biases every judgement in the same direction.
 - **Imports are reference.** This is the user's call and it is what makes most of
   the cheap options available. See [what reference-only gives
-  up](#what-reference-only-gives-up), which is not nothing.
+  up](#what-reference-only-gives-up-and-the-way-back), which is not nothing.
 
 ## The order of work
 
 1. **Audio**, because it is what the shot is for.
-2. **A single image**, because a modelsheet is one drawing and one drawing is
-   cheap however it is stored.
-3. **An image sequence**, because it is the only one where the storage question
-   is real, and it should be decided by a benchmark rather than by argument.
+2. **A single image**, because it is the smallest instance of the shape
+   everything else uses, and building it builds most of 3.
+3. **An image sequence**, which is 2 with more frames — plus the two things one
+   frame never needs: a bound on what is resident, and a decode that does not
+   happen on the interface thread.
+4. **A video**, which is 3 with a decoder in front of it and no new storage at
+   all.
+5. **Video export**, last and deliberately so. It is the only item here that
+   writes a file for somebody else, and none of the other four is waiting on it.
 
-Nothing in 1 blocks 2, and 3 is deliberately last.
+Nothing in 1 blocks 2. The order of 2, 3 and 4 is not a preference: each is the
+one before it with one thing added, so taking them out of order means building
+the same machinery twice.
 
 ## Audio is not a track
 
@@ -232,13 +253,22 @@ With no audio in the scene, nothing changes at all.
 
 **Two things follow, and both should be built in from the start.**
 
-*A manual sync offset, in milliseconds.* Whatever survives the subtraction is a
-constant per machine and per driver, and the honest way to remove it is to let
-the user null it out. Note this is **not** the same field as an audio track's
-placement offset, which is in frames and belongs to the shot: the calibration
-describes the machine, so it is a preference and does not go in `scene.json`.
-Two fields, because they are two different kinds of thing and a project carried
-to another computer must not carry the first one with it.
+*A manual sync offset, in milliseconds — **deferred**, on the user's call.*
+Whatever survives the subtraction is a constant per machine and per driver, and
+the honest way to remove it is to let the user null it out. That is still true;
+it is simply not worth a control until a machine turns out to need one.
+
+Deferring it costs nothing structurally, and that is why it is safe to defer.
+The calibration describes the *machine*, so it is a preference and does not go
+in `scene.json` — which means adding it later touches no project file and is not
+a format change. It is also **not** the same field as an audio track's placement
+offset, which is in frames and belongs to the shot; that one is not deferred,
+because a project carried to another computer has to carry it.
+
+What deferring does cost: if `playedMs()` turns out to over- or under-report on
+some driver, there is nothing the user can do about it but say so. That is
+acceptable while the subtraction is honest, and the way to find out whether it
+is honest is to measure it — see [which library](#which-library).
 
 *The arithmetic must be a pure function of "samples played".* GitHub's runners
 have no audio device — anything opening an output there fails or hangs. So the
@@ -247,32 +277,117 @@ fake, pinning the loop seam and the stall case with no hardware at all. The
 precedent is `exporting::Solve`: the thing that needs a resource is passed in, so
 the logic can be tested without it.
 
-## Which audio library (not settled)
+## Which library
 
-**This is genuinely open, and video is what decides it.**
+**Settled: Qt Multimedia.** Video import is wanted, and that is what decides it —
+exactly as the first draft of this note predicted it would. A live-action
+reference for a character animator is an ordinary request, an animatic that
+arrived as an `.mp4` is an ordinary Tuesday, and a storyboard mode editing
+several scenes would want a player too. Take Qt Multimedia for any of those and
+the audio module comes with it, at which point vendoring an audio-only library
+was a detour.
 
-### What was checked
+The case for vendoring miniaudio was real and is recorded below rather than
+deleted, because what it was weighing is what the cost of this decision still
+is.
 
-Qt Multimedia is **not installed anywhere in this project's world today**.
-Locally, `C:\msys64\ucrt64\lib\cmake` has `Qt6Core`, `Qt6Gui`, `Qt6Widgets`,
-`Qt6Network` and the Labs QML modules, and no `Qt6Multimedia`. In
-[ci.yml](../.github/workflows/ci.yml), `jurplel/install-qt-action@v4` is called
-with a version and no `modules:`, which installs qtbase only.
+### What it buys beyond the decision
 
-So taking Qt Multimedia costs: a `pacman -S
-mingw-w64-ucrt-x86_64-qt6-multimedia` locally; `modules: qtmultimedia` on **four**
-Qt install steps (three build platforms and the sanitize job); and three
-deployment tools that must now find and bundle a backend —
-`linuxdeploy-plugin-qt`, `macdeployqt`, `windeployqt` — for a module whose
-default backend is FFmpeg, shipped as a plugin with its own bundled shared
-libraries.
+Three things, none of which was the reason and all of which are worth having.
+
+- **`QAudioDecoder` closes the codec gap.** This was named as the one thing that
+  would change the answer other than video: miniaudio does not decode AAC/M4A or
+  Opus, and a director sending an `.m4a` off a phone is ordinary. Qt decodes all
+  of them, so the "explain and ask for a WAV" conversation does not have to
+  happen.
+- **`QAudioSink` in pull mode is the shape [scrubbing](#scrubbing-comes-first)
+  asked for** — a device that calls you for samples, rather than a media-player
+  object with a play position.
+- **`QMediaPlayer` is what a storyboard mode would want**, and it is the same
+  module. That is not a reason to build one, but it is a reason not to have to
+  revisit this.
+
+### What it costs, and none of it has changed
+
+- `pacman -S mingw-w64-ucrt-x86_64-qt6-multimedia` locally.
+- `modules: qtmultimedia` on **four** Qt install steps in
+  [ci.yml](../.github/workflows/ci.yml) — three build platforms and the sanitize
+  job.
+- Three deployment tools that must now find and bundle a backend:
+  `linuxdeploy-plugin-qt`, `macdeployqt`, `windeployqt`. Qt Multimedia's default
+  backend is FFmpeg, shipped as a plugin with its own bundled shared libraries.
 
 That last line is the zlib story again, and the handover already wrote the
 lesson: *"X is a dependency of Y, so X is present" confuses being linked into
 with being available to link against, and a bundled library is exactly the case
 where those come apart.*
 
-### The case for vendoring miniaudio
+**So the deployment spike comes before any audio code is written.** A
+hello-world that opens a sink, built and packaged through all three tools on all
+three platforms. If `windeployqt` does not bundle the FFmpeg plugin correctly,
+that is a fact worth having on day one and a disaster to discover after the
+audio layer exists. The precedent for how to ask is `dock_probe` — see [asking Qt
+a question directly](handover.md#asking-qt-a-question-directly) — which exists
+for exactly this class of question: is this ours or theirs, answered by the
+smallest program that can tell.
+
+### The one line in CMakeLists that can turn the application off
+
+**`Multimedia` must not be added to the root `find_package(Qt6 COMPONENTS ...)`.**
+
+This is not a style preference, it is a trap the handover already paid for: [what
+asking for a private Qt component at the top level switches
+off](handover.md#what-asking-for-a-private-qt-component-at-the-top-level-switches-off).
+A component in that list which the installed Qt does not have fails the whole
+`find_package`, `Qt6_FOUND` comes back false, and the `if(Qt6_FOUND)` around
+`src/app` skips **every GUI target** — while configure, build and `ctest` all
+report success.
+
+Every Qt this project currently builds against is such an install. There is no
+`Qt6Multimedia` in MSYS2 here today and none on the CI runners, so the first
+commit that adds it to the root list would turn the application off on every
+machine at once, and say so only in one status line in the middle of a
+successful log. Ask for it as its own package, the way `Qt6GuiPrivate` is asked
+for in `tests/`, and let a missing module disable the audio feature rather than
+the program.
+
+### The seam is still wanted, and now for one reason rather than two
+
+It used to be insurance against picking the wrong library. That reason is gone;
+the other one is not, and it was always the stronger of the two.
+
+**The sync arithmetic must be a pure function of "samples played".** GitHub's
+runners have no audio device, so anything opening an output there fails or
+hangs. The slot calculation therefore takes a sample count as an argument and a
+test drives it with a fake, pinning the loop seam and the stall case with no
+hardware at all. The precedent is `exporting::Solve`: the thing that needs a
+resource is passed in, so the logic can be tested without it.
+
+That requirement alone produces the `AudioDevice` header — open at rate R,
+receive a callback asking for N frames, report frames consumed, stop. Keeping
+Qt's types out of `MainWindow` and `TimelineWidget` then costs nothing extra,
+and it is the version of this decision that could otherwise be regretted.
+
+**And there is one number to measure before trusting any of it.**
+`QAudioSink::processedUSecs()` is the obvious source for `playedMs()`, and
+whether it counts audio *handed to* the sink or audio *played out of* it decides
+whether the buffer-in-flight subtraction is still needed. It is the number the
+deferred [manual sync offset](#the-playback-clock) is standing on.
+
+**Measure it, in the deployment spike, before writing the sync arithmetic.** Play
+a file and ask whether the number ever reports more audio than there has been
+time to play. It cannot, if it counts audio that has come out; it will, if it
+counts audio handed over. Ten lines, once, and then it is known.
+
+Neither answer is more likely than the other and this note does not guess at one,
+because a guess written here is an invitation to skip the measurement. What is
+worth knowing is what the measurement is *for*: getting this wrong does not fail,
+it leans — the picture sits a fixed fraction of a frame away from the sound, on
+every frame, invisibly. That is exactly the error [the playback
+clock](#the-playback-clock) exists to remove, arriving through the one number
+meant to remove it.
+
+### What was weighed against it, kept because it is the cost
 
 `third_party/` already holds tinyexr and miniz — two single-file libraries
 vendored with a written argument, precisely to avoid per-platform install steps
@@ -280,88 +395,143 @@ and per-platform bytes. miniaudio is the same shape: one header, public domain /
 MIT-0 and so GPL-compatible, speaking WASAPI, CoreAudio, ALSA and PulseAudio
 with no system dependency, with WAV, FLAC and MP3 decoders built in.
 
-Against Qt Multimedia that is: no new Qt module, no change to four CI steps, no
-new burden on three deployment tools, no bundled FFmpeg, MP3 without a
-backend-dependent codec, and a data callback that is exactly where `playedMs()`
-and scrub audio both want to live.
+Against Qt Multimedia that was: no new Qt module, no change to four CI steps, no
+new burden on three deployment tools, no bundled FFmpeg, and a data callback
+exactly where `playedMs()` and scrub audio both want to live. **Every one of
+those is still true, and each one is now a cost this project has agreed to
+pay.** They are listed here so that the bill is not a surprise, and so that a
+future reader who finds video import abandoned knows what the audio layer could
+go back to.
 
-### The case for Qt Multimedia, which is video
-
-**Importing a video is something people will want**, and it is the branch where
-vendoring an audio-only library is the wrong call. A live-action reference for a
-character animator is an ordinary request; so is dropping in an animatic that
-arrived as an `.mp4` rather than as frames. Video needs a media framework, and
-the realistic ones are Qt Multimedia or FFmpeg directly. Take Qt Multimedia for
-video and the audio module comes with it, at which point miniaudio was a
-detour.
-
-**The sub-question that changes the answer, and which is also not settled:**
-does "import a video" mean *decode it to frames once, at import* — in which case
-it is a decoder problem and lands in whatever storage shape sequences use — or
-*play it live as a layer*, which is a player problem and settles the question in
-Qt Multimedia's favour immediately? These are very different features that share
-a menu item.
-
-### What is settled about it
-
-Two things, whichever way it goes.
-
-**The decoder and the device are separable, and only the device is awkward to
-replace.** A hybrid is legitimate: decode through one thing, play through
-another.
-
-**The seam matters more than the choice.** What is needed from an audio device
-is small — open at rate R, receive a callback asking for N frames, report frames
-consumed, stop. Behind about fifty lines of an `AudioDevice` header, swapping one
-implementation for the other is a day's work. The version of this decision that
-could be regretted is the one where the library's types reach into `MainWindow`
-and `TimelineWidget`. Since the sync arithmetic has to be a pure function anyway,
-the seam is being asked for regardless.
-
-**What would change it, other than video:** a codec. miniaudio does not decode
-AAC/M4A or Opus, and a director sending an `.m4a` off a phone is an ordinary
-Tuesday. That is a gap rather than obsolescence — the answers are to explain and
-ask for a WAV, to hook up a decoder, or to decode through Qt while playing
-through miniaudio.
-
-**What would *not* change it:** the platform APIs, which are the safe part.
-WASAPI has been the Windows audio API since Vista and has never been deprecated;
-CoreAudio's output path has been stable for twenty years. Linux is where the
-churn lives — OSS → ALSA → PulseAudio → PipeWire — but PipeWire ships
+What would *not* have changed it either way: the platform APIs, which are the
+safe part. WASAPI has been the Windows audio API since Vista and has never been
+deprecated; CoreAudio's output path has been stable for twenty years. Linux is
+where the churn lives — OSS → ALSA → PulseAudio → PipeWire — but PipeWire ships
 `pipewire-pulse` and `pipewire-alsa` as the compatibility path, and the failure
-mode if that eroded is worse latency, not silence. Nor does maintenance: the
-library would be public domain and sitting in the tree, so "abandoned" means
-"ours", over a surface small enough to own.
+mode if that eroded is worse latency, not silence.
+
+## Video export, and what Qt gives free
+
+**Not free, but cheap — and not before Qt 6.8.** It is not a priority: it comes
+after import, and this section exists so that it is easy when it comes rather
+than to argue for doing it now.
+
+### What the API actually is
+
+`QMediaRecorder` encodes and muxes, but its input is a `QMediaCaptureSession` —
+which historically meant a camera, a microphone or a screen grab. There was no
+supported way to hand it frames the program generated itself. **Qt 6.8 added
+`QVideoFrameInput` and `QAudioBufferInput`**, which are exactly that: push a
+`QVideoFrame` per composited frame with a start and end time in microseconds,
+throttled by a `readyToSendVideoFrame` signal, and push the soundtrack the same
+way.
+
+So the new code is: composite each frame as the export already does, wrap the
+`Framebuffer` as a `QVideoFrame`, push, handle the backpressure, wait for
+finalisation. A couple of hundred lines and a dialog. The muxing — which is the
+part that would otherwise mean FFmpeg by hand — comes with it.
+
+### What it does not give
+
+- **Encoder control.** `QMediaFormat` picks a container and a codec; quality is
+  a five-step enum or an explicit bitrate. No CRF, no preset, no profile.
+- **Anything but 8-bit 4:2:0** out of H.264/H.265 in practice. Chroma
+  subsampling on flat colour with hard edges is close to the worst case for what
+  this program draws: coloured line art will fringe. That is fine for a file
+  somebody watches to check timing and wrong for anything called a master.
+- **Certainty across platforms.** The FFmpeg backend ships as a plugin with its
+  own bundled libraries, and which encoders are present varies. Check on all
+  three rather than assuming.
+
+**So it is the convenience deliverable**, the way TIFF is the compatibility one
+and EXR is the lossless one — the handover's queue makes that distinction for
+TIFF and it is worth making once here too, because it is what stops the same
+argument happening twice. Everything downstream already takes an image sequence.
+
+### Two constraints that have to be decided before it is built
+
+**The Qt floor rises to 6.8, with no headroom under it.**
+[CMakeLists.txt](../CMakeLists.txt) asks for 6.5 today, and `ci.yml` pins Linux
+and macOS at `6.8.*` — which is the version `QVideoFrameInput` arrives in.
+Video export therefore has a hard minimum sitting exactly on what CI installs.
+Nothing to do about it now except know it: **do not lower the CI pin below 6.8,
+and do not raise the root `find_package` minimum for any other reason without
+noticing this.**
+
+**Shipping an H.264 encoder is a decision, not a side effect.** Qt Multimedia
+under GPLv3/LGPLv3 is fine for this project. The bundled FFmpeg — and, for
+software H.264, OpenH264 — add third-party licence texts to ship from
+`packaging/`, and the patent position around distributing an H.264 encoder is
+something a GPL project should settle deliberately. Free-software projects ship
+one routinely; that is a reason it is defensible, not a reason it is automatic.
+
+### What to do now so it is easy later
+
+Nothing in the import work needs changing for it. Two habits are enough:
+
+- **The export already composites every frame at canvas size**, through
+  `exporting::write`. A recorder is another `exporting::Format`-shaped decision
+  over the same loop, not a second traversal of the scene. Keep it that way.
+- **Audio can now leave the program**, which the [placement
+  offset](#the-menu-and-what-each-dialog-asks) in frames is what positions. That
+  is arithmetic on the shot and is unaffected by any device latency, so the
+  deferred calibration never enters a muxed file. Worth writing down because the
+  two offsets look alike and only one of them is ever a deliverable.
+
+And one sentence the import dialog says today has to change when this ships:
+**"audio is not exported"** stops being true. Until then it is true and it stays.
 
 ## A single image
 
-**Settled, and it is the cheap case.** An imported still is an ordinary `Track`
-with one ordinary `Layer` and one `Image`, its cel holding the decoded pixels.
+**Settled, and it changed: a still is a reference layer too.** The first draft
+made it an ordinary `Track` with an ordinary `Layer` and one `Image` whose cel
+holds the decoded pixels, on the grounds that one drawing is cheap however it is
+stored. That is still true about the memory and is no longer the deciding
+question.
+
+**What decided it is coherence, on the user's call.** Once a sequence is a
+reference layer — see [how a sequence is stored](#how-a-sequence-is-stored) —
+making the still the one thing that is not means answering *placement, locking,
+export, save cost, colouring* and *what happens when you draw on it* twice, with
+two different answers, for two features a user thinks of as one. A still is a
+sequence of one frame, and there is no cheaper way to say that than to make it
+one.
+
+It costs one thing, and it is the cheap case of it: tracing over a modelsheet
+means converting it to drawings first — one command, on one drawing. See [the
+way back](#what-reference-only-gives-up-and-the-way-back).
+
+So:
 
 - `TrackEnd::HoldLast` is **required**, or the modelsheet appears on frame 0 and
   nowhere else. It already exists.
-- The layer is **locked** by default — a property, not a kind, and
-  `beginStroke` already refuses on it — and can be unlocked.
-- Layer opacity already works, which is the whole of what a reference needs.
-- Placement is the transform box, validated by the user, as with any other
-  transform. That means this feature waits on transforming a layer across time
-  ([#25](https://github.com/S-poony/Animage/issues/25)); before then, place at
-  1:1 with the top-left at the origin, since the canvas is the only rectangle in
-  the model and drawing outside it is already allowed.
+- **The layer is not locked, and does not need to be.** The first draft locked
+  it, which was right when it was an ordinary raster layer whose only protection
+  was the lock. A reference layer refuses the brush on its *kind* instead — which
+  means a kind check has to be added to
+  [`refuseToEditHere`](../src/app/animage/canvas_widget.cpp), which deliberately
+  has none today. See [the traps](#what-the-handover-already-knows-about-this),
+  because that is a design decision being reversed and it has a comment
+  explaining it.
 
-  > **Update: #25 is built, and it has one clause this has to answer.** The box
-  > is "Transform layer through time" in the layer panel, and it is green rather
-  > than blue — see "transforming a layer through time" in handover.md. But it
-  > **refuses a locked layer**, and the line above says an imported modelsheet
-  > lands locked. So placing an import is either unlock, place, relock, or an
-  > exception argued for here. It also *bakes* rather than storing a transform,
-  > which for an import is a different question than it was for drawn work: what
-  > is being placed came off disk at a known size, and resampling it into cels on
-  > placement is a decision this note should make rather than inherit.
+  **The new check goes ahead of the lock**, following the order `refuseHere`
+  already uses and for the same reason it gives: *unlocking a colour layer would
+  not make a cut work on it, so naming the lock would send somebody to fix the
+  wrong thing.* Locking an import as well would be worse than redundant — the
+  refusal reports the first reason it finds, so a locked reference layer answers
+  *"this layer is locked"* to somebody who then unlocks it and is no better off.
+  The kind is the true reason and it is the one that has to be said.
+- Layer opacity already works, which is the whole of what a reference needs.
+- **Placement is stored, not baked**, and that is the answer to the clause the
+  first draft left open. It is set out under [how a sequence is
+  stored](#how-a-sequence-is-stored), because it is the same mechanism for one
+  frame and for two hundred.
 
 **The cost, once:** a tile is 128×128 RGBA half = exactly 128 KB. A 300 dpi A4
 scan (2480×3508) is 20×28 = 560 tiles = **70 MB**. An HD still is 15×9 = 135
-tiles = **17 MB**. That is fine for a thing you import one of.
+tiles = **17 MB**. That is fine for a thing you import one of — and under the
+reference shape it is a cache entry rather than a cel, so it is fine for a thing
+you import one of *and never save the tiles of*.
 
 **A visible modelsheet is exported**, and that is accepted rather than
 overlooked — see [what the export says](#what-the-export-says). Hiding the layer
@@ -370,8 +540,10 @@ compositing cost and **not** the memory.
 
 An "import at half size" option is worth having and should be named that rather
 than "compress", because that is what it does: a quarter of the tiles, and right
-for a reference you look at rather than export.
-
+for a reference you look at rather than export. Under the reference shape it is
+not a separate feature at all — it is a placement of 50%, applied where every
+other placement is applied, and the box filter that serves it is the one
+`transformTiles` already uses for reduction.
 ## Colours, which have to survive
 
 An artist importing a palette image and eyedropping from it is a stated use, so
@@ -401,116 +573,338 @@ JPEG's chroma subsampling happened before the file reached us.
 it back, compare within the known quantisation. It fails loudly if anyone
 touches the conversion.
 
-## Sequences: three shapes (not settled)
+**All of that now happens in the derive step and not once at import**, which
+changes two things about it. It has to be **deterministic**, because a frame
+that is decoded, evicted and decoded again must come back the same or the
+picture changes while you scrub over it — that is not a quality question, it is a
+correctness one. And it has to be **cheap enough to be on the decode path**: the
+`Format_RGBA64` detour exists to stop an 8-bit conversion banding, and it costs
+four bytes a channel across a whole frame every time a frame is rebuilt. If that
+turns out to dominate a scrub, the answer is to widen the cache rather than to
+skip the conversion.
 
-**This is the other genuinely open decision, and a benchmark should settle it
-rather than an argument.**
+## How a sequence is stored
 
-Two facts frame it. A sequence is the only import where the numbers are real: an
-HD frame is 17 MB of tiles, so 100 frames is **1.7 GB** resident, and 4K is 68 MB
-a frame. And **the first save after an import is a first-class cost, not a
-footnote** — `bench_save` measured 3047 ms for 96 drawings, but those are *line
-art*: 14 thin strokes and 4 scribbles per drawing, so `encodeCel` keeps only
-narrow row spans and throws most of every tile away. An imported frame has every
-span full. The ratio is large and unmeasured, and it is the first number
-`bench_import` should report.
+**Settled: a reference layer, with no cel** — shape 3 of the three the first
+draft weighed. What settled it was not the benchmark it asked for. It was video.
 
-### Shape 1 — ordinary cels
+The first draft framed this as "cheapest to build and closes a door" against
+"more machinery and keeps it open", and said it should be decided deliberately.
+Three things decided it, in this order.
 
-What a drawn frame is. Everything works: brush, transform, CTG over the top,
-onion skin, export, undo.
+### Video removes shape 1 from the list
 
-*Costs:* 17 MB per HD frame resident, permanently, and a full encode of every
-frame on the first save.
+An HD frame is 17 MB of tiles. **Ten seconds of HD video at 24 fps is 240 frames
+= 4.15 GB resident**, permanently, and a full encode of all of it on the first
+save.
 
-### Shape 2 — derived cels, with the file as the truth
+And a second ceiling sits under that one, which nothing in the first draft of
+this note mentioned: **the undo history is bounded at 512 MB** — see [what the
+history is allowed to cost](handover.md#what-the-history-is-allowed-to-cost).
+Merely holding the frames does not spend that, but any command that displaces
+them journals what it displaced, so a single operation over such a layer is
+eight times the whole budget and drops every older command in the session to
+make room. The layer bake already hits this and says so — a forty-drawing HD
+layer retains 880 MB — and a ten-second video is six times the drawings.
 
-The source file lives in the project folder; the tiles are built from it and are
-a **bounded cache that can be dropped and rebuilt**. The save writes the source
-file, not the cels.
+Ordinary cels were defensible for a hundred-frame PNG sequence and are not a
+candidate once a video can be imported. That is new information rather than a
+change of mind: the first draft named video as the thing that would decide the
+audio library and did not notice it also decides this.
 
-This is not a new idea in this codebase — it is `CtgFillCache` exactly: derived
-data, bounded, kept in `Document` rather than on the `Cel` precisely because
-losing it costs a rebuild and nothing else. And "what happens when you draw on
-it" already has a worked answer here: the first mark on an inheriting CTG
-drawing copies what it was showing and edits the copy. Same move — the first
-stroke promotes a derived cel to a real one, and from then on it saves normally.
+### Shape 3's compositor cost was overstated, and this was checked
 
-*Buys:* the save cost collapses to copying a file. Resident memory becomes
-whatever the cache is allowed to be, rather than the whole sequence. Drawing and
-colouring stay possible.
+The first draft said shape 3 costs "one new path in the compositor, which is
+real and is the substantial one". **That is true if the cache holds decoded
+pixels, and false if it holds a `TileGrid`** — which it should, because
+[`compositeGrids`](../src/core/compositor.cpp) already takes `const TileGrid*`
+and cannot tell where one came from.
 
-*Costs:* eviction and rebuild machinery; a wrinkle where a rebuilt cel needs a
-stable `revision()`, since the CTG input hash is keyed on it; and the source
-files sit in the project folder alongside whatever cels have been promoted.
+There is exactly one place in the program that resolves a layer to pixels —
+`collectPasses` — and it already has the branch this needs, for the colour layer:
 
-### Shape 3 — a reference layer, with no cel at all
+```cpp
+if (layer->kind == LayerKind::Ctg) {
+    ...
+    else if (const CtgFill* fill = doc.ctgFillFor(track_id, image_id, *it))
+        passes.push_back({nullptr, layer, {}, fill});
+    continue;
+}
+```
 
-The compositor reads decoded pixels — or the compressed bytes, decoded on demand
-— and there is no `Cel`. Cheapest of the three in both memory and save time: a
-2 MB JPEG stays 2 MB rather than becoming 17 MB of tiles, and a save is a file
-copy.
+A reference layer is the same three lines with a `const TileGrid*` coming back
+instead of a `const CtgFill*` — and it inherits the rule the CTG branch already
+states in a comment beside it: *"If no fill has been built yet the layer simply
+does not draw — compositing is not the place to start a max-flow."* **Substitute
+"decode" for "max-flow" and that is exactly the rule this needs**, for the same
+reason and with the same consequence: the paint finishes with whatever is in the
+cache, and asks for what was missing.
 
-*What it does not cost, having been checked rather than assumed.* An earlier
-draft of this note said a new kind "splits every path that touches pixels — the
-compositor, the eyedropper, the transform's `liftThrough`, `paintedBounds`,
-`celForWriting`". That was wrong, in both directions:
+Two things fall out of it, neither of which had to be designed:
 
-- **The eyedropper is free.** `CanvasWidget::pickColourAt` composites a 1×1
-  rectangle through `compositeScene` and reads the pixel back, across every
-  track. It samples the *picture*, so it works on anything the compositor can
-  draw, with no new code at all.
-- **`refuseHere` already branches on the layer kind** — `if (layer->kind ==
-  LayerKind::Ctg) return Refusal::ColourLayer;` — and it is the single list that
-  copy, cut, paste, transform and the brush all consult. A reference kind is one
-  more line in a function that exists for precisely this.
-- **And the paths behind that gate are never reached.** `liftForTransform`,
-  `paintedBounds` and `celForWriting` sit downstream of the refusal, so they need
-  nothing.
+- **The per-layer export is free.** `compositeLayers` resolves through
+  `collectPasses` too, so "what does a per-layer export write for a layer with no
+  cels" — an open question in the first draft — answers itself: what the
+  compositor draws, at canvas size, through the path that already exists.
+- **A reference grid keeps the absent-tile shortcut.** It is a real `TileGrid`,
+  so a mostly-empty reference costs its own area and not the viewport's. That is
+  the thing a fill had to have specially given back to it; see [what a fill with
+  no absent tile stops getting for
+  free](handover.md#what-a-fill-with-no-absent-tile-stops-getting-for-free).
 
-*What it actually costs:* **one new path in the compositor**, which is real and
-is the substantial one. A decision about what a per-layer export writes for a
-layer with no cels — the source frames, nothing, or a render. And a decode per
-frame per paint if the bytes are kept compressed, which is affordable for JPEG
-and not for PNG.
+### Shape 2's promotion is better as a command than as a state machine
 
-*And what it forecloses* is the subject of the next section, which is the honest
-cost and is not an implementation one.
+Shape 2 — derived cels with the file as the truth — bought the ability to draw
+on an import, and paid for it with eviction, rebuild, a stable `revision()` for a
+cel that can be rebuilt, and a promotion state machine keyed on the first stroke.
 
-### Where this stands
+**Every one of those exists to make the first stroke silently turn a derived cel
+into a real one.** Make it an explicit command instead and they all go away,
+while what they were buying stays. See [the way
+back](#what-reference-only-gives-up-and-the-way-back), which is the user's call
+and is the whole of shape 2's argument, bought for a dialog.
 
-**On build cost alone, shape 3 is plausibly the cheapest of the three, and this
-note should not pretend otherwise.** Shape 2 needs eviction, rebuild, a stable
-`revision()` for a cel that can be rebuilt, and a promotion state machine. Shape
-3 needs none of those: there is no cache to bound, nothing to invalidate, and no
-second state a cel can be in. Set against that, its compositor path is one
-function.
+### What the shape is
 
-The argument for shape 2 is **optionality, not economy** — it keeps drawing,
-colouring and per-frame transforms possible on an imported sequence. The
-argument against it is that optionality is being paid for in machinery, and the
-user has now said twice that a sequence is reference and does not need any of
-it. In real work you position a reference once, with a layer-level transform
-([#25](https://github.com/S-poony/Animage/issues/25), already on the queue), and
-never touch its pixels again — which is a use case shape 3 serves completely.
+**A reference layer has no cels. Its pixels are derived from a file, and what is
+derived is a `TileGrid` in a bounded cache on `Document`.**
 
-So this is a real choice between "cheapest to build and closes a door" and
-"more machinery and keeps it open", and it should be made deliberately rather
-than defaulted into. What `bench_import` contributes is the size of the door:
-full encode time per imported frame against a drawn one, resident tile bytes,
-and paint cost at a realistic cache size. If shape 1's numbers turn out
-tolerable, the door is cheap and shape 2 is not needed either.
+The precedent is exact and it is not an analogy: `CtgFillCache` is derived data,
+bounded, kept in `Document` rather than on the `Cel`, *precisely because losing
+it costs a rebuild and nothing else* — which is the sentence
+[ctg_fill.h](../src/core/ctg_fill.h) already uses about itself. Read that class
+before writing this one. It is close to a template:
 
-**One decision is cheap and should be made now, whichever shape wins: keep the
-source files in the project folder from day one, even while they are redundant.**
-That is what preserves the option. Without it, moving from shape 1 to either of
-the others is a migration; with it, it is a change to one class — and shapes 2
-and 3 both need those files anyway, since under both of them the file is what
-the picture is made from. The price is disk — a 100-frame
-PNG sequence sitting beside the cels it produced — which for a single image is
-nothing and for sequences is another number for the benchmark.
+| `CtgFillCache` does | and a reference cache wants |
+|---|---|
+| bounded in **bytes**, not entries | the same — frames differ in size by 4× between HD and 4K |
+| LRU touched by *lookup*, not by store | the same, and for the same reason: scrubbing back and forth must not evict what is being scrubbed over |
+| a `generation()` counter for answers in flight | the same — see [the traps](#what-the-handover-already-knows-about-this) |
+| eviction costs a recompute and nothing else | eviction costs a decode and nothing else |
 
-## What reference-only gives up
+And the request path is the one the colour layer already uses:
+`CanvasWidget::paintEvent` asks for what is missing and computes none of it; a
+worker decodes; a poll installs the answer and refreshes. `requestCtgFills` is
+the model, and the reason it is the right one here is that **video decode cannot
+happen on the interface thread** and neither can a 70 MB scan.
+
+**One new invariant, and it has to be written down because it does not look like
+one:** the reference cache may only be evicted where the document may be edited.
+`LayerPass` holds raw pointers into it and `compositeGrids` reads them from
+several threads. That is the same rule the document already has — it just does
+not read as "editing the document" to whoever writes the eviction.
+
+### Placement is stored, and that is what answers #25
+
+This is the clause the first draft flagged and could not answer: *what is being
+placed came off disk at a known size, and resampling it into cels on placement is
+a decision this note should make rather than inherit.*
+
+[`Document::transformLayer`](../src/core/document.cpp) bakes, and
+[#25](https://github.com/S-poony/Animage/issues/25) argued for the opposite and
+lost for one reason: a stored affine would force *everything that reads a
+layer's pixels* through a matrix — the brush, the eyedropper, `ctgBarrier`,
+`celBounds`, fit-to-drawing, export. See [transforming a layer through
+time](handover.md#transforming-a-layer-through-time).
+
+**That argument is entirely about layers whose pixels are the truth.** A
+reference layer's pixels are derived, so its placement can be applied *in the
+derive step* — decode, colour-convert, linearise, tile, `transformTiles`, cache —
+and what reaches `collectPasses` is a plain, already-placed, untransformed grid.
+`compositeScene` stays a flat list of untransformed grids. `LayerPass` is not
+widened. **The thing #25 refused is still refused.**
+
+Three consequences, all good:
+
+- **Loss never compounds.** Nudging a reference twice re-derives twice from the
+  original file. A baked import would resample a resample, and for something you
+  position while animating and then adjust again, that is the difference that
+  matters.
+- **Scaling down costs less, not more.** A 4K source placed at 25% caches a
+  quarter-size grid, because the derive is what applies the scale. ("Import at
+  half size" is therefore not a feature — it is a placement.)
+- **The locked-layer clause dissolves.** The first draft asked whether placing an
+  import means unlock-place-relock, or an exception. Neither: the rule stays
+  *lock refuses what writes pixels*, a reference layer's placement writes none,
+  and imports do not land locked anyway.
+
+**One green box, two Applies** — bake on an ordinary layer, store on a reference
+one — with the *layer kind* deciding and the bar saying which. That is the "two
+doors and no switch" argument holding rather than being bent: what is refused
+there is a control that lets you change what a live gesture is about, and this is
+not one.
+
+### One field the model needs, and it is not a retiming feature
+
+`Image` needs a second sparse map beside
+[`cels`](../src/core/image.h): `LayerId → source frame index`. Absent means empty
+here, exactly as it does for `cels`, and it survives reordering and deletion for
+the same reason `cels` does.
+
+**Retiming an import is not a priority — but this field is not what makes
+retiming possible, it is what makes the mapping survive an ordinary edit.**
+Without it, "which frame of the source does this drawing show" has to be derived
+from position, and position moves: add a hold and two drawings share a slot
+index; delete a frame and everything after it shifts. The very first hold breaks
+it, and retrofitting the field afterwards is a migration of every project that
+has an import in it.
+
+**Do not key it on `Image::number`.** [track.h](../src/core/track.h) is explicit
+that nothing is keyed on that number and that it is reused after a deletion — so
+keying a picture on it would silently re-point another drawing's frame. That is
+the same warning the drawing-number counter earned, pointing the other way.
+
+With the field present, retiming an import is not a feature to build so much as
+one that is not prevented, and the two traps to know are recorded in [what the
+handover already knows about
+this](#what-the-handover-already-knows-about-this).
+
+### What is still worth benchmarking, and what is not
+
+`bench_import` was proposed to size a door that is now closed, and most of what
+it was for has gone with it. What is left is worth measuring and is different:
+
+- **Decode time per frame, per format**, because it is what decides whether the
+  cache can keep up with scrubbing. JPEG and PNG are not close.
+- **What a cache bound should be**, in bytes, against a realistic scrub.
+- **Time to convert a layer to drawings**, because that one *does* write cels and
+  is bounded by the history budget.
+
+Encode time per imported frame against a drawn one — the first number the draft
+asked for — is no longer interesting, because a reference layer's frames are
+never encoded into cels at all.
+
+## Video is a sequence with a decoder in front
+
+**Settled: a video is extracted to frames once, at import.** Not decoded to
+frames in memory, and not played live as a layer.
+
+### Why not live
+
+A `QMediaPlayer` inside the compositor is a second timebase, which is precisely
+the trap [the playback clock](#the-playback-clock) spends four ways describing.
+And `QMediaPlayer::setPosition` is not a frame-exact random-access decoder: it
+seeks approximately and asynchronously, so getting frame N means getting
+something near frame N. For a program whose stated purpose is deciding *which
+frame* a thing is on, an off-by-one-or-two reference is worse than no reference,
+because it is wrong quietly.
+
+### What extraction buys
+
+- **Video and sequence become one storage shape**, one cache, one export answer,
+  one everything downstream. The decoder is a front end and touches nothing else.
+- **Frame accuracy is exact and permanent.** There is no seek behaviour left to
+  fight, ever.
+- **The project opens on a machine without the codec**, which a self-contained
+  project folder ought to mean and would not otherwise.
+- **Qt Multimedia never reaches the paint path or the playback path.** It runs
+  once, in a worker, at import. The seam [which library](#which-library) asks for
+  is preserved for free rather than by discipline.
+
+### What it costs, and the mitigation
+
+Disk, and a wait at import. Three decisions follow:
+
+- **Extract as JPEG.** The source was already lossy, so nothing that matters is
+  lost — and it is the difference between roughly 600 MB and roughly 70 MB for
+  ten seconds of HD. An imported PNG sequence is kept exactly as it arrived; only
+  video-derived frames are written as JPEG, because only they came from a lossy
+  source already.
+- **Keep the video file too.** It is usually smaller than its own extracted
+  frames, and it is what makes re-extraction at a different rate possible. See
+  [when the frame rate changes](#when-the-frame-rate-changes), which needs it.
+- **The dialog asks for in and out points**, defaulting to the whole file. This
+  is the mitigation for the case that hurts — a two-minute animatic is 2880
+  frames — and it is what people want anyway: you import the part of the animatic
+  that is your shot, not the whole board.
+
+### Which file is the truth, for a video
+
+Worth setting out on its own, because everywhere else in this note the answer is
+obvious and here it is not — and the whole of the section below only makes sense
+once it is clear.
+
+**For an image sequence the imported files are the truth**, from the first day to
+the last. The tiles are derived from them, dropping a tile costs a decode, and
+re-deriving is exact however many times it happens. There is nothing here to
+worry about.
+
+**For a video the extracted frames are the truth, and the video file is not.**
+That is the asymmetry. A video cannot be read at a frame you name — seeking is
+approximate, which is [why it is not played
+live](#why-not-live) — so extraction is not a cache being filled from a source
+that stays authoritative. **It is a one-way conversion**, from something the
+program cannot address into something it can, and afterwards the picture is made
+from the result and never from the `.mp4` again.
+
+So a frame missed during extraction is missing from the picture, and nothing
+re-derives it, because re-deriving would mean running the extraction again and
+nothing does that on its own. The video is kept beside the frames — so the frame
+is not gone from the disk, and running the extraction again is at least
+*possible* — but that is a fact about the folder and not a mechanism.
+
+**Converting to drawings is downstream of all of this and is not where the risk
+is:** it copies whatever the picture already is, holes included.
+
+### Slots are addressed by time, not by file number
+
+**Frames are placed where their presentation timestamp says, and never by their
+position in the extracted list.** This is not a defensive measure; it is what
+conforming a rate *is*. A 25 fps source in a 24 fps scene means slot *i* is the
+source frame nearest time *i*/24, and there is no way to express that by counting
+files. See [when the frame rate changes](#when-the-frame-rate-changes), which is
+the same mechanism read from the other end.
+
+One property falls out of it and is worth knowing, though it is not a reason to
+do it: a frame that is missing for any reason leaves a *gap* rather than shifting
+everything after it, and a gap is filled by holding the frame before — which is a
+hold, and the timeline is made of those.
+
+### Getting a complete extraction
+
+**Why this is a question at all: Qt Multimedia gives us a player, not a video
+decoder.** `QAudioDecoder` decodes a file to buffers on demand; there is no
+public equivalent for video, so the only route to frames is `QMediaPlayer`
+feeding a `QVideoSink`. A player is **entitled** to drop frames — its job is the
+right picture at the right wall-clock moment, and skipping when it cannot keep up
+is correct behaviour for that job. The risk is not that decoding is unreliable;
+it is that this is a playback tool held by the wrong end.
+
+**Entitled to is not the same as likely to, and the two should not be confused
+here.** Decoding HD at 1× is a small fraction of one core against a 41 ms frame
+period. The expectation is that nothing drops at all.
+
+So two things, both of which are cheap and neither of which is a recovery
+mechanism:
+
+- **Extract at 1×, and never let the sink be the bottleneck.** A player driven
+  fast has to choose what to skip; at normal rate it has a whole frame period per
+  frame and no reason to skip anything. The frame handler must not encode a JPEG
+  while the decoder waits on it — copy the frame, put it on a bounded queue,
+  return, and let a worker write the files. Bounded, because a queue of
+  decoder-owned frames is a way to exhaust the decoder's own buffers. The cost is
+  that extracting *n* seconds takes *n* seconds, which [in and out
+  points](#video) keep to the length of the shot.
+- **Count what arrived.** A video declares its duration and rate, so the number
+  to expect is known before extraction starts. Comparing costs nothing and it is
+  what makes a shortfall a fact rather than a suspicion.
+
+**And nothing else, until there is something to design for.** What an import
+should do about a short extraction — refuse, import with the gaps, retry — is not
+decided here, deliberately: the right answer depends on whether shortfalls happen
+at all, how many frames, and whether they are transient or systematic, and none of
+those is known. Choosing a recovery before knowing the failure is how machinery
+gets built for a case that never arrives. **The measurement decides it**, and
+until then the count is an assertion that fails loudly.
+
+If it turns out to drop regularly, the answer is not a retry button — it is that
+`QMediaPlayer` is the wrong tool, and the route is FFmpeg directly. That is
+genuinely awkward: Qt Multimedia already *bundles* FFmpeg for its own backend and
+does not expose it, so this would be a second copy of a library already in the
+build. Worth knowing as the shape of the bad outcome, and worth nothing at all
+until it is measured.
+
+## What reference-only gives up, and the way back
 
 Stated plainly so that it is a decision and not a discovery.
 
@@ -521,37 +915,112 @@ must be a cel-bearing layer in the same track as the colour layer.
 
 Two consequences:
 
-- A **reference layer with no cel cannot be a CTG barrier at all** (shape 3).
+- A **reference layer has no cel and cannot be a CTG barrier at all.**
 - Even with cels, an import that always lands in a **new track** cannot be a
   barrier for a colour layer in a different one.
 
 Which together mean: **importing scanned line art and colouring it with
-LazyBrush does not work.** For an application whose headline is a colour solver,
-that is a real thing to give up, and it is worth being sure.
+LazyBrush does not work, until it is converted.** For an application whose
+headline is a colour solver, that is a real thing to give up, and it is why the
+way back is not optional.
 
-**The way back, if it is wanted, is a command rather than a mode.** "Convert to
-drawings" bakes a reference track into ordinary cels — paying the memory and the
-save cost, on demand, at the moment somebody actually wants to colour it. That
-keeps the default cheap, keeps the door open, and asks nobody to decide at import
-time. Under shape 2 it is nearly free to implement: it is the promotion that
-already has to exist.
+### Convert to drawings
 
-**Not settled:** whether an import should also be able to land *as a layer in an
-existing track* rather than only as a new track. That is the other half of the
-answer, and it is a small addition to the import dialog rather than a change to
-the model.
+**Settled: it converts the whole layer, and it is offered by a popup that
+appears when you try to draw on a reference layer.** Both halves are the user's
+call and both are worth the reasons being recorded.
+
+*Whole layer, not per drawing.* Per drawing is cheaper on the history and is what
+shape 2's promotion would have done — and it is the wrong thing to show somebody.
+A reference layer that is drawings on some frames and reference on others is a
+state nobody asked for and nobody can see, and the first question it produces is
+"why can I draw here and not there". Converting the layer is one answer to one
+question.
+
+*Offered on the attempt to draw, not only from a menu.* The refusal is where the
+question actually gets asked. But it should be **both**: a command in the layer
+panel beside "Transform layer through time", greyed out with a tooltip when it
+does not apply, because that is the pattern the handover argues for — *"a control
+that comes and goes as you move between layers is one nobody can find twice, and
+'why can I not do this here' is the question a disabled control exists to
+answer."* The popup is discoverability; the button is findability; they are not
+alternatives.
+
+**What the popup says, and the one thing to get right about it.** The user's
+instinct was that it should say whether the conversion is lossless, depending on
+whether the reference was scaled or rotated. That is the right thing to key on
+and the wrong tense to say it in.
+
+The conversion writes the cached grid into cels, and the cached grid *is* what is
+on screen. **So the conversion never loses anything** — any resampling already
+happened in the derive step. What is actually lost is the *future*: once
+converted, the pixels are the truth, so re-placing the layer bakes on top of what
+is already baked, and from then on loss compounds. So:
+
+- at 1:1, with no rotation: *"Every pixel is kept exactly."*
+- scaled or rotated: *"The drawings will hold what you see now. Placing it again
+  afterwards will resample what is already resampled — place it first if you have
+  not."*
+
+**And it must not claim more than that.** A JPEG or a video frame was lossy
+before it reached the program, and "every pixel is kept exactly" is a statement
+about *this step* and not about the artwork. The popup says what converting does;
+it is not entitled to say the drawing matches what somebody scanned.
+
+The popup also has to say the cost, because it is large and it is not
+recoverable: the frame count, the memory, and that **it will clear the rest of
+the undo history**. A 240-frame HD layer is 4 GB in one command against a 512 MB
+budget. The conversion itself always undoes — the newest command is never
+dropped — but everything older goes. That is inherent to writing cels rather than
+a fault, and it is the same sentence [transforming a layer through
+time](handover.md#what-it-costs-and-the-bound-that-had-to-change) already had to
+write about itself.
+
+**Sometimes it refuses, and that is not a gap to be closed later.** Whole-layer
+conversion serves the case it is for — scanned line art, tens of drawings, which
+is what colouring an import means — and cannot serve a two-hundred-frame video,
+because nothing can: those pixels do not fit in memory and colouring them was
+never the point. The refusal says the number and says the layer is too long,
+rather than starting and failing partway. Reimporting a shorter range is the
+answer, and the [in and out points](#video) are what make it a small one.
+
+**And it is the same code.** `Document::transformLayer` is: walk every drawing of
+a layer, write a new `TileGrid` into each, inside one `ScopedCommand`, with the
+`bad_alloc` rescue, the deferred trim and the redo stack held aside. Convert-to-
+drawings is that loop with `decodedFrame(source, n)` where `transformTiles(old,
+t)` is. **All four of those details are bugs if they are omitted, and all four
+were found the expensive way once already** — see [running out of memory, and why
+that is a rescue rather than a
+crash](handover.md#running-out-of-memory-and-why-that-is-a-rescue-rather-than-a-crash).
+Extract the loop when the second caller arrives; do not write it twice.
+
+It needs the bound asked before the work as well, in the shape of
+`commitFitsInBudget`, so that a conversion which cannot fit refuses with a reason
+instead of failing in the middle.
+
+### Landing in an existing track
+
+**Settled: the import dialog asks, and it is in the first cut.** The first draft
+left this open as "a small addition to the import dialog rather than a change to
+the model", and what makes it first-cut rather than later is the section above:
+converting an import in its own track leaves the drawings in that track, and
+`ctg_sources` resolve inside the track — so a character's colour layer still
+cannot cut against them. The alternative to the combo box is an operation that
+moves a layer between tracks, which nobody has scoped and which is not smaller.
 
 ## The menu, and what each dialog asks
 
-Three items under **File ▸ Import**, arriving in this order:
+Four items under **File ▸ Import**, arriving in this order:
 
 - **Audio…**
 - **Image…**
 - **Image sequence…**
+- **Video…**
 
 A still and a sequence are separate items because they arrive at different times
 and do different things, not because the file picker cannot tell them apart.
-Nothing for projects, PSDs or (yet) video.
+Video is separate again because it asks two questions neither of the others does.
+Nothing for projects or PSDs.
 
 **Drag and drop onto the timeline is how people will actually do this.** Not in
 the first cut, but each import should be a function the drop handler can call.
@@ -562,21 +1031,83 @@ the first cut, but each import should be a function the drop handler can call.
   `frame9.png` and nobody has ever wanted it to. Files with no number, or two
   numbering schemes in one selection, are *said* rather than guessed at — the
   house rule is to let the input in and explain it, not to silently pick.
-- **Where:** a new track.
+- **Where:** a new track, or a layer in an existing one. See [landing in an
+  existing track](#landing-in-an-existing-track) for why this is in the first cut
+  and not deferred.
 - **Exposure:** on 1s. An image sequence has no frame rate of its own; inventing
-  one is inventing information.
-- **Size:** the transform box, validated by the user.
-- **Import at half size:** offered, off by default.
+  one is inventing information. This is the sentence video does *not* inherit —
+  see below.
+- **Size:** the transform box, validated by the user, and stored rather than
+  baked.
+- **Import at half size:** offered, off by default. It is a placement of 50% and
+  not a separate mechanism.
 - **The recap:** frame count and what it will cost, before it happens.
 
 ### Image
 
 The same, minus order and exposure. One drawing, `TrackEnd::HoldLast`.
 
+### Video
+
+Everything the sequence dialog asks, plus two questions that are the whole
+reason it is its own item:
+
+- **In and out points**, defaulting to the whole file. A two-minute animatic is
+  2880 frames on disk; the shot is thirty of them.
+- **Frame rate.** The video has one and the scene has one. Conform to the
+  scene's, by default and loudly — see [when the frame rate
+  changes](#when-the-frame-rate-changes). This is not the sequence's "inventing
+  one is inventing information": a video's rate is information, and using it is
+  the opposite of inventing.
+
+And the recap says what extraction will cost in **disk** as well as memory,
+because that is the number this import has and the others do not.
+
 ### Audio
 
 The file, and a placement offset in frames. And one sentence the dialog has to
 say, because it is otherwise found out much later: **audio is not exported.**
+That sentence stops being true the day [video
+export](#video-export-and-what-qt-gives-free) ships, and until then it stays.
+
+## When the frame rate changes
+
+**Both directions warn, and this is a decision rather than a nicety.** A
+conformed video is the one import whose picture is right and whose *timing* can
+silently become wrong, and timing is what the import was for.
+
+**On import, when the video's rate is not the scene's.** Say both numbers, say
+which one is being conformed to, and say what that does — at 25 into 24, one
+frame in twenty-five is dropped; at 24 into 25, one is repeated. Conforming is
+right, because getting *time* right is what a lipsync or animatic reference is
+for, and a 4% drift over a ten-second shot is two and a half frames by the end.
+But it is not free and it should not be silent.
+
+**On changing the scene's rate, when a conformed video is already in it.** This
+is the direction that is easy to miss and worse when it happens: the import was
+correct when it was made, nothing about it has changed, and it is now wrong. The
+warning fires from `SceneSettingsDialog`, names the imports affected, and offers
+to re-conform them.
+
+**Re-conforming is cheap, and that is why it can be offered rather than only
+warned about.** The extracted frames are already on disk and the source video is
+kept beside them; re-conforming rewrites the slot-to-source-frame mapping and
+touches no pixels at all. It is the [one field the model
+needs](#one-field-the-model-needs-and-it-is-not-a-retiming-feature) doing the job
+it exists for.
+
+**Which means the source rate has to be stored.** One number per imported video,
+recorded at import: the rate the frames were extracted at. Without it the second
+warning cannot be asked — "did this used to match?" has no answer — and
+re-conforming has nothing to conform from.
+
+This is the one import-provenance field this note argues *for*, and it is worth
+saying why, because [where an import lands](#where-an-import-lands) argues
+against the whole category. The objection there is to a field that records where
+something came from and then decides nothing: *"a stored counter that no longer
+decides anything is exactly the thing somebody re-wires by accident later"*. This
+one decides two things every time it is read — whether the warning fires, and
+what re-conforming conforms from. It is not provenance; it is an input.
 
 ## Where an import lands
 
@@ -600,6 +1131,16 @@ not export imported tracks, lock imported tracks, relink, re-import.
 So no track records where it came from, and the stack after several imports is
 whatever the import order made it.
 
+**Two fields elsewhere in this note look like exceptions and are not**, and it is
+worth saying which so that the rule stays usable rather than being quietly
+abandoned. A reference layer stores its source and its placement, and a conformed
+video stores the rate it was extracted at. Neither records *provenance* — each is
+read every time the picture is built, and the program stops working without it.
+What the rule above refuses is a field that says where something came from and
+then decides nothing, because that is the one that attracts *do not export
+imported tracks, lock imported tracks, relink, re-import*. **The test is whether
+removing the field breaks something today**, and for these two it does.
+
 **One residual case, and dragging is the answer.** A drawing track created
 *after* an import also lands at the bottom, so it ends up below that import.
 Enforcing otherwise would need the same field. Restacking by dragging already
@@ -619,6 +1160,19 @@ announces it*. The recap is where that announcement belongs. Once imported
 sequences exist it also answers "why is my export 4 GB" before the export rather
 than after.
 
+**And an export has to decode every frame of a reference layer, not the ones
+that have been looked at.** The cache holds what somebody scrubbed over; an
+export writes the whole shot, so a 240-frame reference is 240 decodes even if
+three of them were ever on screen. That is not a new problem, it is an old one
+with a second instance: [export_sequence.h](../src/app/animage/export_sequence.h)
+already explains that the export must run the colour solves for frames nobody
+visited, *because* a compositor is not allowed to start one — and says an export
+that composited only what was cached would write blanks without saying anything.
+A reference layer is the same sentence with "decode" in place of "solve", and it
+wants the same two things: the export drives the work itself, and the progress
+bar counts it. A decode is milliseconds where a solve is a second and a half, but
+240 of them is still a stretch of a bar that would otherwise sit still.
+
 ## The project folder and the file format
 
 A project stays **a self-contained folder**. Nothing here introduces a reference
@@ -629,12 +1183,26 @@ first thing in this format that does.
 the-shot.animage/
   scene.json
   cels/cel-000007.acel
-  audio/dialogue.wav        the imported file, copied in
-  imports/bg_0001.png       the imported sources, kept
+  audio/dialogue.wav          the imported file, copied in
+  imports/bg_0001.png         an imported sequence, as it arrived
+  imports/animatic.mp4        an imported video, kept
+  imports/animatic_0001.jpg   ...and the frames extracted from it
 ```
 
-**Decoded PCM is derived and is not stored** — decode at load; a ten-second file
-is tens of milliseconds. Waveform peaks are derived too.
+**`imports/` is not redundant any more, and that is the change.** The first
+draft kept the source files while they were redundant, as the cheap decision that
+preserved the option. Under the reference shape they are not an option, they are
+where the picture comes from: a reference layer has no cels, so if the file is
+gone there is nothing to draw. Which raises the stakes on one line of [not in
+scope](#not-in-scope) — relinking a moved source file stays out, and it stays out
+because the folder is self-contained and nothing can move.
+
+**What is derived and is not stored**, all of it rebuilt on demand:
+
+- decoded PCM — decode at load; a ten-second file is tens of milliseconds
+- waveform peaks
+- **every reference frame's tiles.** This is the large one: a 240-frame import
+  adds nothing whatever to what a save writes, because there are no cels.
 
 **`kSceneFormatVersion` goes to 2.** Not because an older build would misread an
 `audio_tracks` key, but because it would *ignore* it and then autosave over the
@@ -642,29 +1210,174 @@ project two minutes later without it. Silent data loss, and the version gate is
 what stops it. That is exactly the standard [project_io.h](../src/app/animage/project_io.h)
 sets: bump when old builds would get it wrong.
 
-The incremental save works in favour of imports either way: an imported cel's
-revision never changes, so after the first write it is carried forward as a hard
-link and costs nothing.
+The same gate covers everything else here, and it is worth listing what an older
+build would get wrong so that nobody is tempted to let one of them through:
+a `LayerKind` it does not know reads as raster, so an import would come back as
+an **empty layer that silently saves over the reference**; the per-image source
+frame map would be dropped; and a conformed video's source rate would be lost, so
+[the frame-rate warning](#when-the-frame-rate-changes) could never fire again.
+Three ways to lose work quietly, behind one number.
+
+The incremental save is unaffected and cheaply so. A converted import's cels have
+revisions like any others, so after the first write they are carried forward as
+hard links and cost nothing; an unconverted one has no cels to carry.
+
+## What the handover already knows about this
+
+Everything below is already written down in
+[handover.md](handover.md) and none of it was reachable from this note. They are
+here because each one is a thing this feature walks into, and the handover's own
+rule for its trap list is that you scan it *before* touching something rather
+than after.
+
+| what it is | why it is this note's problem |
+|---|---|
+| [What a missing pen release takes down with it](handover.md#what-a-missing-pen-release-takes-down-with-it) | the convert popup is raised by a pen that is still down |
+| [What the history is allowed to cost](handover.md#what-the-history-is-allowed-to-cost) | 512 MB, and converting a layer is past it on its own |
+| [Running out of memory, and why that is a rescue rather than a crash](handover.md#running-out-of-memory-and-why-that-is-a-rescue-rather-than-a-crash) | the four details convert-to-drawings inherits, each a bug if dropped |
+| [What asking for a private Qt component at the top level switches off](handover.md#what-asking-for-a-private-qt-component-at-the-top-level-switches-off) | `Multimedia` in the root `find_package` turns the application off |
+| [What emptying the fill cache does not reach while a solve is in flight](handover.md#what-emptying-the-fill-cache-does-not-reach-while-a-solve-is-in-flight) | a decode in flight when the placement changes |
+| [What went stale when the solve stopped finishing in the same call stack](handover.md#what-went-stale-when-the-solve-stopped-finishing-in-the-same-call-stack) | anything that was correct because the decode used to be synchronous |
+| [Why a cache key of cel revisions serves wrong fills, not slow ones](handover.md#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones) | a wrong cache key here serves the wrong frame, not a slow one |
+| [Every route that changes the input to a differencing function](handover.md#every-route-that-changes-the-input-to-a-differencing-function) | an import adds a track, and audio adds a row |
+| [What a comment goes on claiming after you replace the design under it](handover.md#what-a-comment-goes-on-claiming-after-you-replace-the-design-under-it) | `refuseToEditHere` says in a comment that it does not check the kind |
+| [Looking at the interface](handover.md#looking-at-the-interface) | four dialogs, a popup and a new row, none of which a green build can see |
+| [The same source, two different pictures](handover.md#the-same-source-two-different-pictures) | the backend a download has is not the backend on your desk |
+
+Five of them need more than a row, and one thing that is not a trap at all is at
+the end because it means a piece of this does not have to be built.
+
+**The convert popup must not be raised from `tabletEvent`.** *"Opening any dialog
+with the pen down was enough"* is how the handover puts it, and the popup this
+note asks for is opened by exactly that: a pen coming down on a reference layer.
+The classic failure is smaller here than it looks — a refused stroke opens no
+command, so there is no depth counter to strand — but the release is still
+swallowed by the dialog, and a dialog appearing under a pen that is still on the
+tablet is bad to use quite apart from being risky. Record the refusal on the
+press and raise the popup on the release. The general shape is `abandonGesture`'s:
+a press-to-release gesture needs a third way out.
+
+**The decode cache needs a generation counter from the first version, not from
+the first bug.** What a decoded frame depends on is not all in its key: the
+placement is on the layer, the source list is on the import, and neither moves
+anything the key can see. The way both say "that is all wrong now" is by emptying
+the cache — which reaches the shelf and not the answers in the air, and a decode
+started before a placement changed will land after it, match, and be installed as
+current. The fill cache learned this the expensive way when its solve stopped
+finishing in the call that started it. Copy `CtgFillCache::generation()`; do not
+rediscover it.
+
+**And a wrong key here is worse than a slow one.** The lesson from the fill cache
+is that a key which is a bijection today stops being one quietly: *"every cel in
+a project straight off disk is at revision 1"*. A reference frame's key has to
+name the source, the frame index **and** the placement it was derived under —
+because two frames derived at different scales are different pictures that would
+otherwise share a key, and what you get is not a slow scrub but the wrong frame
+on screen.
+
+**An import has to call `syncTimelineHeight`.** It does not size the timeline
+dock, it moves it by the rows that came or went, so every route that changes the
+track count has to say so — and [#74](https://github.com/S-poony/Animage/issues/74)
+is what happens when one does not: a load that added two tracks left the strip at
+the height for one, and the symptom was that *Ctrl+Z put it back*, because undo
+was the next thing that called it. An import adds a track. An audio import adds a
+row that is not a track at all, which is a case that function has never seen.
+
+**One comment goes stale the moment a reference layer exists**, and it is a
+comment that explains a deliberate decision rather than a detail.
+`refuseToEditHere` — the brush's list — says: *"The layer kind is not here: the
+brush puts scribbles on a colour layer, the eraser rubs them out again... Nothing
+on this list moves a mark from one place to another, so nothing on it has to care
+which kind of mark it is."* A reference layer is the first kind the brush itself
+must refuse, so that list gains its first kind check and that paragraph stops
+being true. Rewrite it in the same commit. The handover's own entry on this is
+about a comment that survived the design under it being replaced, and it is worth
+reading before writing the replacement.
+
+**One thing comes free and is worth knowing so nobody builds it twice.**
+`refuseToEditHere` is what `Pointing` consults, so the moment a reference layer
+refuses the brush, **the cursor already says so** — before the pen is anywhere
+near the tablet, with no new code. That is [what the pointer
+says](handover.md#what-the-pointer-says) paying for itself, and it means the
+popup is the second thing that tells you rather than the first.
 
 ## Not in scope
 
-Video (see above — it is a question, not a plan), audio export or muxing, more
-than one audio track, volume automation, waveform rendering in the first cut (a
-labelled bar is enough to place a sound), track reading and phoneme breakdown,
+More than one audio track, volume automation, waveform rendering in the first cut
+(a labelled bar is enough to place a sound), track reading and phoneme breakdown,
 and relinking a moved source file.
+
+Two things have moved off this list and one has moved onto it.
+
+**Video import is in.** It was "a question, not a plan" and it is now a plan; it
+is what settled [which library](#which-library) and, through that,
+[how a sequence is stored](#how-a-sequence-is-stored).
+
+**Video export and muxing are in, and are last.** Not in the first cut and not in
+the third, but no longer out — see [video export](#video-export-and-what-qt-gives-free),
+which exists so that the work is cheap when it is reached and so that nothing
+built before then makes it expensive.
+
+**A manual audio sync calibration is out**, on the user's call, and out is
+reversible here in a way most of this list is not: it is a preference rather than
+a field in `scene.json`, so adding it later touches no project. See [the playback
+clock](#the-playback-clock).
 
 ## The open questions
 
-1. **Which audio library**, decided mainly by whether video import is on the
-   road — and, if it is, by whether "import a video" means *decode to frames
-   once* or *play it live as a layer*. Those are different features sharing a
-   menu item.
-2. **Which shape a sequence is stored in** — ordinary cels, derived cels with the
-   file as the truth, or a reference layer with none. Shape 3 is probably the
-   cheapest to build and closes a door; shape 2 keeps it open and pays in
-   machinery. `bench_import` sizes the door; keeping the source files from day
-   one preserves the option under any of the three.
-3. **Whether giving up colouring imported line art is intended**, given that CTG
-   barriers are per-track and a reference layer has no cel to be one. If not, the
-   answers are "convert to drawings" as an explicit command, or letting an import
-   land as a layer in an existing track.
+**All three of the first draft's are answered**, and they are kept here with
+their answers rather than deleted, because what decided each one is the part
+worth having.
+
+1. ~~**Which audio library**~~ — **Qt Multimedia.** Video import is wanted, which
+   is exactly the branch the question named as decisive. The sub-question — does
+   "import a video" mean decode-to-frames-once or play-it-live — is answered
+   *neither*, and closer to the first: [extract to frames once, at
+   import](#video-is-a-sequence-with-a-decoder-in-front), so the decoder never
+   reaches the paint path.
+2. ~~**Which shape a sequence is stored in**~~ — **a reference layer, with no
+   cel.** Not settled by `bench_import`, which was sizing a door that video had
+   already closed: ten seconds of HD is 4.15 GB of tiles against a 512 MB history
+   budget. Two things the first draft had wrong in the cheap direction: the
+   compositor needs nothing at all if the cache holds a `TileGrid`, and shape 2's
+   promotion is better as a command than a state machine.
+3. ~~**Whether giving up colouring imported line art is intended**~~ — **no, and
+   both of the answers it proposed are taken.** [Convert to
+   drawings](#convert-to-drawings) is an explicit command over the whole layer,
+   offered by a popup when you try to draw; and an import can land as a layer in
+   an existing track, which is in the first cut *because* of this — a converted
+   import in its own track still cannot be a barrier for a colour layer in
+   another one.
+
+**What is left is two things to measure, and this note does not guess at either.**
+A guess written down here would be read later as a decision somebody took, and it
+would be an invitation to skip the measurement that was supposed to replace it.
+So each is stated as the question, the test, and what each answer means:
+
+**1. Does `QAudioSink::processedUSecs()` count audio handed to the device, or
+audio played out of it?**
+
+*Test:* play a file and watch whether the number ever reports more audio than
+there has been time to play.
+*If handed over:* `playedMs()` subtracts the audio still queued.
+*If played out:* use it as it comes.
+Either way it is one line, because the arithmetic is a pure function of a sample
+count. See [which library](#which-library).
+
+**2. Does `QMediaPlayer` at 1×, with a sink that never blocks, extract every
+frame?**
+
+*Test:* extract clips of known length and compare the count against the frame
+count each file declares.
+*If nothing drops*, which is what is expected: video import costs a wait and
+nothing else, and the count stays as an assertion.
+*If something drops:* the numbers are what say whether it is a stray frame or a
+pattern, and only then is there anything to design — see [getting a complete
+extraction](#getting-a-complete-extraction), which deliberately does not decide
+it in advance.
+*If it drops regularly:* `QMediaPlayer` is the wrong tool and the route is FFmpeg
+directly — the one genuinely expensive outcome in this note.
+
+Both belong in the same spike as the deployment check, and that spike comes
+before any audio code. Neither blocks starting, but the second is the only
+question here whose answer could change what gets built.
