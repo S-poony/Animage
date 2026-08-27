@@ -475,6 +475,13 @@ Q_SIGNALS:
     void viewChanged();
     void documentChanged();
 
+    // A decoded picture arrived, or the last one outstanding did. What listens
+    // is the status bar's count of how much of a sequence is on hand: a paint
+    // is what asks for a frame, but a frame landing is not a paint, so without
+    // this the number would only move when something else happened to refresh
+    // it -- and standing still is exactly what it exists not to do.
+    void referenceFramesChanged();
+
     // An imported file could not be turned into a picture: it is not where the
     // project left it, or it is there and will not decode.
     //
@@ -836,6 +843,7 @@ private:
     ReferenceDecoder reference_decoder_;
     std::map<std::pair<animage::ImageId, animage::LayerId>, ReferenceWanted> reference_asked_;
     QTimer* reference_poll_ = nullptr;
+    bool reference_was_pending_ = false;
     std::function<QString(const std::string&)> locate_import_;
 
     // Runs only while something is outstanding.

@@ -57,6 +57,16 @@ public:
     // node-based and the entry being returned is never the one evicted.
     const TileGrid* find(const CtgKey& key, const Transform& under) const;
 
+    // Whether a frame is here, **without counting it as used**.
+    //
+    // For counting how much of a sequence is ready, which is a question asked
+    // about every drawing of it at once. Asking is not using: going through
+    // `find` would renew all hundred and fifty of them on every status update,
+    // so every frame would look equally recent and the eviction order -- the
+    // whole of what keeps a scrub's own frames resident -- would be flattened
+    // by the thing that merely wanted to report on it.
+    bool has(const CtgKey& key, const Transform& under) const;
+
     void store(const CtgKey& key, const Transform& under, TileGrid tiles);
 
     void clear();

@@ -975,10 +975,17 @@ void CanvasWidget::giveUpOnFrame(const animage::CtgKey& key, const Transform& un
 }
 
 void CanvasWidget::noteReferencePending() {
-    if (!reference_poll_) return;
     const bool pending = !reference_asked_.empty();
-    if (pending && !reference_poll_->isActive()) reference_poll_->start();
-    if (!pending) reference_poll_->stop();
+    if (reference_poll_) {
+        if (pending && !reference_poll_->isActive()) reference_poll_->start();
+        if (!pending) reference_poll_->stop();
+    }
+    // The last one landing is worth saying as much as the first: it is what
+    // takes the count off the status bar, and a count that stayed up after
+    // everything was in would be reporting work that has finished.
+    if (pending == reference_was_pending_) return;
+    reference_was_pending_ = pending;
+    Q_EMIT referenceFramesChanged();
 }
 
 // Requests about a cache that has since been emptied, which are the only ones
@@ -1058,6 +1065,9 @@ void CanvasWidget::collectReferenceFrames() {
         return;
     }
     noteReferencePending();
+    // Every arrival and not only the last, because the number moving is the
+    // whole of what tells somebody the program is working rather than stuck.
+    Q_EMIT referenceFramesChanged();
 
     // A frame that has arrived is a whole layer appearing where there was
     // nothing, nowhere near wherever the pen was, so all of it is redrawn --

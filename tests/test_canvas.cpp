@@ -9353,6 +9353,82 @@ void animportedSequenceLandsAsOneDrawingPerFile() {
 
 // Starting later than frame one, which is the only thing about *when* the
 // dialog offers a choice over.
+// What the status bar counts.
+//
+// The count exists because a shot playing before its imported pictures are
+// decoded shows the playhead advancing over a blank canvas, and that is
+// indistinguishable from the program being broken. Whether it *appears* is
+// something to judge by looking; what it counts is not, and the two rules below
+// are the ones that would go wrong silently.
+void theCountOfReadyPicturesDescribesTheWholeSequence() {
+    TEST("the status bar counts every frame of a sequence, and only the ones it can wait for");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 4; ++i) {
+        const QString file = dir.filePath(QStringLiteral("f%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importSequenceFrom(files, 1, false, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer = track->layers.front().id;
+
+    // The denominator is the whole sequence and not what is on screen. During a
+    // take every frame is visited, and the climb from one to all of them is the
+    // progress somebody is waiting on; "how many are being worked out right
+    // now" would read one for the whole of it.
+    CHECK_EQ(window.importsReady().wanted, 4);
+
+    // **The numerator only moves for frames that have been on screen**, because
+    // a frame is only asked for when it is being drawn. Settling here fills one
+    // of the four and not all of them, and that is the honest shape of it: a
+    // sequence fills as it is played or scrubbed over, which is exactly why the
+    // count is worth showing during a take and worth hiding the rest of the
+    // time -- a number that stops at one of four with nothing outstanding is
+    // not progress, it is somewhere somebody stopped looking.
+    CHECK(window.settleReferenceFrames());
+    CHECK_EQ(window.importsReady().ready, 1);
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    for (std::size_t slot = 0; slot < 4; ++slot) {
+        canvas->setFrame(slot);
+        CHECK(window.settleReferenceFrames());
+    }
+    CHECK_EQ(window.importsReady().ready, 4);
+
+    // A hidden layer is never asked for, so counting it would put a denominator
+    // up that nothing can ever reach -- and a number that cannot move is
+    // exactly what "stuck" looks like, which is what this is here to tell apart
+    // from working.
+    Layer hidden = *doc.scene().findTrack(track_id)->findLayer(layer);
+    hidden.visible = false;
+    doc.updateLayer(track_id, layer, hidden);
+    CHECK_EQ(window.importsReady().wanted, 0);
+    CHECK(doc.undo());
+    CHECK_EQ(window.importsReady().wanted, 4);
+
+    // A drawing pointed at no frame is not a frame anybody is waiting for. Same
+    // rule as a missing cel: absent means the layer is empty here.
+    doc.setSourceFrame(track_id, track->imageAtSlot(0), layer, Image::kNoSourceFrame);
+    CHECK_EQ(window.importsReady().wanted, 3);
+}
+
 void aSequenceCanStartAfterTheFirstFrame() {
     TEST("a sequence started at frame 4 leaves the frames before it empty");
     QTemporaryDir dir;
@@ -9738,6 +9814,7 @@ int main(int argc, char** argv) {
     filesAreOrderedByTheirLastNumber();
     animportedSequenceLandsAsOneDrawingPerFile();
     aSequenceCanStartAfterTheFirstFrame();
+    theCountOfReadyPicturesDescribesTheWholeSequence();
     removingTheOnlyLayerIsRefusedInTheOpen();
     twoImportsOfOneFileAreToldApart();
     placingAnImportStoresRatherThanBakes();

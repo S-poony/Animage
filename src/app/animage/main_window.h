@@ -122,6 +122,25 @@ public:
     // precisely so that nothing on the interface thread waits for one.
     bool settleReferenceFrames(int timeout_ms = 30000);
 
+    // How much of every imported sequence in the scene has been decoded.
+    //
+    // For the status bar, and it is the answer to a real complaint: an import
+    // whose frames are not ready draws nothing, correctly -- compositing may
+    // not start a decode -- so playing a shot before they are all in shows the
+    // playhead advancing over a blank canvas with nothing anywhere saying why.
+    // "Working" and "broken" look identical, and only a number tells them
+    // apart, because a number moves.
+    //
+    // Public so a test can pin what it counts. Whether it *appears* is a thing
+    // to judge by looking -- it comes and goes with a decode being outstanding,
+    // which is a race no screenshot can catch -- but the counting rules are not,
+    // and they are what would go wrong silently.
+    struct ImportsReady {
+        int ready = 0;
+        int wanted = 0;
+    };
+    ImportsReady importsReady() const;
+
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
     // the window building its actions from the table is exactly the thing that
@@ -218,6 +237,7 @@ private:
     void rebuildLayerList();
     void syncStatus();
     void refreshEverything();
+
 
     // An imported file the canvas could not turn into a picture. Gathered, and
     // said once per document; see the definitions for why the saying is queued

@@ -268,6 +268,12 @@ MainWindow::MainWindow() {
     canvas_->setImportLocator(
         [this](const std::string& name) { return importPathFor(name); });
     connect(canvas_, &CanvasWidget::importUnreadable, this, &MainWindow::onImportUnreadable);
+    // Queued for the reason the colour's is: this fires from the poll that
+    // installs a frame, and the paint that asked for it may still be on the
+    // stack -- touching the status bar or the panels from inside a paint is how
+    // a widget gets rebuilt underneath itself.
+    connect(canvas_, &CanvasWidget::referenceFramesChanged, this, [this] { syncStatus(); },
+            Qt::QueuedConnection);
     setCentralWidget(canvas_);
 
     playback_timer_ = new QTimer(this);
@@ -2662,6 +2668,33 @@ void MainWindow::syncStatus() {
     const QString colouring =
         canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
 
+    // How much of an imported sequence is on hand, and only while some of it is
+    // not. A number rather than a word, because the complaint this answers is
+    // that a shot playing before its pictures are decoded looks exactly like a
+    // shot that is broken -- the playhead advances over a blank canvas and
+    // nothing anywhere says why. "loading" alone would not settle that either;
+    // what tells somebody it is working is that the number moves.
+    //
+    // **Shown while a decode is outstanding, and not while frames are merely
+    // missing**, which is the same rule `colouring...` follows one line up and
+    // is not the rule this had first.
+    //
+    // A frame is only ever asked for when it is on screen, so a sequence you
+    // have scrubbed part of sits at 40 of 151 with nothing whatever happening.
+    // A number that does not move is worse than no number: it is exactly what
+    // "stuck" looks like, and this exists to tell working from stuck.
+    //
+    // The denominator is still the whole sequence rather than what is
+    // outstanding, because during a take every frame is visited and the climb
+    // from 1 to 151 is the progress somebody is actually waiting on. "How many
+    // are being worked out right now" would read 1 for the whole of it.
+    const MainWindow::ImportsReady pictures =
+        canvas_->referenceFramesPending() ? importsReady() : ImportsReady{};
+    const QString loading =
+        pictures.wanted > 0
+            ? QStringLiteral("   pictures %1/%2").arg(pictures.ready).arg(pictures.wanted)
+            : QString();
+
     // Past this track's last drawing there is no slot and no cel, so there is
     // nothing to draw on -- while the canvas may still be showing something,
     // because a track that holds or cycles goes on contributing to the picture.
@@ -2745,7 +2778,7 @@ void MainWindow::syncStatus() {
     // ran to 40 would be the timeline lying about its own length.
     status_->setText(
         QStringLiteral("frame %1 / %2   %3 (%4)   held %5   drawings %6   layers %7   zoom %8%   "
-                       "tiles %9   %10   %11 fps%12%13%14%15")
+                       "tiles %9   %10   %11 fps%12%13%14%15%16")
             .arg(slot + 1)
             .arg(doc_.scene().shotFrames())
             .arg(QString::fromStdString(track->name))
@@ -2758,6 +2791,7 @@ void MainWindow::syncStatus() {
             .arg(history)
             .arg(doc_.scene().framerate)
             .arg(colouring)
+            .arg(loading)
             .arg(past)
             .arg(outside)
             .arg(selected));
@@ -3253,6 +3287,35 @@ TileGrid MainWindow::importAtOneToOne(const Layer& layer, int frame, QString* tr
         return {};
     }
     return image_import::decode(path, trouble);
+}
+
+MainWindow::ImportsReady MainWindow::importsReady() const {
+    ImportsReady out;
+    const ReferenceCache& cache = doc_.referenceCache();
+
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference || layer.reference_sources.empty()) continue;
+            // A hidden layer is never asked for, so counting it would put a
+            // denominator in the status bar that nothing can ever reach -- the
+            // number would stick, and a number that does not move is worse than
+            // no number at all, because it reads as stuck rather than as done.
+            if (!layer.visible) continue;
+
+            for (const auto& [id, image] : track.images) {
+                // Absent means the layer is empty at this drawing, exactly as a
+                // missing cel does. Nothing to decode, so nothing to wait for.
+                if (image.sourceFrameFor(layer.id) == Image::kNoSourceFrame) continue;
+                ++out.wanted;
+                // Asked without renewing it: see ReferenceCache::has. Counting
+                // through `find` would touch every frame of the sequence on
+                // every status update and flatten the order that keeps a
+                // scrub's own frames resident.
+                if (cache.has(CtgKey{id, layer.id}, layer.placement)) ++out.ready;
+            }
+        }
+    }
+    return out;
 }
 
 // Says, once per document, that some imported pictures could not be read.

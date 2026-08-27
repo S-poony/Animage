@@ -48,6 +48,11 @@ const TileGrid* ReferenceCache::find(const CtgKey& key, const Transform& under) 
     return &found->second.tiles;
 }
 
+bool ReferenceCache::has(const CtgKey& key, const Transform& under) const {
+    auto found = entries_.find(key);
+    return found != entries_.end() && found->second.under == under;
+}
+
 void ReferenceCache::store(const CtgKey& key, const Transform& under, TileGrid tiles) {
     ++stores_;
     auto found = entries_.find(key);
