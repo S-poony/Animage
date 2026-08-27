@@ -7,6 +7,101 @@
 #include <utility>
 
 namespace animage {
+namespace {
+
+// How much decoded import is worth keeping.
+//
+// **Not measured, and the arithmetic is here so that it can be argued with.** A
+// tile is 128 KB, so one HD frame is 135 tiles = 17 MB and one 4K frame is
+// 510 = 64 MB. The gesture this exists to serve is dragging the playhead back
+// and forth across a syllable, which at 24 fps over a second is 24 frames --
+// 408 MB at HD. Half a gigabyte is the next round number above that, so a scrub
+// of about that length holds, and one twice as long re-decodes its far end.
+//
+// It is a budget, so by the rule this codebase learned the hard way it will
+// express itself as a threshold somewhere else: the somewhere is "how far you
+// can scrub before the frame you come back to has to be decoded again", and
+// decoding again is the ordinary cost of arriving at a drawing.
+//
+// docs/importing.md lists "what a cache bound should be, in bytes, against a
+// realistic scrub" as one of the things worth benchmarking, and this is what
+// stands in until it is. What would change it is somebody reporting a scrub
+// that stutters at one end, with the frame size they were working at.
+constexpr std::size_t kReferenceByteBudget = 512u << 20;
+
+// What one frame weighs. Every tile of it: unlike a fill's marks, nothing here
+// is a handle shared with something else that would exist anyway.
+std::size_t footprintOf(const TileGrid& tiles) { return tiles.tileCount() * sizeof(Tile); }
+
+}  // namespace
+
+ReferenceCache::ReferenceCache() : budget_(kReferenceByteBudget) {}
+
+const TileGrid* ReferenceCache::find(const CtgKey& key, const Transform& under) const {
+    auto found = entries_.find(key);
+    if (found == entries_.end()) return nullptr;
+    // Absent rather than stale, and the lookup is not counted as a use in that
+    // case: an entry nobody can read is not one worth keeping alive, and the
+    // store that is about to replace it would then be evicting on its behalf.
+    if (!(found->second.under == under)) return nullptr;
+    found->second.used = ++clock_;
+    return &found->second.tiles;
+}
+
+void ReferenceCache::store(const CtgKey& key, const Transform& under, TileGrid tiles) {
+    ++stores_;
+    auto found = entries_.find(key);
+    if (found != entries_.end()) {
+        bytes_ -= footprintOf(found->second.tiles);
+        found->second.under = under;
+        found->second.tiles = std::move(tiles);
+    } else {
+        found = entries_.emplace(key, Entry{under, std::move(tiles), 0}).first;
+    }
+    found->second.used = ++clock_;
+    bytes_ += footprintOf(found->second.tiles);
+
+    evictDownToBudget(key);
+}
+
+void ReferenceCache::clear() {
+    entries_.clear();
+    bytes_ = 0;
+    ++generation_;
+}
+
+// kNoId names no drawing, so nothing is spared: a budget being lowered is not a
+// store, and there is no entry a caller is holding a reference to.
+void ReferenceCache::setByteBudget(std::size_t bytes) {
+    budget_ = bytes;
+    evictDownToBudget(CtgKey{});
+}
+
+// Oldest first, and never the entry just stored: the caller is holding a
+// reference to it. One frame can be larger than the whole budget on its own --
+// a 300 dpi A4 scan is 70 MB and nothing stops a larger one -- and that is the
+// case this rule quietly handles: the budget is exceeded rather than the answer
+// thrown away before it is read.
+void ReferenceCache::evictDownToBudget(const CtgKey& keep) {
+    if (bytes_ <= budget_) return;
+
+    std::vector<std::pair<std::uint64_t, CtgKey>> by_age;
+    by_age.reserve(entries_.size());
+    for (const auto& [key, entry] : entries_) {
+        if (key == keep) continue;
+        by_age.emplace_back(entry.used, key);
+    }
+    std::sort(by_age.begin(), by_age.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [used, key] : by_age) {
+        if (bytes_ <= budget_) break;
+        auto found = entries_.find(key);
+        if (found == entries_.end()) continue;
+        bytes_ -= footprintOf(found->second.tiles);
+        entries_.erase(found);
+    }
+}
 
 Document::Document() = default;
 
@@ -794,19 +889,12 @@ void Document::setSourceFrame(TrackId track_id, ImageId image_id, LayerId layer_
 
 const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id,
                                             const Transform& under) const {
-    auto found = reference_frames_.find(CtgKey{image_id, layer_id});
-    if (found == reference_frames_.end()) return nullptr;
-    // Absent rather than stale. What is held was derived at some placement, and
-    // if it is not this one it is a picture of where the import used to be --
-    // which would go on being drawn, convincingly, until something happened to
-    // refresh it.
-    if (!(found->second.under == under)) return nullptr;
-    return &found->second.tiles;
+    return reference_frames_.find(CtgKey{image_id, layer_id}, under);
 }
 
 void Document::setReferenceFrame(TrackId, ImageId image_id, LayerId layer_id,
                                  const Transform& under, TileGrid tiles) {
-    reference_frames_[CtgKey{image_id, layer_id}] = ReferenceFrame{under, std::move(tiles)};
+    reference_frames_.store(CtgKey{image_id, layer_id}, under, std::move(tiles));
 }
 
 void Document::forgetReferenceFrames() { reference_frames_.clear(); }

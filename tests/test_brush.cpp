@@ -659,6 +659,84 @@ void aDerivedFrameIsNotDocumentState() {
     CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, Transform{}) == nullptr);
 }
 
+// The rule a still could not exercise and a sequence stands on.
+//
+// A scrub goes back and forth over a handful of frames, so the frames being
+// looked at are the ones that must survive -- which is why a *lookup* renews an
+// entry and a store does not. Get it the other way round and the cache holds
+// whatever was decoded most recently, which during a scrub is exactly the frame
+// you are leaving.
+//
+// Driven against a budget small enough to fill rather than against half a
+// gigabyte of tiles, which is why the bound is settable at all.
+void aLookupIsWhatKeepsAFrameResident() {
+    TEST("a frame that is looked at outlives one that was only stored");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    // One tile each, so the arithmetic is countable: three fit, the fourth does
+    // not, and exactly one has to go.
+    const auto oneTile = [] { return flatGrid({0, 0, 4, 4}, {1.0f, 1.0f, 1.0f, 1.0f}); };
+    const ImageId a = f.image;
+    const ImageId b = f.doc.insertImage(f.track, 1);
+    const ImageId c = f.doc.insertImage(f.track, 2);
+    const ImageId d = f.doc.insertImage(f.track, 3);
+
+    f.doc.setReferenceCacheBudget(3 * sizeof(Tile));
+
+    f.doc.setReferenceFrame(f.track, a, reference, Transform{}, oneTile());
+    f.doc.setReferenceFrame(f.track, b, reference, Transform{}, oneTile());
+    f.doc.setReferenceFrame(f.track, c, reference, Transform{}, oneTile());
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{3});
+    CHECK_EQ(f.doc.referenceCache().bytes(), 3 * sizeof(Tile));
+
+    // Looked at, which is what a paint of that drawing does. `a` is now the
+    // oldest *store* and the newest *use*, and those two disagreeing is the
+    // whole of what this test is about.
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+
+    f.doc.setReferenceFrame(f.track, d, reference, Transform{}, oneTile());
+
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{3});
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, b, reference, Transform{}) == nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, c, reference, Transform{}) != nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, d, reference, Transform{}) != nullptr);
+
+    // And a frame larger than the whole budget is kept rather than thrown away
+    // before anybody can read it. A 300 dpi A4 scan is 70 MB and nothing stops
+    // a larger one, so this is a real case and not a degenerate one: the budget
+    // is exceeded, deliberately, because the alternative is a layer that can
+    // never draw at all.
+    f.doc.setReferenceCacheBudget(sizeof(Tile) / 2);
+    f.doc.setReferenceFrame(f.track, a, reference, Transform{}, oneTile());
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{1});
+}
+
+// Emptying the shelf is how everything a frame depends on but is not keyed on
+// says "all of that is wrong now" -- and the count is what lets a decode still
+// in the air be told the same thing when it lands. See CtgFillCache::generation,
+// which learned this the expensive way.
+void emptyingTheFrameCacheIsCounted() {
+    TEST("the reference cache counts how many times it has been emptied");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    const std::uint64_t before = f.doc.referenceCache().generation();
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
+                            flatGrid({0, 0, 4, 4}, {1.0f, 1.0f, 1.0f, 1.0f}));
+    // Storing is not emptying. A counter that moved here would call off every
+    // answer in flight on every frame that arrived, which is the opposite of
+    // what it is for.
+    CHECK_EQ(f.doc.referenceCache().generation(), before);
+
+    f.doc.forgetReferenceFrames();
+    CHECK(f.doc.referenceCache().generation() > before);
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{0});
+    CHECK_EQ(f.doc.referenceCache().bytes(), std::size_t{0});
+}
+
 }  // namespace
 
 int main() {
@@ -679,5 +757,7 @@ int main() {
     compositorWorksLeftOfTheOrigin();
     aReferenceLayerDrawsWhatWasDerived();
     aDerivedFrameIsNotDocumentState();
+    aLookupIsWhatKeepsAFrameResident();
+    emptyingTheFrameCacheIsCounted();
     return testing::summarise("brush");
 }

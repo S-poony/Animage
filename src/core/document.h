@@ -17,6 +17,113 @@
 
 namespace animage {
 
+// A bounded store of what imported files decode to: one entry per drawing per
+// reference layer, holding the already-placed pixels.
+//
+// **`CtgFillCache` is the template and the resemblance is not an accident.**
+// Both are derived data, bounded, kept on the Document rather than on the thing
+// they describe, precisely because losing an entry costs a rebuild and nothing
+// else -- a recompute there, a decode here. Read that class before changing
+// this one; four of its decisions are repeated below for the same reasons.
+//
+// It lives here rather than in a file of its own because the key it needs is
+// `CtgKey`, which document.h already has, and because Document is its only
+// owner. Nothing outside asks it a question that Document does not forward.
+//
+// **Absent beats stale, which is the one thing here that is not `CtgFillCache`
+// with the words changed.** An entry records the placement it was derived at,
+// and a lookup at any other placement reports *nothing here*. A frame derived
+// under an old placement is not a slightly out-of-date picture, it is a picture
+// of where the import used to be, and it would go on being drawn convincingly
+// until something happened to refresh it.
+//
+// **Eviction may only happen where the document may be edited.** This does not
+// look like an invariant, which is why it is written down: `LayerPass` holds
+// raw pointers into these grids and `compositeGrids` reads them from several
+// threads, so dropping an entry while a paint is in flight is a dangling read.
+// It is the same rule the document already has -- it simply does not read as
+// "editing the document" to whoever writes the eviction.
+class ReferenceCache {
+public:
+    // Defined in document.cpp, where the default budget is, so that the number
+    // and the arithmetic that argues for it stay in one place.
+    ReferenceCache();
+
+    // Null when there is no entry, and null when the entry was derived under a
+    // different placement. The caller cannot tell the two apart and does not
+    // need to: both mean "ask for this again".
+    //
+    // References into the store survive an insertion, because the map is
+    // node-based and the entry being returned is never the one evicted.
+    const TileGrid* find(const CtgKey& key, const Transform& under) const;
+
+    void store(const CtgKey& key, const Transform& under, TileGrid tiles);
+
+    void clear();
+
+    // Moves the bound, and takes effect immediately. The default is half a
+    // gigabyte; see the definition in document.cpp for the arithmetic behind
+    // that and what would change it.
+    //
+    // Reachable so that the rule above -- a *lookup* keeps an entry alive, a
+    // store does not -- can be tested against a budget a test can fill, rather
+    // than by building half a gigabyte of tiles. That rule is the one worth
+    // pinning: it is what stops a scrub evicting the frames being scrubbed
+    // over, and it is invisible until somebody has already made it wrong.
+    void setByteBudget(std::size_t bytes);
+
+    // How many times the store has been emptied.
+    //
+    // The same counter `CtgFillCache` has and for the same reason, which is
+    // worth stating because it is the one piece here that exists before the bug
+    // rather than after it. What a decoded frame depends on is not all in its
+    // key: the source list is on the layer and so is the placement, and the way
+    // both say "that is all wrong now" is by emptying this. That reaches the
+    // shelf and not the answers in the air -- a decode started before a
+    // placement changed lands after it and would be installed as current.
+    // Anything with a decode in flight records this alongside what it asked.
+    std::uint64_t generation() const { return generation_; }
+
+    std::size_t size() const { return entries_.size(); }
+
+    // What the frames held weigh, which is every tile of every one of them.
+    //
+    // Unlike a fill's marks, none of this is shared with anything else: each
+    // frame is decoded on its own, so a tile in here is a tile this cache is
+    // the reason for. Two drawings pointed at the same source frame decode
+    // twice and are counted twice, which is what actually happens.
+    std::size_t bytes() const { return bytes_; }
+
+    // How many frames have been put in, which is how many decodes have
+    // happened. Exposed for the reason CtgFillCache counts its stores: "did
+    // that decode again?" has no honest answer but a count, and a wrong key
+    // does not fail, it only gets slow.
+    std::uint64_t storeCount() const { return stores_; }
+
+private:
+    struct Entry {
+        // What the pixels were derived at. Held rather than assumed, because a
+        // placement is stored on the layer and can be changed and undone, and
+        // nothing else about the layer moves when it does.
+        Transform under;
+        TileGrid tiles;
+        // Touched by a *lookup* and not by a store, so the order reflects what
+        // is being looked at rather than what was last decoded. That is the
+        // whole point on this cache: scrubbing back and forth over a syllable
+        // must not evict the frames being scrubbed over.
+        mutable std::uint64_t used = 0;
+    };
+
+    void evictDownToBudget(const CtgKey& keep);
+
+    std::unordered_map<CtgKey, Entry, CtgKeyHash> entries_;
+    mutable std::uint64_t clock_ = 0;
+    std::size_t bytes_ = 0;
+    std::size_t budget_;
+    std::uint64_t stores_ = 0;
+    std::uint64_t generation_ = 0;
+};
+
 // Owns the scene, every cel, the id counters and the undo history. Editing goes
 // through this class rather than through the structs directly, because that is
 // the only way an operation can be recorded for undo.
@@ -347,14 +454,20 @@ public:
     // that is not in its key says so by calling this -- the layer's source
     // being repointed, a document being replaced by another whose drawings
     // answer to the same ids.
-    //
-    // Not bounded yet, and deliberately not: one still is one entry, and a
-    // bound whose only entry can never be evicted is machinery pretending to
-    // be a policy. Sequences are what make it a cache; the shape here is the
-    // one a bound goes into. See CtgFillCache for what that looks like once it
-    // matters, including the part where a lookup and not a store is what keeps
-    // an entry alive.
     void forgetReferenceFrames();
+
+    // The store itself, for what only it can answer: how many frames are
+    // resident, what they weigh, and the generation anything with a decode in
+    // flight has to record. Const, because installing a frame goes through
+    // setReferenceFrame -- which is the one place the eviction rule above is
+    // honoured.
+    const ReferenceCache& referenceCache() const { return reference_frames_; }
+
+    // Moves the cache's bound. Here rather than on a non-const accessor,
+    // because lowering it evicts, and the rule is that evicting happens only
+    // where the document may be edited -- an accessor that handed the cache out
+    // by reference would put that decision at every call site instead.
+    void setReferenceCacheBudget(std::size_t bytes) { reference_frames_.setByteBudget(bytes); }
 
     // --- history ---------------------------------------------------------
 
@@ -525,14 +638,7 @@ private:
     // a fill is -- see "why a cache key of cel revisions serves wrong fills,
     // not slow ones" in docs/handover.md for why the key names the drawing and
     // the layer rather than anything with a revision in it.
-    struct ReferenceFrame {
-        // What the pixels were derived at. Held rather than assumed, because a
-        // placement is stored on the layer and can be changed and undone, and
-        // nothing else about the layer moves when it does.
-        Transform under;
-        TileGrid tiles;
-    };
-    std::unordered_map<CtgKey, ReferenceFrame, CtgKeyHash> reference_frames_;
+    ReferenceCache reference_frames_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.
