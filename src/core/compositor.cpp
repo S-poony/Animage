@@ -657,7 +657,12 @@ static void collectPasses(const Document& doc, TrackId track_id, ImageId image_i
         // TileGrid, so everything below this function is untouched -- it cannot
         // tell a decoded frame from a drawn one, and must not have to.
         if (layer->kind == LayerKind::Reference) {
-            if (const TileGrid* frame = doc.referenceFrameFor(track_id, image_id, *it)) {
+            // Asked for at the layer's placement, so a frame derived at an
+            // earlier one is not drawn. What that costs is a blank layer for as
+            // long as it takes to re-derive; what it saves is the picture
+            // confidently showing where the import used to be.
+            if (const TileGrid* frame =
+                    doc.referenceFrameFor(track_id, image_id, *it, layer->placement)) {
                 passes.push_back({frame, layer});
             }
             continue;

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "ids.h"
+#include "transform.h"
 
 namespace animage {
 
@@ -115,6 +116,29 @@ struct Layer {
     // the layer draws nothing without it -- which is the test docs/importing.md
     // sets for a field of this shape under "where an import lands".
     std::string reference_source;
+
+    // For a Reference layer: where the imported picture sits, applied when its
+    // pixels are derived from the file.
+    //
+    // **Stored rather than baked, which is the opposite of what a layer
+    // transform does elsewhere** -- and the difference is not a preference.
+    // Issue #25 bakes because a stored affine would force everything that reads
+    // a layer's pixels through a matrix: the brush, the eyedropper, ctgBarrier,
+    // celBounds, the export. That argument is entirely about layers whose
+    // pixels are the truth. A reference layer's are derived, so the placement
+    // is applied in the derive step and what reaches the compositor is a plain,
+    // already-placed grid. `compositeScene` is still a flat list of
+    // untransformed grids and `LayerPass` is still not widened.
+    //
+    // What it buys is that the loss never compounds. Adjusting a placement
+    // re-derives from the original file, so a picture nudged and scaled and
+    // nudged again has been resampled once, from the bytes that came off disk,
+    // however many times it has been moved. A baked one would be a resample of
+    // a resample of a resample.
+    //
+    // It is also why there is no lasso here: a placement is a property of the
+    // whole file and there is no such thing as placing half of it.
+    Transform placement;
 
     // Defaulted, so a field added above is compared without anybody having to
     // remember. The canvas holds a copy of the layer list the onion skin was

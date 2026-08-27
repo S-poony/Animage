@@ -9065,7 +9065,8 @@ void anImportSurvivesSavingAndOpening() {
     // The name coming back is not enough: it is the derived pixels that decide
     // whether anything is on screen, and a layer whose file did not survive
     // looks exactly like one whose file did until you ask for them.
-    const TileGrid* frame = doc.referenceFrameFor(track->id, track->imageAtSlot(0), layer->id);
+    const TileGrid* frame =
+        doc.referenceFrameFor(track->id, track->imageAtSlot(0), layer->id, layer->placement);
     CHECK(frame != nullptr);
     if (frame) CHECK_NEAR(frame->pixel(10, 10).b, 1.0, 1e-2);
 }
@@ -9204,6 +9205,151 @@ void twoImportsOfOneFileAreToldApart() {
     if (sources.size() == 2) CHECK(sources[0] != sources[1]);
 }
 
+
+// Placing an import, which is the one transform in the program that writes no
+// pixels at all.
+//
+// Everything here is about that difference. A bake resamples every drawing and
+// journals what it displaced; a placement stores five numbers and the picture
+// is derived from the file again at them. What that buys is that adjusting a
+// placement is free and lossless however often it is done -- so the things
+// worth asserting are that no cel appeared, that the history holds a layer
+// change rather than a pile of tiles, and that the picture on screen actually
+// moved.
+void placingAnImportStoresRatherThanBakes() {
+    TEST("placing an imported picture writes no cel, moves the picture, and undoes");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 0, 255)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    const std::size_t tiles_before = doc.totalTileCount();
+
+    // The picture starts at the origin, so it is over the top-left of the
+    // canvas and not over a point 400 across.
+    const auto opaqueAt = [&](int x, int y) {
+        const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+        const TileGrid* frame = doc.referenceFrameFor(track, drawing, layer, now->placement);
+        return frame && frame->pixel(x, y).a > 0.5f;
+    };
+    CHECK(opaqueAt(10, 10));
+    CHECK(!opaqueAt(410, 10));
+
+    // Placed 400 pixels across, the way Apply stores it.
+    Layer moved = *doc.scene().findTrack(track)->findLayer(layer);
+    moved.placement.dx = 400.0;
+    doc.updateLayer(track, layer, moved);
+    window.refreshReferenceFrames();
+
+    // **No cel, and no tiles.** The picture moved and the document holds
+    // exactly as many tiles as it did before -- which is none, because a
+    // reference layer has no cels at all. A bake would have written one per
+    // drawing and journalled what it displaced.
+    CHECK_EQ(doc.totalTileCount(), tiles_before);
+    CHECK(doc.scene().findTrack(track)->findImage(drawing)->celFor(layer) == kNoId);
+
+    CHECK(!opaqueAt(10, 10));
+    CHECK(opaqueAt(410, 10));
+
+    // And it undoes, because a placement is a layer property and goes through
+    // the same op every other one does.
+    CHECK(doc.undo());
+    window.refreshReferenceFrames();
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->placement.dx, 0.0);
+    CHECK(opaqueAt(10, 10));
+    CHECK(!opaqueAt(410, 10));
+}
+
+// The cache is keyed on the placement, and that is not an optimisation.
+//
+// A frame derived at an earlier placement is not stale-and-usable, it is a
+// picture of where the import used to be -- and it would go on being drawn,
+// convincingly, until something happened to refresh it. So it is reported as
+// absent, and the layer draws nothing until the right one arrives.
+void aFrameDerivedAtAnotherPlacementIsNotServed() {
+    TEST("a picture derived at a different placement counts as absent, not as stale");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(picture, nullptr));
+
+    Document& doc = window.documentForTesting();
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    CHECK(doc.referenceFrameFor(track, drawing, layer, Transform{}) != nullptr);
+
+    Transform elsewhere;
+    elsewhere.dx = 17.0;
+    CHECK(doc.referenceFrameFor(track, drawing, layer, elsewhere) == nullptr);
+}
+
+// The one-drawing case, which is what gave the lasso back.
+//
+// A layer of one drawing is the Transform tool's job, so the layer button hands
+// it over rather than running the whole-layer path with the selection thrown
+// away. Asserted through the box's own report of what it is doing, because that
+// is what the colour and the bar label are read from.
+void aLayerOfOneDrawingIsTheOrdinaryTransform() {
+    TEST("the layer button on a one-drawing layer keeps the selection and is not a whole-layer "
+         "gesture");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // Something to move: a new track has one drawing and one layer, and the
+    // gesture refuses a layer with nothing on it.
+    Document& doc = window.documentForTesting();
+    const Track& track = doc.scene().tracks.front();
+    const LayerId layer = track.layers.front().id;
+    strokeOn(doc, track.id, track.imageAtSlot(0), layer, 100.0f, 100.0f, 300.0f, 300.0f);
+    canvas->refreshAll();
+    QCoreApplication::processEvents();
+
+    // Asked of the canvas rather than of the panel button, because the button
+    // is not the thing under test and its enabled state is refreshed by signals
+    // this fixture does not send -- the stroke above went into the document
+    // directly, which nothing in the window heard.
+    canvas->setActiveLayer(layer);
+    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::None);
+    QCoreApplication::processEvents();
+
+    CHECK(canvas->transformIsLive());
+    // Handed to the tool, so it is not a whole-layer gesture -- which is what
+    // makes the box blue and what lets a lasso through. Both used to be wrong
+    // here for the same reason: the layer door assumed several drawings.
+    CHECK(!canvas->transformIsWholeLayer());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -9213,6 +9359,9 @@ int main(int argc, char** argv) {
     animportedLayerRefusesTheBrushAsItself();
     removingTheOnlyLayerIsRefusedInTheOpen();
     twoImportsOfOneFileAreToldApart();
+    placingAnImportStoresRatherThanBakes();
+    aFrameDerivedAtAnotherPlacementIsNotServed();
+    aLayerOfOneDrawingIsTheOrdinaryTransform();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();

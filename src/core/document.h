@@ -312,13 +312,22 @@ public:
     // `core` never opens a file. What derives these is the application, which
     // knows about `imports/` and about QImage; this class only holds the
     // answer, exactly as it holds a fill somebody else solved.
-    const TileGrid* referenceFrameFor(TrackId track, ImageId image, LayerId layer) const;
+    // `under` is the placement the answer has to have been derived at. A frame
+    // derived under a different one is not stale-and-usable, it is **the wrong
+    // picture** -- a modelsheet at the size and angle it used to be -- so it is
+    // reported as absent and the layer draws nothing until the right one
+    // arrives. That is the same choice the fill cache makes and for the same
+    // reason: see "why a cache key of cel revisions serves wrong fills, not slow
+    // ones" in docs/handover.md, which is this mistake made the other way round.
+    const TileGrid* referenceFrameFor(TrackId track, ImageId image, LayerId layer,
+                                      const Transform& under) const;
 
     // Installs derived pixels. Not an edit: no command, no journal, no undo
     // entry and no cel -- the document is not changed by this, only the
     // memo of what a file decodes to. That is why it is allowed to be called
     // from a paint.
-    void setReferenceFrame(TrackId track, ImageId image, LayerId layer, TileGrid tiles);
+    void setReferenceFrame(TrackId track, ImageId image, LayerId layer, const Transform& under,
+                           TileGrid tiles);
 
     // Throws the derived pixels away. Everything a reference frame depends on
     // that is not in its key says so by calling this -- the layer's source
@@ -502,7 +511,14 @@ private:
     // a fill is -- see "why a cache key of cel revisions serves wrong fills,
     // not slow ones" in docs/handover.md for why the key names the drawing and
     // the layer rather than anything with a revision in it.
-    std::unordered_map<CtgKey, TileGrid, CtgKeyHash> reference_frames_;
+    struct ReferenceFrame {
+        // What the pixels were derived at. Held rather than assumed, because a
+        // placement is stored on the layer and can be changed and undone, and
+        // nothing else about the layer moves when it does.
+        Transform under;
+        TileGrid tiles;
+    };
+    std::unordered_map<CtgKey, ReferenceFrame, CtgKeyHash> reference_frames_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

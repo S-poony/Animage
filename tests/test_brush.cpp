@@ -602,7 +602,7 @@ void aReferenceLayerDrawsWhatWasDerived() {
     compositor.composite(f.doc, f.track, f.image, region, frame);
     CHECK_NEAR(frame.pixel(5, 5).a, 0.0, 1e-3);
 
-    f.doc.setReferenceFrame(f.track, f.image, reference,
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
                             flatGrid({490, 490, 20, 20}, {0.0f, 0.0f, 1.0f, 1.0f}));
 
     compositor.composite(f.doc, f.track, f.image, region, frame);
@@ -635,7 +635,7 @@ void aDerivedFrameIsNotDocumentState() {
     const std::size_t tiles_before = f.doc.totalTileCount();
     const bool could_undo = f.doc.canUndo();
 
-    f.doc.setReferenceFrame(f.track, f.image, reference,
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
                             flatGrid({0, 0, 300, 300}, {1.0f, 1.0f, 1.0f, 1.0f}));
 
     // The picture is a memo and not an edit. This is what makes an import free
@@ -646,9 +646,17 @@ void aDerivedFrameIsNotDocumentState() {
     CHECK_EQ(f.doc.canUndo(), could_undo);
     CHECK(f.doc.scene().findTrack(f.track)->findImage(f.image)->celFor(reference) == kNoId);
 
-    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference) != nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, Transform{}) != nullptr);
+
+    // Asked at a placement it was not derived at, the answer is absent rather
+    // than stale. A picture of where the import used to be is worse than no
+    // picture: it is convincing.
+    Transform moved;
+    moved.dx = 40.0;
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, moved) == nullptr);
+
     f.doc.forgetReferenceFrames();
-    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference) == nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, Transform{}) == nullptr);
 }
 
 }  // namespace

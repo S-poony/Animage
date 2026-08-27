@@ -771,13 +771,21 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
     return (found && found->valid) ? found : nullptr;
 }
 
-const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id) const {
+const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id,
+                                            const Transform& under) const {
     auto found = reference_frames_.find(CtgKey{image_id, layer_id});
-    return (found == reference_frames_.end()) ? nullptr : &found->second;
+    if (found == reference_frames_.end()) return nullptr;
+    // Absent rather than stale. What is held was derived at some placement, and
+    // if it is not this one it is a picture of where the import used to be --
+    // which would go on being drawn, convincingly, until something happened to
+    // refresh it.
+    if (!(found->second.under == under)) return nullptr;
+    return &found->second.tiles;
 }
 
-void Document::setReferenceFrame(TrackId, ImageId image_id, LayerId layer_id, TileGrid tiles) {
-    reference_frames_[CtgKey{image_id, layer_id}] = std::move(tiles);
+void Document::setReferenceFrame(TrackId, ImageId image_id, LayerId layer_id,
+                                 const Transform& under, TileGrid tiles) {
+    reference_frames_[CtgKey{image_id, layer_id}] = ReferenceFrame{under, std::move(tiles)};
 }
 
 void Document::forgetReferenceFrames() { reference_frames_.clear(); }

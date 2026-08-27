@@ -106,6 +106,22 @@ struct Transform {
         if (flip_y && 2.0 * pivot_y != std::floor(2.0 * pivot_y)) return false;
         return true;
     }
+
+    // Exact, and the pivot counts.
+    //
+    // Wanted because a stored placement -- a reference layer's, which is the
+    // only transform in the program that outlives its gesture -- is what the
+    // pixels derived from it are keyed on. "Has this changed" therefore decides
+    // whether a picture on screen is the right one, so it is asked of every
+    // field rather than of the ones that look like they matter: the pivot moves
+    // where a rotation goes, and two placements agreeing everywhere but there
+    // are two different pictures.
+    //
+    // Exact comparison for the same reason isWholePixelTranslation uses one --
+    // these numbers arrive from fields and handles, not from arithmetic that
+    // drifts, and a tolerance here would be a cache that sometimes serves the
+    // wrong frame.
+    friend bool operator==(const Transform&, const Transform&) = default;
 };
 
 struct Vec2 {

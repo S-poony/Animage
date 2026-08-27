@@ -95,6 +95,20 @@ public:
     // is untouched in that case.
     bool importImageFrom(const QString& path, QString* trouble = nullptr);
 
+    // Re-derives any imported picture whose pixels were made at a placement its
+    // layer no longer has. Cheap when there is nothing to do, which is nearly
+    // always; see the definition for why it runs from refreshEverything rather
+    // than from the paint.
+    //
+    // Reports what it could not read rather than failing. A missing import
+    // costs that picture; the drawings are not affected, and refusing the whole
+    // project over a reference would be worse than opening it with the
+    // reference blank and saying so.
+    //
+    // Public so a test can change a placement directly and then ask for the
+    // consequence, which is otherwise only reachable through a live gesture.
+    void refreshReferenceFrames();
+
     // The action a shortcut id names, or null if the window never made one.
     // For tests that assert the window and the table agree about the keyboard --
     // the window building its actions from the table is exactly the thing that
@@ -170,6 +184,8 @@ private:
                   const QString& more = QString(), const std::vector<shortcuts::Id>& also = {});
     void keyedTip(QWidget* on, shortcuts::Id id, const QString& what,
                   const QString& more = QString(), const std::vector<shortcuts::Id>& also = {});
+    // Changes what one keyed tooltip says, keeping the key it names.
+    void setKeyedTipText(QWidget* on, const QString& what);
     void syncTooltips();
     // Edit > Keyboard shortcuts. Opens the dialog, and on Apply installs what it
     // hands back and writes it down.
@@ -313,15 +329,25 @@ private:
     // different questions. See docs/importing.md.
     void importImage();
 
-    // Decodes every imported file the scene names, from `folder`. A reference
-    // layer holds no pixels, so this is what makes an opened project show its
-    // imports -- without it the layers are there and draw nothing.
+    // Where an imported file's bytes are: inside the project once it has been
+    // saved, and at the path it came from until then. Empty when neither.
+    QString importPathFor(const std::string& name) const;
+
+    // The imported picture with no placement applied, which is what a placement
+    // gesture floats. See the definition: the stored placement is absolute, so
+    // the pixels under it have to be the unplaced ones.
+    animage::TileGrid importAtOneToOne(const animage::Layer& layer,
+                                       QString* trouble = nullptr) const;
+
+    // Derives the pixels of every reference layer whose picture is missing or
+    // was derived at a placement the layer no longer has. Cheap when there is
+    // nothing to do, which is nearly always; see the definition for why it runs
+    // here rather than from the paint.
     //
-    // Reports what it could not read rather than failing the load. A missing
-    // import costs that picture; the drawings are not affected, and refusing
-    // the whole project over a reference would be worse than opening it with
-    // the reference blank and saying so.
-    void deriveReferenceFrames(const QString& folder);
+    // Reports what it could not read rather than failing. A missing import
+    // costs that picture; the drawings are not affected, and refusing the whole
+    // project over a reference would be worse than opening it with the
+    // reference blank and saying so.
 
     // Tracks. Adding one puts it at the bottom of the stack and makes it
     // current, because the thing you do next is draw on it.
@@ -439,6 +465,10 @@ private:
     // Enabled per layer rather than per program: a colour layer cannot be
     // transformed at all, and a locked or hidden one is not being edited.
     QPushButton* layer_transform_ = nullptr;
+    // The transform bar's Apply, kept because what it does depends on the
+    // gesture: it bakes a drawing and it stores a placement, and one tooltip
+    // for both would be false half the time.
+    QPushButton* transform_apply_ = nullptr;
     // The same, for the one other panel button that can refuse: a track must
     // keep a layer, so the last one cannot be removed.
     QPushButton* layer_remove_ = nullptr;
@@ -541,6 +571,11 @@ private:
     // kept rather than pruned because a Save As has to be able to reach back
     // to the same original, and one path per import is nothing.
     ProjectIO::Imports imports_;
+
+    // Whether this document has already been told about imports it cannot read.
+    // refreshReferenceFrames runs on every refresh and a missing file stays
+    // missing, so without this the message box would come back for ever.
+    bool reported_missing_imports_ = false;
 
     bool updating_list_ = false;
     bool forwarding_key_ = false;

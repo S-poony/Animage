@@ -288,8 +288,18 @@ public:
     // Refuses where the tool refuses, and that includes a colour layer: a mark
     // on one is a label, and interpolating it invents a colour that competes
     // for regions on its own account.
-    Refusal beginLayerTransform();
+    // `unplaced` is the imported picture at 1:1 and is only read when the
+    // active layer is a Reference one. It has to come from the caller because
+    // deriving it means opening a file, which the canvas has no business
+    // knowing how to find -- see MainWindow::importAtOneToOne, and see the
+    // definition here for why the *unplaced* pixels are what a placement
+    // gesture floats.
+    Refusal beginLayerTransform(animage::TileGrid unplaced = {});
     bool transformIsWholeLayer() const { return transform_ && transform_->whole_layer; }
+
+    // Whether the gesture on screen is placing an imported picture, which is
+    // what the bar says instead of naming a bake. Nothing is written by one.
+    bool transformIsPlacement() const { return transform_ && transform_->reference; }
 
     // The five numbers on the bar. Setting them puts the pivot back to the
     // middle of what was picked up, so that a typed rotation always means the
@@ -681,6 +691,13 @@ private:
     // writes -- the eraser included, which is what a Backspace through a loop
     // is.
     Refusal refuseToEditHere() const;
+    // Everything both of the above check except the layer kind: no drawing, no
+    // layer, locked, hidden. Split out because placing an imported picture has
+    // to skip the kind -- being a reference layer is the reason it is being
+    // placed -- while still refusing a locked or hidden one, which are about
+    // whether you are editing this layer at all and mean the same thing here.
+    Refusal refuseToTouchHere() const;
+    Refusal refuseToPlaceHere() const { return refuseToTouchHere(); }
 
     // That list plus the layer kind. Shared by the transform tool and by all
     // three clipboard operations, because "refuse where the brush refuses" is
@@ -959,6 +976,31 @@ private:
         // drawing describes nothing on the other forty; and Apply goes through
         // Document::transformLayer.
         bool whole_layer = false;
+
+        // Whether what is being placed is an imported picture, which changes
+        // what Apply does and nothing else about the gesture.
+        //
+        // A reference layer holds no cels, so there is nothing to bake: Apply
+        // stores these five numbers on the layer and the pixels are derived
+        // from the file again at them. That is why `values` starts at the
+        // layer's current placement rather than at the identity -- the numbers
+        // are absolute and the drag edits them, where every other transform in
+        // the program starts from nothing and describes a change.
+        //
+        // It is also why there is no lasso here whatever the drawing count: a
+        // placement is a property of the whole file, and there is no such thing
+        // as placing half of it.
+        bool reference = false;
+
+        // The imported picture at 1:1, owned for the length of the gesture.
+        //
+        // Owned rather than pointed at, which is LayerFootprint's rule and for
+        // the same reason: a live gesture holding a pointer into something the
+        // document can rebuild is a dangling pointer waiting for a refresh.
+        // Nothing else holds these pixels -- the cache holds the *placed* ones,
+        // which is what composites -- so this is where they live until Apply or
+        // Escape.
+        animage::TileGrid unplaced;
 
         // Every drawing of the layer, and what a fit check needs about them.
         // Empty unless `whole_layer`.

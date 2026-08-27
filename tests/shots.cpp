@@ -844,6 +844,56 @@ const std::vector<Situation>& situations() {
          "menus, tools, layer panel, timeline and status bar, all in their places",
          [](Stage&) {}},
 
+        {"an-imported-picture-being-placed",
+         "the box round an import should be BLUE -- one drawing moves, so it is the blue case "
+         "however it was reached -- and the panel button should read 'Place this picture'. "
+         "Nothing is written by this box: the numbers are stored and the picture is made from "
+         "the file again at them",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settle();
+             // Through the tool, which for a reference layer routes to the same
+             // placement the panel button reaches -- both doors mean one thing
+             // when there is one picture, and this is the picture of that.
+             s.press(Id::Transform);
+             s.settle();
+         }},
+
+        {"an-imported-picture-placed-and-applied",
+         "the picture should have MOVED and been scaled, and the status bar should still say "
+         "tiles 0: a placement writes no pixels at all, so the document holds exactly as many "
+         "tiles after it as before",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settle();
+             s.press(Id::Transform);
+             s.settle();
+             // Through the numeric fields rather than the handles, so the shot
+             // is of an exact placement and not of wherever a synthetic drag
+             // happened to land.
+             s.canvas->setTransformValues([] {
+                 Transform t;
+                 t.dx = 500.0;
+                 t.dy = 260.0;
+                 t.scale_x = 0.6;
+                 t.scale_y = 0.6;
+                 return t;
+             }());
+             s.settle();
+             s.choose("Apply");
+             s.settle();
+         }},
+
         {"an-imported-picture",
          "the picture is on the canvas from a file and not from a cel: a second track at the "
          "bottom of the timeline, its layer listed, and the status bar saying the brush will "

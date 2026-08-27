@@ -744,6 +744,22 @@ void MainWindow::keyedTip(QWidget* on, shortcuts::Id id, const QString& what,
     keyed_tips_.push_back({nullptr, on, id, what, more, also});
 }
 
+// Changes what a keyed tooltip says, keeping the key it names.
+//
+// The tooltips are composed from a table so that rebinding a key rewrites every
+// sentence that mentions one; this reaches into that table rather than around
+// it, so a tooltip that changes with the gesture still gets its key from the
+// same place as all the others.
+void MainWindow::setKeyedTipText(QWidget* on, const QString& what) {
+    for (KeyedTip& tip : keyed_tips_) {
+        if (tip.widget != on) continue;
+        if (tip.what == what) return;  // nothing to do, and syncTooltips is not free
+        tip.what = what;
+        syncTooltips();
+        return;
+    }
+}
+
 void MainWindow::syncTooltips() {
     const shortcuts::Bindings& keys = shortcuts::current();
     const auto spelled = [&keys](shortcuts::Id id) {
@@ -1423,10 +1439,11 @@ void MainWindow::buildTransformBar() {
         keyedTip(b, id, what, more);
         connect(b, &QPushButton::clicked, this, handler);
         row->addWidget(b);
+        return b;
     };
-    button(QStringLiteral("Apply"), shortcuts::Id::TransformApply,
-           QStringLiteral("Bake it into the drawing"), QString(),
-           [this] { canvas_->applyTransform(); });
+    transform_apply_ = button(QStringLiteral("Apply"), shortcuts::Id::TransformApply,
+                              QStringLiteral("Bake it into the drawing"), QString(),
+                              [this] { canvas_->applyTransform(); });
     button(QStringLiteral("Cancel"), shortcuts::Id::TransformCancel,
            QStringLiteral("Put it back where it was"),
            QStringLiteral("Nothing was written, so this leaves no undo step."),
@@ -1456,6 +1473,23 @@ void MainWindow::placeTransformBar() {
 void MainWindow::chooseTransformTool() {
     stopPlayback();
     if (canvas_->transformIsLive()) return;
+
+    // **An imported picture goes through the placement path, whichever door was
+    // used.** The tool takes the drawing in front of you, and for a reference
+    // layer that is one picture shown from a file -- so both doors mean the
+    // same thing here and there is nothing for them to disagree about. Refusing
+    // and pointing at the other button would be a rule with no consequence
+    // behind it, which is the kind of rule people learn as "this program is
+    // fussy".
+    //
+    // "Two doors and no switch" is untouched by this: what that refuses is
+    // changing the scope of a gesture already on screen, and this is decided
+    // before there is one.
+    if (const Layer* layer = currentLayer();
+        layer && layer->kind == LayerKind::Reference) {
+        transformLayerThroughTime();
+        return;
+    }
 
     const CanvasWidget::Refusal refusal = canvas_->beginTransform();
     if (refusal == CanvasWidget::Refusal::None) return;
@@ -1511,7 +1545,17 @@ void MainWindow::onTransformBegan() {
     if (transform_scope_) {
         // Set before the bar is placed, because it changes the bar's width and
         // the placement is worked out from the size hint.
-        transform_scope_->setText(canvas_->transformIsWholeLayer()
+        //
+        // Three words rather than two, and the third is the one that carries
+        // news. "Whole layer" and "This drawing" both say how much is about to
+        // be written over; "Placing" says that nothing is -- the numbers are
+        // stored and the picture is derived from the file again at them, so
+        // this box can be opened and adjusted for ever at no cost to the
+        // picture. That is the opposite of what the other two mean, and it is
+        // not something anybody would assume from a box that looks the same.
+        transform_scope_->setText(canvas_->transformIsPlacement()
+                                      ? QStringLiteral("Placing — nothing is written")
+                                  : canvas_->transformIsWholeLayer()
                                       ? QStringLiteral("Whole layer")
                                       : QStringLiteral("This drawing"));
     }
@@ -1522,6 +1566,18 @@ void MainWindow::onTransformBegan() {
         transform_bar_->setVisible(true);
         transform_bar_->raise();
     }
+    // What Apply does depends on which gesture is on screen, and the two
+    // differ in the one way this program is most careful about: a bake writes
+    // every drawing it touches and a placement writes nothing at all. A button
+    // that says "bake" over a gesture that stores would be undoing, in the
+    // place somebody looks for reassurance, exactly what storing is for.
+    if (transform_apply_) {
+        setKeyedTipText(transform_apply_,
+                        canvas_->transformIsPlacement()
+                            ? QStringLiteral("Put the picture down here. Nothing is written")
+                            : QStringLiteral("Bake it into the drawing"));
+    }
+
     setShortcutMode(shortcuts::Mode::Transform);
     syncTransformFields();
     syncStatus();
@@ -2138,11 +2194,13 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
     // that project. Kept, a name that both projects happen to use would resolve
     // to the wrong file on the next save.
     imports_ = ProjectIO::Imports();
+    // A different document, so what it could not read has not been said yet.
+    reported_missing_imports_ = false;
     // Before afterProjectLoaded, so the first paint has the pictures. A
     // reference layer with nothing derived draws nothing at all -- correctly,
     // since compositing may not start a decode -- and the canvas would come up
     // blank and then fill in, which reads as a bug.
-    deriveReferenceFrames(home);
+    refreshReferenceFrames();
     afterProjectLoaded();
     return true;
 }
@@ -2748,6 +2806,11 @@ void MainWindow::syncTimelineHeight() {
 }
 
 void MainWindow::refreshEverything() {
+    // First, because everything below it draws. A placement that has just
+    // changed -- or been undone -- leaves the derived picture keyed on the old
+    // one, and a refresh that painted before re-deriving would show the layer
+    // blank for a frame.
+    refreshReferenceFrames();
     syncTimelineHeight();
     timeline_widget_->refresh();
     canvas_->setFrame(timeline_widget_->currentSlot());
@@ -2923,8 +2986,12 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
         doc_.endCommand();
     }
 
-    doc_.setReferenceFrame(added, drawing, layer_id, std::move(pixels));
     imports_.pending[import_name] = path;
+    // Installed at the placement the layer has, which for a fresh import is the
+    // identity -- so this is the decoded picture unchanged. Going through the
+    // same call refreshReferenceFrames uses is what keeps one answer to "what
+    // is this layer showing".
+    doc_.setReferenceFrame(added, drawing, layer_id, Transform{}, std::move(pixels));
 
     setCurrentTrack(added);
     // An import adds a track, which is one of the routes that has to say so:
@@ -2946,28 +3013,102 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
     return true;
 }
 
-void MainWindow::deriveReferenceFrames(const QString& folder) {
+// Where an imported file's bytes are right now.
+//
+// The project folder once it has one, and the path it was imported from until
+// then. Same order and same reason as ProjectIO::Imports: the folder is the
+// answer for every import except one that has not been saved yet.
+QString MainWindow::importPathFor(const std::string& name) const {
+    if (name.empty()) return QString();
+    const QString file = QString::fromStdString(name);
+    if (!project_folder_.isEmpty()) {
+        const QString inside = project_folder_ + QStringLiteral("/imports/") + file;
+        if (QFileInfo::exists(inside)) return inside;
+    }
+    const auto pending = imports_.pending.find(name);
+    return (pending == imports_.pending.end()) ? QString() : pending->second;
+}
+
+// The imported picture at 1:1, with no placement applied at all.
+//
+// What a placement gesture floats. The stored placement is *absolute* rather
+// than a delta -- the box opens at the numbers the layer is already placed at,
+// so dragging edits them rather than composing onto them -- which means the
+// pixels underneath have to be the unplaced ones. Feeding it the placed grid
+// from the cache would apply the placement twice.
+//
+// Decoded rather than kept, and only for as long as a gesture holds it. The
+// precedent is LayerFootprint, which owns copies of its grids rather than
+// pointing at the document's; the alternative here is a second permanent grid
+// per import, which is the memory the reference shape exists not to spend.
+TileGrid MainWindow::importAtOneToOne(const Layer& layer, QString* trouble) const {
+    const QString path = importPathFor(layer.reference_source);
+    if (path.isEmpty()) {
+        if (trouble) *trouble = QStringLiteral("the imported file is not where the project left it");
+        return {};
+    }
+    return image_import::decode(path, trouble);
+}
+
+// Derives the pixels of every reference layer whose picture is missing or was
+// derived at a placement that is no longer the layer's.
+//
+// **Called from refreshEverything and not from the paint**, which is the one
+// decision here worth arguing. A paint-time request is what the colour layer
+// does, and it is the right shape once a decode has to happen on a worker --
+// which a sequence will need and a still does not. Until then this runs where
+// the program already admits something has changed, and it is cheap when
+// nothing has: the test is a hash lookup per drawing, and every one of them
+// hits on every frame where nothing moved.
+//
+// It costs a decode on the interface thread when something *has* moved, which
+// on a 300 dpi scan is noticeable and on a sequence would not be acceptable.
+// That is the line where this grows a worker, and it is the same line where
+// docs/importing.md says the request path has to become requestCtgFills'.
+void MainWindow::refreshReferenceFrames() {
     QStringList unreadable;
 
     for (const Track& track : doc_.scene().tracks) {
         for (const Layer& layer : track.layers) {
             if (layer.kind != LayerKind::Reference || layer.reference_source.empty()) continue;
 
-            const QString file = folder + QStringLiteral("/imports/") +
-                                 QString::fromStdString(layer.reference_source);
+            // Nothing to do is the ordinary case and has to be the cheap one.
+            // Asked at the layer's current placement, so this is also what
+            // notices a placement that was changed or undone -- neither of
+            // which touches a cel, and so neither of which anything else here
+            // would see.
+            bool complete = true;
+            for (const auto& [id, image] : track.images) {
+                if (!doc_.referenceFrameFor(track.id, id, layer.id, layer.placement)) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete) continue;
+
             QString trouble;
-            TileGrid pixels = image_import::decode(file, &trouble);
-            if (pixels.empty() && !trouble.isEmpty()) {
-                unreadable.append(QStringLiteral("%1 (%2)")
-                                      .arg(QString::fromStdString(layer.reference_source), trouble));
+            const TileGrid source = importAtOneToOne(layer, &trouble);
+            if (source.empty() && !trouble.isEmpty()) {
+                unreadable.append(QStringLiteral("%1 (%2)").arg(
+                    QString::fromStdString(layer.reference_source), trouble));
                 continue;
             }
+
+            // **From the file every time, and never from what is already
+            // derived.** This is the whole of why a placement is stored rather
+            // than baked: a picture nudged, scaled and nudged again has been
+            // resampled once, from the bytes that came off disk. Re-deriving
+            // from the last derived grid would be a resample of a resample, and
+            // would look identical until the third or fourth adjustment.
+            TileGrid placed = layer.placement.isIdentity()
+                                  ? source
+                                  : transformTiles(source, layer.placement);
 
             // Every drawing of the track, not only the one at frame 0. A still
             // is one drawing today; walking them is what stops this being
             // rewritten the moment a sequence has several.
             for (const auto& [id, image] : track.images) {
-                doc_.setReferenceFrame(track.id, id, layer.id, pixels);
+                doc_.setReferenceFrame(track.id, id, layer.id, layer.placement, placed);
             }
         }
     }
@@ -2977,6 +3118,12 @@ void MainWindow::deriveReferenceFrames(const QString& folder) {
     // that picture; the drawings are untouched, and refusing to open a shot
     // because a modelsheet has gone would be a worse trade than any this
     // program makes elsewhere.
+    //
+    // Reported once per document rather than once per refresh: this runs on
+    // every refresh, and a missing file stays missing, so a message box each
+    // time would make the program unusable rather than informative.
+    if (reported_missing_imports_) return;
+    reported_missing_imports_ = true;
     QMessageBox::warning(this, QStringLiteral("Imported pictures"),
                          QStringLiteral("This project could not read %1 of its imported "
                                         "pictures, and those layers will be blank:\n\n%2")
@@ -3699,27 +3846,12 @@ void MainWindow::syncLayerButtons() {
                                  "A mark on one is a label rather than paint, and turning or\n"
                                  "scaling it would blend two labels into a third colour that\n"
                                  "then competes for regions on its own account.");
-    } else if (layer->kind == LayerKind::Reference) {
-        // Beside the colour layer and ahead of the lock, which is where this
-        // function's own rule puts a reason about the kind -- and it earns its
-        // place rather than merely fitting: without it a reference layer greys
-        // the button out anyway, on "nothing is drawn on this layer yet",
-        // because it has no cels. True, useless, and it sends somebody looking
-        // for a drawing to make. This one names what is actually in the way.
-        //
-        // What it says about baking is a promise this button cannot keep yet.
-        // A reference layer's pixels are derived from a file, so its placement
-        // wants storing rather than baking -- see docs/importing.md -- and
-        // until that exists an import sits at 1:1 at the origin.
-        refusal = QStringLiteral("an imported picture cannot be transformed yet.\n"
-                                 "It is shown from its file rather than stored as drawings,\n"
-                                 "so there is nothing here to bake. Placing one without\n"
-                                 "resampling it is still to be built.");
     } else if (layer->locked) {
         refusal = QStringLiteral("this layer is locked");
     } else if (!layer->visible) {
         refusal = QStringLiteral("this layer is hidden");
-    } else if (doc_.layerDrawings(track_, layer->id).empty()) {
+    } else if (layer->kind != LayerKind::Reference &&
+               doc_.layerDrawings(track_, layer->id).empty()) {
         // Last, because beginLayerTransform asks it last. Cels and not ink: a
         // layer with no cel anywhere has nothing to move and is the case worth
         // catching, which is a brand-new layer. Asking about the ink would mean
@@ -3730,13 +3862,32 @@ void MainWindow::syncLayerButtons() {
     }
 
     layer_transform_->setEnabled(refusal.isEmpty());
+    // An imported picture is *placed* and not transformed, and the button says
+    // so. One word for two things whose costs differ by everything -- one
+    // writes every drawing in the layer, the other writes nothing at all --
+    // would be the button telling the same lie the tooltip is here to prevent.
+    const bool placing = layer && layer->kind == LayerKind::Reference;
+    layer_transform_->setText(placing ? QStringLiteral("Place this picture")
+                                      : QStringLiteral("Transform layer through time"));
     layer_transform_->setToolTip(
-        refusal.isEmpty()
-            ? QStringLiteral("Move, turn or scale every drawing of this layer at once.\n\n"
+        !refusal.isEmpty()
+            ? QStringLiteral("Cannot %1: %2")
+                  .arg(placing ? QStringLiteral("place this picture")
+                               : QStringLiteral("transform this layer through time"),
+                       refusal)
+        : placing
+            // Worth saying because it is the opposite of every other warning on
+            // this button, and because nobody would assume it: a placement is
+            // stored rather than written, so it can be adjusted again and again
+            // and the picture is still one resample away from the file.
+            ? QStringLiteral("Move, turn or scale the imported picture.\n\n"
+                             "Nothing is written: where it sits is stored, and the picture is\n"
+                             "made from the file again each time you move it. Adjusting it\n"
+                             "never costs it any quality, however often you do it.")
+            : QStringLiteral("Move, turn or scale every drawing of this layer at once.\n\n"
                              "It is baked on Apply: every drawing in the layer is written,\n"
                              "in one undo step. A nudge or a flip is exact; turning or\n"
-                             "scaling resamples every drawing, once.")
-            : QStringLiteral("Cannot transform this layer through time: %1").arg(refusal));
+                             "scaling resamples every drawing, once."));
 
     // Remove layer, which had the same fault the button above was built to
     // avoid and had it from the start: `removeCurrentLayer` returns without a
@@ -3762,7 +3913,26 @@ void MainWindow::syncLayerButtons() {
 
 // The layer panel's button. The canvas owns the gesture; this is the door.
 void MainWindow::transformLayerThroughTime() {
-    const CanvasWidget::Refusal why = canvas_->beginLayerTransform();
+    // An imported picture is placed rather than baked, and what the gesture
+    // floats is the file at 1:1 -- the stored placement is absolute, so the
+    // pixels under it must be unplaced. Decoded here because this is the side
+    // of the seam that knows where `imports/` is; the canvas is handed pixels
+    // and never a path.
+    TileGrid unplaced;
+    if (const Layer* layer = currentLayer();
+        layer && layer->kind == LayerKind::Reference) {
+        QString trouble;
+        unplaced = importAtOneToOne(*layer, &trouble);
+        if (unplaced.empty()) {
+            statusBar()->showMessage(
+                QStringLiteral("Cannot place this picture: %1")
+                    .arg(trouble.isEmpty() ? QStringLiteral("it has nothing in it") : trouble),
+                6000);
+            return;
+        }
+    }
+
+    const CanvasWidget::Refusal why = canvas_->beginLayerTransform(std::move(unplaced));
     if (why != CanvasWidget::Refusal::None) {
         sayCannot(statusBar(), "transform this layer through time", why);
         return;

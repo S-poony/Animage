@@ -1840,17 +1840,31 @@ void CanvasWidget::drawSelection(QPainter& painter) const {
 // created, so the question is not what kind of mark this would be but whether
 // there is anywhere to put one. See docs/importing.md.
 CanvasWidget::Refusal CanvasWidget::refuseToEditHere() const {
-    if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
-
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
-    if (!layer) return Refusal::NoLayer;
     // Ahead of the lock, which is the order refuseHere already uses and for the
     // reason it gives: unlocking would not make this work, so naming the lock
     // would send somebody to fix the wrong thing. An import is not locked --
     // the kind is what refuses -- but a person is free to lock one, and then
     // the true reason still has to be the one that is said.
-    if (layer->kind == LayerKind::Reference) return Refusal::ReferenceLayer;
+    if (layer && layer->kind == LayerKind::Reference) return Refusal::ReferenceLayer;
+    return refuseToTouchHere();
+}
+
+// The rest of that list, without the kind.
+//
+// Placing an imported picture has to get past the reference check -- being one
+// is why it is being placed -- and must still stop on the other four, which are
+// not about what kind of layer this is but about whether you are working on it
+// at all. A locked layer is one you have said not to change, and a placement
+// changes it; a hidden one is one you cannot see, and placing something you
+// cannot see is aiming in the dark.
+CanvasWidget::Refusal CanvasWidget::refuseToTouchHere() const {
+    if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
+
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    if (!layer) return Refusal::NoLayer;
     if (layer->locked) return Refusal::LockedLayer;
     if (!layer->visible) return Refusal::HiddenLayer;
     return Refusal::None;
@@ -2080,12 +2094,38 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
 // **The ghosts.** Every other drawing of the layer, under the float at low
 // opacity, moving with it -- because what is being placed is the layer and not
 // the drawing, and there is no other way to see whether it has landed.
-CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
+CanvasWidget::Refusal CanvasWidget::beginLayerTransform(TileGrid unplaced) {
     if (transform_) return Refusal::None;
+
+    const Track* holding = doc_.scene().findTrack(track_);
+    const Layer* active = holding ? holding->findLayer(active_layer_) : nullptr;
+    const bool placing = active && active->kind == LayerKind::Reference;
+
+    // **A layer of one drawing is the Transform tool's job, and going through
+    // it rather than around it is what gives the lasso back.**
+    //
+    // The whole-layer path clears the selection, on the grounds that a loop
+    // describes a shape on this drawing and nothing at all on the other forty.
+    // With one drawing there are no other forty: the loop describes exactly
+    // what is there, and refusing it here while honouring it in the tool was a
+    // difference with no reason behind it. Everything else agrees already --
+    // the box is this drawing's bounds either way, Apply writes one cel either
+    // way -- and the ordinary path does it without the bake's rescue, its
+    // deferred trim or its history cost.
+    //
+    // Not for a reference layer, whatever the count: there is no cel for the
+    // tool to lift, and a placement is a property of the whole file.
+    if (!placing && doc_.layerDrawings(track_, active_layer_).size() == 1) {
+        return beginTransform();
+    }
 
     // The same list, in the same order, for the same reasons -- including the
     // layer kind. See beginTransform.
-    const Refusal refusal = refuseHere();
+    //
+    // Except the reference kind, which this door is the only way past: the
+    // brush refuses it because there is nowhere to put a mark, and placing a
+    // picture is not putting a mark anywhere.
+    const Refusal refusal = placing ? refuseToPlaceHere() : refuseHere();
     if (refusal != Refusal::None) return refusal;
 
     // Sets tool_ by hand, so it ends the stroke itself. See #78 and the note in
@@ -2097,6 +2137,7 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
 
     LiveTransform live;
     live.whole_layer = true;
+    live.reference = placing;
     live.track = track_;
     live.image = image_;
     live.layer = active_layer_;
@@ -2106,13 +2147,32 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     // number the status bar promises all have to be about exactly the same set,
     // in the same order.
     std::vector<const TileGrid*> grids;
-    for (const ImageId id : doc_.layerDrawings(track_, active_layer_)) {
-        const Cel* cel = doc_.celAt(track_, id, active_layer_);
-        if (!cel) continue;
-        // Pushed together, so the two lists stay index for index -- which is
-        // what lets the float be found by image and the budget by position.
-        live.layer_images.push_back(id);
-        grids.push_back(&cel->tiles());
+    if (placing) {
+        // One picture, shown on every drawing of the track. The pixels are the
+        // *unplaced* ones and the numbers below are the layer's current
+        // placement, so what is on screen when the box opens is what was on
+        // screen before it opened -- and dragging edits the placement rather
+        // than composing onto it. That is what stops a picture adjusted three
+        // times having been resampled three times.
+        if (unplaced.empty()) return Refusal::NothingDrawn;
+        live.unplaced = std::move(unplaced);
+        for (const auto& [id, image] : track->images) live.layer_images.push_back(id);
+        // Sorted, because an unordered_map's walk order is not the timeline's
+        // and is not stable between two runs of the same program -- and the
+        // ghost picture is composited in this order. The same reason
+        // Document::layerDrawings sorts.
+        std::sort(live.layer_images.begin(), live.layer_images.end());
+        grids.assign(live.layer_images.size(), &live.unplaced);
+    } else {
+        for (const ImageId id : doc_.layerDrawings(track_, active_layer_)) {
+            const Cel* cel = doc_.celAt(track_, id, active_layer_);
+            if (!cel) continue;
+            // Pushed together, so the two lists stay index for index -- which
+            // is what lets the float be found by image and the budget by
+            // position.
+            live.layer_images.push_back(id);
+            grids.push_back(&cel->tiles());
+        }
     }
     // Worked out once and held, because drawnBounds reads pixels and the drag
     // that follows asks the budget on every pointer move.
@@ -2137,6 +2197,18 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     // to go and which is after the bake has already written every drawing.
     clearSelection();
 
+    if (live.reference && active) {
+        // The box opens at the placement the layer already has, which is the
+        // point of storing one: you can see where the picture is and adjust it,
+        // rather than starting from nothing and describing a change to
+        // something you cannot read off the screen. It is also how somebody
+        // finds out that moving it again costs nothing.
+        live.values = active->placement;
+    }
+    // The pivot is the middle of what was picked up, always -- including for a
+    // stored placement, where "what was picked up" is the unplaced picture and
+    // so this is the same number that was stored. endTransformDrag puts it back
+    // here after every drag, so the numeric fields keep meaning one thing.
     live.values.pivot_x = live.bounds.x + live.bounds.width / 2.0;
     live.values.pivot_y = live.bounds.y + live.bounds.height / 2.0;
     transform_ = std::move(live);
@@ -2164,10 +2236,18 @@ void CanvasWidget::rebindLayerTransform() {
 
     live.image = image_;
     live.lifted = TileGrid{};
-    for (std::size_t i = 0; i < live.layer_images.size(); ++i) {
-        if (live.layer_images[i] != live.image) continue;
-        if (i < live.footprint.grids.size()) live.lifted = live.footprint.grids[i];
-        break;
+    if (live.reference) {
+        // Every drawing of a reference track shows the same file, so which one
+        // the playhead is on does not change the float -- and must not leave it
+        // empty when the playhead is past the track's last slot, where a held
+        // import is still very much on screen.
+        live.lifted = live.unplaced;
+    } else {
+        for (std::size_t i = 0; i < live.layer_images.size(); ++i) {
+            if (live.layer_images[i] != live.image) continue;
+            if (i < live.footprint.grids.size()) live.lifted = live.footprint.grids[i];
+            break;
+        }
     }
 
     // The float first, because it settles `covers` and `step` and the ghosts go
@@ -2431,6 +2511,37 @@ bool CanvasWidget::applyTransform() {
     // other commit in this program there is nothing on screen that would change
     // while it ran. A pointer that goes on looking like a transform pointer
     // through a two-second stall reads as a program that has stopped.
+    if (live.reference) {
+        // **Stored, not baked.** No cel is written, nothing is journalled
+        // beyond the layer's own properties, and the picture is derived from
+        // the file again at these numbers -- so adjusting a placement for the
+        // tenth time has still resampled the original once.
+        //
+        // It goes through updateLayer, so it undoes like any other layer
+        // property. What re-derives afterwards is refreshEverything, which
+        // asks whether each reference layer's pixels were made at the
+        // placement it now has; that is also what covers the undo, which
+        // changes a placement without touching anything else that would
+        // notice.
+        const Track* track = doc_.scene().findTrack(live.track);
+        const Layer* layer = track ? track->findLayer(live.layer) : nullptr;
+        if (layer && !(layer->placement == live.values)) {
+            Layer placed = *layer;
+            placed.placement = live.values;
+            doc_.updateLayer(live.track, live.layer, placed);
+        }
+        transform_.reset();
+        refreshAll();
+        refreshPointer();
+        Q_EMIT documentChanged();
+        Q_EMIT transformEnded();
+        // True: a placement always lands. There is no budget to exceed and no
+        // allocation to fail -- what it writes is five numbers -- so the
+        // refusal this returns for a bake that will not fit has nothing to
+        // report here.
+        return true;
+    }
+
     if (live.whole_layer) {
         if (!live.values.isIdentity()) {
             // Said before the wait and not after it. The count is the list the
@@ -2617,15 +2728,31 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     // scale that would take a hundred gigabytes to rasterise as at one that
     // takes eight megabytes -- and looking right up to the moment Enter is
     // pressed is what made this worth reporting. See issue #40.
-    // And green when it is the whole layer through time rather than the drawing
-    // in front of you. Two doors into one gesture that write wildly different
-    // amounts, so the box says which one you came through -- the ghosts say it
-    // too, but a layer of two drawings barely has ghosts and the box always
-    // does. Red still wins: whether it can be committed at all is the more
-    // urgent of the two things this colour is carrying.
-    const QColor ink = !transform_fits_ ? QColor(220, 50, 50)
-                       : live.whole_layer ? QColor(40, 160, 90)
-                                          : QColor(60, 130, 240);
+    // And green when more moves than the thing you pointed at.
+    //
+    // **The rule is about scope and not about which door you came through**,
+    // which is a finer distinction than this used to draw and is the one that
+    // survives a reference layer. It said green for the whole-layer gesture on
+    // the grounds that the two doors "write wildly different amounts" -- true
+    // of a bake, and not true at all of a placement, which writes nothing and
+    // can still move forty drawings. And a one-drawing layer came through the
+    // layer door and moved exactly the drawing in front of you, which is the
+    // blue case wearing green.
+    //
+    // So: blue is what you pointed at -- your selection, or the drawing you are
+    // looking at. Green is more than that. The ghosts say it too, but a layer
+    // of two drawings barely has ghosts and the box always does.
+    //
+    // What the colour deliberately does *not* carry is whether the lasso
+    // applies. That already announces itself, and better: a gesture that
+    // ignores a loop clears it, so the loop visibly goes. One signal per fact.
+    //
+    // Red still wins: whether it can be committed at all is the more urgent of
+    // the two things this colour is carrying.
+    const bool more_than_one_drawing = live.layer_images.size() > 1;
+    const QColor ink = !transform_fits_          ? QColor(220, 50, 50)
+                       : more_than_one_drawing   ? QColor(40, 160, 90)
+                                                 : QColor(60, 130, 240);
 
     painter.save();
     painter.setBrush(Qt::NoBrush);
