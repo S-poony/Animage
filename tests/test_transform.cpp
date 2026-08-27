@@ -4,7 +4,9 @@
 // one of these is a decision the code makes, and a decision can be asserted
 // exactly.
 
+#include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "document.h"
 #include "transform.h"
@@ -816,7 +818,7 @@ void theLayerCeilingBoundsGrowthAndNotTheTotal() {
     // of nine tiles the margin is most of the answer and any ratio measured
     // there is a ratio about the fixture.
     const TileGrid grid = gridOfTiles(16, 9);
-    const std::vector<const TileGrid*> forty(40, &grid);
+    const LayerFootprint forty = layerFootprint(std::vector<const TileGrid*>(40, &grid));
 
     // The case the first version of this got wrong, and the reason the rule
     // changed: turning a layer asks for about what the layer already holds, so
@@ -841,12 +843,12 @@ void theLayerCeilingBoundsGrowthAndNotTheTotal() {
     doubled.scale_x = 2.0;
     doubled.scale_y = 2.0;
     const TileGrid small = gridOfTiles(3, 3);
-    const std::vector<const TileGrid*> one(1, &small);
+    const LayerFootprint one = layerFootprint({&small});
     CHECK(commitFitsInBudget(one, doubled, kCommitTileBudget));
 
     // And the rule holds at both ends of the size range, which is what two did
     // not do: a rotation goes through on a small layer as well as a large one.
-    const std::vector<const TileGrid*> forty_small(40, &small);
+    const LayerFootprint forty_small = layerFootprint(std::vector<const TileGrid*>(40, &small));
     CHECK(commitFitsInBudget(forty_small, turn, 8));
 
     // A nudge across the layer is never refused, however many drawings there
@@ -860,8 +862,47 @@ void theLayerCeilingBoundsGrowthAndNotTheTotal() {
 
     // Nothing to move costs nothing to ask about, and is not refused by a
     // ceiling no scale could fit under.
-    const std::vector<const TileGrid*> nothing;
-    CHECK(commitFitsInBudget(nothing, huge, 1));
+    CHECK(commitFitsInBudget(layerFootprint({}), huge, 1));
+
+    // A layer that is simply absent at some drawings is skipped rather than
+    // refused, and a null never reaches the answer as a hole in the list.
+    const LayerFootprint holes = layerFootprint({nullptr, &grid, nullptr});
+    CHECK_EQ(holes.grids.size(), std::size_t{1});
+    CHECK_EQ(holes.drawn.size(), std::size_t{1});
+    CHECK(commitFitsInBudget(holes, turn, 8));
+}
+
+void aFootprintIsWhatAGestureHoldsRatherThanAsksFor() {
+    TEST("a layer footprint answers the budget without reading the layer again");
+
+    // The point of the type, pinned: it owns its grids, so the answer survives
+    // the document being edited underneath it. Without that, holding one for
+    // the length of a drag would be holding pointers into cels that a stroke,
+    // an undo or a delete could take away.
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId first = doc.insertImage(track, 0);
+    const ImageId second = doc.insertImage(track, 1);
+    drawBox(doc, track, first, ink, {40, 40, 40, 20});
+    drawBox(doc, track, second, ink, {40, 40, 40, 20});
+
+    const LayerFootprint held = layerFootprint(doc.layerGrids(track, ink));
+    CHECK_EQ(held.grids.size(), std::size_t{2});
+    const std::size_t occupied = held.occupied;
+    CHECK(occupied > 0);
+
+    Transform turn;
+    turn.rotation = 7.0;
+    const bool before = commitFitsInBudget(held, turn, kCommitTileBudget);
+
+    // Now take the layer apart underneath it. The footprint is unchanged,
+    // because what it holds is its own.
+    doc.clearCel(track, second, ink);
+    CHECK(doc.celAt(track, second, ink) == nullptr ||
+          doc.celAt(track, second, ink)->tiles().empty());
+    CHECK_EQ(held.occupied, occupied);
+    CHECK_EQ(commitFitsInBudget(held, turn, kCommitTileBudget), before);
 }
 
 void aBakeThatRunsOutOfMemoryPutsEveryDrawingBack() {
@@ -914,6 +955,157 @@ void aBakeThatRunsOutOfMemoryPutsEveryDrawingBack() {
     CHECK_EQ(again.drawings, drawings.size());
 }
 
+void aRescuedBakeLeavesTheHistoryAsItFoundIt() {
+    TEST("a layer bake that runs out of memory does not spend the session's history");
+
+    // The trap this pins, and it is the one the refusal message walks into:
+    // closing a command trims the history to its byte budget, and one bake is
+    // most of that budget on its own -- at HD, more than all of it. So the
+    // close dropped every older command to make room, and the rescue then threw
+    // away the command the room was made for. "Nothing has changed", said over
+    // an undo stack that had just been emptied.
+    Document doc;
+    // Small enough that one bake is most of it, which is what a 4K layer is
+    // against the real 512 MB.
+    doc.setHistoryBudget(512u * 1024u);
+
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+
+    std::vector<ImageId> drawings;
+    for (int d = 0; d < 6; ++d) {
+        drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(d)));
+        drawBox(doc, track, drawings.back(), ink, {40, 40, 200, 200});
+    }
+
+    const std::size_t depth = doc.undoDepth();
+    const std::uint64_t stamp = doc.historyStamp();
+    CHECK(depth > 1);
+
+    Transform t;
+    t.dx = 700.0;
+    t.dy = 500.0;
+    doc.failLayerBakeAfterForTesting(4);
+    CHECK(doc.transformLayer(track, ink, t).ran_out_of_memory);
+
+    // Every command still there, and the newest of them still the one that was
+    // newest before the bake.
+    CHECK_EQ(doc.undoDepth(), depth);
+    CHECK_EQ(doc.historyStamp(), stamp);
+    CHECK(!doc.canRedo());
+
+    // And they still work: the drawing made before the bake can still be taken
+    // back, which is the thing a trimmed history quietly stops being able to do.
+    std::size_t undone = 0;
+    while (doc.undo()) ++undone;
+    CHECK_EQ(undone, depth);
+    CHECK(doc.celAt(track, drawings[0], ink) == nullptr);
+}
+
+void aRescuedBakeGivesTheRedoStackBack() {
+    TEST("a layer bake that runs out of memory leaves a redo where it found one");
+
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId rough = doc.addLayer(track, "rough");
+
+    std::vector<ImageId> drawings;
+    for (int d = 0; d < 3; ++d) {
+        drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(d)));
+        drawBox(doc, track, drawings.back(), ink, {40, 40, 40, 20});
+    }
+
+    // Something to redo, on a layer the bake is not about, so undoing it leaves
+    // every drawing the bake will walk exactly where it was.
+    drawBox(doc, track, drawings[0], rough, {200, 200, 40, 20});
+    CHECK(doc.undo());
+    CHECK(doc.canRedo());
+    CHECK_EQ(doc.celAt(track, drawings[0], rough) == nullptr
+                 ? 0.0f
+                 : doc.celAt(track, drawings[0], rough)->pixel(210, 210).a,
+             0.0f);
+
+    Transform t;
+    t.dx = 300.0;
+    // Two in, so the bake really has written something before it gives up --
+    // this is the rollback path and not the nothing-happened one.
+    doc.failLayerBakeAfterForTesting(2);
+    CHECK(doc.transformLayer(track, ink, t).ran_out_of_memory);
+
+    // Nothing changed, so nothing the document offered before it should be
+    // gone -- including the thing it was offering to put back.
+    CHECK(doc.canRedo());
+    CHECK(doc.redo());
+    CHECK(doc.celAt(track, drawings[0], rough)->pixel(210, 210).a > 0.9f);
+    // And the layer itself is still where it was: the bake put it back.
+    CHECK(doc.celAt(track, drawings[0], ink)->pixel(50, 50).a > 0.9f);
+}
+
+void theBakeFailureHookIsTakenByTheNextBakeWhateverItDoes() {
+    TEST("a bake-failure hook is taken by the next bake even when that bake does nothing");
+
+    // Armed, then spent on a call that returns before it writes anything. The
+    // hook has to go with that call rather than lie in wait: a test that armed
+    // it, asked for an identity and then asked for a real bake would otherwise
+    // watch the real one fail for no reason it had written down.
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const ImageId image = doc.insertImage(track, 0);
+    drawBox(doc, track, image, ink, {40, 40, 40, 20});
+
+    Transform moved;
+    moved.dx = 300.0;
+
+    doc.failLayerBakeAfterForTesting(0);
+    // An identity: takes the hook, writes nothing, reports nothing.
+    CHECK(!doc.transformLayer(track, ink, Transform{}).ran_out_of_memory);
+    CHECK_EQ(doc.transformLayer(track, ink, moved).drawings, std::size_t{1});
+
+    // And the same for a layer that is not there at all.
+    doc.failLayerBakeAfterForTesting(0);
+    CHECK(!doc.transformLayer(track, 9999, moved).ran_out_of_memory);
+    CHECK(!doc.transformLayer(track, ink, moved).ran_out_of_memory);
+}
+
+void everyDrawingOfALayerIsListedInAStableOrder() {
+    TEST("a layer's drawings come back sorted, whatever order the images are held in");
+
+    // `Track::images` is an unordered_map: its walk order is not the timeline's
+    // and is not stable between runs. Everything that has to agree with the
+    // bake reads this, so the order has to be the list's and not the map's --
+    // the ghost picture is composited in it, and merged in a hash order it came
+    // out a different picture every time it was drawn.
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId rough = doc.addLayer(track, "rough");
+
+    std::vector<ImageId> made;
+    for (int d = 0; d < 12; ++d) {
+        made.push_back(doc.insertImage(track, static_cast<std::size_t>(d)));
+        // Every other drawing gets ink; the rest get only the layer beside it,
+        // so this is also a check that the list is about one layer.
+        drawBox(doc, track, made.back(), (d % 2 == 0) ? ink : rough, {40, 40, 40, 20});
+    }
+
+    const std::vector<ImageId> drawings = doc.layerDrawings(track, ink);
+    CHECK_EQ(drawings.size(), std::size_t{6});
+    CHECK(std::is_sorted(drawings.begin(), drawings.end()));
+    for (const ImageId id : drawings) CHECK(doc.celAt(track, id, ink) != nullptr);
+
+    // Asked twice, answered the same, which is the property a picture built
+    // from it depends on.
+    CHECK(doc.layerDrawings(track, ink) == drawings);
+
+    // And it is exactly what the grids and the bake are about.
+    CHECK_EQ(doc.layerGrids(track, ink).size(), drawings.size());
+    Transform t;
+    t.dx = 300.0;
+    CHECK_EQ(doc.transformLayer(track, ink, t).drawings, drawings.size());
+}
+
 void aBakeThatFailsBeforeWritingUndoesNothingElse() {
     TEST("a layer bake that fails before its first write leaves earlier history alone");
 
@@ -964,7 +1156,12 @@ int main() {
     bakingALayerTouchesEveryDrawingOnce();
     bakingAnIdentityWritesNothing();
     theLayerCeilingBoundsGrowthAndNotTheTotal();
+    aFootprintIsWhatAGestureHoldsRatherThanAsksFor();
     aBakeThatRunsOutOfMemoryPutsEveryDrawingBack();
     aBakeThatFailsBeforeWritingUndoesNothingElse();
+    aRescuedBakeLeavesTheHistoryAsItFoundIt();
+    aRescuedBakeGivesTheRedoStackBack();
+    theBakeFailureHookIsTakenByTheNextBakeWhateverItDoes();
+    everyDrawingOfALayerIsListedInAStableOrder();
     return testing::summarise("transform");
 }

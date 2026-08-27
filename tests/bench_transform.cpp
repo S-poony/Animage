@@ -276,7 +276,7 @@ int main() {
 
             // Whether one gesture on this layer can be committed at all, which
             // is one total across the drawings and not one each.
-            const std::vector<const TileGrid*> grids = doc.layerGrids(track, layer);
+            const LayerFootprint grids = layerFootprint(doc.layerGrids(track, layer));
             Transform bigger;
             bigger.scale_x = 2.0;
             bigger.scale_y = 2.0;

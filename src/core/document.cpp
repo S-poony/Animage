@@ -626,11 +626,14 @@ void Document::clearCel(TrackId track_id, ImageId image_id, LayerId layer_id) {
 // order is not the timeline's and is not even stable between two runs of the
 // same program. A bake that journalled its tiles in a different order each time
 // would be a bake no test could assert anything about.
-static std::vector<ImageId> drawingsWithACel(const Track& track, LayerId layer) {
+std::vector<ImageId> Document::layerDrawings(TrackId track_id, LayerId layer_id) const {
     std::vector<ImageId> drawings;
-    drawings.reserve(track.images.size());
-    for (const auto& [id, image] : track.images) {
-        if (image.celFor(layer) != kNoId) drawings.push_back(id);
+    const Track* track = scene_.findTrack(track_id);
+    if (!track) return drawings;
+
+    drawings.reserve(track->images.size());
+    for (const auto& [id, image] : track->images) {
+        if (image.celFor(layer_id) != kNoId) drawings.push_back(id);
     }
     std::sort(drawings.begin(), drawings.end());
     return drawings;
@@ -638,10 +641,7 @@ static std::vector<ImageId> drawingsWithACel(const Track& track, LayerId layer) 
 
 std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId layer_id) const {
     std::vector<const TileGrid*> grids;
-    const Track* track = scene_.findTrack(track_id);
-    if (!track) return grids;
-
-    for (const ImageId image : drawingsWithACel(*track, layer_id)) {
+    for (const ImageId image : layerDrawings(track_id, layer_id)) {
         if (const Cel* found = celAt(track_id, image, layer_id)) grids.push_back(&found->tiles());
     }
     return grids;
@@ -649,11 +649,17 @@ std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId laye
 
 Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
                                              const Transform& t) {
+    // Taken whatever happens next, including every way out below. A hook left
+    // armed by a bake that never ran would fire on an unrelated later one, and
+    // "the next call to this function" is a rule a test can hold in its head
+    // where "the next call that got as far as writing something" is not.
+    const std::optional<std::size_t> fail_after = std::exchange(fail_bake_after_, std::nullopt);
+
     Track* track = scene_.findTrack(track_id);
     if (!track || !track->findLayer(layer_id)) return {};
     if (t.isIdentity()) return {};
 
-    const std::vector<ImageId> drawings = drawingsWithACel(*track, layer_id);
+    const std::vector<ImageId> drawings = layerDrawings(track_id, layer_id);
     if (drawings.empty()) return {};
 
     // Where the history stood before any of this, so that the rescue below can
@@ -662,6 +668,24 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
     // one in the same breath and read the same either way. A stamp is unique to
     // the command that got it and the newest command is never trimmed.
     const std::uint64_t before = historyStamp();
+
+    // **The history is not allowed to pay for a bake that is about to be
+    // undone.** Closing the command trims the history to its byte budget, and
+    // one bake is most of that budget on its own -- at HD, more than all of it
+    // -- so an ordinary close drops every older command to make room. That is
+    // the right price for a bake that *lands*: undo has to hold the old pixels
+    // and there is no cheaper correct answer. It is the wrong price entirely
+    // for one that runs out of memory, because the rescue then throws away the
+    // very command the room was made for, and the session's undo history has
+    // been spent on nothing. Reported as a bake that failed, said "nothing has
+    // changed", and left Ctrl+Z doing nothing at all.
+    //
+    // So the trim is held until the outcome is known, and the redo stack is
+    // held aside rather than cleared -- a rescued bake has to leave the history
+    // exactly as it found it, which is what the refusal message promises.
+    defer_trim_ = true;
+    std::vector<Command> redo_before = std::move(redo_stack_);
+    redo_stack_.clear();
 
     LayerBake done;
     {
@@ -675,7 +699,7 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
         ScopedCommand command(*this, "Transform layer through time");
         try {
             for (const ImageId image : drawings) {
-                if (fail_bake_after_ && done.drawings >= *fail_bake_after_) throw std::bad_alloc();
+                if (fail_after && done.drawings >= *fail_after) throw std::bad_alloc();
                 Cel* cel = celForWriting(track_id, image, layer_id);
                 if (!cel) continue;
                 // Nothing is created here: every drawing in the list already
@@ -691,10 +715,25 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
             // destructor during unwinding is a terminate rather than an error.
             done.ran_out_of_memory = true;
         }
-        fail_bake_after_.reset();
     }
+    defer_trim_ = false;
+    // Asked once, here, and used by both outcomes: whether the bake got as far
+    // as putting a command on the stack at all.
+    const bool wrote = historyStamp() != before;
 
-    if (!done.ran_out_of_memory) return done;
+    if (!done.ran_out_of_memory) {
+        // It landed, so the room it needs is room it has earned. Trimming here
+        // rather than in endCommand is the only difference from every other
+        // command in the program, and it is one line further along. What was
+        // held aside is dropped rather than put back, because a bake that wrote
+        // something is an edit and an edit is what invalidates a redo.
+        if (wrote) {
+            trimHistory();
+        } else {
+            redo_stack_ = std::move(redo_before);
+        }
+        return done;
+    }
 
     // Put back whatever landed. Every drawing written is journalled, so this is
     // exact rather than approximate -- and it is the whole reason the bake is
@@ -705,12 +744,17 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
     // leaves an empty command, which endCommand does not put on the stack at
     // all, and undoing then would undo whatever the person did *before* this.
     done.drawings = 0;
-    if (historyStamp() != before && undo()) {
+    if (wrote && undo()) {
         // And it must not be redoable. Undo moves the command to the redo
         // stack, and a redo of a bake that ran out of memory would put the
         // layer back into the half-written state this just rescued it from.
         redo_stack_.pop_back();
     }
+    // Everything the bake displaced has been put back, so what it was holding
+    // is not being held any more and the history is the size it was before. The
+    // redo stack goes back too: a bake that changed nothing must not be the
+    // thing that took away a redo.
+    redo_stack_ = std::move(redo_before);
     return done;
 }
 
@@ -844,7 +888,14 @@ void Document::endCommand() {
         // The only moment the history grows. Undo and redo move a command from
         // one stack to the other and free nothing, so nothing else can put it
         // over its budget.
-        trimHistory();
+        //
+        // Deferred for exactly one caller. A layer bake may be undone again the
+        // instant it closes -- it is the one command in the program that can
+        // run out of memory halfway and put itself back -- and trimming for a
+        // command that is about to be thrown away spends the session's history
+        // on nothing. transformLayer trims itself once it knows. Nothing else
+        // sets this, and it is cleared before that function returns.
+        if (!defer_trim_) trimHistory();
     }
     pending_ = Command{};
 }

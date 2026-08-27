@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -484,7 +485,13 @@ int filterReach(const Transform& t) {
 //
 // Cheap: no tile is looked at. It is what answers most of a drag, because
 // anything comfortably under the budget needs no count at all.
-std::size_t destinationTileBound(const TileGrid& source, const Transform& t,
+//
+// `drawn` is the source's own drawnBounds, handed in rather than taken here.
+// That is the one number in this file that costs real time to work out --
+// drawnBounds asks every tile whether it is fully transparent, which reads
+// pixels until it finds one -- and it does not depend on the transform, so a
+// drag must not pay for it again on every pointer move. See LayerFootprint.
+std::size_t destinationTileBound(const PixelRect& drawn, const Transform& t,
                                  std::size_t stop_at) {
     const Matrix forward = matrixOf(t);
 
@@ -492,7 +499,6 @@ std::size_t destinationTileBound(const TileGrid& source, const Transform& t,
     // box it walks, and kept in doubles: this is asked about scales whose box
     // does not fit in an int at all, and a refusal is the answer there rather
     // than a wrapped-around width.
-    const PixelRect drawn = drawnBounds(source);
     const Vec2 corners[4] = {
         apply(forward, {double(drawn.x), double(drawn.y)}),
         apply(forward, {double(drawn.x + drawn.width), double(drawn.y)}),
@@ -524,6 +530,29 @@ std::size_t destinationTileBound(const TileGrid& source, const Transform& t,
     return (bound >= static_cast<double>(stop_at)) ? stop_at : static_cast<std::size_t>(bound);
 }
 
+// Where one source tile's ink can land, in destination pixels.
+//
+// Grown by the filter's reach in *source* pixels, the way the resampler grows
+// the box it reads, and then by a whole tile once it has landed -- which is the
+// slack between an inverse-mapped square and the axis-aligned box the resampler
+// tests against. A rotated 128-pixel square's box is 128 * (|cos| + |sin|)
+// across, so the excess is under twenty-seven destination pixels; a tile of
+// margin covers it several times over and costs a rim of tiles on a count that
+// is already only being compared against a threshold.
+PixelRect tileFootprint(const Matrix& forward, TileCoord coord, int reach) {
+    const PixelRect square{coord.x * kTileSize - reach, coord.y * kTileSize - reach,
+                           kTileSize + 2 * reach, kTileSize + 2 * reach};
+    const PixelRect landed = transformedBounds(forward, square);
+    return {landed.x - kTileSize, landed.y - kTileSize, landed.width + 2 * kTileSize,
+            landed.height + 2 * kTileSize};
+}
+
+// How many destination tiles a dense bitmap may be spread over before the hash
+// set is the better answer. 65,536 entries is 64 KB, which is nothing beside a
+// single tile -- and past it the box is so much larger than the budget that the
+// count stops early anyway.
+constexpr std::size_t kBitmapCells = 1u << 16;
+
 // The destination tiles of one commit, counted exactly and no further than
 // `stop_at` -- past which the answer is only "at least this many", which is all
 // a budget ever needs to know.
@@ -532,49 +561,98 @@ std::size_t destinationTileBound(const TileGrid& source, const Transform& t,
 // destination tile is wanted by transformTiles if the *axis-aligned box* of its
 // inverse-mapped square reaches occupied source, and that box is wider than the
 // square it came from. So each source tile's footprint is grown before it is
-// counted, and this counts slightly more than the resampler would produce. It
-// never counts fewer, which is the direction that matters.
+// counted -- see tileFootprint -- and this counts slightly more than the
+// resampler would produce. It never counts fewer, which is the direction that
+// matters.
+//
+// **Marked in a bitmap rather than inserted into a set, where the destination
+// box is small enough to address.** Hashing a tile coordinate was the whole
+// cost of a whole-layer fit check: the count runs per drawing and is summed, so
+// a rotation drag over a forty-drawing layer of line art measured 10.9 ms a
+// pointer move against 0.3 ms for the same drag on one drawing -- on the
+// interface thread, once per tablet event. The box a commit lands in is dense
+// enough to index directly, so this marks a byte instead. It is a change of
+// speed and not of answer: both paths count the same coordinates the same
+// number of times, and the set is still there for the boxes too large to
+// address.
 std::size_t destinationTileCount(const TileGrid& source, const Transform& t,
                                  std::size_t stop_at) {
     const Matrix forward = matrixOf(t);
     const int reach = filterReach(t);
 
-    std::unordered_set<TileCoord, TileCoordHash> touched;
+    // Where every footprint has to land, from the occupied tiles' own bounds
+    // grown exactly as one tile's are. An affine takes a larger rectangle to a
+    // larger axis-aligned box, so no tile's footprint can escape this one.
+    bool any = false;
+    TileCoord lowest{}, highest{};
+    for (const auto& [coord, tile] : source.tiles()) {
+        if (!tile) continue;
+        if (!any) {
+            lowest = highest = coord;
+            any = true;
+            continue;
+        }
+        lowest = {std::min(lowest.x, coord.x), std::min(lowest.y, coord.y)};
+        highest = {std::max(highest.x, coord.x), std::max(highest.y, coord.y)};
+    }
+    if (!any) return 0;
+
+    const PixelRect whole{lowest.x * kTileSize - reach, lowest.y * kTileSize - reach,
+                          (highest.x - lowest.x + 1) * kTileSize + 2 * reach,
+                          (highest.y - lowest.y + 1) * kTileSize + 2 * reach};
+    const PixelRect landed = transformedBounds(forward, whole);
+    const TileCoord origin = tileCoordFor(landed.x - kTileSize, landed.y - kTileSize);
+    const TileCoord furthest = tileCoordFor(landed.x + landed.width + kTileSize - 1,
+                                            landed.y + landed.height + kTileSize - 1);
+    const long long across = static_cast<long long>(furthest.x) - origin.x + 1;
+    const long long down = static_cast<long long>(furthest.y) - origin.y + 1;
+
+    std::size_t counted = 0;
     // Sized once for the answer it can be asked to hold, because growing a hash
-    // table repeatedly is most of what this costs otherwise.
-    touched.reserve(stop_at + 1);
+    // table repeatedly is most of what the fallback costs otherwise.
+    std::unordered_set<TileCoord, TileCoordHash> touched;
+    std::vector<std::uint8_t> marked;
+    // A box that came back inside out is one whose corners overflowed an int on
+    // the way here, which the scale guard makes unreachable and which the set
+    // survives anyway. Addressing it would not.
+    const bool dense = landed.width > 0 && landed.height > 0 && across > 0 && down > 0 &&
+                       static_cast<std::size_t>(across * down) <= kBitmapCells;
+    if (dense) {
+        marked.assign(static_cast<std::size_t>(across * down), 0u);
+    } else {
+        touched.reserve(std::min<std::size_t>(stop_at, kBitmapCells) + 1);
+    }
+
     for (const auto& [coord, tile] : source.tiles()) {
         if (!tile) continue;
 
-        // Grown by the filter's reach in *source* pixels, the way the resampler
-        // grows the box it reads, and then by a whole tile once it has landed
-        // -- which is the slack between an inverse-mapped square and the
-        // axis-aligned box the resampler tests against. A rotated 128-pixel
-        // square's box is 128 * (|cos| + |sin|) across, so the excess is under
-        // twenty-seven destination pixels; a tile of margin covers it several
-        // times over and costs a rim of tiles on a count that is already only
-        // being compared against a threshold.
-        const PixelRect square{coord.x * kTileSize - reach, coord.y * kTileSize - reach,
-                               kTileSize + 2 * reach, kTileSize + 2 * reach};
-        PixelRect landed = transformedBounds(forward, square);
-        landed = {landed.x - kTileSize, landed.y - kTileSize, landed.width + 2 * kTileSize,
-                  landed.height + 2 * kTileSize};
-
-        const TileCoord first = tileCoordFor(landed.x, landed.y);
-        const TileCoord last =
-            tileCoordFor(landed.x + landed.width - 1, landed.y + landed.height - 1);
+        const PixelRect footprint = tileFootprint(forward, coord, reach);
+        const TileCoord first = tileCoordFor(footprint.x, footprint.y);
+        const TileCoord last = tileCoordFor(footprint.x + footprint.width - 1,
+                                            footprint.y + footprint.height - 1);
         for (int ty = first.y; ty <= last.y; ++ty) {
             for (int tx = first.x; tx <= last.x; ++tx) {
-                touched.insert({tx, ty});
+                if (dense) {
+                    std::uint8_t& cell =
+                        marked[static_cast<std::size_t>(ty - origin.y) *
+                                   static_cast<std::size_t>(across) +
+                               static_cast<std::size_t>(tx - origin.x)];
+                    if (cell) continue;
+                    cell = 1u;
+                    ++counted;
+                } else {
+                    if (!touched.insert({tx, ty}).second) continue;
+                    ++counted;
+                }
                 // Inside the innermost loop, so that the work this does is
                 // bounded by what it was asked for and not by the footprint it
                 // is walking. One source tile at a large enough scale covers
                 // more destination tiles than the whole budget by itself.
-                if (touched.size() >= stop_at) return stop_at;
+                if (counted >= stop_at) return stop_at;
             }
         }
     }
-    return touched.size();
+    return counted;
 }
 
 }  // namespace
@@ -593,31 +671,41 @@ bool commitFitsInBudget(const TileGrid& source, const Transform& t, std::size_t 
     // the tiles with anything under them, so anything comfortably under the
     // budget is answered without counting a single tile. That is most of a
     // drag, which is what keeps this off the pen's latency path.
-    const std::size_t bound = destinationTileBound(source, t, tile_budget + 1);
+    const std::size_t bound = destinationTileBound(drawnBounds(source), t, tile_budget + 1);
     if (bound == kUncountable) return false;
     if (bound <= tile_budget) return true;
 
     return destinationTileCount(source, t, tile_budget + 1) <= tile_budget;
 }
 
-bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Transform& t,
+LayerFootprint layerFootprint(const std::vector<const TileGrid*>& sources) {
+    LayerFootprint layer;
+    layer.grids.reserve(sources.size());
+    layer.drawn.reserve(sources.size());
+    for (const TileGrid* source : sources) {
+        if (!source) continue;
+        layer.drawn.push_back(drawnBounds(*source));
+        // Counted rather than taken from tileCount(), which counts entries and
+        // not ink: an over-count here would *raise* the ceiling, and this is
+        // the one number in the expression that has to lean the other way.
+        for (const auto& [coord, tile] : source->tiles()) {
+            if (tile) ++layer.occupied;
+        }
+        layer.grids.push_back(*source);
+    }
+    return layer;
+}
+
+bool commitFitsInBudget(const LayerFootprint& layer, const Transform& t,
                         std::size_t tile_budget) {
     // The exact paths again, and the reason is stronger here than for one
     // drawing: a registration nudge across a whole layer is the commonest thing
     // this feature is for, and it must never be the one that will not fit.
     if (t.isWholePixelTranslation() || t.isAxisMirror()) return true;
 
-    // What the layer already holds, which is what the ceiling below is built
-    // from. Counted rather than taken from tileCount(), which counts entries
-    // and not ink: an over-count here would *raise* the ceiling, and this is
-    // the one number in the expression that has to lean the other way.
-    std::size_t occupied = 0;
-    for (const TileGrid* source : sources) {
-        if (!source) continue;
-        for (const auto& [coord, tile] : source->tiles()) {
-            if (tile) ++occupied;
-        }
-    }
+    const std::vector<TileGrid>& sources = layer.grids;
+    const std::size_t occupied = layer.occupied;
+
     // Before the scale guard and not after, exactly as for one drawing: the
     // guard is about what one occupied tile costs, and a layer with nothing on
     // it anywhere has none. A bake of nothing fits in any budget, including one
@@ -657,9 +745,9 @@ bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Trans
     // at the same coordinate are two tiles: the coordinate is shared, the
     // memory is not.
     std::size_t bounded = 0;
-    for (const TileGrid* source : sources) {
-        if (!source || source->empty()) continue;
-        const std::size_t bound = destinationTileBound(*source, t, allowed + 1);
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        if (sources[i].empty()) continue;
+        const std::size_t bound = destinationTileBound(layer.drawn[i], t, allowed + 1);
         if (bound == kUncountable) return false;
         bounded += bound;
         if (bounded > allowed) break;
@@ -672,9 +760,9 @@ bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Trans
     // drawing would not have. What bounds the work is still the ceiling --
     // whatever is left of it -- and not the number of drawings.
     std::size_t total = 0;
-    for (const TileGrid* source : sources) {
-        if (!source || source->empty()) continue;
-        total += destinationTileCount(*source, t, allowed + 1 - total);
+    for (const TileGrid& source : sources) {
+        if (source.empty()) continue;
+        total += destinationTileCount(source, t, allowed + 1 - total);
         if (total > allowed) return false;
     }
     return true;

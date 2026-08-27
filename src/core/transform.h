@@ -234,6 +234,34 @@ bool commitFitsInBudget(const TileGrid& source, const Transform& t,
 // for undo, so about four times the layer at once.
 inline constexpr std::size_t kLayerGrowth = 3;
 
+// Everything about a layer's grids that a fit check needs and the transform
+// cannot change, gathered once.
+//
+// It exists for the drag. `drawnBounds` is the only expensive thing in a fit
+// check -- it asks every tile whether it is fully transparent, which reads
+// pixels until it finds one -- and asking it about forty drawings measured
+// 16 ms, on the interface thread, once per tablet event. None of it depends on
+// the five numbers being dragged, so the gesture works it out when it starts
+// and hands the same answer back on every move.
+//
+// It owns its grids rather than pointing at the document's, and that is worth a
+// line: a TileGrid copy is a hash map of shared tile handles and not a pixel,
+// so the copy costs microseconds -- and what it buys is that the whole thing
+// can be held by a live gesture, copied about and outlive an edit without a
+// dangling pointer being possible at all.
+struct LayerFootprint {
+    std::vector<TileGrid> grids;
+    // One per grid, in the same order. An empty grid gets an empty rectangle
+    // and is skipped rather than refused.
+    std::vector<PixelRect> drawn;
+    // Occupied tiles across the whole layer, which is what the ceiling is
+    // measured against.
+    std::size_t occupied = 0;
+};
+// Null sources are dropped rather than kept as holes, so `grids` is exactly
+// what a bake would walk.
+LayerFootprint layerFootprint(const std::vector<const TileGrid*>& sources);
+
 // The same question about a bake across a whole layer: every drawing of it,
 // moved by the same numbers, in one command.
 //
@@ -254,7 +282,7 @@ inline constexpr std::size_t kLayerGrowth = 3;
 //
 // Null and empty grids are skipped rather than refused, so a layer that is
 // simply absent at some drawings costs nothing to ask about.
-bool commitFitsInBudget(const std::vector<const TileGrid*>& sources, const Transform& t,
+bool commitFitsInBudget(const LayerFootprint& layer, const Transform& t,
                         std::size_t tile_budget = kCommitTileBudget);
 
 }  // namespace animage

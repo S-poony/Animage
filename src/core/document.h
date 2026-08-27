@@ -199,8 +199,16 @@ public:
     // than merely shrugging.
     LayerBake transformLayer(TrackId track, LayerId layer, const Transform& t);
 
-    // Makes the next bake fail after `drawings` of them, so the rescue above
-    // can be asserted rather than merely written.
+    // **A rescued bake leaves the history exactly as it found it**, which is
+    // what its refusal message promises and what the first version of it did
+    // not do. Closing a command trims the history to its byte budget, and one
+    // bake is most of that budget on its own -- so an ordinary close drops
+    // every older command to make room, and the rescue then throws away the
+    // command the room was made for. The session's undo history went with it.
+    // The trim is held until the outcome is known instead. See endCommand.
+    //
+    // Makes the next call to transformLayer fail after `drawings` of them, so
+    // the rescue above can be asserted rather than merely written.
     //
     // A hook in `core` for a test to pull is not free, and it is here because
     // the alternative is worse: the rescue is what makes bounding the growth
@@ -209,17 +217,28 @@ public:
     // a test can arrange -- a machine with room to swap succeeds and is merely
     // slow, and one without it takes the test process down with it.
     //
-    // Nothing in the interface reaches this, and it resets itself when the bake
-    // it armed has run.
+    // Nothing in the interface reaches this, and the next call to
+    // transformLayer takes it whether or not that call gets as far as writing
+    // anything -- so a hook armed before an identity, or before a layer with no
+    // drawings on it, cannot go off on some later bake instead.
     void failLayerBakeAfterForTesting(std::size_t drawings) { fail_bake_after_ = drawings; }
 
-    // The grids `transformLayer` would move, in the order it would move them.
+    // The drawings `transformLayer` would move, in the order it would move
+    // them: distinct images with a cel on this layer, sorted.
     //
-    // Exposed because two other things have to agree with the bake about
-    // exactly which drawings are in it and must not work it out for themselves:
-    // the budget, which sums the destination tiles across all of them, and the
-    // ghost picture the live gesture shows. The pointers are the document's and
-    // are good for exactly as long as it is not edited.
+    // Exposed because everything else that has to agree with the bake about
+    // exactly which drawings are in it must not work it out for itself -- the
+    // budget, the count the status bar promises, and the ghost picture the live
+    // gesture shows. Sorted, and that is not tidiness: `images` is an
+    // unordered_map, so its walk order is not the timeline's and is not even
+    // stable between two runs of the same program. A bake that journalled its
+    // tiles in a different order each time would be a bake no test could assert
+    // anything about, and a ghost picture merged in that order would be a
+    // different picture each time it was drawn.
+    std::vector<ImageId> layerDrawings(TrackId track, LayerId layer) const;
+
+    // The same list as grids, for the budget. The pointers are the document's
+    // and are good for exactly as long as it is not edited.
     std::vector<const TileGrid*> layerGrids(TrackId track, LayerId layer) const;
 
     std::size_t celCount() const { return cels_.size(); }
@@ -410,9 +429,16 @@ private:
     std::uint64_t command_stamps_ = 0;
     std::size_t history_budget_ = kDefaultHistoryBudget;
 
-    // Armed only by failLayerBakeAfterForTesting, and cleared by the bake it
-    // armed. Absent means what it says: nothing is going to be made to fail.
+    // Armed only by failLayerBakeAfterForTesting, and taken by the next call to
+    // transformLayer whatever that call does. Absent means what it says:
+    // nothing is going to be made to fail.
     std::optional<std::size_t> fail_bake_after_;
+
+    // Set only by transformLayer, and only for as long as its own command is
+    // open: a bake that runs out of memory undoes itself, and a history trimmed
+    // to make room for a command that is then thrown away has spent the
+    // session's undo on nothing. See endCommand.
+    bool defer_trim_ = false;
 
     CtgFillCache ctg_cache_;
     CtgCarries ctg_carries_;
