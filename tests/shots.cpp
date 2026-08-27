@@ -135,7 +135,9 @@
 #include "document.h"
 #include "floating_dock_frame.h"
 #include "layer_list.h"
+#include "image_import.h"
 #include "scene_settings_dialog.h"
+#include "sequence_import_dialog.h"
 #include "main_window.h"
 #include "shortcuts.h"
 #include "shortcuts_dialog.h"
@@ -576,6 +578,27 @@ private:
 // widening step when the file carries any other profile -- is exactly the kind
 // of thing that is wrong by a little and invisible in a screenshot of a drawing.
 // Flat saturated patches beside each other are where a wrong conversion shows.
+// A board with a number on it, for the sequence shots. The number is the point:
+// a sequence photographed with three identical pictures cannot show whether the
+// playhead is looking at the frame it says it is.
+bool writeNumberedBoard(const QString& path, int number) {
+    QImage board(640, 400, QImage::Format_RGBA8888);
+    board.fill(QColor(246, 244, 238));
+
+    QPainter painter(&board);
+    painter.setPen(QColor(40, 40, 46));
+    painter.drawRect(board.rect().adjusted(0, 0, -1, -1));
+    QFont big = painter.font();
+    big.setPointSize(160);
+    big.setBold(true);
+    painter.setFont(big);
+    painter.drawText(board.rect(), Qt::AlignCenter, QString::number(number));
+    painter.end();
+
+    board.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return board.save(path, "PNG");
+}
+
 bool writeSwatchGrid(const QString& path) {
     QImage sheet(640, 400, QImage::Format_RGBA8888);
     sheet.fill(QColor(246, 244, 238));
@@ -922,6 +945,29 @@ const std::vector<Situation>& situations() {
              if (!s.window.importImageFrom(file, &trouble)) {
                  std::printf("  could not import: %s\n", qPrintable(trouble));
              }
+             s.settlePicture();
+         }},
+
+        {"an-imported-sequence",
+         "one drawing per file across the timeline, the playhead on the third of them and that "
+         "frame's own picture on the canvas -- three cards on the import's row, not one held "
+         "across three, and the row stopping where the files stop rather than holding past them",
+         [](Stage& s) {
+             std::vector<QString> files;
+             for (int i = 1; i <= 3; ++i) {
+                 const QString file =
+                     s.scratch() + QStringLiteral("/board%1.png").arg(i, 3, 10, QLatin1Char('0'));
+                 writeNumberedBoard(file, i);
+                 files.push_back(file);
+             }
+             QString trouble;
+             if (!s.window.importSequenceFrom(files, 1, false, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // The third frame, because the first would be the picture a still
+             // shows too -- what this has to photograph is a *different* one.
+             s.timeline->setCurrentSlot(2);
              s.settlePicture();
          }},
 
@@ -1362,6 +1408,29 @@ const std::vector<Situation>& situations() {
              for (int i = 0; i < 30; ++i) s.choose("Add layer");
              s.choose("Add colour layer");
              s.picture = Stage::closeUpOf(s.layerPanel());
+         }},
+
+        {"what-importing-a-sequence-asks",
+         "the recap is an account of what the ordering rule DID, because the order is numeric "
+         "and not correctable and there is no list to drag rows about in. This selection is the "
+         "awkward one on purpose: two naming schemes, one file with no number at all and one "
+         "that will not read, and every one of those has to be a sentence rather than a "
+         "surprise. The cost is per frame and not for all of them, because a reference layer "
+         "holds what is being looked at and decodes the rest again",
+         [](Stage& s) {
+             SequenceImportDialog::Found found;
+             found.ordering = image_import::order({QStringLiteral("a_001.png"),
+                                                   QStringLiteral("a_002.png"),
+                                                   QStringLiteral("b_010.png"),
+                                                   QStringLiteral("cover.png")});
+             found.width = 1920;
+             found.height = 1080;
+             found.unreadable = 1;
+
+             auto* dialog = new SequenceImportDialog(found, 7, &s.window);
+             dialog->show();
+             s.settle();
+             s.picture = dialog->grab().toImage();
          }},
 
         {"the-keyboard-shortcuts-panel",

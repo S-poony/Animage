@@ -32,6 +32,8 @@ add_library(animage_ui STATIC
   animage/floating_dock_frame.h
   animage/scene_settings_dialog.cpp
   animage/scene_settings_dialog.h
+  animage/sequence_import_dialog.cpp
+  animage/sequence_import_dialog.h
   animage/shortcuts.cpp
   animage/shortcuts.h
   animage/shortcuts_dialog.cpp

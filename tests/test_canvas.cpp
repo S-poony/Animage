@@ -50,6 +50,7 @@
 
 #include "brush.h"
 #include "canvas_widget.h"
+#include "image_import.h"
 #include "layer_list.h"
 #include "name_limits.h"
 #include "export_sequence.h"
@@ -9197,6 +9198,200 @@ void aSequenceShowsADifferentFrameAtEachDrawing() {
 // decode that fails and leaves nothing behind is asked for again on the next
 // paint, and again sixteen milliseconds later, for as long as the window is
 // open. Remembering the failure as an empty picture is what makes asking stop.
+// The order a set of files becomes a sequence in, which is a rule with no
+// control in front of it -- so it has to be right and it has to be *said*.
+void filesAreOrderedByTheirLastNumber() {
+    TEST("a sequence is ordered by the last number in each name, and says what it did");
+
+    const auto namesOf = [](const image_import::Ordering& order) {
+        std::vector<std::string> out;
+        for (const QString& path : order.paths) out.push_back(path.toStdString());
+        return out;
+    };
+
+    // The case the rule exists for: nine before ten, which alphabetical order
+    // gets backwards and which nobody has ever wanted corrected.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("frame10.png"), QStringLiteral("frame9.png"),
+             QStringLiteral("frame1.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{3});
+        if (names.size() == 3) {
+            CHECK_EQ(names[0], std::string("frame1.png"));
+            CHECK_EQ(names[1], std::string("frame9.png"));
+            CHECK_EQ(names[2], std::string("frame10.png"));
+        }
+        CHECK_EQ(order.numbered, 3);
+        CHECK_EQ(order.schemes, 1);
+        CHECK_EQ(order.first, 1LL);
+        CHECK_EQ(order.last, 10LL);
+        CHECK(order.gaps);  // 1, 9, 10 is three files across ten numbers
+    }
+
+    // The *last* run of digits and not the first, which is what tells frame ten
+    // of shot two from frame two of anything.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("shot2_frame010.png"), QStringLiteral("shot2_frame002.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{2});
+        if (names.size() == 2) {
+            CHECK_EQ(names[0], std::string("shot2_frame002.png"));
+            CHECK_EQ(names[1], std::string("shot2_frame010.png"));
+        }
+        CHECK_EQ(order.schemes, 1);
+    }
+
+    // Padding is not part of the group, or a run would split at its first
+    // carry -- frame9 and frame10 are one sequence with different digit counts.
+    {
+        const image_import::Ordering order =
+            image_import::order({QStringLiteral("a9.png"), QStringLiteral("a10.png")});
+        CHECK_EQ(order.schemes, 1);
+        CHECK(!order.gaps);
+    }
+
+    // Two schemes stay two runs rather than interleaving, and the ends of "the"
+    // run are not reported because there is no one run to have ends.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("b_002.png"), QStringLiteral("a_002.png"),
+             QStringLiteral("b_001.png"), QStringLiteral("a_001.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{4});
+        if (names.size() == 4) {
+            CHECK_EQ(names[0], std::string("a_001.png"));
+            CHECK_EQ(names[1], std::string("a_002.png"));
+            CHECK_EQ(names[2], std::string("b_001.png"));
+            CHECK_EQ(names[3], std::string("b_002.png"));
+        }
+        CHECK_EQ(order.schemes, 2);
+        CHECK_EQ(order.first, 0LL);
+        CHECK_EQ(order.last, 0LL);
+    }
+
+    // A name with no digits at all cannot take part in the rule, so it goes
+    // last rather than first: putting it first would push every frame somebody
+    // *did* number one slot later than its name says.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("cover.png"), QStringLiteral("f002.png"), QStringLiteral("f001.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{3});
+        if (names.size() == 3) {
+            CHECK_EQ(names[0], std::string("f001.png"));
+            CHECK_EQ(names[1], std::string("f002.png"));
+            CHECK_EQ(names[2], std::string("cover.png"));
+        }
+        CHECK_EQ(order.numbered, 2);
+        CHECK_EQ(order.unnumbered, 1);
+    }
+}
+
+// The import itself, through the function the menu item drives.
+void animportedSequenceLandsAsOneDrawingPerFile() {
+    TEST("an imported sequence is one drawing per file, on a track that ends where it ends");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, colours[i - 1]));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const std::size_t tracks_before = doc.scene().tracks.size();
+
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().tracks.size(), tracks_before + 1);
+    const Track* track = doc.scene().findTrack(doc.scene().tracks.back().id);
+    CHECK(track != nullptr);
+    if (!track || track->layers.empty()) return;
+
+    // One drawing per file, and each pointed at its own.
+    CHECK_EQ(track->slots.size(), std::size_t{3});
+    CHECK_EQ(track->layers.size(), std::size_t{1});
+    const Layer& layer = track->layers.front();
+    CHECK_EQ(static_cast<int>(layer.kind), static_cast<int>(LayerKind::Reference));
+    CHECK_EQ(layer.reference_sources.size(), std::size_t{3});
+    for (int i = 0; i < 3 && i < static_cast<int>(track->slots.size()); ++i) {
+        const Image* record = track->findImage(track->imageAtSlot(static_cast<std::size_t>(i)));
+        CHECK(record != nullptr);
+        if (record) CHECK_EQ(record->sourceFrameFor(layer.id), i);
+    }
+
+    // Nothing past the last frame, which is what an animation does and is
+    // deliberately not what a single imported picture does.
+    CHECK_EQ(static_cast<int>(track->end), static_cast<int>(TrackEnd::Nothing));
+
+    // **No cels and no tiles.** Two hundred frames would cost a save and the
+    // undo history exactly this much: nothing.
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+    for (const auto& [id, image] : track->images) {
+        CHECK(image.celFor(layer.id) == kNoId);
+    }
+
+    // And the whole import is one undo step, however many files it was.
+    CHECK(doc.canUndo());
+    const std::size_t depth = doc.undoDepth();
+    Document& editable = window.documentForTesting();
+    CHECK(editable.undo());
+    CHECK_EQ(editable.undoDepth(), depth - 1);
+    CHECK_EQ(editable.scene().tracks.size(), tracks_before);
+}
+
+// Starting later than frame one, which is the only thing about *when* the
+// dialog offers a choice over.
+void aSequenceCanStartAfterTheFirstFrame() {
+    TEST("a sequence started at frame 4 leaves the frames before it empty");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 2; ++i) {
+        const QString file = dir.filePath(QStringLiteral("f%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/4, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const Track* track = doc.scene().findTrack(doc.scene().tracks.back().id);
+    CHECK(track != nullptr);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer = track->layers.front().id;
+
+    // Five slots: three before, then the two frames. The three before are real
+    // drawings with no picture on them, which is what "the track is silent
+    // until frame 4" has to be -- a track has no other way of being empty at
+    // its beginning.
+    CHECK_EQ(track->slots.size(), std::size_t{5});
+    for (std::size_t i = 0; i < track->slots.size() && i < 5; ++i) {
+        const Image* record = track->findImage(track->imageAtSlot(i));
+        CHECK(record != nullptr);
+        if (!record) continue;
+        const int wanted = (i < 3) ? Image::kNoSourceFrame : static_cast<int>(i) - 3;
+        CHECK_EQ(record->sourceFrameFor(layer), wanted);
+    }
+}
+
 void aFileThatWillNotReadIsAskedForOnce() {
     TEST("an import that cannot be decoded is remembered as blank rather than asked for again");
     QTemporaryDir dir;
@@ -9540,6 +9735,9 @@ int main(int argc, char** argv) {
     animportedLayerRefusesTheBrushAsItself();
     aSequenceShowsADifferentFrameAtEachDrawing();
     aFileThatWillNotReadIsAskedForOnce();
+    filesAreOrderedByTheirLastNumber();
+    animportedSequenceLandsAsOneDrawingPerFile();
+    aSequenceCanStartAfterTheFirstFrame();
     removingTheOnlyLayerIsRefusedInTheOpen();
     twoImportsOfOneFileAreToldApart();
     placingAnImportStoresRatherThanBakes();

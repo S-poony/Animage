@@ -95,6 +95,25 @@ public:
     // is untouched in that case.
     bool importImageFrom(const QString& path, QString* trouble = nullptr);
 
+    // The same for a sequence: the files already in the order they will be
+    // shown in, landing on a new track from `start_frame` (1 for the first
+    // frame of the shot), one drawing each.
+    //
+    // **Nothing is decoded here.** The still's version decodes because it
+    // already has to, to find out whether the file reads at all; a sequence of
+    // two hundred would be two hundred decodes on the interface thread, so the
+    // drawings are pointed at their files and the paint asks for them. What
+    // that means for a caller is that the pictures are not on screen when this
+    // returns -- see settleReferenceFrames.
+    //
+    // A file that will not read is kept in the list rather than dropped,
+    // because the position in that list is what each drawing points at.
+    // Removing one would move every frame after it onto the wrong picture.
+    //
+    // False, with the document untouched, only when there are no files at all.
+    bool importSequenceFrom(const std::vector<QString>& paths, int start_frame, bool half_size,
+                            QString* trouble = nullptr);
+
     // Waits for every imported picture on screen to be decoded and installed.
     //
     // Public so a test can change a placement directly and then ask for the
@@ -328,6 +347,7 @@ private:
     // that sniffs the file, because they arrive at different times and ask
     // different questions. See docs/importing.md.
     void importImage();
+    void importImageSequence();
 
     // Where an imported file's bytes are: inside the project once it has been
     // saved, and at the path it came from until then. Empty when neither.

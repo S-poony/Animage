@@ -2,6 +2,7 @@
 #include "image_import.h"
 
 #include <QColorSpace>
+#include <QFileInfo>
 #include <QImageReader>
 
 #include <algorithm>
@@ -70,7 +71,106 @@ QImage inSrgb(QImage source, Converted* converted) {
     return source;
 }
 
+// One file's name, cut where the ordering rule cuts it.
+struct Named {
+    QString path;
+    QString scheme;  // what surrounds the number, which is what groups files
+    long long number = 0;
+    bool has_number = false;
+    QString name;  // for ordering the ones with no number at all
+};
+
+// The last run of digits, which is the convention rather than a guess: a
+// renderer writes `shot2_frame010.png` and means frame ten, so reading the
+// first run would order a whole shot by the number of the shot.
+Named cut(const QString& path) {
+    Named out;
+    out.path = path;
+    out.name = QFileInfo(path).fileName();
+
+    int end = out.name.size();
+    while (end > 0 && !out.name.at(end - 1).isDigit()) --end;
+    if (end == 0) {
+        out.scheme = out.name;  // no digits at all: the whole name is the group
+        return out;
+    }
+    int begin = end;
+    while (begin > 0 && out.name.at(begin - 1).isDigit()) --begin;
+
+    bool ok = false;
+    const long long value = out.name.mid(begin, end - begin).toLongLong(&ok);
+    if (!ok) {
+        // Longer than a long long, which no frame number is. Treated as having
+        // no number rather than as having a wrong one: a silently wrapped index
+        // would order the sequence confidently and incorrectly.
+        out.scheme = out.name;
+        return out;
+    }
+
+    out.number = value;
+    out.has_number = true;
+    // The padding is deliberately not part of the group. `frame9.png` and
+    // `frame10.png` are one sequence and differ in digit count, so a scheme
+    // that included the width would split every run at its first carry.
+    out.scheme = out.name.left(begin) + QLatin1Char('#') + out.name.mid(end);
+    return out;
+}
+
 }  // namespace
+
+Ordering order(const QStringList& paths) {
+    Ordering out;
+    if (paths.isEmpty()) return out;
+
+    std::vector<Named> cuts;
+    cuts.reserve(static_cast<std::size_t>(paths.size()));
+    for (const QString& path : paths) cuts.push_back(cut(path));
+
+    // Numbered first, grouped by scheme, then by number. Unnumbered after all
+    // of them, by name -- they cannot take part in the rule, and putting them
+    // first would push every frame somebody does have a number for one slot
+    // later than the name says.
+    std::stable_sort(cuts.begin(), cuts.end(), [](const Named& a, const Named& b) {
+        if (a.has_number != b.has_number) return a.has_number;
+        if (!a.has_number) return a.name < b.name;
+        if (a.scheme != b.scheme) return a.scheme < b.scheme;
+        return a.number < b.number;
+    });
+
+    // Counted over the numbered files only. A name with no digits in it is
+    // already reported on its own, and counting each of them as a scheme of its
+    // own would say "named 3 different ways" and then "1 has no number" about
+    // overlapping sets -- two sentences that add up to more files than there
+    // are.
+    std::vector<QString> schemes;
+    for (const Named& one : cuts) {
+        out.paths.push_back(one.path);
+        if (!one.has_number) {
+            ++out.unnumbered;
+            continue;
+        }
+        ++out.numbered;
+        if (std::find(schemes.begin(), schemes.end(), one.scheme) == schemes.end()) {
+            schemes.push_back(one.scheme);
+        }
+    }
+    out.schemes = static_cast<int>(schemes.size());
+
+    // The ends of the run, and only when there is one run to have ends. Across
+    // two schemes the first number comes from one group and the last from
+    // another, and "1 to 24" would be a sentence about nothing.
+    if (out.numbered > 0 && out.schemes == 1) {
+        out.first = cuts.front().number;
+        out.last = cuts[static_cast<std::size_t>(out.numbered) - 1].number;
+        // A run with a hole in it is worth saying: it usually means a render
+        // that did not finish, or a selection that missed a file. It is not
+        // worth refusing -- a gap is a frame the sequence does not have, and
+        // the frames after it keep their own numbers rather than sliding back
+        // to close it.
+        out.gaps = (out.last - out.first + 1) != out.numbered;
+    }
+    return out;
+}
 
 std::size_t tileCountFor(int width, int height) {
     if (width <= 0 || height <= 0) return 0;

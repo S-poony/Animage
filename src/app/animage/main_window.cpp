@@ -66,6 +66,7 @@
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
+#include "sequence_import_dialog.h"
 #include "shortcuts_dialog.h"
 #include "timeline_widget.h"
 
@@ -872,11 +873,14 @@ void MainWindow::buildMenus() {
     file->addAction(makeAction(Id::SaveProject, [this] { saveProject(); }));
     file->addAction(makeAction(Id::SaveProjectAs, [this] { saveProjectAs(); }));
     file->addSeparator();
-    // A submenu with one item in it, because the others are coming and the
-    // place they go should not move once people have found it. See
-    // docs/importing.md for what "Image sequence" and "Video" will ask.
+    // A still and a sequence are separate items because they arrive at
+    // different times and do different things, not because the file picker
+    // cannot tell them apart. See docs/importing.md for what "Video" will ask
+    // on top of these two.
     QMenu* import = file->addMenu(QStringLiteral("&Import"));
     import->addAction(QStringLiteral("&Image..."), this, &MainWindow::importImage);
+    import->addAction(QStringLiteral("Image &sequence..."), this,
+                      &MainWindow::importImageSequence);
     file->addSeparator();
     // No key, so no row: the table is what the keyboard does, and an action with
     // nothing bound to it has nothing to say there.
@@ -2841,7 +2845,7 @@ namespace {
 // scene already names -- because two modelsheets from two folders are very
 // often both called `model.png`, and the second one silently becoming the first
 // is a picture quietly replaced.
-std::string importNameFor(const Document& doc, const QString& path) {
+std::string importNameIn(std::unordered_set<std::string>& taken, const QString& path) {
     QString stem = QFileInfo(path).completeBaseName();
     QString suffix = QFileInfo(path).suffix().toLower();
     // Everything that is not a letter, a digit, a dash or a dot becomes a dash,
@@ -2856,16 +2860,33 @@ std::string importNameFor(const Document& doc, const QString& path) {
     if (stem.isEmpty()) stem = QStringLiteral("import");
     if (suffix.isEmpty()) suffix = QStringLiteral("png");
 
+    const QString base = stem + QLatin1Char('.') + suffix;
+    if (!taken.count(base.toStdString())) {
+        taken.insert(base.toStdString());
+        return base.toStdString();
+    }
+    for (int n = 2;; ++n) {
+        const QString candidate = QStringLiteral("%1-%2.%3").arg(stem).arg(n).arg(suffix);
+        if (taken.count(candidate.toStdString())) continue;
+        taken.insert(candidate.toStdString());
+        return candidate.toStdString();
+    }
+}
+
+// What the document already has spoken for. Gathered once by a caller that is
+// about to name several files, because the answer for the second file has to
+// take account of the first -- and the document does not know about the first
+// until the whole import is over.
+std::unordered_set<std::string> importNamesTaken(const Document& doc) {
     std::unordered_set<std::string> taken;
     for (const std::string& name : ProjectIO::importsReferencedBy(doc)) taken.insert(name);
+    return taken;
+}
 
-    const QString base = stem + QLatin1Char('.') + suffix;
-    if (!taken.count(base.toStdString())) return base.toStdString();
-    for (int n = 2;; ++n) {
-        const QString candidate =
-            QStringLiteral("%1-%2.%3").arg(stem).arg(n).arg(suffix);
-        if (!taken.count(candidate.toStdString())) return candidate.toStdString();
-    }
+// The one-file case, which is every caller that is not importing a sequence.
+std::string importNameFor(const Document& doc, const QString& path) {
+    std::unordered_set<std::string> taken = importNamesTaken(doc);
+    return importNameIn(taken, path);
 }
 
 // What to call the track and its layer, given the file's name.
@@ -3030,6 +3051,166 @@ bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
                 .arg(QFileInfo(path).fileName(), converted.from),
             8000);
     }
+    return true;
+}
+
+// File ▸ Import ▸ Image sequence.
+//
+// A file picker, a survey and a recap in front of importSequenceFrom, which is
+// where the importing happens. Same division as the still and for the same
+// reason: a modal dialog is not something `shots` or a test can drive.
+void MainWindow::importImageSequence() {
+    stopPlayback();
+
+    const QStringList picked = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Import image sequence"), QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;All files (*)"));
+    if (picked.isEmpty()) return;
+
+    SequenceImportDialog::Found found;
+    found.ordering = image_import::order(picked);
+
+    // Surveyed rather than decoded, so the recap can say what this costs before
+    // paying it. A survey reads a header; on two hundred frames the decode is
+    // the whole cost being described and doing it here would make the recap the
+    // slow part of the import.
+    //
+    // The size is the first readable file's. Frames of different sizes are
+    // allowed -- each is placed by the same layer placement and simply covers a
+    // different rectangle -- so this is a description of the sequence rather
+    // than a rule it has to meet.
+    for (const QString& path : found.ordering.paths) {
+        const image_import::Survey one = image_import::survey(path);
+        if (!one.ok) {
+            ++found.unreadable;
+            continue;
+        }
+        if (found.width == 0) {
+            found.width = one.width;
+            found.height = one.height;
+        }
+    }
+
+    if (found.width == 0) {
+        QMessageBox::warning(this, QStringLiteral("Import image sequence"),
+                             QStringLiteral("None of those %1 files is a picture this build can "
+                                            "read, so there is nothing to import.")
+                                 .arg(picked.size()));
+        return;
+    }
+
+    SequenceImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const SequenceImportDialog::Answer answer = dialog.answer();
+    QString trouble;
+    if (!importSequenceFrom(found.ordering.paths, answer.start_frame, answer.half_size,
+                            &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import image sequence"), trouble);
+    }
+}
+
+bool MainWindow::importSequenceFrom(const std::vector<QString>& paths, int start_frame,
+                                    bool half_size, QString* trouble) {
+    if (paths.empty()) {
+        if (trouble) *trouble = QStringLiteral("no files were given");
+        return false;
+    }
+
+    // Named against the scene before anything is added, and one at a time,
+    // because two frames of one sequence can arrive from two folders under the
+    // same name -- importNameFor is what makes each unique, and it answers
+    // against the imports the *document* already names.
+    //
+    // So the layer is pointed at its files as they are named, and the pending
+    // list is filled at the same time. That list is what a save copies from
+    // before the project has a folder of its own.
+    const std::string shown = trackNameFor(doc_, paths.front());
+
+    TrackId added = kNoId;
+    LayerId layer_id = kNoId;
+    std::vector<ImageId> drawings;
+    {
+        // One command, so an import of two hundred frames undoes in one step.
+        // It costs the drawings and the slots and no pixels at all: a reference
+        // layer has no cels, so there is nothing here for the journal to hold.
+        doc_.beginCommand("Import image sequence");
+        added = doc_.addTrack(shown);
+        layer_id = doc_.addLayer(added, shown, 0, LayerKind::Reference);
+
+        // The frames the sequence does not start on. A start frame of one adds
+        // none of these; anything later leaves the track empty until then,
+        // which is what "starts at frame 12" has to look like -- there is no
+        // other way for a track to be silent at its beginning.
+        const int before = std::max(0, start_frame - 1);
+        for (int i = 0; i < before; ++i) doc_.insertImage(added, static_cast<std::size_t>(i));
+
+        // Named against the document *and against each other*, in one pass, and
+        // then written to the layer once.
+        //
+        // Once is not tidiness. `updateLayer` journals a copy of the whole layer
+        // list, and the list this is filling in is on it -- so naming the files
+        // one at a time and writing after each would put two hundred copies of a
+        // growing two-hundred-name vector on the undo stack, for one command
+        // that undoes in one step anyway. Quadratic in the length of a sequence,
+        // where nothing else about an import is.
+        std::unordered_set<std::string> taken = importNamesTaken(doc_);
+        std::vector<std::string> named;
+        named.reserve(paths.size());
+        for (const QString& path : paths) {
+            named.push_back(importNameIn(taken, path));
+            imports_.pending[named.back()] = path;
+        }
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            if (const Layer* layer = track->findLayer(layer_id)) {
+                Layer updated = *layer;
+                updated.reference_sources = named;
+                doc_.updateLayer(added, layer_id, updated);
+            }
+        }
+
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            const ImageId drawing = doc_.insertImage(added, static_cast<std::size_t>(before) + i);
+            drawings.push_back(drawing);
+            // On 1s: one drawing per file. An image sequence has no frame rate
+            // of its own and inventing one is inventing information.
+            doc_.setSourceFrame(added, drawing, layer_id, static_cast<int>(i));
+        }
+
+        if (half_size) {
+            // A placement and not a separate kind of import, which is what
+            // makes it undoable, adjustable afterwards through Place this
+            // picture, and cheaper rather than dearer: the derive step applies
+            // the scale, so a half-size frame caches a quarter of the tiles
+            // instead of full ones being shrunk on the way to the screen.
+            if (const Track* track = doc_.scene().findTrack(added)) {
+                if (const Layer* layer = track->findLayer(layer_id)) {
+                    Layer placed = *layer;
+                    placed.placement.scale_x = 0.5;
+                    placed.placement.scale_y = 0.5;
+                    doc_.updateLayer(added, layer_id, placed);
+                }
+            }
+        }
+
+        // Nothing past the last frame, which is what an animation does and is
+        // deliberately not the still's HoldLast. A modelsheet is meant to stay
+        // up for the whole shot; an animatic is a stretch of timing that ends
+        // where it ends. Both are the track's own setting afterwards.
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            TrackProperties properties = track->properties();
+            properties.end = TrackEnd::Nothing;
+            doc_.updateTrack(added, properties);
+        }
+        doc_.endCommand();
+    }
+
+    setCurrentTrack(added);
+    // An import adds a track, which is one of the routes that has to say so:
+    // syncTimelineHeight moves the dock by the rows that came or went rather
+    // than sizing it, so a route that does not call it leaves the strip at the
+    // height for the track count before. refreshEverything calls it.
+    refreshEverything();
     return true;
 }
 
