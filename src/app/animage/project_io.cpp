@@ -754,37 +754,83 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
     const auto carryFolder =
         [&](const char* subdir, const std::vector<std::string>& names,
             const std::unordered_map<std::string, QString>& pending) -> std::optional<QString> {
-        for (const std::string& name : names) {
+        const QString dir = QLatin1String(subdir);
+
+        // One file, tried everywhere it could be. False when none of them had
+        // it, with `tried` left saying where it looked.
+        const auto carryOne = [&](const std::string& name, QStringList& tried) {
             const QString file = QString::fromStdString(name);
-            const QString dir = QLatin1String(subdir);
-            if (!root.mkpath(scratch + QLatin1Char('/') + dir)) {
-                return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
-            }
             const QString into = scratch + QLatin1Char('/') + dir + QLatin1Char('/') + file;
 
-            QStringList tried;
             const auto attempt = [&](const QString& from) {
                 if (from.isEmpty()) return false;
                 tried.append(from);
                 return carryForward(from, into);
             };
 
-            const auto found = pending.find(name);
             if (attempt(state.folder.isEmpty()
                             ? QString()
                             : state.folder + QLatin1Char('/') + dir + QLatin1Char('/') + file)) {
-                continue;
+                return true;
             }
-            if (found != pending.end() && attempt(found->second)) continue;
-            if (attempt(folder + QLatin1Char('/') + dir + QLatin1Char('/') + file)) continue;
+            const auto found = pending.find(name);
+            if (found != pending.end() && attempt(found->second)) return true;
+            return attempt(folder + QLatin1Char('/') + dir + QLatin1Char('/') + file);
+        };
+
+        if (!names.empty() && !root.mkpath(scratch + QLatin1Char('/') + dir)) {
+            return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
+        }
+        for (const std::string& name : names) {
+            QStringList tried;
+            if (carryOne(name, tried)) continue;
 
             // Said rather than skipped, and said now: the original is still
             // wherever it was imported from, and a save that quietly dropped it
             // would be discovered when the project was next opened somewhere
             // else.
             return QStringLiteral("cannot find the imported file \"%1\". Looked in: %2")
-                .arg(file, tried.isEmpty() ? QStringLiteral("nowhere it could be")
-                                           : tried.join(QStringLiteral(", ")));
+                .arg(QString::fromStdString(name),
+                     tried.isEmpty() ? QStringLiteral("nowhere it could be")
+                                     : tried.join(QStringLiteral(", ")));
+        }
+
+        // **And everything else the folder already holds, which nothing in the
+        // document names any more.**
+        //
+        // A save builds a new folder and swaps it in, so a file the loop above
+        // did not carry is a file deleted -- and until convert-to-drawings
+        // existed, nothing could stop naming a file without the person having
+        // said to remove it. Converting does exactly that: the layer becomes
+        // drawings and stops being an import, so the next save would take the
+        // scan out of the project. Undoing then left a layer naming files that
+        // existed nowhere, and the save after *that* failed outright on the
+        // error above.
+        //
+        // So the folder keeps what has been put in it. Which means it only ever
+        // grows: nothing here can tell a file left behind by a conversion from
+        // one left behind by a track somebody deleted, and telling them apart
+        // would need a layer recording where it came from -- the field
+        // docs/importing.md refuses under "where an import lands". Keeping both
+        // is the trade, and it is the same principle the video plan already
+        // states about keeping a source beside the frames drawn from it.
+        //
+        // Best-effort, unlike the loop above: these are files nothing is asking
+        // for, so one that has gone missing is not a project that cannot be
+        // written.
+        std::unordered_set<std::string> named(names.begin(), names.end());
+        for (const QString& where : {state.folder, folder}) {
+            if (where.isEmpty()) continue;
+            const QDir already(where + QLatin1Char('/') + dir);
+            if (!already.exists()) continue;
+            for (const QString& file : already.entryList(QDir::Files)) {
+                if (!named.insert(file.toStdString()).second) continue;
+                if (!root.mkpath(scratch + QLatin1Char('/') + dir)) {
+                    return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
+                }
+                QStringList tried;
+                carryOne(file.toStdString(), tried);
+            }
         }
         return std::nullopt;
     };
