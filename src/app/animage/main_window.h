@@ -476,6 +476,11 @@ private:
     // current, because the thing you do next is draw on it.
     void addTrack();
     void renameTrack();
+
+    // The row you are pointed at, again, and it works on a soundtrack too --
+    // which is also how a second soundtrack gets into a scene, the model having
+    // been a list all along.
+    void duplicateCurrentTrack();
     void removeCurrentTrack();
     void setOverwriteDrawings(bool overwrite);
     void setTrackEnd(animage::TrackEnd behaviour);
@@ -663,8 +668,15 @@ private:
     std::vector<KeyedTip> keyed_tips_;
 
     QAction* overwrite_action_ = nullptr;
-    // The three "past the last drawing" items, with what each one means.
+    // The three "past the last drawing" items, with what each one means, and
+    // the submenu they are in.
+    //
+    // **The submenu is held as well as its items, because disabling the items
+    // is not disabling the menu.** A submenu whose every entry is greyed still
+    // opens, which offers a choice and then refuses all of it -- reported from
+    // use on a soundtrack row, where none of the three means anything.
     std::vector<std::pair<QAction*, animage::TrackEnd>> end_actions_;
+    QMenu* end_menu_ = nullptr;
     bool updating_track_menu_ = false;
 
     // The one audio output in the program, and the one place a soundtrack is

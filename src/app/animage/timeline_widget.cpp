@@ -261,6 +261,19 @@ void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPain
     painter.setPen(QPen(colours.outline, 1));
     painter.drawRect(extent.adjusted(0, 0, -1, -1));
 
+    // **The level as a line across the block, which the waveform took away.**
+    // Before the shape was drawn from the sound, the top of the fill *was* the
+    // level and there was nothing else it could be. Now the top of the fill is
+    // the loudest syllable in view, and everywhere else it is lower -- so the
+    // number the drag is setting has no edge of its own left. This is that
+    // edge: it sits where a flat block would have ended, the waveform touches
+    // it at the file's loudest moment and stays under it everywhere else.
+    if (filled > 0) {
+        painter.setPen(QPen(colours.outline, 1));
+        const int level_y = band_top + band_height - filled;
+        painter.drawLine(x0, level_y, x0 + extent.width() - 1, level_y);
+    }
+
     // The level as a number too. A bar says "louder than that one"; an animator
     // setting a reference level under a dialogue track wants to be able to come
     // back to the same place.

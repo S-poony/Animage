@@ -984,6 +984,8 @@ void MainWindow::buildMenus() {
     // place of its own.
     QMenu* track_menu = menuBar()->addMenu(QStringLiteral("&Track"));
     track_menu->addAction(QStringLiteral("Add track"), this, &MainWindow::addTrack);
+    track_menu->addAction(QStringLiteral("Duplicate track"), this,
+                          &MainWindow::duplicateCurrentTrack);
     track_menu->addAction(QStringLiteral("Rename track..."), this, &MainWindow::renameTrack);
     track_menu->addAction(QStringLiteral("Delete track"), this, &MainWindow::removeCurrentTrack);
     track_menu->addSeparator();
@@ -1005,6 +1007,7 @@ void MainWindow::buildMenus() {
     // drawing" -- which is the same words twice and reads as though the two
     // might mean different things.
     QMenu* end_menu = track_menu->addMenu(QStringLiteral("Past the last drawing"));
+    end_menu_ = end_menu;
     auto* ends = new QActionGroup(this);
     ends->setExclusive(true);
     const TrackEnd choices[] = {TrackEnd::Nothing, TrackEnd::HoldLast, TrackEnd::Cycle};
@@ -3858,6 +3861,38 @@ void MainWindow::renameTrack() {
     refreshEverything();
 }
 
+// The whole track again, layers, drawings and all.
+//
+// **On a soundtrack this is also how a scene gets a second one.** The model has
+// been a list since audio arrived and the row loop has always walked it; what
+// was missing was any way to put another one in, and duplicating the one you
+// have is the obvious one -- the same take at two placements is an ordinary
+// thing to want while a shot is being timed.
+void MainWindow::duplicateCurrentTrack() {
+    stopPlayback();
+
+    if (const AudioTrack* sound =
+            doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio())) {
+        const TrackId made = doc_.duplicateAudioTrack(sound->id);
+        if (made == kNoId) return;
+        // The samples across rather than a second decode of the same file:
+        // `core` does not decode, and the clip is already here. A copy of a few
+        // megabytes against tens of milliseconds of disk and codec.
+        if (const AudioClip* clip = doc_.audioSamplesFor(sound->id))
+            doc_.setAudioSamples(made, *clip);
+        refreshEverything();
+        return;
+    }
+
+    const TrackId made = doc_.duplicateTrack(track_);
+    if (made == kNoId) return;
+    // Onto the copy, which is what every other "make me a new one" in this
+    // program does: adding a track, adding a layer and duplicating a drawing
+    // all leave you standing on the thing you just made.
+    setCurrentTrack(made);
+    refreshEverything();
+}
+
 void MainWindow::removeCurrentTrack() {
     // A soundtrack first, for renameTrack's reason: the highlight is what the
     // menu acts on. There is no "a scene needs at least one" rule here -- a
@@ -3962,6 +3997,11 @@ void MainWindow::syncTrackMenu() {
         action->setEnabled(track != nullptr);
         action->setChecked(track && track->end == behaviour);
     }
+    // And the submenu itself. Greying its three items leaves a menu that still
+    // opens to offer a choice and then refuses all of it, which is worse than
+    // one that does not open: the second says there is nothing here, the first
+    // says there is something here you may not have.
+    if (end_menu_) end_menu_->menuAction()->setEnabled(track != nullptr);
     updating_track_menu_ = false;
 }
 

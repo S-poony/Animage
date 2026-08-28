@@ -240,9 +240,15 @@ same drawing still showing, not a thing of their own, and they travel with it.
 
 **Tracks.** One row each, under one ruler and one playhead. Click a row to work
 on that track: the layer panel, the brush and every timing button follow it,
-while the canvas goes on showing all of them. The Track menu adds, renames and
-deletes them; a new track arrives at the bottom of the stack, with a layer and a
-drawing so there is something to draw on.
+while the canvas goes on showing all of them. The Track menu adds, duplicates,
+renames and deletes them; a new track arrives at the bottom of the stack, with a
+layer and a drawing so there is something to draw on.
+
+**Duplicate track** makes a complete copy directly under the original — the same
+layers, the same drawings, the same timing — and puts you on the copy. It is a
+real copy and not a second view of the same thing: drawing on one does not
+reach the other. On a soundtrack row it duplicates the soundtrack instead, which
+is how a scene gets a second one.
 
 Drag a track's name up or down the strip on the left to restack it — the top row
 is the front of the picture, so that is how a background gets behind a character.
@@ -408,7 +414,7 @@ syllables are, and it does three things:
 | gesture | what it does |
 |---|---|
 | drag the block **sideways** | moves the sound along the shot |
-| drag the block **up or down** | sets the level — the height of the fill *is* the level, and at the bottom it is silent |
+| drag the block **up or down** | sets the level — the line across the block is where you have set it, and at the bottom it is silent |
 | drag either **end** | crops the sound, without changing the file |
 
 The waveform is the block's own top edge rather than a picture drawn on it, so
@@ -417,7 +423,8 @@ with it, and at the bottom it is a flat line. It is drawn relative to the
 loudest moment in that file rather than to full scale — a take recorded at a
 sensible level would otherwise be a ripple with nothing readable in it — so the
 shape tells you *where* the sound is and the block's height tells you how loud
-it will be.
+it will be. The line across the block is the level itself: the waveform touches
+it at the loudest moment in the file and stays under it everywhere else.
 
 Nothing snaps to whole frames. A frame at 24 fps is 42 milliseconds, which is
 most of the way to a syllable, so placing a sound to the nearest frame is not

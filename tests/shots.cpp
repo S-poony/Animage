@@ -1023,7 +1023,10 @@ const std::vector<Situation>& situations() {
          "by the level, syllables and all, which is what makes it one shape rather than a "
          "waveform with a bar behind it -- and at the bottom it flattens to a line, which is "
          "what silent looks like. The block stays visible at any level including none: a row "
-         "that vanished when it was silenced would be a row nobody could grab to bring back",
+         "that vanished when it was silenced would be a row nobody could grab to bring back. "
+         "The line across it is the level itself: the waveform touches it at the file's loudest "
+         "moment and stays under it everywhere else, which is the edge a flat block used to "
+         "have and the shape took away",
          [](Stage& s) {
              const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
              writeTone(file, 1.0);
@@ -1039,6 +1042,9 @@ const std::vector<Situation>& situations() {
                  doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, quiet);
              }
              s.settlePicture();
+             // Close up, because what this is about is one row and the canvas
+             // above it is empty.
+             s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
         {"a-soundtrack-highlighted",
@@ -1509,6 +1515,24 @@ const std::vector<Situation>& situations() {
              for (int i = 0; i < 3; ++i) s.press(Id::HoldLonger);
              s.press(Id::InsertDrawing);
              printTimelinePalette(*s.timeline);
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-duplicated-track",
+         "Track > Duplicate track, on a track with a hold and a drawing on it. The copy lands "
+         "directly under the one it came from and carries the same cards, because a drawing "
+         "number is unique within a track and this is a whole track -- so the copy reads the "
+         "same, which is what a duplicate should look like. Everything inside it is new: its "
+         "own layers, its own drawings and its own cels, which is what stops drawing on one of "
+         "the two reaching the other",
+         [](Stage& s) {
+             s.press(Id::InsertDrawing);
+             s.press(Id::HoldLonger);
+             s.press(Id::HoldLonger);
+             s.line(QPointF(300.0, 300.0), QPointF(600.0, 420.0));
+             s.settlePicture();
+             s.choose("Duplicate track");
+             s.settlePicture();
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 

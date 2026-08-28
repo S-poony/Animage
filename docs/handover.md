@@ -17,6 +17,7 @@ the shape of the program. Those five maps are.
 | [Where it got to](#where-it-got-to) | what exists, milestone by milestone |
 | [**How the program fits together**](#how-the-program-fits-together) | five paths traced end to end, each across several files |
 | [Several tracks, and a track that overwrites](#several-tracks-and-a-track-that-overwrites) | what a second track changed, and what it broke |
+| [Duplicating a track](#duplicating-a-track) | every id inside it is new, and one of them would not have looked wrong |
 | [Restacking by dragging](#restacking-by-dragging) | layers and tracks, one gesture, and where the panel had been scrolling to |
 | [Naming a track or a layer](#naming-a-track-or-a-layer) | renaming a row where it is, and what a name is allowed to be |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
@@ -889,6 +890,44 @@ And **`Timeline` is now `Track`** throughout, including the French
 specification. A `Track` is one stack of layers with its own time; the timeline
 is the scene's shared time axis and the panel that shows it. A scene has several
 tracks and one timeline. If you find the old name anywhere, it meant the track.
+
+## Duplicating a track
+
+**Track ▸ Duplicate track**, and the copy lands directly under the one it came
+from. It follows the highlight like the rest of that menu, so on a soundtrack
+row it duplicates the soundtrack — which is also, today, **the only way a scene
+gets a second one**. The model has been a list since audio arrived and the row
+loop has always walked it; what was missing was any way to put another in, and
+duplicating the one you have is the obvious one.
+
+**Every id inside a track is new, and that is the whole of the work.** A track's
+insides are named by ids that mean something only within it, and three of them
+point at each other:
+
+| | names | so a copy must |
+|---|---|---|
+| `Track::slots` | image ids | be rebuilt from the new ones, holds and all |
+| `Image::cels`, `Image::source_frames` | layer ids | be re-keyed onto the new layers |
+| `Layer::ctg_sources` | the line-art layers a colour layer is cut against | point at the copy's own line art |
+
+**The last one is the one that would not look wrong.** A copy whose colour
+layers still named the original's line art draws perfectly until somebody
+redraws one of the two tracks, and then the wrong fill re-cuts. It is what
+`aDuplicatedColourLayerIsCutAgainstItsOwnTracksLineArt` pins, and taking the
+remap out reddens that test and nothing else — which is exactly what makes it
+worth having.
+
+Drawing numbers are **kept rather than renumbered**: a number is unique within a
+track and this is a whole track, so the copy's cards read the same as the
+original's. Cels are copied rather than shared, which is what makes it a
+duplicate and not a second view, and is the one part of it that costs memory —
+the same cost `duplicateImage` pays, once per drawing.
+
+A soundtrack's copy is cheap by comparison: a file name and four numbers, no
+cels and no ids inside it. `Document::duplicateAudioTrack` does not copy the
+decoded samples, because `core` does not decode — `MainWindow` hands the clip
+across afterwards rather than paying for a second decode of a file it already
+has in memory.
 
 ## Restacking by dragging
 
@@ -3691,6 +3730,15 @@ So the two facts stay and are drawn as two facts:
   is what tells the menu, and it exists because `trackChanged` cannot: clicking
   a soundtrack row deliberately leaves the current track where it was.
 
+**A submenu whose every item is greyed still opens**, which is a thing worth
+knowing because it looks fixed and is not. "Past the last drawing" had its three
+items disabled on a soundtrack row and went on opening to offer them — a menu
+that offers a choice and then refuses all of it says *there is something here
+you may not have*, where one that does not open says *there is nothing here*.
+The second is the true one. `QMenu::menuAction()` is what has to be disabled,
+and holding the submenu as well as its items is the only reason `end_menu_`
+exists.
+
 **Renaming a soundtrack is allowed, and the objection to it is answered rather
 than dismissed.** It was raised that a user should perhaps not be able to rename
 an import at all. The thing that makes it safe is that an `AudioTrack` carries
@@ -3738,6 +3786,15 @@ Two decisions in it that are not obvious:
   floor the row breaks into islands, which reads as a sound that is not there
   rather than a sound that is soft — and the gaps are also where somebody has to
   grab to move the block.
+
+**And the level got a line of its own back, which the waveform had taken away.**
+Before the shape came from the sound, the top of the fill *was* the level and
+there was nothing else it could be. With a waveform the top of the fill is the
+loudest syllable in view and everywhere else it is lower — so the number the
+drag is setting had no edge left. The line sits where a flat block would have
+ended: the waveform touches it at the file's loudest moment and stays under it
+everywhere else. Reported from use, on the first row anybody dragged after the
+waveform landed.
 
 `AudioPeaks` in `core/audio_peaks.h` is what it draws from: one bucket per 64
 frames of audio, built when a file decodes and thrown away with the samples.

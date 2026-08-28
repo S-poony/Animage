@@ -147,6 +147,27 @@ public:
     // --- structure -------------------------------------------------------
 
     TrackId addTrack(std::string name);
+
+    // The same track again, directly under the one it came from.
+    //
+    // **Every id inside it is new, and that is the whole of the work.** A
+    // track's layers, drawings and cels are named by ids that mean something
+    // only within it, and three of them point at each other: `Image::cels` and
+    // `Image::source_frames` are keyed on layer ids, `Track::slots` names image
+    // ids, and a colour layer's `ctg_sources` names the line-art layers it is
+    // cut against. A copy that reused any of them would be a second track
+    // wired to the first one's insides -- and the colour case is the one that
+    // would not look wrong until somebody drew on the original.
+    //
+    // Drawing numbers are kept rather than renumbered: they are unique within
+    // a track and this is a whole track, so the copy's cards read the same as
+    // the original's, which is what a duplicate should look like.
+    //
+    // Cels are copied rather than shared. That is what makes it a duplicate and
+    // not a second view, and it is the one part of this that costs memory --
+    // the same cost `duplicateImage` pays, once per drawing.
+    TrackId duplicateTrack(TrackId track);
+
     void removeTrack(TrackId track);
     void updateTrack(TrackId track, const TrackProperties& properties);
 
@@ -164,6 +185,17 @@ public:
     // Adds a soundtrack naming a file inside the project's `audio/` folder.
     // An edit, journaled and undoable like adding a track.
     TrackId addAudioTrack(std::string name, std::string source);
+
+    // The same soundtrack again, pointing at the same file.
+    //
+    // Cheap where a drawing track's copy is not: there are no cels, no layers
+    // and no ids inside it -- a soundtrack is a file name and four numbers. The
+    // decoded samples are **not** copied here, because `core` does not decode:
+    // a caller that has them can install them with `setAudioSamples` and one
+    // that does not leaves the row saying so until something decodes the file
+    // again.
+    TrackId duplicateAudioTrack(TrackId track);
+
     void removeAudioTrack(TrackId track);
 
     // What the row is called. **The label and not the file**: `source` names a

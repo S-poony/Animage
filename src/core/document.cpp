@@ -128,6 +128,24 @@ TrackId Document::addAudioTrack(std::string name, std::string source) {
     return scene_.audio_tracks.back().id;
 }
 
+TrackId Document::duplicateAudioTrack(TrackId id) {
+    for (std::size_t i = 0; i < scene_.audio_tracks.size(); ++i) {
+        if (scene_.audio_tracks[i].id != id) continue;
+
+        ScopedCommand command(*this, "Duplicate soundtrack");
+        AudioTrack copy = scene_.audio_tracks[i];
+        copy.id = track_ids_.next();
+        copy.name = copy.name + " copy";
+
+        const std::size_t index = i + 1;
+        scene_.audio_tracks.insert(
+            scene_.audio_tracks.begin() + static_cast<std::ptrdiff_t>(index), std::move(copy));
+        recordOp(std::make_unique<AudioTrackOp>(index, std::nullopt));
+        return scene_.audio_tracks[index].id;
+    }
+    return kNoId;
+}
+
 void Document::removeAudioTrack(TrackId track) {
     for (std::size_t i = 0; i < scene_.audio_tracks.size(); ++i) {
         if (scene_.audio_tracks[i].id != track) continue;
@@ -257,6 +275,83 @@ TrackId Document::addTrack(std::string name) {
     // command the track did not exist.
     recordOp(std::make_unique<TrackOp>(index, std::nullopt));
     return scene_.tracks.back().id;
+}
+
+TrackId Document::duplicateTrack(TrackId id) {
+    const auto at = std::find_if(scene_.tracks.begin(), scene_.tracks.end(),
+                                 [&](const Track& t) { return t.id == id; });
+    if (at == scene_.tracks.end()) return kNoId;
+    const Track& source = *at;
+    const std::size_t index = static_cast<std::size_t>(at - scene_.tracks.begin()) + 1;
+
+    ScopedCommand command(*this, "Duplicate track");
+
+    Track copy;
+    copy.id = track_ids_.next();
+    copy.setProperties(source.properties());
+    copy.name = source.name + " copy";
+
+    // The layers first, because everything below is keyed on their ids.
+    std::unordered_map<LayerId, LayerId> layers;
+    copy.layers.reserve(source.layers.size());
+    for (const Layer& layer : source.layers) {
+        Layer fresh = layer;
+        fresh.id = layer_ids_.next();
+        layers[layer.id] = fresh.id;
+        copy.layers.push_back(std::move(fresh));
+    }
+
+    // **And then the one place a layer points at another layer.** A colour
+    // layer's sources name the line art it is cut against, within this track --
+    // so a copy that left them alone would have its fills cut against the
+    // *original's* line art, which looks perfectly right until somebody draws
+    // on one of the two tracks.
+    for (Layer& layer : copy.layers) {
+        for (LayerId& cut_against : layer.ctg_sources) {
+            const auto found = layers.find(cut_against);
+            if (found != layers.end()) cut_against = found->second;
+        }
+    }
+
+    std::unordered_map<ImageId, ImageId> images;
+    images.reserve(source.images.size());
+    for (const auto& [image_id, image] : source.images) {
+        Image fresh;
+        fresh.id = image_ids_.next();
+        // Kept, not renumbered: a number is unique within a track and this is a
+        // whole track, so the copy's cards read the same as the original's.
+        fresh.number = image.number;
+        fresh.marker = image.marker;
+
+        for (const auto& [layer_id, cel_id] : image.cels) {
+            const Cel* original = cel(cel_id);
+            const auto mapped = layers.find(layer_id);
+            if (!original || mapped == layers.end()) continue;
+            const CelId made = createCelCopy(*original);
+            fresh.cels[mapped->second] = made;
+            addCelRef(made);
+        }
+        // The other way a drawing carries a picture -- see copyOfImage, where
+        // forgetting this one made a duplicate come back blank.
+        for (const auto& [layer_id, frame] : image.source_frames) {
+            const auto mapped = layers.find(layer_id);
+            if (mapped != layers.end()) fresh.source_frames[mapped->second] = frame;
+        }
+
+        images[image_id] = fresh.id;
+        copy.images.emplace(fresh.id, std::move(fresh));
+    }
+
+    copy.slots.reserve(source.slots.size());
+    for (ImageId slot : source.slots) {
+        const auto found = images.find(slot);
+        copy.slots.push_back(found == images.end() ? kNoId : found->second);
+    }
+
+    scene_.tracks.insert(scene_.tracks.begin() + static_cast<std::ptrdiff_t>(index),
+                         std::move(copy));
+    recordOp(std::make_unique<TrackOp>(index, std::nullopt));
+    return scene_.tracks[index].id;
 }
 
 void Document::removeTrack(TrackId id) {
