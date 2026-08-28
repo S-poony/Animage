@@ -126,28 +126,122 @@ void anEmptyShotAndNonsenseRatesAnswerRatherThanDivideByZero() {
 
 void whichSampleIsHeardAtASlot() {
     TEST("which sample of the file is heard at a slot");
-    CHECK_EQ(sampleForSlot(0, 0, kRate, kFps), std::int64_t(0));
-    CHECK_EQ(sampleForSlot(1, 0, kRate, kFps), kPerFrame);
-    CHECK_EQ(sampleForSlot(24, 0, kRate, kFps), std::int64_t(kRate));
+    AudioPlacement at_zero;
+    CHECK_EQ(sampleForSlot(0, at_zero, kRate, kFps), std::int64_t(0));
+    CHECK_EQ(sampleForSlot(1, at_zero, kRate, kFps), kPerFrame);
+    CHECK_EQ(sampleForSlot(24, at_zero, kRate, kFps), std::int64_t(kRate));
 
     // Placed at frame 10, the file's first sample is heard on frame 10.
-    CHECK_EQ(sampleForSlot(10, 10, kRate, kFps), std::int64_t(0));
-    CHECK_EQ(sampleForSlot(11, 10, kRate, kFps), kPerFrame);
+    AudioPlacement at_ten;
+    at_ten.offset_frames = 10.0;
+    CHECK_EQ(sampleForSlot(10, at_ten, kRate, kFps), std::int64_t(0));
+    CHECK_EQ(sampleForSlot(11, at_ten, kRate, kFps), kPerFrame);
 
-    // Before it starts there is nothing to hear, and saying so with a negative
-    // beats a bool a caller can forget to look at.
-    CHECK_EQ(sampleForSlot(9, 10, kRate, kFps), std::int64_t(-1));
-    CHECK_EQ(sampleForSlot(0, 10, kRate, kFps), std::int64_t(-1));
+    // **Before it starts the number says by how much**, rather than reporting a
+    // sentinel. A caller feeding a device plays silence until the index reaches
+    // zero and then reads on, which is what a sound placed part-way into a
+    // frame needs -- half of that frame is silence and half of it is sound.
+    CHECK_EQ(sampleForSlot(9, at_ten, kRate, kFps), -kPerFrame);
+    CHECK_EQ(sampleForSlot(0, at_ten, kRate, kFps), -10 * kPerFrame);
 }
 
-// A soundtrack that starts before the shot does is ordinary: a line of dialogue
-// with a breath in front of it, the word on frame 1 and the breath falling off
-// the start. The subtraction has to be done widened, or slot 0 against an
-// offset of -5 becomes a sample index near eighteen quintillion.
+// The whole reason the offset is a double. 1/24 of a second is 42 ms, which is
+// most of the way to a syllable, so a sound placed to the nearest frame is not
+// placed at all.
+void aSoundCanSitBetweenTwoFrames() {
+    TEST("a sound placed between two frames is heard between them");
+    AudioPlacement half;
+    half.offset_frames = 10.5;
+
+    // Frame 10 begins half a frame before the sound does.
+    CHECK_EQ(sampleForSlot(10, half, kRate, kFps), -kPerFrame / 2);
+    // Frame 11 is half a frame into it.
+    CHECK_EQ(sampleForSlot(11, half, kRate, kFps), kPerFrame / 2);
+
+    // And the fraction survives being small. A tenth of a frame at 24 fps is
+    // 4 ms, which is the order of precision a drag actually has.
+    AudioPlacement nudged;
+    nudged.offset_frames = 10.1;
+    CHECK_EQ(sampleForSlot(10, nudged, kRate, kFps), -kPerFrame / 10);
+}
+
+// Floor and not truncate. Truncation rounds towards zero, so a slot a fraction
+// *before* the sound would come back as sample 0 -- audible, on a frame that
+// should be silent, and only on the negative side. Nobody finds that by ear.
+void theSampleIndexIsFlooredAndNotTruncated() {
+    TEST("a slot just before the sound reads as before it, not as its first sample");
+    AudioPlacement just_after;
+    just_after.offset_frames = 0.5;
+    const std::int64_t at_zero = sampleForSlot(0, just_after, kRate, kFps);
+    CHECK(at_zero < 0);
+    CHECK_EQ(at_zero, -kPerFrame / 2);
+}
+
 void aSoundtrackCanStartBeforeTheShotDoes() {
     TEST("a soundtrack can start before the shot does");
-    CHECK_EQ(sampleForSlot(0, -5, kRate, kFps), 5 * kPerFrame);
-    CHECK_EQ(sampleForSlot(5, -5, kRate, kFps), 10 * kPerFrame);
+    AudioPlacement early;
+    early.offset_frames = -5.0;
+    CHECK_EQ(sampleForSlot(0, early, kRate, kFps), 5 * kPerFrame);
+    CHECK_EQ(sampleForSlot(5, early, kRate, kFps), 10 * kPerFrame);
+}
+
+// --- cropping, which moves two numbers and no samples ----------------------
+
+void croppingTheFrontMovesTheReadHeadAndNotTheSound() {
+    TEST("cropping the front of a sound leaves the rest where it was");
+    // A sound at frame 10, cropped by a quarter of a second. Cropping the front
+    // means the audio under every remaining frame is the audio that was there
+    // before -- so the in-point and the offset move together.
+    AudioPlacement cropped;
+    cropped.offset_frames = 10.0 + 0.25 * kFps;  // the block's front moved right
+    cropped.trim_start_seconds = 0.25;
+
+    // At the new front, a quarter of a second into the file.
+    CHECK_EQ(sampleForSlot(16, cropped, kRate, kFps), std::int64_t(0.25 * kRate));
+
+    // And the frame that was showing a given sample before the crop is showing
+    // the same sample after it, which is the whole claim.
+    AudioPlacement whole;
+    whole.offset_frames = 10.0;
+    CHECK_EQ(sampleForSlot(20, whole, kRate, kFps), sampleForSlot(20, cropped, kRate, kFps));
+}
+
+void croppingIsTwoNumbersAndNoSamples() {
+    TEST("a crop changes what is audible without touching the clip");
+    AudioClip clip;
+    clip.rate = kRate;
+    clip.channels = 1;
+    clip.samples.assign(kRate * 2, 0.5f);  // two seconds
+    const std::size_t before = clip.samples.size();
+
+    AudioPlacement whole;
+    CHECK_NEAR(audibleSeconds(clip, whole), 2.0, 1e-9);
+    CHECK_EQ(audibleFrames(clip, whole, kFps), std::size_t(48));
+    CHECK_EQ(lastAudibleSample(clip, whole), std::int64_t(kRate * 2));
+
+    AudioPlacement cropped;
+    cropped.trim_start_seconds = 0.5;
+    cropped.trim_end_seconds = 0.25;
+    CHECK_NEAR(audibleSeconds(clip, cropped), 1.25, 1e-9);
+    CHECK_EQ(audibleFrames(clip, cropped, kFps), std::size_t(30));
+    // The out-point counts from the end of the file, and the in-point does not
+    // enter it: one names a sample and the other names where reading starts.
+    CHECK_EQ(lastAudibleSample(clip, cropped), std::int64_t(kRate * 2 - kRate / 4));
+
+    // **Non-destructive**, which is the whole reason to do it this way: the
+    // samples are untouched, so the crop undoes by putting two numbers back.
+    CHECK_EQ(clip.samples.size(), before);
+}
+
+void aLengthThatEndsPartWayIntoAFrameStillUsesThatFrame() {
+    TEST("a sound ending a tenth of the way into a frame still occupies it");
+    AudioClip clip;
+    clip.rate = kRate;
+    clip.channels = 1;
+    // A second and a tenth of a frame.
+    clip.samples.assign(kRate + kPerFrame / 10, 0.5f);
+    // Rounded up, or the row would stop short of what you can hear.
+    CHECK_EQ(audibleFrames(clip, AudioPlacement{}, kFps), std::size_t(25));
 }
 
 void theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem() {
@@ -159,7 +253,7 @@ void theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem() {
     sound.id = 1;
     sound.name = "dialogue";
     sound.source = "dialogue.wav";
-    sound.offset_frames = 12;
+    sound.placement.offset_frames = 12;
     scene.audio_tracks.push_back(sound);
 
     // The one property the whole "audio is not a track" argument rests on:
@@ -187,9 +281,9 @@ void theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem() {
 void gainIsWhatYouWillHearAndTheBarHeightIsTheSameNumber() {
     TEST("gain is what you will hear, and the bar height is the same number");
     AudioTrack sound;
-    CHECK_NEAR(sound.gain, 1.0, 1e-12);
-    sound.gain = 0.0;  // silent at the bottom, so no separate mute is needed
-    CHECK_NEAR(sound.gain, 0.0, 1e-12);
+    CHECK_NEAR(sound.placement.gain, 1.0, 1e-12);
+    sound.placement.gain = 0.0;  // silent at the bottom, so no separate mute is needed
+    CHECK_NEAR(sound.placement.gain, 0.0, 1e-12);
 }
 
 }  // namespace
@@ -202,7 +296,12 @@ int main() {
     aDeviceReportingBackwardsDoesNotThrowThePictureAcrossTheShot();
     anEmptyShotAndNonsenseRatesAnswerRatherThanDivideByZero();
     whichSampleIsHeardAtASlot();
+    aSoundCanSitBetweenTwoFrames();
+    theSampleIndexIsFlooredAndNotTruncated();
     aSoundtrackCanStartBeforeTheShotDoes();
+    croppingTheFrontMovesTheReadHeadAndNotTheSound();
+    croppingIsTwoNumbersAndNoSamples();
+    aLengthThatEndsPartWayIntoAFrameStillUsesThatFrame();
     theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem();
     gainIsWhatYouWillHearAndTheBarHeightIsTheSameNumber();
     return testing::summarise("audio");

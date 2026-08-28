@@ -143,8 +143,7 @@ void AudioTrackOp::applySwap(Document& doc) {
 void AudioPlacementOp::applySwap(Document& doc) {
     AudioTrack* track = doc.mutableScene().findAudioTrack(track_);
     if (!track) return;
-    std::swap(track->offset_frames, offset_frames_);
-    std::swap(track->gain, gain_);
+    std::swap(track->placement, placement_);
 }
 
 // No cel refcount moves either way: nothing enters or leaves the scene, the

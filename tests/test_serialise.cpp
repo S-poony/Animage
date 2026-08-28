@@ -574,7 +574,10 @@ void aSoundtrackSurvivesTheRoundTrip() {
     TEST("a soundtrack comes back with its file, its placement and its gain");
     Document doc = buildScene();
     const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
-    doc.setAudioTrackPlacement(sound, -4, 0.5);
+    AudioPlacement placed;
+    placed.offset_frames = -4;
+    placed.gain = 0.5;
+    doc.setAudioTrackPlacement(sound, placed);
 
     // The samples are derived and must not be written. Installing some here is
     // what makes the next check mean something: a save that carried them would
@@ -598,8 +601,8 @@ void aSoundtrackSurvivesTheRoundTrip() {
     const AudioTrack& back = loaded.scene().audio_tracks.front();
     CHECK_EQ(back.source, std::string("dialogue.wav"));
     CHECK_EQ(back.name, std::string("dialogue"));
-    CHECK_EQ(back.offset_frames, -4);  // a breath in front of the word
-    CHECK_NEAR(back.gain, 0.5, 1e-9);
+    CHECK_NEAR(back.placement.offset_frames, -4.0, 1e-9);  // a breath in front of the word
+    CHECK_NEAR(back.placement.gain, 0.5, 1e-9);
 
     // Derived, so it does not come back -- and nothing pretends it did.
     CHECK(loaded.audioSamplesFor(back.id) == nullptr);
@@ -644,12 +647,15 @@ void undoingAnImportTakesTheSoundtrackWithIt() {
     const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
     CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
 
-    doc.setAudioTrackPlacement(sound, 12, 0.4);
-    CHECK_EQ(doc.scene().findAudioTrack(sound)->offset_frames, 12);
+    AudioPlacement moved;
+    moved.offset_frames = 12;
+    moved.gain = 0.4;
+    doc.setAudioTrackPlacement(sound, moved);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.offset_frames, 12.0, 1e-9);
 
     CHECK(doc.undo());  // the placement
-    CHECK_EQ(doc.scene().findAudioTrack(sound)->offset_frames, 0);
-    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 1.0, 1e-9);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.offset_frames, 0.0, 1e-9);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 1.0, 1e-9);
 
     CHECK(doc.undo());  // the import
     CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
@@ -666,10 +672,14 @@ void gainIsClampedWhereItIsStoredAndNotAtEachCaller() {
     Document doc = buildScene();
     const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
 
-    doc.setAudioTrackPlacement(sound, 0, 4.0);
-    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 1.0, 1e-9);
-    doc.setAudioTrackPlacement(sound, 0, -1.0);
-    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 0.0, 1e-9);
+    AudioPlacement loud;
+    loud.gain = 4.0;
+    doc.setAudioTrackPlacement(sound, loud);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 1.0, 1e-9);
+    AudioPlacement negative;
+    negative.gain = -1.0;
+    doc.setAudioTrackPlacement(sound, negative);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 0.0, 1e-9);
 
     // And a file that says something impossible is clamped on the way in too,
     // rather than being trusted because it was written by us once.
@@ -680,16 +690,78 @@ void gainIsClampedWhereItIsStoredAndNotAtEachCaller() {
     text.replace(at, wrote.size(), "\"gain\": 900");
     Document loaded;
     CHECK(ProjectIO::readSceneJson(text, loaded, nullptr));
-    CHECK_NEAR(loaded.scene().audio_tracks.front().gain, 1.0, 1e-9);
+    CHECK_NEAR(loaded.scene().audio_tracks.front().placement.gain, 1.0, 1e-9);
 }
 
 void soundtracksRaisedTheFormatVersion() {
-    TEST("scene.json says version 3, which stops an older build orphaning a soundtrack");
+    TEST("the version is past 3, which stops an older build orphaning a soundtrack");
+    // A floor and not the number, for the reason the imports test above gives:
+    // asserting the exact version a bump introduced breaks on the *next* bump,
+    // which is the wrong failure. This one has now happened twice.
     Document doc = buildScene();
     doc.addAudioTrack("dialogue", "dialogue.wav");
     const std::string text = ProjectIO::writeSceneJson(doc);
-    CHECK(text.find("\"version\": 3") != std::string::npos);
     CHECK(ProjectIO::kSceneFormatVersion >= 3);
+    CHECK(text.find("\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion)) !=
+          std::string::npos);
+}
+
+void acropSurvivesTheRoundTripAndAnUntrimmedSoundWritesNothing() {
+    TEST("a crop comes back, and a sound nobody cropped writes no trim at all");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    // Untrimmed first: the same bytes a project wrote before the trim existed.
+    const std::string plain = ProjectIO::writeSceneJson(doc);
+    CHECK(plain.find("trim_start_seconds") == std::string::npos);
+    CHECK(plain.find("trim_end_seconds") == std::string::npos);
+
+    AudioPlacement cropped;
+    // Fractional, which is the whole point: 1/24 of a second is 42 ms.
+    cropped.offset_frames = 12.4;
+    cropped.trim_start_seconds = 0.25;
+    cropped.trim_end_seconds = 0.5;
+    doc.setAudioTrackPlacement(sound, cropped);
+
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    if (loaded.scene().audio_tracks.empty()) return;
+
+    const AudioPlacement& back = loaded.scene().audio_tracks.front().placement;
+    // **The fraction survives.** A file that wrote this as an integer would put
+    // the sound back on frame 12 -- 17 ms away, which is where a consonant
+    // lives, and is exactly what the version bump exists to refuse.
+    CHECK_NEAR(back.offset_frames, 12.4, 1e-9);
+    CHECK_NEAR(back.trim_start_seconds, 0.25, 1e-9);
+    CHECK_NEAR(back.trim_end_seconds, 0.5, 1e-9);
+}
+
+void aCropIsBoundedBySomethingLeftToGrab() {
+    TEST("a crop cannot eat the whole sound");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 1;
+    clip.samples.assign(48000, 0.5f);  // one second
+    doc.setAudioSamples(sound, std::move(clip));
+
+    AudioPlacement greedy;
+    greedy.trim_start_seconds = 10.0;  // far more than there is
+    doc.setAudioTrackPlacement(sound, greedy);
+
+    // A sound trimmed to nothing draws no block, and a row with no block has
+    // nothing to take hold of -- so the gesture that emptied it would be the
+    // last one anybody could make on it.
+    const AudioClip* held = doc.audioSamplesFor(sound);
+    CHECK(held != nullptr);
+    if (!held) return;
+    CHECK(audibleSeconds(*held, doc.scene().findAudioTrack(sound)->placement) > 0.0);
+    CHECK(audibleFrames(*held, doc.scene().findAudioTrack(sound)->placement, 24) > 0);
 }
 
 void aSoundtrackDoesNotLengthenTheShot() {
@@ -731,6 +803,8 @@ int main() {
     undoingAnImportTakesTheSoundtrackWithIt();
     gainIsClampedWhereItIsStoredAndNotAtEachCaller();
     soundtracksRaisedTheFormatVersion();
+    acropSurvivesTheRoundTripAndAnUntrimmedSoundWritesNothing();
+    aCropIsBoundedBySomethingLeftToGrab();
     aSoundtrackDoesNotLengthenTheShot();
     return testing::summarise("serialise");
 }

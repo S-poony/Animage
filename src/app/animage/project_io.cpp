@@ -1112,8 +1112,18 @@ std::string ProjectIO::writeSceneJson(const Document& doc) {
             one.insert("id", jsonNumber(static_cast<qint64>(track.id)));
             one.insert("name", QString::fromStdString(track.name));
             one.insert("source", QString::fromStdString(track.source));
-            one.insert("offset_frames", jsonNumber(track.offset_frames));
-            one.insert("gain", track.gain);
+            // A double, and written as one. A sound placed to the nearest
+            // frame is not placed: 1/24 of a second is 42 ms.
+            one.insert("offset_frames", track.placement.offset_frames);
+            one.insert("gain", track.placement.gain);
+            // Only when they say something. A soundtrack nobody has cropped
+            // writes the same bytes it did before the trim existed.
+            if (track.placement.trim_start_seconds > 0.0) {
+                one.insert("trim_start_seconds", track.placement.trim_start_seconds);
+            }
+            if (track.placement.trim_end_seconds > 0.0) {
+                one.insert("trim_end_seconds", track.placement.trim_end_seconds);
+            }
             sounds.append(one);
         }
         out.insert("audio_tracks", sounds);
@@ -1175,8 +1185,18 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
         track.id = static_cast<TrackId>(asInt(one.value("id"), 0));
         track.name = one.value("name").toString().toStdString();
         track.source = one.value("source").toString().toStdString();
-        track.offset_frames = asInt(one.value("offset_frames"), 0);
-        track.gain = std::clamp(one.value("gain").toDouble(1.0), 0.0, 1.0);
+        // toDouble and not asInt: a version 3 file wrote a whole number here
+        // and reads back as the same number, so nothing has to be migrated.
+        track.placement.offset_frames = one.value("offset_frames").toDouble(0.0);
+        track.placement.gain = std::clamp(one.value("gain").toDouble(1.0), 0.0, 1.0);
+        // Absent means untrimmed, which is what every project written before
+        // this existed means. Negatives are clamped rather than trusted: what
+        // bounds these against the *clip* is Document::setAudioTrackPlacement,
+        // and a load has no decoded clip to bound them with yet.
+        track.placement.trim_start_seconds =
+            std::max(0.0, one.value("trim_start_seconds").toDouble(0.0));
+        track.placement.trim_end_seconds =
+            std::max(0.0, one.value("trim_end_seconds").toDouble(0.0));
         if (track.id == kNoId || track.source.empty()) continue;
         scene.audio_tracks.push_back(std::move(track));
     }

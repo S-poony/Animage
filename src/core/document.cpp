@@ -2,6 +2,7 @@
 #include "document.h"
 
 #include <algorithm>
+#include <cmath>
 #include <new>
 #include <unordered_set>
 #include <utility>
@@ -144,19 +145,44 @@ void Document::removeAudioTrack(TrackId track) {
     }
 }
 
-void Document::setAudioTrackPlacement(TrackId track, int offset_frames, double gain) {
+void Document::setAudioTrackPlacement(TrackId track, AudioPlacement placement) {
     AudioTrack* found = scene_.findAudioTrack(track);
     if (!found) return;
-    // Clamped here rather than at the two call sites, so that a number arriving
-    // from a spin box and a number arriving from a drag cannot disagree about
-    // what a gain is allowed to be.
-    gain = std::clamp(gain, 0.0, 1.0);
-    if (found->offset_frames == offset_frames && found->gain == gain) return;
+
+    placement.gain = std::clamp(placement.gain, 0.0, 1.0);
+    placement.trim_start_seconds = std::max(0.0, placement.trim_start_seconds);
+    placement.trim_end_seconds = std::max(0.0, placement.trim_end_seconds);
+
+    // The trim is bounded by the sound it trims, and this is the only place
+    // that can do it: the clip is derived data held here, not on the track.
+    //
+    // **A minimum of one frame of audio survives**, rather than zero. A sound
+    // trimmed to nothing draws no block, and a row with no block is a row with
+    // nothing to take hold of -- so the gesture that emptied it would be the
+    // last one anybody could make on it. Undo would still work; needing it to
+    // is the failure.
+    if (const AudioClip* clip = audioSamplesFor(track)) {
+        if (clip->rate > 0 && !clip->empty()) {
+            const double whole =
+                static_cast<double>(clip->frames()) / static_cast<double>(clip->rate);
+            const double floor_seconds = std::min(whole, 1.0 / 24.0);
+            const double room = std::max(0.0, whole - floor_seconds);
+            placement.trim_start_seconds = std::min(placement.trim_start_seconds, room);
+            placement.trim_end_seconds =
+                std::min(placement.trim_end_seconds, room - placement.trim_start_seconds);
+        }
+    }
+
+    const AudioPlacement& live = found->placement;
+    if (live.offset_frames == placement.offset_frames && live.gain == placement.gain &&
+        live.trim_start_seconds == placement.trim_start_seconds &&
+        live.trim_end_seconds == placement.trim_end_seconds) {
+        return;
+    }
 
     ScopedCommand command(*this, "Place audio");
-    recordOp(std::make_unique<AudioPlacementOp>(track, found->offset_frames, found->gain));
-    found->offset_frames = offset_frames;
-    found->gain = gain;
+    recordOp(std::make_unique<AudioPlacementOp>(track, found->placement));
+    found->placement = placement;
 }
 
 void Document::setAudioSamples(TrackId track, AudioClip clip) {
@@ -175,14 +201,17 @@ std::size_t Document::timelineFrames() const {
     for (const AudioTrack& sound : scene_.audio_tracks) {
         const auto it = audio_samples_.find(sound.id);
         if (it == audio_samples_.end()) continue;
-        const std::size_t length = it->second.framesAtFps(scene_.framerate);
+        // The *audible* length, so a sound cropped short stops asking the
+        // timeline to reach where it used to end.
+        const std::size_t length = audibleFrames(it->second, sound.placement, scene_.framerate);
         if (length == 0) continue;
         // A soundtrack that starts before the shot contributes only what is
         // inside it: the part before frame 0 is not somewhere the playhead can
         // go, so it is not length the timeline has to reach.
-        const long long last = static_cast<long long>(sound.offset_frames) +
-                               static_cast<long long>(length);
-        if (last > 0) frames = std::max(frames, static_cast<std::size_t>(last));
+        const double last = sound.placement.offset_frames + static_cast<double>(length);
+        if (last > 0.0) {
+            frames = std::max(frames, static_cast<std::size_t>(std::ceil(last)));
+        }
     }
     return frames;
 }

@@ -3420,7 +3420,9 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
         // two, and lengthening the shot would have been a third.
         doc_.beginCommand("Import audio");
         added = doc_.addAudioTrack(QFileInfo(path).completeBaseName().toStdString(), source);
-        doc_.setAudioTrackPlacement(added, offset, 1.0);
+        AudioPlacement placed;
+        placed.offset_frames = offset;
+        doc_.setAudioTrackPlacement(added, placed);
 
         if (extend_shot) {
             // **Never shorter than it is**, whatever the offset. The box says

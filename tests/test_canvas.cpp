@@ -2683,7 +2683,7 @@ void aSoundtrackSurvivesAnImportASaveAndAReopen() {
         CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
         if (scene.audio_tracks.empty()) return;
         sound = scene.audio_tracks.front().id;
-        CHECK_EQ(scene.audio_tracks.front().offset_frames, 6);
+        CHECK_NEAR(scene.audio_tracks.front().placement.offset_frames, 6.0, 1e-9);
 
         // Decoded on the way in, unlike a picture -- there is nothing later to
         // ask, because what would ask is a device callback that must not wait
@@ -2720,7 +2720,7 @@ void aSoundtrackSurvivesAnImportASaveAndAReopen() {
     const animage::Scene& scene = reopened.documentForTesting().scene();
     CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
     if (scene.audio_tracks.empty()) return;
-    CHECK_EQ(scene.audio_tracks.front().offset_frames, 6);
+    CHECK_NEAR(scene.audio_tracks.front().placement.offset_frames, 6.0, 1e-9);
 
     // Decoded again from the copy, which is the load path doing its one job.
     const animage::AudioClip* clip =

@@ -145,14 +145,13 @@ private:
 // neither of those wants half a struct.
 class AudioPlacementOp final : public Op {
 public:
-    AudioPlacementOp(TrackId track, int offset_frames, double gain)
-        : track_(track), offset_frames_(offset_frames), gain_(gain) {}
+    AudioPlacementOp(TrackId track, AudioPlacement placement)
+        : track_(track), placement_(placement) {}
     void applySwap(Document& doc) override;
 
 private:
     TrackId track_;
-    int offset_frames_;
-    double gain_;
+    AudioPlacement placement_;
 };
 
 // Moves a track from one place in the stack to another. Its own inverse like

@@ -218,15 +218,33 @@ private:
     // gutter restacks the track. A soundtrack row has no cards to pick up, so a
     // vertical drag inside it collides with nothing.
 
-    // Where the sound sits, in slots: [first, last). Empty when the clip has
-    // not decoded or the track is silent-length.
-    std::pair<std::size_t, std::size_t> audioExtent(const animage::AudioTrack& sound) const;
+    // Where the audible part of the sound sits, in slots: [first, last).
+    // Fractional, because the offset is -- a sound placed to the nearest frame
+    // is not placed. Empty when nothing has decoded or the trim leaves nothing.
+    std::pair<double, double> audioExtent(const animage::AudioTrack& sound) const;
 
-    // The gain a press or drag at `y` in this row means. Clamped to 0..1, and
-    // measured from the *bottom* of the row: the bar's height in the row is the
-    // level, so at the bottom it is silent and no separate mute is needed.
+    // The gain a drag at `y` in this row means. Clamped to 0..1, and measured
+    // from the *bottom* of the row: the bar's height in the row is the level,
+    // so at the bottom it is silent and no separate mute is needed.
     double gainForY(std::size_t row, int y) const;
-    void applyGain(int pointer_y);
+
+    // **Three gestures in one row, and one of them is decided rather than
+    // chosen.** Dragging an end crops; dragging the body sideways moves the
+    // sound along the shot; dragging it up and down sets the level. The ends
+    // are unambiguous and start on the press. The other two share a press and
+    // are told apart by which way the pointer goes first -- exactly how this
+    // file already tells a drawing drag (along the row) from a track restack
+    // (across it).
+    //
+    // Nothing rounds to a frame. 1/24 of a second is 42 ms, which is most of
+    // the way to a syllable, so a sound placed to the nearest frame is not
+    // placed at all -- and a pixel is 1/26 of a frame at this cell width, which
+    // is the precision the gesture actually has.
+    enum class AudioDrag { None, Deciding, Move, Gain, TrimStart, TrimEnd };
+    void applyAudioDrag(int x, int y);
+
+    // Where the block's two ends are, in x, for the grab zones and the cursor.
+    bool audioEdgeAt(std::size_t row, int x, bool* is_start) const;
 
     animage::Document& doc_;
     animage::TrackId track_ = animage::kNoId;
@@ -237,12 +255,19 @@ private:
 
     std::size_t current_slot_ = 0;
 
-    // Dragging a soundtrack's bar up and down sets its gain. One command for
-    // the whole drag, as the exposure stretch does, so a level found by ear
-    // undoes in a single step rather than in fifty.
-    bool dragging_gain_ = false;
-    animage::TrackId gain_track_ = animage::kNoId;
-    std::size_t gain_row_ = 0;
+    // A gesture in a soundtrack's row. One command for the whole drag, as the
+    // exposure stretch does, so a level found by ear or a sound nudged into
+    // place undoes in a single step rather than in fifty.
+    //
+    // `audio_drag_from_` is the placement as it was when the press landed, and
+    // every drag is computed *from* it rather than by accumulating deltas. That
+    // is the same reason the transform box holds absolute numbers: accumulating
+    // makes the result depend on how many mouse events arrived, which is not
+    // something a person can aim at.
+    AudioDrag audio_drag_ = AudioDrag::None;
+    animage::TrackId audio_drag_track_ = animage::kNoId;
+    std::size_t audio_drag_row_ = 0;
+    animage::AudioPlacement audio_drag_from_;
 
     bool stretching_ = false;
     std::size_t stretch_row_ = 0;

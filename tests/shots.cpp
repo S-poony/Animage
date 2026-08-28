@@ -1004,7 +1004,35 @@ const std::vector<Situation>& situations() {
              }
              animage::Document& doc = s.window.documentForTesting();
              if (!doc.scene().audio_tracks.empty()) {
-                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, 4, 0.2);
+                 animage::AudioPlacement quiet;
+                 quiet.offset_frames = 4;
+                 quiet.gain = 0.2;
+                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, quiet);
+             }
+             s.settlePicture();
+         }},
+
+        {"a-soundtrack-cropped-and-nudged",
+         "the same sound cropped at both ends and nudged off the frame line. The block's front "
+         "and back are where the crop left them, and its left edge sits four tenths of a cell "
+         "past frame 9 -- which is the only way a placement finer than a frame is visible. "
+         "Nothing was cut: the crop is two numbers and the samples are untouched",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.5);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 1, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             animage::Document& doc = s.window.documentForTesting();
+             if (!doc.scene().audio_tracks.empty()) {
+                 animage::AudioPlacement cropped;
+                 // Between two frames, deliberately: 1/24 s is 42 ms and a
+                 // sound placed to the nearest frame is not placed.
+                 cropped.offset_frames = 8.4;
+                 cropped.trim_start_seconds = 0.25;
+                 cropped.trim_end_seconds = 0.35;
+                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, cropped);
              }
              s.settlePicture();
          }},

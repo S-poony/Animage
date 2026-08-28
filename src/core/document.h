@@ -165,10 +165,18 @@ public:
     TrackId addAudioTrack(std::string name, std::string source);
     void removeAudioTrack(TrackId track);
 
-    // Where the sound sits in the shot, and how loud. One command for both,
-    // because the timeline row's drag changes gain and the dialog's box changes
-    // the offset, and neither wants half a struct.
-    void setAudioTrackPlacement(TrackId track, int offset_frames, double gain);
+    // Where the sound sits, how much of it is used, and how loud.
+    //
+    // One command for the whole struct, because a caller cannot write half a
+    // placement and an undo entry is one swap. The same shape updateTrack has.
+    //
+    // **Everything is clamped here and not at the call sites.** A gain from a
+    // spin box and a gain from a drag must not be able to disagree about what a
+    // gain is; and a trim is clamped against the *clip*, which is why this is
+    // on the Document -- the one object that holds both the placement and the
+    // decoded samples. A trim that ate the whole sound would leave a row with
+    // nothing to grab and no way back.
+    void setAudioTrackPlacement(TrackId track, AudioPlacement placement);
 
     // Installs decoded samples. **Not an edit**: no command, no journal entry,
     // no undo step. The document is not changed by this, only the memo of what

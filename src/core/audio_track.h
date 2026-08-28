@@ -30,25 +30,35 @@ namespace animage {
 // does not have. It has no layers, and is not given a one-row layer list so
 // that a gain control has somewhere to live -- that would mean every
 // currentLayer() call site handling a layer that is not one.
-struct AudioTrack {
-    TrackId id = kNoId;
-    std::string name;
-
-    // The file inside the project's `audio/` folder, as a bare name. Not a
-    // path: a project is a self-contained folder and nothing here may point
-    // outside it. Same rule, and the same reason, as an import's source.
-    std::string source;
-
-    // Where the sound sits in the shot, in frames. **This belongs to the shot
-    // and is saved**, and it is emphatically not the deferred per-machine sync
-    // calibration -- that one describes a driver, is measured in milliseconds,
-    // and is a preference rather than anything in scene.json. The two look
-    // alike and only this one travels with a project to another computer.
+// Where a soundtrack sits, how much of it is used, and how loud.
+//
+// **Two units, and each is in the frame of reference of the thing it
+// describes.** That is not an inconsistency to tidy up: it is what keeps both
+// numbers still correct after somebody changes the scene's frame rate.
+//
+// The *offset* is a fact about the shot. You placed the sound so a consonant
+// lands on the drawing at frame 12; in frames, it stays on that drawing when
+// the rate changes. In seconds it would slide off the drawing it was matched
+// to.
+//
+// The *trim* is a fact about the sound. "Start 0.3 seconds into the file" goes
+// on meaning the same moment of the recording whatever the picture does around
+// it. In frames, a rate change would re-point it into a different part of the
+// take.
+struct AudioPlacement {
+    // Where the sound starts, in frames of picture. **Fractional**, because
+    // placing a sound to the nearest frame is not placing it: 1/24 of a second
+    // is 42 ms, which is most of the way to a syllable. A drag moves it by
+    // whatever a pixel is worth and nothing rounds it.
     //
     // Signed, because a soundtrack that starts before the shot does is
     // ordinary: an animator given a line of dialogue with a breath in front of
     // it puts the word on frame 1 and lets the breath fall off the start.
-    int offset_frames = 0;
+    //
+    // Not the deferred per-machine sync calibration, which describes a driver,
+    // is measured in milliseconds and is a preference rather than anything in
+    // scene.json. The two look alike and only this one travels with a project.
+    double offset_frames = 0.0;
 
     // What you will hear, 0 to 1. The height of the bar in the timeline row
     // *is* this number -- the row shows the level rather than describing it,
@@ -58,6 +68,30 @@ struct AudioTrack {
     // height is read off. Where a human-facing curve is wanted it belongs at
     // the gesture, not in the field.
     double gain = 1.0;
+
+    // How much of the file is skipped at each end, in seconds.
+    //
+    // **Non-destructive: the file is untouched and nothing is re-encoded.** A
+    // trim moves two numbers, so it costs nothing, undoes like anything else,
+    // and can be taken back to the whole take at any point -- which is the
+    // whole reason to do it this way rather than by cutting samples.
+    double trim_start_seconds = 0.0;
+    double trim_end_seconds = 0.0;
+};
+
+struct AudioTrack {
+    TrackId id = kNoId;
+    std::string name;
+
+    // The file inside the project's `audio/` folder, as a bare name. Not a
+    // path: a project is a self-contained folder and nothing here may point
+    // outside it. Same rule, and the same reason, as an import's source.
+    std::string source;
+
+    // Everything a gesture on the row can change, in one struct, so that an
+    // undo entry is one swap and a caller cannot write half of it. The same
+    // shape Track uses for TrackProperties.
+    AudioPlacement placement;
 };
 
 // What a soundtrack file decoded to.
@@ -135,13 +169,35 @@ struct AudioClip {
 std::size_t slotForPlayedFrames(std::size_t start_slot, std::int64_t played, int rate, int fps,
                                 std::size_t count);
 
-// Which sample of the file is heard at this slot, given where the track sits.
+// Which sample of the file is heard at this slot, given where the track sits
+// and how much of it is trimmed away.
 //
-// Negative when the slot is before the sound starts -- a caller feeding a
-// device wants silence there, and saying so with a signed number is better than
-// a bool it can forget to check. Also negative past nothing: running off the
-// *end* of a file is the file's own length to answer, which this cannot see and
-// does not pretend to.
-std::int64_t sampleForSlot(std::size_t slot, int offset_frames, int rate, int fps);
+// **Negative means the sound has not started, and the number says by how
+// much.** A caller feeding a device plays silence until the index reaches zero
+// and then reads on -- which is what a sound placed at frame 12.5 needs, since
+// half of frame 12 is silence and half of it is sound. A sentinel could not
+// express that, which is why this returns a signed index rather than -1.
+//
+// It does not know where the file ends. That is `lastAudibleSample`, which
+// needs the clip and this deliberately does not take one: the picture's side of
+// the arithmetic is a pure function of numbers, and keeping it that way is what
+// lets a test drive it with no decoded audio at all.
+std::int64_t sampleForSlot(std::size_t slot, const AudioPlacement& placement, int rate, int fps);
+
+// One past the last sample the trim leaves audible, given the clip.
+//
+// A caller reading at or past this plays silence: the trim is an out-point, and
+// running off it is not an error any more than running off the end of the file
+// is.
+std::int64_t lastAudibleSample(const AudioClip& clip, const AudioPlacement& placement);
+
+// How long the audible part of the sound is: in seconds, and in frames of
+// picture at `fps`.
+//
+// Rounded up to whole frames, because a sound that ends a tenth of the way into
+// a frame still makes a noise on it -- and the row has to draw that frame or the
+// block would stop short of what you can hear.
+double audibleSeconds(const AudioClip& clip, const AudioPlacement& placement);
+std::size_t audibleFrames(const AudioClip& clip, const AudioPlacement& placement, int fps);
 
 }  // namespace animage

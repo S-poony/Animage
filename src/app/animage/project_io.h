@@ -45,6 +45,13 @@ public:
     // changes in a way old builds would misread; a file with a higher version
     // is refused with a message saying the build is older than the file.
     //
+    // **4 is a soundtrack's trim, and a fractional offset.** A build that reads
+    // `offset_frames` as an integer would round a sound placed at frame 12.4
+    // back onto frame 12 -- 17 ms at 24 fps, which is where a consonant lives --
+    // and would drop the in and out points entirely, playing whole takes where
+    // a line had been cropped out of one. Both survive a *refusal* and neither
+    // survives being read by an older build, which is what this number is for.
+    //
     // **3 is soundtracks.** A build that does not know `audio_tracks` drops the
     // key on load and then autosaves over the project two minutes later without
     // it -- and unlike a cel, there is nothing in the document to write it back
@@ -60,7 +67,7 @@ public:
     // having dropped the import. Silent data loss, which is exactly the
     // standard this number exists to enforce: bump when old builds would get it
     // wrong, not merely when they would not understand.
-    static constexpr int kSceneFormatVersion = 3;
+    static constexpr int kSceneFormatVersion = 4;
 
     // What the last successful save or load left on disk, so the next save can
     // tell which cel files are still current. A cel's revision is bumped by

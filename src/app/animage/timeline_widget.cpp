@@ -143,8 +143,11 @@ struct AudioRowPaint {
     bool current = false;
     QString name;
     double gain = 1.0;
-    std::size_t first = 0;  // the extent, in slots; last <= first means nothing
-    std::size_t last = 0;
+    // The extent, in slots and fractional: a sound placed at frame 12.4 draws
+    // its edge four tenths of a cell along, which is the only way the placement
+    // being finer than a frame is visible at all.
+    double first = 0.0;
+    double last = 0.0;
 };
 
 void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPaint& row) {
@@ -166,8 +169,8 @@ void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPain
         return;
     }
 
-    const int x0 = kGutterWidth + static_cast<int>(row.first) * kCellWidth;
-    const int x1 = kGutterWidth + static_cast<int>(row.last) * kCellWidth;
+    const int x0 = kGutterWidth + static_cast<int>(std::lround(row.first * kCellWidth));
+    const int x1 = kGutterWidth + static_cast<int>(std::lround(row.last * kCellWidth));
     const int band_top = row.top + 2;
     const int band_height = kRowHeight - 8;
 
@@ -225,26 +228,23 @@ const Track* TimelineWidget::currentTrack() const { return doc_.scene().findTrac
 // nothing stores it: a clip is derived, and a soundtrack whose file has not
 // decoded yet has no length to draw. That is the honest picture -- an empty row
 // says "nothing here to place" rather than a block of a made-up size.
-std::pair<std::size_t, std::size_t> TimelineWidget::audioExtent(const AudioTrack& sound) const {
+std::pair<double, double> TimelineWidget::audioExtent(const AudioTrack& sound) const {
     const AudioClip* clip = doc_.audioSamplesFor(sound.id);
-    if (!clip || clip->empty()) return {0, 0};
-    const std::size_t length = clip->framesAtFps(doc_.scene().framerate);
-    if (length == 0) return {0, 0};
+    if (!clip || clip->empty()) return {0.0, 0.0};
+    // The *audible* length, so a cropped sound draws the part that is left
+    // rather than the part that was imported.
+    const std::size_t length = audibleFrames(*clip, sound.placement, doc_.scene().framerate);
+    if (length == 0) return {0.0, 0.0};
 
-    // A soundtrack may start before the shot does -- a breath in front of a
-    // word -- and what is off the front simply is not drawn. The extent is
-    // clamped rather than the offset, so the part that *is* in the shot stays
-    // where it belongs.
-    const long long first = sound.offset_frames;
-    const long long last = first + static_cast<long long>(length);
-    if (last <= 0) return {0, 0};
-    return {static_cast<std::size_t>(std::max<long long>(0, first)),
-            static_cast<std::size_t>(last)};
+    const double first = sound.placement.offset_frames;
+    const double last = first + static_cast<double>(length);
+    if (last <= 0.0) return {0.0, 0.0};
+    // Only the front is clamped. A soundtrack may start before the shot does --
+    // a breath in front of a word -- and what is off the front is not drawn,
+    // while the part that *is* in the shot stays exactly where it belongs.
+    return {std::max(0.0, first), last};
 }
 
-// Measured from the bottom of the row, because the bar's height in the row *is*
-// the level. Nothing here converts to decibels: what is stored is what the
-// height is read off, and a curve belongs at a gesture rather than in a field.
 double TimelineWidget::gainForY(std::size_t row, int y) const {
     const int top = rowTop(row) + 2;
     const int height = kRowHeight - 8;
@@ -252,12 +252,98 @@ double TimelineWidget::gainForY(std::size_t row, int y) const {
     return std::clamp(double(top + height - y) / double(height), 0.0, 1.0);
 }
 
-void TimelineWidget::applyGain(int pointer_y) {
-    const AudioTrack* sound = doc_.scene().findAudioTrack(gain_track_);
+// Which end of the block the pointer is on, if either. The same grab distance
+// a run edge uses, so the two feel like one idea rather than two.
+bool TimelineWidget::audioEdgeAt(std::size_t row, int x, bool* is_start) const {
+    const AudioTrack* sound = audioAt(row);
+    if (!sound) return false;
+    const auto [first, last] = audioExtent(*sound);
+    if (last <= first) return false;
+
+    const int x0 = kGutterWidth + static_cast<int>(std::lround(first * kCellWidth));
+    const int x1 = kGutterWidth + static_cast<int>(std::lround(last * kCellWidth));
+    // The start wins a tie, which only happens on a block too narrow to have
+    // two ends -- and cropping the front of one is the more useful half.
+    if (std::abs(x - x0) <= kEdgeGrab) {
+        if (is_start) *is_start = true;
+        return true;
+    }
+    if (std::abs(x - x1) <= kEdgeGrab) {
+        if (is_start) *is_start = false;
+        return true;
+    }
+    return false;
+}
+
+// What the drag under way means, computed from where the press landed rather
+// than by accumulating deltas -- so the result depends on where the pointer is
+// and not on how many mouse events happened to arrive.
+void TimelineWidget::applyAudioDrag(int x, int y) {
+    const AudioTrack* sound = doc_.scene().findAudioTrack(audio_drag_track_);
     if (!sound) return;
-    doc_.setAudioTrackPlacement(gain_track_, sound->offset_frames, gainForY(gain_row_, pointer_y));
+    const int fps = std::max(1, doc_.scene().framerate);
+
+    // **Nothing rounds.** A pixel is 1/26 of a frame here, which is about 1.6 ms
+    // at 24 fps -- and 1/24 of a second is 42 ms, most of the way to a syllable,
+    // so a sound placed to the nearest frame is not placed at all.
+    const double moved_frames = double(x - press_x_) / double(kCellWidth);
+    AudioPlacement next = audio_drag_from_;
+
+    switch (audio_drag_) {
+        case AudioDrag::Gain:
+            next.gain = gainForY(audio_drag_row_, y);
+            break;
+
+        case AudioDrag::Move:
+            next.offset_frames = audio_drag_from_.offset_frames + moved_frames;
+            break;
+
+        case AudioDrag::TrimStart: {
+            // **The sound stays where it is and the block's front moves in.**
+            // Cropping the front means the audio under every remaining frame is
+            // the audio that was there before -- so the in-point and the offset
+            // move together by the same amount. Moving only the trim would slide
+            // the whole take earlier, which is a different gesture and not this
+            // one.
+            double delta = moved_frames;
+            if (const AudioClip* clip = doc_.audioSamplesFor(sound->id)) {
+                // Clamped here as well as in the Document, because the offset is
+                // derived from the trim: letting the trim clamp on its own would
+                // move the sound without cropping it.
+                const double whole = clip->rate > 0 ? double(clip->frames()) / clip->rate : 0.0;
+                const double room =
+                    std::max(0.0, whole - audio_drag_from_.trim_end_seconds - 1.0 / 24.0);
+                const double lo = -audio_drag_from_.trim_start_seconds * fps;
+                const double hi = (room - audio_drag_from_.trim_start_seconds) * fps;
+                delta = std::clamp(delta, lo, std::max(lo, hi));
+            }
+            next.trim_start_seconds = audio_drag_from_.trim_start_seconds + delta / fps;
+            next.offset_frames = audio_drag_from_.offset_frames + delta;
+            break;
+        }
+
+        case AudioDrag::TrimEnd: {
+            // The back end only. Dragging right lengthens, so it *removes* trim.
+            double delta = moved_frames;
+            if (const AudioClip* clip = doc_.audioSamplesFor(sound->id)) {
+                const double whole = clip->rate > 0 ? double(clip->frames()) / clip->rate : 0.0;
+                const double room =
+                    std::max(0.0, whole - audio_drag_from_.trim_start_seconds - 1.0 / 24.0);
+                const double lo = (audio_drag_from_.trim_end_seconds - room) * fps;
+                const double hi = audio_drag_from_.trim_end_seconds * fps;
+                delta = std::clamp(delta, std::min(lo, hi), hi);
+            }
+            next.trim_end_seconds = audio_drag_from_.trim_end_seconds - delta / fps;
+            break;
+        }
+
+        default:
+            return;
+    }
+
+    doc_.setAudioTrackPlacement(audio_drag_track_, next);
+    refresh();
     Q_EMIT documentChanged();
-    update();
 }
 
 std::size_t TimelineWidget::rowOf(TrackId track) const {
@@ -479,7 +565,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             band.top = rowTop(row);
             band.current = sound->id == audio_row_;
             band.name = QString::fromStdString(sound->name);
-            band.gain = sound->gain;
+            band.gain = sound->placement.gain;
             std::tie(band.first, band.last) = audioExtent(*sound);
             paintAudioRow(painter, colours, band);
             continue;
@@ -660,18 +746,34 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         audio_row_ = sound->id;
         update();
         // The name strip is the handle for nothing here -- a soundtrack has no
-        // compositing order, so there is no restack to start -- and the rest of
-        // the row is the level.
-        if (x >= kGutterWidth) {
-            dragging_gain_ = true;
-            gain_track_ = sound->id;
-            gain_row_ = row;
+        // compositing order, so there is no restack to start.
+        if (x < kGutterWidth) return;
+
+        audio_drag_track_ = sound->id;
+        audio_drag_row_ = row;
+        audio_drag_from_ = sound->placement;
+        press_x_ = x;
+        press_y_ = y;
+
+        // The ends are unambiguous, so they start on the press. The body is
+        // not: sideways is a move and up-and-down is a level, and which one it
+        // is has not happened yet.
+        bool is_start = false;
+        if (audioEdgeAt(row, x, &is_start)) {
+            audio_drag_ = is_start ? AudioDrag::TrimStart : AudioDrag::TrimEnd;
             // One command for the whole drag, as the exposure stretch does:
-            // nested commands collapse, so a level found by ear undoes in a
-            // single step rather than in fifty.
-            doc_.beginCommand("Set level");
-            applyGain(y);
+            // nested commands collapse, so a crop found by eye undoes in one
+            // step rather than in fifty.
+            doc_.beginCommand("Crop sound");
+            refreshCursor(x, y);
+            return;
         }
+
+        // **No command yet, and nothing applied.** A press that never moves is
+        // a click that selected the row, and a click that set the level to
+        // wherever it landed would mean you could not select a soundtrack
+        // without changing it.
+        audio_drag_ = AudioDrag::Deciding;
         return;
     }
 
@@ -759,11 +861,26 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    // The level follows the pointer's height wherever it goes sideways: a drag
-    // that wandered out of its row is still the drag it started as, and letting
-    // go of the level because the hand moved along would be maddening.
-    if (dragging_gain_) {
-        applyGain(y);
+    // A soundtrack's row. The gesture, once decided, follows the pointer
+    // wherever it goes: a drag that wandered out of its row is still the drag
+    // it started as, and letting go of it because the hand moved would be
+    // maddening.
+    if (audio_drag_ == AudioDrag::Deciding) {
+        const int dx = std::abs(x - press_x_);
+        const int dy = std::abs(y - press_y_);
+        if (std::max(dx, dy) >= kDragThreshold) {
+            // Whichever axis moved further. The same way this file already
+            // tells a drawing drag (along a row) from a track restack (across
+            // one) -- except that here both start inside the row, so the
+            // threshold decides rather than the side of the gutter.
+            audio_drag_ = dx > dy ? AudioDrag::Move : AudioDrag::Gain;
+            doc_.beginCommand(dx > dy ? "Move sound" : "Set level");
+            refreshCursor(x, y);
+        }
+        return;
+    }
+    if (audio_drag_ != AudioDrag::None) {
+        applyAudioDrag(x, y);
         return;
     }
 
@@ -912,7 +1029,12 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // arrives, which is what stops the open hand promising a restack that
     // cannot happen here.
     if (isAudioRow(row)) {
-        return x < kGutterWidth ? Qt::ArrowCursor : Qt::SizeVerCursor;
+        if (x < kGutterWidth) return Qt::ArrowCursor;
+        // An end crops, which is the same shape of gesture as stretching an
+        // exposure and says so with the same cursor. The body does two things
+        // and cannot promise either, so it says both.
+        if (audioEdgeAt(row, x, nullptr)) return Qt::SplitHCursor;
+        return Qt::SizeAllCursor;
     }
 
     // The name strip, which the row is restacked by. The hand still means one
@@ -1011,11 +1133,16 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
 
-    if (dragging_gain_) {
-        dragging_gain_ = false;
-        gain_track_ = kNoId;
-        doc_.endCommand();
-        Q_EMIT documentChanged();
+    if (audio_drag_ != AudioDrag::None) {
+        // Deciding never opened one: it is a click that selected a row.
+        const bool had_command = audio_drag_ != AudioDrag::Deciding;
+        audio_drag_ = AudioDrag::None;
+        audio_drag_track_ = kNoId;
+        refreshCursor(x, y);
+        if (had_command) {
+            doc_.endCommand();
+            Q_EMIT documentChanged();
+        }
         return;
     }
 
@@ -1040,11 +1167,14 @@ void TimelineWidget::abandonGesture() {
         doc_.endCommand();
         Q_EMIT documentChanged();
     }
-    if (dragging_gain_) {
-        dragging_gain_ = false;
-        gain_track_ = animage::kNoId;
-        doc_.endCommand();
-        Q_EMIT documentChanged();
+    if (audio_drag_ != AudioDrag::None) {
+        const bool had_command = audio_drag_ != AudioDrag::Deciding;
+        audio_drag_ = AudioDrag::None;
+        audio_drag_track_ = animage::kNoId;
+        if (had_command) {
+            doc_.endCommand();
+            Q_EMIT documentChanged();
+        }
     }
 
     // Everything else is dropped where it stood. Nothing here writes to the
