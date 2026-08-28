@@ -347,9 +347,10 @@ thing that got worse. They still list what the deployment tool bundled, which is
 the regression worth watching; they no longer *run* the result and ask it
 whether the backend loaded, because the thing that answered that was the flag.
 A plugin in the right folder and a plugin that loads are different facts, and
-only the first is checked now. Buying the second back means a diagnostic flag in
-the application — a reasonable thing to want for somebody reporting "no
-sound", and a different feature from a spike.
+only the first is checked now. Buying the second back means something inside
+`animage` again, because the deployment tools read what `animage` imports and
+nothing else — which is [#87](https://github.com/S-poony/Animage/issues/87),
+where what a silent failure costs a user is written out.
 
 **What stays** is `tests/audio_probe.cpp`, the `find_package(Qt6Multimedia)`
 block, and `modules: qtmultimedia` in CI. The probe stays for `dock_probe`'s

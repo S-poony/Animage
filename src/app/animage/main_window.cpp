@@ -86,6 +86,25 @@ namespace {
 // track", and a temporary message hides the line while it is up -- so saying
 // the same thing in other words covers over the words that were already saying
 // it. `Refusal::NoDrawing` is exactly that case, and so far the only one.
+// How much sound a scrub burst plays, past the frame it starts on.
+//
+// **One frame's worth is what docs/importing.md asks for, and one frame's worth
+// is too short to recognise.** At 24 fps a frame is 42 ms, which is under half a
+// syllable: dragging fast it does not matter, because each burst is cut off by
+// the next and what you hear is continuous, but the moment you stop on a frame
+// to listen, 42 ms is a blip you cannot tell a *b* from a *d* in. So a burst is
+// the frame it stands on or 120 ms, whichever is longer -- about a syllable,
+// and at 8 fps or slower the frame is already longer than that and wins.
+//
+// The number is here rather than spread through scrubAudio because it is a
+// judgement about ears and is expected to be argued with.
+constexpr int kScrubFloorMs = 120;
+
+// And a ramp at each end of it. A buffer that begins and ends part-way up a
+// waveform steps the speaker cone, which is a click on every frame dragged
+// past. Three milliseconds is inaudible as a fade and removes all of it.
+constexpr int kScrubFadeMs = 3;
+
 void sayCannot(QStatusBar* bar, const char* verb, CanvasWidget::Refusal refusal) {
     if (!bar || refusal == CanvasWidget::Refusal::None) return;
     if (refusal == CanvasWidget::Refusal::NoDrawing) return;
@@ -1991,6 +2010,9 @@ void MainWindow::buildTimelinePanel() {
     timeline_widget_->setTrack(track_);
     connect(timeline_widget_, &TimelineWidget::currentSlotChanged, this,
             &MainWindow::onSlotChanged);
+    // Narrower than the one above, and deliberately: only a drag or a click in
+    // the ruler makes a noise. See TimelineWidget::scrubbed.
+    connect(timeline_widget_, &TimelineWidget::scrubbed, this, &MainWindow::scrubAudio);
     connect(timeline_widget_, &TimelineWidget::documentChanged, this,
             &MainWindow::refreshEverything);
     // Clicking a row is the other way the current track changes, and it has to
@@ -2937,6 +2959,10 @@ void MainWindow::refreshEverything() {
     canvas_->setFrame(timeline_widget_->currentSlot());
     rebuildLayerList();
     syncStatus();
+    // A soundtrack can arrive here by an import and leave by an undo, and the
+    // output should match what the document holds either way. Free when it
+    // already does.
+    refreshAudioDevice();
 }
 
 // --- importing -----------------------------------------------------------
@@ -3476,6 +3502,85 @@ void MainWindow::refreshAudioSamples() {
         const audio_import::Decoded decoded = audio_import::decode(path);
         doc_.setAudioSamples(track.id, decoded.ok ? decoded.clip : AudioClip{});
     }
+    refreshAudioDevice();
+}
+
+// The rate to open an output at, which is the first soundtrack's own.
+int MainWindow::audioRate() const {
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        const AudioClip* clip = doc_.audioSamplesFor(track.id);
+        if (clip && clip->rate > 0 && !clip->empty()) return clip->rate;
+    }
+    return 0;
+}
+
+void MainWindow::refreshAudioDevice() {
+    const int rate = audioRate();
+    if (rate <= 0) {
+        // No sound in this project, so no reason to hold somebody's sound card.
+        audio_.close();
+        audio_tried_rate_ = 0;
+        audio_trouble_.clear();
+        return;
+    }
+    if (audio_.running() && audio_.openedFor() == rate) return;
+
+    // **A failure is remembered rather than retried.** This runs whenever the
+    // document changes and opening a device is a third of a second, so a
+    // machine with no audio output would otherwise spend that again on every
+    // stroke. A soundtrack at another rate arriving is what makes it worth
+    // asking again.
+    if (!audio_.running() && audio_tried_rate_ == rate) return;
+    audio_tried_rate_ = rate;
+
+    QString trouble;
+    if (audio_.open(rate, 2, &trouble)) {
+        audio_trouble_.clear();
+        return;
+    }
+    audio_trouble_ = trouble;
+    // Said, and not raised. A machine with no sound card is not a fault in the
+    // project somebody just opened, and a dialog in front of it would say
+    // otherwise.
+    statusBar()->showMessage(QStringLiteral("No sound: %1").arg(trouble), 8000);
+}
+
+animage::AudioProgram MainWindow::audioProgramAt(std::size_t slot) const {
+    AudioProgram program;
+    // The device's numbers and not a clip's: a driver that refused the rate
+    // asked for is the case renderAudio resamples in, and it can only do that
+    // if it is told what it is rendering for.
+    program.rate = audio_.rate();
+    program.channels = audio_.channels();
+    program.fps = std::max(1, doc_.scene().framerate);
+    program.start_slot = slot;
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        std::shared_ptr<const AudioClip> clip = doc_.sharedAudioSamplesFor(track.id);
+        if (!clip || clip->empty()) continue;
+        // Shared, not copied, and this is the one place in the program that
+        // asks for it that way -- everything after this line is read on the
+        // device's thread. See Document::sharedAudioSamplesFor.
+        program.sources.push_back({std::move(clip), track.placement});
+    }
+    return program;
+}
+
+void MainWindow::scrubAudio(std::size_t slot) {
+    // Playback has the device while a take is running, and dragging the ruler
+    // during one is a request to move the playhead rather than to hear a frame.
+    if (playback_timer_->isActive()) return;
+    if (!audio_.running()) return;
+
+    auto program = std::make_shared<AudioProgram>(audioProgramAt(slot));
+    if (program->sources.empty() || program->rate <= 0) return;
+
+    const std::int64_t rate = program->rate;
+    program->length = std::max<std::int64_t>(rate / program->fps,
+                                             rate * kScrubFloorMs / 1000);
+    program->fade = rate * kScrubFadeMs / 1000;
+    // Nothing to loop: a burst is a burst, and a shot that ended under it would
+    // wrap the sound round to frame 0 half-way through a syllable.
+    audio_.play(std::move(program));
 }
 
 // Where a soundtrack file's bytes are right now. importPathFor, for `audio/`.

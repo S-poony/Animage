@@ -69,6 +69,17 @@ public:
 
 Q_SIGNALS:
     void currentSlotChanged(std::size_t slot);
+
+    // The playhead was dragged or clicked in the ruler, and this is where it
+    // landed.
+    //
+    // **Narrower than currentSlotChanged on purpose.** That one fires for every
+    // way the playhead moves -- the arrow keys, playback, a card being clicked,
+    // a track being deleted underneath it -- and what wants this one is scrub
+    // audio, which must make a noise when somebody is reading a track and stay
+    // out of the way when somebody is drawing. Stepping through frames with the
+    // keyboard while animating is not a request to hear anything.
+    void scrubbed(std::size_t slot);
     void trackChanged(animage::TrackId track);
     void documentChanged();
 
@@ -184,6 +195,15 @@ private:
     // the same hand. Reported, and it had been there from the beginning.
     Qt::CursorShape cursorAt(int x, int y) const;
     void refreshCursor(int x, int y) { setCursor(cursorAt(x, y)); }
+
+    // Move the playhead as a scrub does, and say so.
+    //
+    // `always` is for the press that begins one: clicking the ruler on the
+    // frame the playhead is already standing on is a request to hear that
+    // frame, and a slot that did not change is not a reason to stay quiet.
+    // While the pointer is moving, only a change is worth a sound -- twenty
+    // bursts of the same frame is not scrubbing, it is a buzz.
+    void scrubTo(int x, bool always);
 
     // What the row under the pointer is, asked for rather than written on it.
     // The gutter is a hundred pixels wide and a track has a name in it; a second

@@ -170,6 +170,14 @@ if(TARGET animage_ui)
   # the format and run on any Qt. No audio *device* is needed: a decode produces
   # buffers and opens no output, which is what lets this run on a runner. See
   # docs/audio-spike.md.
+  # The handover between the interface and a device, on a fake one. It needs
+  # animage_ui for AudioPlayer and no audio *device* at all, which is the whole
+  # point of it -- see the header of test_audio_player.cpp.
+  add_executable(test_audio_player test_audio_player.cpp)
+  target_link_libraries(test_audio_player PRIVATE animage_ui)
+  target_include_directories(test_audio_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_audio_player COMMAND test_audio_player)
+
   add_executable(test_audio_decode test_audio_decode.cpp)
   target_link_libraries(test_audio_decode PRIVATE animage_ui)
   target_include_directories(test_audio_decode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

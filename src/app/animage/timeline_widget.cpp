@@ -394,6 +394,12 @@ void TimelineWidget::setTrack(TrackId track) {
     Q_EMIT trackChanged(track_);
 }
 
+void TimelineWidget::scrubTo(int x, bool always) {
+    const std::size_t before = current_slot_;
+    setCurrentSlot(slotAt(x));
+    if (always || current_slot_ != before) Q_EMIT scrubbed(current_slot_);
+}
+
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
     // Against the scene and not against one track: the playhead is the
     // timeline's, so it can stand on a frame that this track does not reach.
@@ -736,7 +742,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
             return;
         }
         scrubbing_ = true;
-        setCurrentSlot(slotAt(x));
+        scrubTo(x, true);
         return;
     }
 
@@ -863,7 +869,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (scrubbing_) {
-        setCurrentSlot(slotAt(x));
+        scrubTo(x, false);
         return;
     }
 

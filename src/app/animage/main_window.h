@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "audio_player.h"
 #include "document.h"
 #include "export_sequence.h"
 #include "project_io.h"
@@ -414,6 +415,40 @@ private:
     // every call but the one after opening a project with sound in it.
     void refreshAudioSamples();
 
+    // Opens or closes the audio output to match what the document holds.
+    //
+    // **A project with a soundtrack keeps an output open; one without keeps
+    // none.** That is the shape opening costs forced: a scrub is a burst of
+    // sound on every frame the playhead is dragged past, and opening a device
+    // is a third of a second, so it cannot be done per burst. Opening it when
+    // the sound arrives rather than when the first burst does is what stops
+    // the first burst being the silent one.
+    //
+    // Cheap and idempotent, so it can be called from anywhere the document may
+    // have changed. It reopens only when the rate it should be running at
+    // changes, which is when a soundtrack arrives or goes away.
+    void refreshAudioDevice();
+
+    // The soundtrack rate to open a device at, or 0 for "no sound here".
+    //
+    // The first decoded clip's own rate, so the ordinary case -- one soundtrack
+    // -- is read sample for sample with no resampling at all. A second
+    // soundtrack at another rate is resampled to this one, which is the right
+    // way round: the file somebody is animating to should be the exact one.
+    int audioRate() const;
+
+    // Everything the scene's soundtracks are, as a device's thread may read
+    // them, starting at `slot`. Empty sources when there is nothing to play.
+    animage::AudioProgram audioProgramAt(std::size_t slot) const;
+
+    // A burst of sound from where the playhead just landed.
+    //
+    // What TimelineWidget::scrubbed is for, and only that: reading a track
+    // means dragging back and forth over a syllable until you can hear which
+    // frame the consonant is on. Stepping frames with the keyboard while
+    // drawing is not that, and makes no noise.
+    void scrubAudio(std::size_t slot);
+
     // Where an imported file's bytes are: inside the project once it has been
     // saved, and at the path it came from until then. Empty when neither.
     QString importPathFor(const std::string& name) const;
@@ -631,6 +666,15 @@ private:
     // The three "past the last drawing" items, with what each one means.
     std::vector<std::pair<QAction*, animage::TrackEnd>> end_actions_;
     bool updating_track_menu_ = false;
+
+    // The one audio output in the program, and the one place a soundtrack is
+    // handed to another thread. See audio_player.h.
+    AudioPlayer audio_;
+    // The last reason opening one failed, so a machine with no sound card is
+    // told once rather than on every edit, and the rate that failed, so it is
+    // not retried on every edit either.
+    QString audio_trouble_;
+    int audio_tried_rate_ = 0;
 
     QTimer* playback_timer_ = nullptr;
     QTimer* autosave_timer_ = nullptr;

@@ -162,7 +162,8 @@ jobs:
       # sitting in the right folder and a plugin that loads are different facts,
       # and the second needed a flag inside the application to answer. That flag
       # was the spike and has come out with it -- see docs/audio-spike.md, "what
-      # comes out again". What replaced it is a seam with no reporting in it.
+      # comes out again". Getting the second fact back is issue #87, which is
+      # where what a silent failure costs a user is written out.
       #
       # Never `set -e` on the reporting: a step that exits on the first thing it
       # cannot find reports less than one that says what is missing.
