@@ -671,6 +671,11 @@ private:
 
     // A new drawing with its own copy of every cel of `source`, refcounted and
     // numbered, but in no slot yet. Shared by both ways of duplicating one.
+    //
+    // **Every way a drawing can carry a picture, and there are two.** A cel for
+    // a raster layer, and a `source_frames` entry for a reference one. A copy
+    // that took only the first came back blank on an import, which is what a
+    // duplicate that "did nothing" turned out to be.
     std::optional<Image> copyOfImage(Track& track, ImageId source);
 
     Scene scene_;

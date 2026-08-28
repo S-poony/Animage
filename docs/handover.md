@@ -3126,6 +3126,30 @@ the test is a hash lookup per drawing.
 See the trap below, which is the one thing here that would have gone wrong
 silently.
 
+### A drawing carries a picture two ways, and a copy has to take both
+
+`Image::cels` is how a raster layer has something at a drawing. `source_frames`
+is how a *reference* layer does — an entry naming which frame of the imported
+file this drawing shows. They sit beside each other on the `Image` and answer
+the same question for two kinds of layer.
+
+`copyOfImage` took only the first, so **a duplicated drawing came back without
+its imported picture**. On a track that is nothing but an import the whole
+drawing was blank, which is what it was reported as: *"Duplicate drawing fails
+silently on an import."* It had not failed. It had succeeded and handed back an
+empty frame.
+
+**The mixed track is the case worth knowing about**, and it is the one that hid:
+a track can hold a raster layer and a reference layer together, and there half
+the drawing came through. It reads as having worked, and the imported half is
+gone.
+
+Nothing is refcounted in the fix, unlike a cel: the entry is an int naming a
+frame of a file the layer already lists, and two drawings pointing at the same
+frame of the same file is the ordinary case — it is what holding an imported
+frame a second time means. `copyOfImage` is the only place in the program that
+builds a copy of an `Image`, which is why this was one hole and not several.
+
 ### It stores where the picture goes, and does not bake it
 
 The section above spends its length on why a layer transform bakes: a stored

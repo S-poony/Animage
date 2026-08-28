@@ -506,6 +506,64 @@ void duplicatingOverwritesTheSameWay() {
     CHECK_NEAR(duplicate->pixel(40, 40).a, 1.0, 1e-2);
 }
 
+// **A drawing carries a picture in two different ways, and a copy has to take
+// both.** A raster layer has a cel; a reference layer has an entry in
+// `source_frames` naming which frame of the imported file it shows. Copying
+// only the cels produced a duplicate with the drawn part intact and the
+// imported part gone -- which on a track that is nothing but an import looks
+// like the command doing nothing at all, and was reported that way.
+//
+// The mixed track is the case worth pinning rather than the pure one, because
+// it is the one where the failure hides: half the drawing came through, so it
+// reads as having worked.
+void duplicatingADrawingTakesTheImportedPictureWithIt() {
+    TEST("duplicating a drawing takes its imported picture as well as its cels");
+    Fixture f;
+    const LayerId imported =
+        f.doc.addLayer(f.track, "modelsheet", 1, LayerKind::Reference);
+
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    paintDot(f.doc, f.track, one, f.layer, 40.0f, 40.0f);
+    f.doc.setSourceFrame(f.track, one, imported, 7);
+    CHECK_EQ(f.tl().findImage(one)->sourceFrameFor(imported), 7);
+
+    const ImageId copy = f.doc.duplicateDrawing(f.track, 0);
+    CHECK(copy != kNoId);
+    const Image* made = f.tl().findImage(copy);
+    CHECK(made != nullptr);
+
+    // The drawn half: its own cel, not the original's.
+    const Cel* original = f.doc.celAt(f.track, one, f.layer);
+    const Cel* duplicate = f.doc.celAt(f.track, copy, f.layer);
+    CHECK(original != nullptr && duplicate != nullptr);
+    CHECK(original != duplicate);
+    CHECK_NEAR(duplicate->pixel(40, 40).a, 1.0, 1e-2);
+
+    // And the imported half, which is the part that used to go missing. Not
+    // copied pixels -- a reference layer has none -- but the same frame of the
+    // same file, which is what holding an imported frame twice means.
+    CHECK_EQ(made->sourceFrameFor(imported), 7);
+}
+
+// The same thing on a track that is nothing but an import, which is how it was
+// found: the whole drawing came back blank, so the command looked like a
+// refusal that had forgotten to say why.
+void duplicatingAnImportOnItsOwnTrackIsNotABlankDrawing() {
+    TEST("duplicating an import on its own track is not a blank drawing");
+    Document doc;
+    const TrackId track = doc.addTrack("modelsheet");
+    const LayerId imported =
+        doc.addLayer(track, "modelsheet", 0, LayerKind::Reference);
+    const ImageId one = doc.insertImage(track, 0);
+    doc.setSourceFrame(track, one, imported, 0);
+
+    const ImageId copy = doc.duplicateDrawing(track, 0);
+    const Track& line = *doc.scene().findTrack(track);
+    CHECK(copy != kNoId);
+    CHECK_EQ(line.frameCount(), std::size_t{2});
+    CHECK_EQ(line.findImage(copy)->sourceFrameFor(imported), 0);
+}
+
 // The issue's second example. Drawing1 held 11 then Drawing2 held 1; drop
 // Drawing2 on frame 4 and it owns everything from there, while the frame it
 // came from is absorbed by the drawing beside it rather than disappearing.
@@ -892,6 +950,8 @@ int main() {
     withoutOverwritingAddingADrawingStillLengthensTheTrack();
     overwritingNeverTakesADrawingsLastFrame();
     duplicatingOverwritesTheSameWay();
+    duplicatingADrawingTakesTheImportedPictureWithIt();
+    duplicatingAnImportOnItsOwnTrackIsNotABlankDrawing();
     movingOverAHoldTakesTheRestOfItAndLeavesNoGap();
     nudgingADrawingAlongItsOwnHold();
     framesLeftAtTheStartGoToTheDrawingAfterThem();

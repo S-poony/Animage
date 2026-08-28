@@ -564,6 +564,21 @@ std::optional<Image> Document::copyOfImage(Track& track, ImageId source_id) {
     copy.id = image_ids_.next();
     copy.number = track.nextDrawingNumber();  // a copy is a new drawing
     copy.marker = source->marker;
+
+    // **The imported picture comes too, and forgetting it is what made
+    // duplicating an import look like a refusal.** `source_frames` sits beside
+    // `cels` and answers the same question for a reference layer that a cel
+    // answers for a raster one -- which is exactly why a copy that took only
+    // the cels produced a drawing with nothing on it. Reported from use as
+    // "Duplicate drawing fails silently on an import"; what it actually did was
+    // succeed, and hand back a blank frame.
+    //
+    // Nothing is refcounted here, unlike a cel: the entry is an int naming a
+    // frame of a file the layer already lists. Two drawings pointing at the
+    // same frame of the same file is the ordinary case -- it is what holding an
+    // imported frame a second time means.
+    copy.source_frames = source->source_frames;
+
     for (const auto& [layer_id, cel_id] : source->cels) {
         const Cel* original = cel(cel_id);
         if (!original) continue;
