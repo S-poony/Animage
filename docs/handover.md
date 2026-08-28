@@ -3801,6 +3801,41 @@ boundary a fixed cost sits on are the same design.** What would have made the
 split worth it is a fact about the *content* — something the band must never be
 able to cover — and there is none here.
 
+**And the gutter is pinned the same way, which is the argument above turned
+ninety degrees.** Asked for from use, and it is the axis that needed it more: a
+shot is long sideways where it is short downwards, so scrolling right is the
+ordinary thing to do in a timeline — and it used to take the column of names off
+the screen, leaving rows of identical cells with nothing saying which track was
+which, and nothing showing which row the brush was on. `setGutterLeft` is
+`setRulerTop` with the axis changed.
+
+Three things it needed that the ruler did not, and each is a consequence of
+which axis it is on rather than a new decision:
+
+- **The names move to a pass of their own, after every row.** A gutter was the
+  first thing each row painted, which was fine while it could not move — a cell
+  drawn afterwards was always to the right of it. Pinned, the cells it must
+  cover are drawn *after* it in the same pass, so it has to come later than all
+  of them. It goes before the ruler rather than after, so the top-left corner
+  stays the ruler's exactly as it looks unscrolled.
+- **The band's contents are clipped to the right of it.** The fill still spans
+  the whole width, but a frame number over the name column would be labelling a
+  cell the gutter is covering, and the end-of-shot grip would be a control
+  sitting on the names. `isOnSceneEnd` refuses inside the gutter for the reason
+  its own comment already gave: *a grab zone you cannot see is worse than no
+  handle at all*.
+- **The rename editor has to be moved.** It is a real child widget laid over the
+  name rather than something painted, so no repaint puts it right; without that
+  line it stays where the gutter used to be. The ruler has nothing living in it.
+
+`inGutter` replaces `x < kGutterWidth` at every hit test and at none of the
+arithmetic — `slotAt` is deliberately not a caller, exactly as `rowAtY` was left
+alone when the ruler was pinned. Cells are where they always were; what the
+column does is cover some. What `test_canvas` pins is not that it is drawn in
+the right place, which a shot says better, but that **where it is drawn and
+where it is pressed are the same place**: those are two pieces of code, and
+moving one without the other is a name column you can see and cannot rename.
+
 **Renaming a soundtrack is allowed, and the objection to it is answered rather
 than dismissed.** It was raised that a user should perhaps not be able to rename
 an import at all. The thing that makes it safe is that an `AudioTrack` carries

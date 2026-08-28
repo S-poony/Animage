@@ -173,15 +173,27 @@ struct AudioRowPaint {
     int fps = 24;
 };
 
-void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPaint& row) {
-    // The gutter reads exactly as a track's does, because from the outside it is
-    // the same thing: the name of the row, and whether this is the row you are
-    // pointed at.
-    const QRect gutter(0, row.top, kGutterWidth - 2, kRowHeight - 2);
-    painter.fillRect(gutter, row.current ? colours.gutter_current : colours.gutter);
-    painter.setPen(row.current ? colours.current_text : colours.text);
-    painter.drawText(gutter.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft, row.name);
+// The name column of one row, wherever the scroll has put it.
+//
+// **Painted in a pass of its own, after every row**, which is the whole of what
+// pinning it costs in this file. It used to be the first thing each row drew,
+// which was fine while it could not move: a cell drawn afterwards was always to
+// the right of it. Pinned, the cells it has to cover are the ones drawn after
+// it in the same pass, so it has to come later than all of them. Same shape as
+// the ruler, one axis over. See setGutterLeft.
+void paintGutter(QPainter& painter, const Palette& colours, const QRect& where,
+                 const QString& name, bool current, bool dimmed) {
+    painter.fillRect(where, colours.gutter);
+    if (current) {
+        QColor fill = colours.gutter_current;
+        if (dimmed) fill.setAlpha(90);
+        painter.fillRect(where, fill);
+    }
+    painter.setPen(current && !dimmed ? colours.current_text : colours.text);
+    painter.drawText(where.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft, name);
+}
 
+void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPaint& row) {
     if (row.last <= row.first) {
         // Nothing decoded, or nothing left in the shot. Said rather than drawn
         // as an empty block: a block of a made-up size would be a picture of
@@ -479,7 +491,7 @@ QPoint TimelineWidget::cellCentreForTesting(std::size_t row, std::size_t slot) c
 }
 
 QPoint TimelineWidget::gutterPointForTesting(std::size_t row) const {
-    return {kGutterWidth / 2, rowTop(row) + kRowHeight / 2};
+    return {gutter_left_ + kGutterWidth / 2, rowTop(row) + kRowHeight / 2};
 }
 
 QPoint TimelineWidget::rulerPointForTesting(std::size_t slot) const {
@@ -489,6 +501,10 @@ QPoint TimelineWidget::rulerPointForTesting(std::size_t slot) const {
 
 bool TimelineWidget::inRuler(int y) const {
     return y >= ruler_top_ && y < ruler_top_ + kRulerHeight;
+}
+
+bool TimelineWidget::inGutter(int x) const {
+    return x >= gutter_left_ && x < gutter_left_ + kGutterWidth;
 }
 
 bool TimelineWidget::rowAtY(int y, std::size_t* row) const {
@@ -522,6 +538,22 @@ void TimelineWidget::setRulerTop(int y) {
     // newly exposed, and what moved here is a strip that was drawn somewhere
     // else. The timeline is rectangles, so a full repaint is cheap.
     update();
+}
+
+void TimelineWidget::setGutterLeft(int x) {
+    const int clamped = std::max(0, x);
+    if (clamped == gutter_left_) return;
+    gutter_left_ = clamped;
+    // The whole widget, for setRulerTop's reason.
+    update();
+    // And the rename editor, if one is open, because it is a real child widget
+    // laid over the name rather than something painted -- so nothing repaints
+    // it into place and it would be left behind where the gutter used to be.
+    // The ruler never had to do this: an editor sits in the gutter, and the
+    // gutter is what just moved.
+    if (renaming_ != kNoId && rename_edit_) {
+        rename_edit_->setGeometry(gutterRectFor(rowOf(renaming_)));
+    }
 }
 
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
@@ -584,6 +616,12 @@ bool TimelineWidget::isOnSceneEnd(int x) const {
     // setting off there is no boundary drawn, and a grab zone you cannot see is
     // worse than no handle at all.
     if (!doc_.scene().fixed_length) return false;
+    // The same sentence, for the reason the gutter being pinned created: scroll
+    // far enough right and the boundary passes under the name column, where it
+    // is clipped out of the ruler band. Without this it would still be
+    // grabbable there -- an invisible handle over the names, which is the exact
+    // thing the line above refuses.
+    if (inGutter(x)) return false;
     return std::abs(x - sceneEndX()) <= kEdgeGrab;
 }
 
@@ -609,7 +647,7 @@ std::pair<std::size_t, std::size_t> TimelineWidget::runAt(std::size_t row,
 // under the pointer", because sometimes the answer is nothing.
 bool TimelineWidget::cardAt(std::size_t row, int x, std::size_t* slot) const {
     const Track* line = trackAt(row);
-    if (!line || x < kGutterWidth) return false;
+    if (!line || inGutter(x)) return false;
 
     const std::size_t at = static_cast<std::size_t>((x - kGutterWidth) / kCellWidth);
     if (at >= line->slots.size()) return false;
@@ -716,17 +754,9 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         // use, along with the Track menu acting on the row that was not lit.
         // The wash is the highlight over the gutter and not a new colour, so it
         // is right in a dark theme for the same reason everything else here is.
-        const bool dimmed = is_current && audio_row_ != kNoId;
-        const QRect gutter(0, top, kGutterWidth - 2, kRowHeight - 2);
-        painter.fillRect(gutter, colours.gutter);
-        if (is_current) {
-            QColor fill = colours.gutter_current;
-            if (dimmed) fill.setAlpha(90);
-            painter.fillRect(gutter, fill);
-        }
-        painter.setPen(is_current && !dimmed ? colours.current_text : colours.text);
-        painter.drawText(gutter.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                         QString::fromStdString(line.name));
+        // The gutter itself is drawn in its own pass below, because it is
+        // pinned and has to cover the cells this loop is about to draw. What
+        // stays here is nothing: see paintGutter.
 
         // Nothing at all past the track's last drawing, whatever its end
         // behaviour is. Faint dotted cells were tried there and read worse than
@@ -838,6 +868,31 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         painter.drawLine(end_x, 0, end_x, height());
     }
 
+    // --- the gutter, after every row, because it is pinned across all of them -
+    //
+    // One pass over the rows again rather than a line inside the first, and the
+    // reason is the pinning: at `gutter_left_` the column sits on top of cells
+    // that the row loop draws *after* it would have drawn the name. Same
+    // decision as the ruler being painted last, on the other axis.
+    //
+    // Before the ruler and not after it, so the top-left corner stays the
+    // ruler's exactly as it is today -- the band already spans the gutter's
+    // columns, and swapping which of the two owns the corner would be a change
+    // to what the timeline looks like unscrolled, which this is not.
+    for (std::size_t row = 0; row < rowCount(); ++row) {
+        const QRect where = gutterRectFor(row);
+        if (const AudioTrack* sound = audioAt(row)) {
+            paintGutter(painter, colours, where, QString::fromStdString(sound->name),
+                        sound->id == audio_row_, false);
+            continue;
+        }
+        if (const Track* line = trackAt(row)) {
+            const bool is_current = line->id == track_;
+            paintGutter(painter, colours, where, QString::fromStdString(line->name), is_current,
+                        is_current && audio_row_ != kNoId);
+        }
+    }
+
     // --- the ruler, last, because it is pinned on top of whatever it reaches --
     //
     // At the top of the widget until something scrolls, which is what it always
@@ -846,6 +901,22 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     // meant to stay put has to cover what slides under it -- see setRulerTop.
     const int band = ruler_top_;
     painter.fillRect(QRect(0, band, width(), kRulerHeight), colours.ruler);
+
+    // **Nothing in the band is drawn over the pinned gutter**, and the band's
+    // own fill is the one thing that still is.
+    //
+    // The corner belongs to both, and it stays the ruler's plain colour, which
+    // is exactly what it looks like unscrolled. What must not be there is the
+    // band's *contents*: a frame number above the name column would be
+    // labelling a cell the gutter is covering, the playhead's marker would be
+    // pointing at a frame nobody can see, and the end-of-shot grip would be a
+    // control sitting on top of the names and draggable from there. Scrolled
+    // right, all three land over the gutter without this.
+    //
+    // Saved and restored rather than left set, because everything below is
+    // inside the same painter and the clip would outlive the band.
+    painter.save();
+    painter.setClipRect(QRect(gutter_left_ + kGutterWidth, band, width(), kRulerHeight));
 
     // The frame numbers, once, across the whole width: it is the scene's time
     // and not any one track's.
@@ -872,6 +943,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         painter.setPen(Qt::NoPen);
         painter.drawRect(QRect(end_x - 3, band, 6, kRulerHeight));
     }
+    painter.restore();
 }
 
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
@@ -916,7 +988,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         setAudioHighlight(sound->id);
         // The name strip is the handle for nothing here -- a soundtrack has no
         // compositing order, so there is no restack to start.
-        if (x < kGutterWidth) return;
+        if (inGutter(x)) return;
 
         audio_drag_track_ = sound->id;
         audio_drag_row_ = row;
@@ -960,7 +1032,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     // The name strip selects, and it is the handle a row is restacked by. There
     // is no frame under it, so nothing else here is competing for the press --
     // which is exactly why the handle is here and not on the row itself.
-    if (x < kGutterWidth) {
+    if (inGutter(x)) {
         may_drag_track_ = true;
         track_drag_row_ = row;
         press_y_ = y;
@@ -1158,7 +1230,7 @@ void TimelineWidget::refreshTooltip(int x, int y) {
             return;
         }
     }
-    const Track* line = (x < kGutterWidth && rowAtY(y, &row)) ? trackAt(row) : nullptr;
+    const Track* line = (inGutter(x) && rowAtY(y, &row)) ? trackAt(row) : nullptr;
     if (!line) {
         setToolTip(QString());
         return;
@@ -1198,7 +1270,7 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // arrives, which is what stops the open hand promising a restack that
     // cannot happen here.
     if (isAudioRow(row)) {
-        if (x < kGutterWidth) return Qt::ArrowCursor;
+        if (inGutter(x)) return Qt::ArrowCursor;
         // An end crops, which is the same shape of gesture as stretching an
         // exposure and says so with the same cursor. The body does two things
         // and cannot promise either, so it says both.
@@ -1209,7 +1281,7 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // The name strip, which the row is restacked by. The hand still means one
     // thing -- this can be picked up and moved -- and now there are two things
     // it is true of: a drawing along its track, and a track up its stack.
-    if (x < kGutterWidth) return Qt::OpenHandCursor;
+    if (inGutter(x)) return Qt::OpenHandCursor;
 
     // The boundary between two runs, which stretches the exposure.
     if (isOnRunEdge(row, x, nullptr)) return Qt::SplitHCursor;
@@ -1382,7 +1454,7 @@ void TimelineWidget::changeEvent(QEvent* event) {
 // drag; the release before the double click disarms it, so nothing has to be
 // undone here.
 bool TimelineWidget::renameAt(int x, int y) {
-    if (x >= kGutterWidth) return false;
+    if (!inGutter(x)) return false;
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return false;
     beginRenaming(row);
@@ -1419,7 +1491,11 @@ void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 QRect TimelineWidget::gutterRectFor(std::size_t row) const {
-    return QRect(0, rowTop(row), kGutterWidth - 2, kRowHeight - 2);
+    // Wherever the scroll has put the column, which is what makes this one
+    // rectangle rather than two: the paint, the rename editor and the hit test
+    // all take it from here, so a pinned gutter cannot end up drawn in one
+    // place and pressed in another.
+    return QRect(gutter_left_, rowTop(row), kGutterWidth - 2, kRowHeight - 2);
 }
 
 void TimelineWidget::beginRenaming(std::size_t row) {

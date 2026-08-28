@@ -10496,6 +10496,92 @@ void convertingAPlacedImportWritesItWhereItSits() {
     CHECK(after->findLayer(layer_id)->placement.isIdentity());
 }
 
+// The gutter is pinned, which is the ruler's decision turned ninety degrees.
+//
+// What is worth pinning about it is not that it is drawn in the right place --
+// a shot says that better -- but that **where it is drawn and where it is
+// pressed are the same place**. Those are two different pieces of code, and a
+// pinned band that moved one without the other would be a name column you can
+// see and cannot rename, or a strip of empty timeline that starts a restack.
+void theGutterStaysPutWhileTheFramesGoPastIt() {
+    TEST("the timeline's names stay put when it is scrolled along the shot");
+
+    MainWindow window;
+    window.resize(900, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    // Far wider than any panel this window can give it, so there is somewhere
+    // to scroll to.
+    for (int i = 0; i < 200; ++i) doc.insertImage(track, 0);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    const int unscrolled = timeline->gutterRectForTesting(0).x();
+    CHECK_EQ(unscrolled, 0);
+
+    // Driven through the scrollbar rather than by calling setGutterLeft, so
+    // that what is being tested includes the connection: a pinning nothing
+    // drives is a pinning that does not happen.
+    QScrollArea* area = nullptr;
+    for (QScrollArea* candidate : window.findChildren<QScrollArea*>()) {
+        if (candidate->widget() == timeline) area = candidate;
+    }
+    CHECK(area != nullptr);
+    if (!area) return;
+
+    QScrollBar* bar = area->horizontalScrollBar();
+    CHECK(bar->maximum() > 0);
+    if (bar->maximum() <= 0) return;
+    bar->setValue(bar->maximum() / 2);
+    QCoreApplication::processEvents();
+
+    const int scrolled = bar->value();
+    CHECK(scrolled > 0);
+    // Drawn where the scroll put it...
+    CHECK_EQ(timeline->gutterRectForTesting(0).x(), scrolled);
+
+    // ...and pressed there too. This is the half that would have gone wrong
+    // silently: the name strip is the handle a row is restacked by and the
+    // thing a double click renames, and both ask where the gutter is.
+    const QPointF name(timeline->gutterPointForTesting(0));
+    CHECK(name.x() > scrolled);
+    sendMouse(timeline, QEvent::MouseButtonPress, name, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, name, Qt::LeftButton, Qt::NoButton);
+    sendMouse(timeline, QEvent::MouseButtonDblClick, name, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    QLineEdit* editor = timeline->renameEditorForTesting();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    CHECK(editor->isVisible());
+    // And the editor is over the gutter rather than back at the origin, which
+    // is the one thing here that no repaint would have fixed: it is a real
+    // child widget and nothing moves it but setGutterLeft.
+    CHECK_EQ(editor->geometry().x(), scrolled);
+    timeline->abandonRename();
+    QCoreApplication::processEvents();
+
+    // And just past the column is ordinary timeline again, which is the other
+    // side of the same question: a gutter test that answered on width alone
+    // would call this the name strip, because it is still left of the hundred
+    // pixels the column used to end at.
+    const int width = 2 * (static_cast<int>(name.x()) - scrolled);
+    const QPointF past(scrolled + width + 6, name.y());
+    CHECK(past.x() < scrolled + 2 * width);
+    sendMouse(timeline, QEvent::MouseButtonPress, past, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, past, Qt::LeftButton, Qt::NoButton);
+    sendMouse(timeline, QEvent::MouseButtonDblClick, past, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+    CHECK(!timeline->renameEditorForTesting()->isVisible());
+}
+
 // **Converting does not take the scan out of the project**, and this is the
 // test for a failure with no symptom at the time -- the same shape as the one
 // anImportSurvivesSavingAndOpening pins, and found the same way.
@@ -10651,6 +10737,7 @@ int main(int argc, char** argv) {
     theTransformToolIsOffForASequenceImportAndOnForAStill();
     aLayerOfOneDrawingIsRefusedAndNamesTheTool();
     convertingAnImportGivesEveryDrawingItsOwnPixels();
+    theGutterStaysPutWhileTheFramesGoPastIt();
     convertingAPlacedImportWritesItWhereItSits();
     convertingDoesNotTakeTheImportOutOfTheProject();
     theConvertButtonIsGreyedWithAReasonEverywhereElse();

@@ -77,6 +77,26 @@ public:
     // wanted.
     void setRulerTop(int y);
 
+    // The same for the gutter, sideways: how far into the widget the column of
+    // names should be drawn, which is how far the scroll area has scrolled it
+    // left.
+    //
+    // **The ruler's argument, turned ninety degrees, and it holds unchanged.**
+    // Lifting the names into a strip of their own beside the viewport would
+    // reserve their hundred pixels; leaving them in spends the same hundred
+    // covering the left of it. Either way the cell at the left edge is hidden
+    // by the same amount and comes out from under by scrolling -- so the
+    // version that keeps one widget, one paint and one set of coordinates is
+    // the one worth having. See setRulerTop, and docs/handover.md on why the
+    // split that looked better was the same picture.
+    //
+    // What it is for: a shot is long sideways where it is short downwards, so
+    // scrolling right is the ordinary thing to do in a timeline -- and doing it
+    // took the names off the screen, leaving rows of identical cells with
+    // nothing saying which track was which. The row you are pointed at is a
+    // colour in the gutter, so it went too.
+    void setGutterLeft(int x);
+
     void setCurrentSlot(std::size_t slot);
     std::size_t currentSlot() const { return current_slot_; }
 
@@ -185,6 +205,16 @@ private:
     // rest of the geometry in the .cpp.
     bool inRuler(int y) const;
 
+    // Whether an x is in the pinned gutter, wherever the scroll has put it.
+    // Asked wherever `x < kGutterWidth` used to be, and for inRuler's reason:
+    // the column is on top of whatever is under it, so where it *is* and where
+    // the cells are are two different questions.
+    //
+    // `slotAt` is deliberately not one of the callers. Cells are where they
+    // always were and what the gutter does is cover some -- exactly as
+    // `rowAtY` was left alone when the ruler was pinned.
+    bool inGutter(int x) const;
+
     // The row under a y, clamped to a real row; false if y is above the rows.
     bool rowAtY(int y, std::size_t* row) const;
     int rowTop(std::size_t row) const;
@@ -199,6 +229,10 @@ public:
     // The name strip of a row: what selects the track, what a restack is
     // dragged by, and what a double click renames.
     QPoint gutterPointForTesting(std::size_t row) const;
+    // The whole rectangle, for the one assertion the centre cannot make: that
+    // where the column is drawn and where the rename editor is put are the
+    // same place once the strip has been scrolled. See setGutterLeft.
+    QRect gutterRectForTesting(std::size_t row) const { return gutterRectFor(row); }
 
     // Where a soundtrack's block is drawn, in slots, fractional.
     //
@@ -331,6 +365,8 @@ private:
     // Where the ruler is drawn, in this widget's own coordinates: 0 until
     // somebody scrolls. See setRulerTop.
     int ruler_top_ = 0;
+    // And where the gutter is, the same way and for the same reasons.
+    int gutter_left_ = 0;
 
     animage::Document& doc_;
     animage::TrackId track_ = animage::kNoId;

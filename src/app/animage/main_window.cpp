@@ -2105,6 +2105,13 @@ void MainWindow::buildTimelinePanel() {
     // only way to hear it. See TimelineWidget::setRulerTop.
     connect(timeline_scroll_->verticalScrollBar(), &QScrollBar::valueChanged, timeline_widget_,
             &TimelineWidget::setRulerTop);
+    // And the names stay put while the frames go past them, which is the same
+    // sentence on the other axis and the one a timeline needs more often: a
+    // shot is long sideways where it is short downwards, so scrolling right is
+    // ordinary -- and it used to leave rows of identical cells with nothing
+    // saying which track was which. See TimelineWidget::setGutterLeft.
+    connect(timeline_scroll_->horizontalScrollBar(), &QScrollBar::valueChanged, timeline_widget_,
+            &TimelineWidget::setGutterLeft);
     timeline_scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     // A floor low enough to drag the panel down to a single row, and no ceiling
     // at all: how tall the timeline should be is the animator's business, and

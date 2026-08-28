@@ -1072,6 +1072,43 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
+        {"a-timeline-scrolled-along-the-shot",
+         "the same thing on the other axis: the names stay put while the frames go past them. "
+         "A shot is long sideways where it is short downwards, so scrolling right is the "
+         "ordinary thing to do here -- and it used to take the gutter off the screen, leaving "
+         "rows of identical cells with nothing saying which track was which and nothing "
+         "showing which row the brush was on. The frame numbers under the column should be "
+         "covered rather than absent, the highlight on the current row should still be "
+         "visible, and the top-left corner should still be the ruler's",
+         [](Stage& s) {
+             for (int i = 0; i < 3; ++i) s.choose("Add track");
+             // Long enough to have somewhere to scroll to. The names are the
+             // point, so they are made distinguishable.
+             Document& doc = s.doc();
+             for (std::size_t row = 0; row < doc.scene().tracks.size(); ++row) {
+                 const Track& line = doc.scene().tracks[row];
+                 TrackProperties named = line.properties();
+                 named.name = "character " + std::to_string(row + 1);
+                 doc.updateTrack(line.id, named);
+                 // Well past what the panel can show at once, or there is
+                 // nothing to scroll and the shot photographs the unscrolled
+                 // case by accident.
+                 for (int i = 0; i < 120; ++i) doc.insertImage(line.id, 0);
+             }
+             // The drawings went in through the document rather than through a
+             // menu item, so nothing has told the strip it is wider now -- and
+             // a scrollbar whose maximum is still zero scrolls nowhere and
+             // photographs the unscrolled case.
+             s.timeline->refresh();
+             s.settlePicture();
+             if (auto* area = s.timelinePanel()->findChild<QScrollArea*>()) {
+                 QScrollBar* bar = area->horizontalScrollBar();
+                 bar->setValue(bar->maximum() / 2);
+             }
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
         {"a-soundtrack-highlighted",
          "one row is pointed at and one row is where the brush is, and they must not read as "
          "the same thing. The soundtrack's gutter takes the full highlight; the drawing track "
