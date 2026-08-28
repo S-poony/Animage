@@ -5166,7 +5166,9 @@ void MainWindow::transformLayerThroughTime() {
 // or expensive. What is said, in order: how many drawings, what they weigh,
 // what happens to the quality, and what happens to the undo history. See
 // docs/importing.md, "convert to drawings", which is where each was argued.
-void MainWindow::convertLayerToDrawings() {
+void MainWindow::convertLayerToDrawings() { askToConvertLayer(false); }
+
+void MainWindow::askToConvertLayer(const bool because_a_stroke_was_refused) {
     stopPlayback();
 
     const Layer* layer = currentLayer();
@@ -5218,12 +5220,23 @@ void MainWindow::convertLayerToDrawings() {
         return;
     }
 
+    // Arriving from a refused stroke, this says why it turned up -- and it is a
+    // line on the front of the recap rather than a question of its own, because
+    // two dialogs asking the same thing is the program not hearing the first
+    // answer. Reported.
+    QString recap;
+    if (because_a_stroke_was_refused) {
+        recap = QStringLiteral("%1 is an imported picture, shown from its files rather than "
+                               "drawn, so there is nothing here to paint on.\n\n")
+                    .arg(name);
+    }
+
     // A tile is 128x128 RGBA half = exactly 128 KB, so tiles/8 is megabytes.
     const double megabytes = static_cast<double>(cost.tiles) / 8.0;
-    QString recap =
+    recap +=
         QStringLiteral("Convert %1 to drawings?\n\n"
-                       "%2 %3 will be written, about %4 MB of pixels. Until now this layer has "
-                       "held no pixels at all: it is shown from its files.\n\n")
+                       "%2 %3 will be written, about %4 MB of pixels. It can then be painted "
+                       "on, erased, and used as the line art a colour layer cuts against.\n\n")
             .arg(name)
             .arg(cost.drawings)
             .arg(cost.drawings == 1 ? QStringLiteral("drawing") : QStringLiteral("drawings"))
@@ -5325,24 +5338,19 @@ void MainWindow::offerToConvertRefusedLayer() {
         // layer that is no longer an import -- converted from the panel in the
         // meantime, or undone away -- must not be offered a conversion.
         const Layer* still = currentLayer();
-        if (still && still->kind == LayerKind::Reference) {
-            const QMessageBox::StandardButton answer = QMessageBox::question(
-                this, QStringLiteral("Convert to drawings"),
-                QStringLiteral(
-                    "%1 is an imported picture, shown from its files rather than drawn, so "
-                    "there is nothing here to paint on.\n\n"
-                    "Convert the layer to drawings? It can then be painted on, erased, and "
-                    "used as the line art a colour layer cuts against.")
-                    .arg(QString::fromStdString(still->name)),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-            // Cleared before the second dialog, not after: convertLayerToDrawings
-            // is modal too, and leaving this set across it would be leaving it
-            // set for as long as somebody reads the recap.
-            offering_conversion_ = false;
-            if (answer == QMessageBox::Yes) convertLayerToDrawings();
-            return;
-        }
+        const bool offer = still && still->kind == LayerKind::Reference;
+        // Cleared before the dialog rather than after it, because that dialog
+        // is modal: leaving this set across it would leave it set for as long
+        // as somebody reads the recap, and a second pen-down on a picture they
+        // have decided against would then be ignored rather than answered.
         offering_conversion_ = false;
+        // **Straight to the recap, which is the only question there is.** This
+        // used to ask "convert this layer?" here and then hand over to a recap
+        // that asked the same thing again with the numbers on it -- two dialogs
+        // for one decision, reported as exactly that. What the refusal is
+        // entitled to add is the sentence saying why it turned up, and that is
+        // now the first line of the recap rather than a dialog of its own.
+        if (offer) askToConvertLayer(true);
     });
 }
 

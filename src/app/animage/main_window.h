@@ -432,6 +432,12 @@ private:
     // The layer panel's other whole-layer button: the way back from an import.
     // Puts the cost, and what is and is not lost, before doing any of it.
     void convertLayerToDrawings();
+    // The same recap, with a line in front of it saying why it turned up
+    // uninvited. **One dialog and not two**, which is the whole reason this
+    // takes a flag rather than the refusal raising its own question first: a
+    // popup that asks "convert this?", takes Yes, and then asks "convert this?"
+    // again with more words is a program that did not hear the first answer.
+    void askToConvertLayer(bool because_a_stroke_was_refused);
     // The same offer, arriving from the other side: somebody has just tried to
     // draw on an imported picture, and the refusal is where the question
     // actually gets asked. Both doors are wanted -- the popup is
