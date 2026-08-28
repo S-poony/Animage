@@ -238,6 +238,12 @@ same drawing still showing, not a thing of their own, and they travel with it.
 
 ## Tracks
 
+**The ruler stays put.** Scroll the timeline down past a few tracks and the
+strip of frame numbers stays at the top, because that strip is where you scrub —
+and soundtracks are under every drawing row, so reaching the sound is exactly
+when you have scrolled. The row directly under the ruler is cut off while you
+are down there; scroll a little further and it comes out.
+
 **Tracks.** One row each, under one ruler and one playhead. Click a row to work
 on that track: the layer panel, the brush and every timing button follow it,
 while the canvas goes on showing all of them. The Track menu adds, duplicates,

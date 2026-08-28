@@ -483,10 +483,18 @@ QPoint TimelineWidget::gutterPointForTesting(std::size_t row) const {
 }
 
 QPoint TimelineWidget::rulerPointForTesting(std::size_t slot) const {
-    return {kGutterWidth + static_cast<int>(slot) * kCellWidth + kCellWidth / 2, kRulerHeight / 2};
+    return {kGutterWidth + static_cast<int>(slot) * kCellWidth + kCellWidth / 2,
+            ruler_top_ + kRulerHeight / 2};
+}
+
+bool TimelineWidget::inRuler(int y) const {
+    return y >= ruler_top_ && y < ruler_top_ + kRulerHeight;
 }
 
 bool TimelineWidget::rowAtY(int y, std::size_t* row) const {
+    // Unchanged by the pinning: rows are where they always were, and what the
+    // band does is cover one of them. Whether the pointer is in the band is a
+    // separate question, asked first -- see inRuler.
     if (y < kRulerHeight || rowCount() == 0) return false;
     const std::size_t at = static_cast<std::size_t>((y - kRulerHeight) / kRowHeight);
     if (row) *row = std::min(at, rowCount() - 1);
@@ -504,6 +512,16 @@ void TimelineWidget::scrubTo(int x, bool always) {
     const std::size_t before = current_slot_;
     setCurrentSlot(slotAt(x));
     if (always || current_slot_ != before) Q_EMIT scrubbed(current_slot_);
+}
+
+void TimelineWidget::setRulerTop(int y) {
+    const int clamped = std::max(0, y);
+    if (clamped == ruler_top_) return;
+    ruler_top_ = clamped;
+    // The whole widget and not the band: a scroll area repaints only what it
+    // newly exposed, and what moved here is a strip that was drawn somewhere
+    // else. The timeline is rectangles, so a full repaint is cheap.
+    update();
 }
 
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
@@ -656,7 +674,6 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
 
     QPainter painter(this);
     painter.fillRect(rect(), colours.background);
-    painter.fillRect(QRect(0, 0, width(), kRulerHeight), colours.ruler);
 
     QFont font = painter.font();
     font.setPointSizeF(8.5);
@@ -664,16 +681,6 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
 
     const std::size_t frames = doc_.timelineFrames();
     const std::size_t shot = doc_.scene().shotFrames();
-
-    // The ruler, once, across the whole width: it is the scene's time and not
-    // any one track's.
-    for (std::size_t i = 0; i < frames; ++i) {
-        if ((i % 5) != 0) continue;
-        const int x = kGutterWidth + static_cast<int>(i) * kCellWidth;
-        painter.setPen(colours.tick);
-        painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
-                         QString::number(i + 1));
-    }
 
     for (std::size_t row = 0; row < rowCount(); ++row) {
         // **Asked for rather than dereferenced**, which is the one line in this
@@ -817,30 +824,53 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         painter.drawLine(0, y, width(), y);
     }
 
-    if (current_slot_ < frames) {
-        const int x = kGutterWidth + static_cast<int>(current_slot_) * kCellWidth;
-        painter.fillRect(QRect(x, 0, kCellWidth - 1, kRulerHeight), colours.current);
-        painter.setPen(colours.current_text);
-        painter.drawText(QRect(x, 0, kCellWidth, kRulerHeight), Qt::AlignCenter,
-                         QString::number(current_slot_ + 1));
-    }
-
-    // Where the shot ends, drawn last so nothing paints over it. A line down the
-    // whole panel with a grip in the ruler: the line is the fact, the grip is
-    // the control, and the ruler is where a scene-level control belongs -- the
-    // rows below are a track's own time.
+    // Where the shot ends: a line down the whole panel, drawn before the ruler
+    // band so the band's grip sits on top of its own end of it.
     //
     // Only when the scene fixes the length. Left to the tracks, the shot ends
     // where the longest one does and the rows already show that by stopping, so
     // the line would say nothing twice -- in a colour that means a constraint,
     // while none is being applied.
-    if (doc_.scene().fixed_length) {
-        const int end_x = sceneEndX();
+    const bool bounded = doc_.scene().fixed_length;
+    const int end_x = bounded ? sceneEndX() : 0;
+    if (bounded) {
         painter.setPen(QPen(colours.boundary, 2));
         painter.drawLine(end_x, 0, end_x, height());
+    }
+
+    // --- the ruler, last, because it is pinned on top of whatever it reaches --
+    //
+    // At the top of the widget until something scrolls, which is what it always
+    // was; `ruler_top_` is the scroll area saying how far the rows have gone
+    // past it. Painted after them rather than before, because a band that is
+    // meant to stay put has to cover what slides under it -- see setRulerTop.
+    const int band = ruler_top_;
+    painter.fillRect(QRect(0, band, width(), kRulerHeight), colours.ruler);
+
+    // The frame numbers, once, across the whole width: it is the scene's time
+    // and not any one track's.
+    for (std::size_t i = 0; i < frames; ++i) {
+        if ((i % 5) != 0) continue;
+        const int x = kGutterWidth + static_cast<int>(i) * kCellWidth;
+        painter.setPen(colours.tick);
+        painter.drawText(QRect(x, band, kCellWidth, kRulerHeight), Qt::AlignCenter,
+                         QString::number(i + 1));
+    }
+
+    if (current_slot_ < frames) {
+        const int x = kGutterWidth + static_cast<int>(current_slot_) * kCellWidth;
+        painter.fillRect(QRect(x, band, kCellWidth - 1, kRulerHeight), colours.current);
+        painter.setPen(colours.current_text);
+        painter.drawText(QRect(x, band, kCellWidth, kRulerHeight), Qt::AlignCenter,
+                         QString::number(current_slot_ + 1));
+    }
+
+    // And the grip, which is the control where the line is the fact. The ruler
+    // is where a scene-level control belongs -- the rows are a track's own time.
+    if (bounded) {
         painter.setBrush(colours.boundary);
         painter.setPen(Qt::NoPen);
-        painter.drawRect(QRect(end_x - 3, 0, 6, kRulerHeight));
+        painter.drawRect(QRect(end_x - 3, band, 6, kRulerHeight));
     }
 }
 
@@ -860,7 +890,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     // The ruler is a scrub band, apart from the end-of-shot grip in it. Exposure
     // edges live below it, so dragging along time can never resize a hold by
     // accident, and the grip is the one thing up here that is not scrubbing.
-    if (y < kRulerHeight) {
+    if (inRuler(y)) {
         if (isOnSceneEnd(x)) {
             dragging_end_ = true;
             refreshCursor(x, y);
@@ -1157,7 +1187,7 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     // is the first thing crossed on the way in from the canvas, so the timeline
     // read as a hand everywhere before you had touched anything. A hand here
     // means one thing now: this drawing can be picked up and moved.
-    if (y < kRulerHeight) return isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::ArrowCursor;
+    if (inRuler(y)) return isOnSceneEnd(x) ? Qt::SplitHCursor : Qt::ArrowCursor;
 
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return Qt::ArrowCursor;

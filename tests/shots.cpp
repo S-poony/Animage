@@ -1047,6 +1047,31 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
+        {"a-timeline-scrolled-to-the-sound",
+         "the ruler stays put while the rows go past it. Soundtracks are under every drawing "
+         "row, so a scene with a few tracks in it is one you scroll down to reach the sound -- "
+         "and the ruler is where scrubbing happens, which is the only way to hear that sound. "
+         "It is pinned inside the scrolled widget rather than lifted out above it, which comes "
+         "to the same picture: either way the same 18 pixels go to the ruler and the row at the "
+         "top of the view is cut off by the same amount",
+         [](Stage& s) {
+             for (int i = 0; i < 5; ++i) s.choose("Add track");
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // Seven rows in a strip that stops growing at four, so it scrolls.
+             if (auto* area = s.timelinePanel()->findChild<QScrollArea*>()) {
+                 QScrollBar* bar = area->verticalScrollBar();
+                 bar->setValue(bar->maximum());
+             }
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
         {"a-soundtrack-highlighted",
          "one row is pointed at and one row is where the brush is, and they must not read as "
          "the same thing. The soundtrack's gutter takes the full highlight; the drawing track "

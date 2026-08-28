@@ -2041,6 +2041,12 @@ void MainWindow::buildTimelinePanel() {
     timeline_scroll_->setWidget(timeline_widget_);
     timeline_scroll_->setWidgetResizable(true);
     timeline_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // The ruler stays put while the rows go past it. Soundtracks are under
+    // every drawing row, so a scene with a few tracks is one you scroll down to
+    // reach the sound -- and the ruler is where scrubbing happens, which is the
+    // only way to hear it. See TimelineWidget::setRulerTop.
+    connect(timeline_scroll_->verticalScrollBar(), &QScrollBar::valueChanged, timeline_widget_,
+            &TimelineWidget::setRulerTop);
     timeline_scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     // A floor low enough to drag the panel down to a single row, and no ceiling
     // at all: how tall the timeline should be is the animator's business, and

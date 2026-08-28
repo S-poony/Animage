@@ -59,6 +59,24 @@ public:
     // about what is being worked on.
     void clearAudioHighlight() { setAudioHighlight(animage::kNoId); }
 
+    // How far down the widget the ruler should be drawn, which is how far the
+    // scroll area has scrolled it up.
+    //
+    // **The ruler is pinned rather than moved out of the scrolled widget**, and
+    // the two come to the same picture. Taking it out would reserve its 18
+    // pixels above the viewport; leaving it in spends the same 18 covering the
+    // top of it. Either way a row at the top of the view is cut off by the same
+    // amount and comes out from under by scrolling -- so the version that keeps
+    // the end-of-shot line one `drawLine` through both bands, and keeps the
+    // sideways scrolling free, is the one worth having.
+    //
+    // What it is for: soundtracks sit under every drawing row, so a scene with
+    // a few tracks is one you scroll down to reach the sound -- and the ruler
+    // is where scrubbing happens, which is the only way to hear it. A ruler
+    // that scrolled away took the scrub band off the screen exactly when it was
+    // wanted.
+    void setRulerTop(int y);
+
     void setCurrentSlot(std::size_t slot);
     std::size_t currentSlot() const { return current_slot_; }
 
@@ -159,7 +177,15 @@ private:
         return drawingRowCount() + doc_.scene().audio_tracks.size();
     }
 
-    // The row under a y, clamped to a real row; false if y is in the ruler.
+    // Whether a y is in the pinned ruler band, wherever the scroll has put it.
+    // Every gesture asks this before it asks which row it is on, because the
+    // band is on top of whatever is under it.
+    //
+    // Not inline, so that the band's height stays written down once, beside the
+    // rest of the geometry in the .cpp.
+    bool inRuler(int y) const;
+
+    // The row under a y, clamped to a real row; false if y is above the rows.
     bool rowAtY(int y, std::size_t* row) const;
     int rowTop(std::size_t row) const;
 
@@ -301,6 +327,10 @@ private:
 
     // Where the block's two ends are, in x, for the grab zones and the cursor.
     bool audioEdgeAt(std::size_t row, int x, bool* is_start) const;
+
+    // Where the ruler is drawn, in this widget's own coordinates: 0 until
+    // somebody scrolls. See setRulerTop.
+    int ruler_top_ = 0;
 
     animage::Document& doc_;
     animage::TrackId track_ = animage::kNoId;

@@ -3739,6 +3739,35 @@ The second is the true one. `QMenu::menuAction()` is what has to be disabled,
 and holding the submenu as well as its items is the only reason `end_menu_`
 exists.
 
+#### The ruler is pinned, and the option that looked better was the same picture
+
+Same report, same cause: **soundtracks are under every drawing row**, so a scene
+with a few tracks in it is one you scroll down to reach the sound — and the
+ruler is where scrubbing happens, which is the only way to hear that sound. A
+ruler that scrolled away with the rows took the scrub band off the screen
+exactly when it was wanted.
+
+It is pinned **inside** the scrolled widget: `setRulerTop` is the scroll area's
+vertical position, the band is painted last so it covers what slides under it,
+and every gesture asks `inRuler` before it asks which row it is on.
+
+**The alternative was to lift it out of the scroll area entirely**, into a strip
+of its own above the viewport, and that was argued for here on the grounds that
+a pinned band inside the widget *hides content*. **That was wrong and it is
+worth writing down why**, because it is a plausible-sounding mistake. Taking the
+ruler out reserves its 18 pixels above the viewport; leaving it in spends the
+same 18 covering the top of it. Either way the row at the top of the view is cut
+off by the same amount and comes out from under by scrolling. Neither costs the
+dock any height — `syncTimelineHeight` moves it by *row differences*, and the
+ruler is part of the fixed surround in both. Same picture, one sixth of the
+code, and the end-of-shot line stays one `drawLine` through both bands instead
+of being split across two widgets.
+
+The general shape of the error: **two designs that differ in which side of a
+boundary a fixed cost sits on are the same design.** What would have made the
+split worth it is a fact about the *content* — something the band must never be
+able to cover — and there is none here.
+
 **Renaming a soundtrack is allowed, and the objection to it is answered rather
 than dismissed.** It was raised that a user should perhaps not be able to rename
 an import at all. The thing that makes it safe is that an `AudioTrack` carries
