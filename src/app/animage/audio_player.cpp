@@ -78,6 +78,15 @@ void AudioPlayer::close() {
     shared_->base = 0;
 }
 
+bool AudioPlayer::onTheRightOutput() const {
+    if (!device_) return false;
+    if (!device_->healthy()) return false;
+    const QString now = AudioDevice::defaultOutputId();
+    // An empty answer means the machine has no default at all, which is not a
+    // reason to throw away a device that is still playing.
+    return now.isEmpty() || now == device_->outputId();
+}
+
 int AudioPlayer::rate() const { return device_ ? device_->rate() : 0; }
 int AudioPlayer::channels() const { return device_ ? device_->channels() : 0; }
 

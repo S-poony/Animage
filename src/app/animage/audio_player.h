@@ -60,6 +60,12 @@ public:
     // already open is the right one for a new soundtrack.
     int openedFor() const { return asked_rate_; }
 
+    // Whether the output this is playing to is still the machine's default and
+    // still running. False is not an error: somebody plugged a speaker in, or
+    // pulled one out, and what to do about it is open another device. See
+    // AudioDevice::outputId.
+    bool onTheRightOutput() const;
+
     // Play this from its beginning. Replaces whatever was playing, and null is
     // how you say "nothing" -- the device goes on running and goes quiet.
     //

@@ -22,6 +22,14 @@ bool AudioDevice::available() {
 #endif
 }
 
+QString AudioDevice::defaultOutputId() {
+#ifdef ANIMAGE_HAVE_AUDIO
+    return QString::fromLatin1(QMediaDevices::defaultAudioOutput().id());
+#else
+    return {};
+#endif
+}
+
 #ifndef ANIMAGE_HAVE_AUDIO
 
 std::unique_ptr<AudioDevice> AudioDevice::open(int, int, Fill, QString* trouble) {
@@ -128,7 +136,9 @@ private:
 class QtAudioDevice : public AudioDevice {
 public:
     QtAudioDevice(const QAudioDevice& output, const QAudioFormat& format, Fill fill)
-        : rate_(format.sampleRate()), channels_(format.channelCount()) {
+        : rate_(format.sampleRate()),
+          channels_(format.channelCount()),
+          output_id_(QString::fromLatin1(output.id())) {
         // The pump before the sink, and destroyed after it: the sink pulls on
         // the pump, so a pump that went away first would be pulled on by a
         // thread that is still running. Member order below is what enforces
@@ -164,11 +174,23 @@ public:
         if (sink_) sink_->stop();
     }
 
+    QString outputId() const override { return output_id_; }
+
+    bool healthy() const override {
+        if (!sink_) return false;
+        // Stopped is the state an output that went away leaves behind, and an
+        // error is the other way it says the same thing. Idle is not a fault:
+        // it is what a pull-mode sink reports when the source has nothing for
+        // it, which for us is any moment nothing is playing.
+        return sink_->error() == QAudio::NoError && sink_->state() != QAudio::StoppedState;
+    }
+
 private:
     std::unique_ptr<Pump> pump_;
     std::unique_ptr<QAudioSink> sink_;
     int rate_ = 0;
     int channels_ = 0;
+    QString output_id_;
 };
 
 }  // namespace

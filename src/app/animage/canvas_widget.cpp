@@ -2284,6 +2284,9 @@ QString CanvasWidget::explain(Refusal refusal) {
         case Refusal::ReferenceLayer:
             return QStringLiteral("this is an imported picture, which is shown from its file "
                                   "rather than drawn -- convert it to drawings first");
+        case Refusal::OneDrawing:
+            return QStringLiteral("there is only one drawing on this layer, and through time "
+                                  "needs a second one to be through -- use the Transform tool");
         case Refusal::NothingDrawn:
             return QStringLiteral("nothing is drawn on this layer");
         case Refusal::NothingSelected: return QStringLiteral("nothing is selected");
@@ -2381,24 +2384,6 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform(TileGrid unplaced) {
     const Layer* active = holding ? holding->findLayer(active_layer_) : nullptr;
     const bool placing = active && active->kind == LayerKind::Reference;
 
-    // **A layer of one drawing is the Transform tool's job, and going through
-    // it rather than around it is what gives the lasso back.**
-    //
-    // The whole-layer path clears the selection, on the grounds that a loop
-    // describes a shape on this drawing and nothing at all on the other forty.
-    // With one drawing there are no other forty: the loop describes exactly
-    // what is there, and refusing it here while honouring it in the tool was a
-    // difference with no reason behind it. Everything else agrees already --
-    // the box is this drawing's bounds either way, Apply writes one cel either
-    // way -- and the ordinary path does it without the bake's rescue, its
-    // deferred trim or its history cost.
-    //
-    // Not for a reference layer, whatever the count: there is no cel for the
-    // tool to lift, and a placement is a property of the whole file.
-    if (!placing && doc_.layerDrawings(track_, active_layer_).size() == 1) {
-        return beginTransform();
-    }
-
     // The same list, in the same order, for the same reasons -- including the
     // layer kind. See beginTransform.
     //
@@ -2407,6 +2392,25 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform(TileGrid unplaced) {
     // picture is not putting a mark anywhere.
     const Refusal refusal = placing ? refuseToPlaceHere() : refuseHere();
     if (refusal != Refusal::None) return refusal;
+
+    // **A layer with one drawing is refused rather than handed to the tool.**
+    //
+    // It used to be handed over, on the reasoning that with one drawing the two
+    // gestures mean the same thing and the whole-layer path would throw a lasso
+    // away for no reason. That is true and it was the wrong conclusion: what it
+    // produced was a button reading "Transform layer through time" that did
+    // something else, on the most ordinary layer there is. Refusing and naming
+    // the tool says the same thing without the lie -- and the lasso comes back
+    // by the same route, because the tool is where you are now sent.
+    //
+    // Nothing is checked here for a reference layer, whatever the count: there
+    // is no cel for a tool to lift and a placement is a property of the whole
+    // file, so the count of drawings says nothing about it.
+    if (!placing) {
+        const std::size_t drawings = doc_.layerDrawings(track_, active_layer_).size();
+        if (drawings == 0) return Refusal::NothingDrawn;
+        if (drawings == 1) return Refusal::OneDrawing;
+    }
 
     // Sets tool_ by hand, so it ends the stroke itself. See #78 and the note in
     // beginTransform: setTool is not on the way in or on the way out of here.

@@ -103,4 +103,27 @@ public:
     // Stops pulling. The callback has returned for the last time when this
     // returns, which is what makes it safe to destroy whatever it was reading.
     virtual void stop() = 0;
+
+    // Which output this opened, as an opaque id.
+    //
+    // **A device is bound to the output it was opened on and never looks
+    // again**, which is right -- a stream cannot follow a moving target -- and
+    // is why this is here. Somebody plugging in a speaker changes what the
+    // machine's *default* output is, and the sink goes on feeding the one that
+    // was default when it opened. Compared with `defaultOutputId()`, this is
+    // how a caller finds out that the answer has moved on and it should open
+    // another. Reported from use: a speaker switched on mid-session, and the
+    // scrub went on playing to nothing.
+    virtual QString outputId() const = 0;
+
+    // Whether it is still running.
+    //
+    // The other half of the same problem, for the case where the default did
+    // *not* move: an output that is unplugged takes its stream down with it,
+    // and what is left says so rather than pulling. There is nothing to be done
+    // about that but open another one.
+    virtual bool healthy() const = 0;
+
+    // The machine's current default output, or empty where there is none.
+    static QString defaultOutputId();
 };

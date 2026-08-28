@@ -3244,18 +3244,25 @@ That already announces itself and better: a gesture that ignores a loop clears
 it, so the loop visibly goes. One signal per fact — and the drawing count has no
 other signal, since a layer of two drawings barely has ghosts.
 
-### A layer of one drawing is the Transform tool's job
+### A layer of one drawing is the Transform tool's job — and is now told so
 
-`beginLayerTransform` hands over to `beginTransform` when the layer has one
-drawing, and **that is what gave the lasso back**. The whole-layer path clears
-the selection because a loop describes a shape on this drawing and nothing at all
-on the other forty; with one drawing there are no other forty, and refusing the
-lasso there while honouring it in the tool was a difference with no reason behind
-it.
+*Superseded in part. What follows is the reasoning, which stands; what changed is
+what the code does with it — see [a layer of one drawing is refused, where it
+used to be handed over](#a-layer-of-one-drawing-is-refused-where-it-used-to-be-handed-over)
+below.*
+
+`beginLayerTransform` used to hand over to `beginTransform` when the layer had
+one drawing, and **that is what gave the lasso back**. The whole-layer path
+clears the selection because a loop describes a shape on this drawing and
+nothing at all on the other forty; with one drawing there are no other forty,
+and refusing the lasso there while honouring it in the tool was a difference
+with no reason behind it.
 
 Everything else already agreed — the box is that drawing's bounds either way,
 Apply writes one cel either way — and the ordinary path does it without the
-bake's rescue, its deferred trim or its history cost.
+bake's rescue, its deferred trim or its history cost. **It refuses and names the
+tool now instead of handing over silently**, which reaches the same place with
+the button telling the truth on the way.
 
 Not for a reference layer, whatever the drawing count: there is no cel for the
 tool to lift, and a placement is a property of the whole file. **There is no
@@ -3264,13 +3271,51 @@ is a different sentence and needs to stay one.
 
 ### The Transform tool works on an import, and the doors do not disagree
 
-`chooseTransformTool` routes a reference layer to the placement. Both doors mean
-one thing when there is one picture, and refusing with a message pointing at the
-other button would be a rule with no consequence behind it.
+`chooseTransformTool` routes a reference layer **of one file** to the placement.
+Both doors mean one thing when there is one picture, and refusing with a message
+pointing at the other button would be a rule with no consequence behind it. A
+sequence is where that stops — see below.
 
 "Two doors and no switch" is untouched by this: what that refuses is a control
 that changes the scope of a gesture *already on screen*, and this is decided
 before there is one.
+
+### And a sequence is where that argument stops
+
+`chooseTransformTool` routes a reference layer of **one** file to the placement.
+A sequence is several, so the tool — which says it moves *this drawing* — has
+nothing here it can honestly do, and it is greyed out with a tooltip naming the
+two ways forward: convert it to drawings, or use "Place this picture", which is
+what moving a whole sequence actually is.
+
+The reasoning above is what decides it rather than a new rule: *"both doors mean
+one thing when there is one picture"* was always the argument, and it simply
+stops being true at two. Greyed rather than left to refuse when pressed, because
+a tool that looks available and then bounces you back to the brush is a tool you
+try twice.
+
+### A layer of one drawing is refused, where it used to be handed over
+
+**This reverses a decision recorded a few paragraphs up**, and the paragraph it
+reverses is worth reading first because the reasoning in it was not wrong — the
+conclusion was.
+
+`beginLayerTransform` used to hand a one-drawing layer to `beginTransform`, on
+the grounds that with one drawing the two gestures mean the same thing and the
+whole-layer path would throw away a lasso for no reason. Both halves of that are
+true. What it produced was a button reading **"Transform layer through time"**
+that quietly did something else, on the most ordinary layer there is — a fresh
+track has exactly one drawing.
+
+So the door refuses with `Refusal::OneDrawing` and the button greys with the
+reason, which names the Transform tool. The lasso comes back by the same route
+it always did: the tool is where you are now sent, by a sentence instead of by
+machinery. What went with the change is the branch that did the handing over,
+which is the simplification the change was predicted to allow.
+
+The general shape: **a control that silently does something other than what it
+says is worse than one that refuses and explains**, even when the thing it
+silently does is the right thing.
 
 ### Four labels that would have been false
 
@@ -3914,6 +3959,15 @@ things in it are decisions rather than shape:
 - **The rate asked for is the clip's**, so the ordinary case is an exact
   sample-for-sample read; a driver that refuses it says what it will take
   instead, and the renderer resamples. A refusal costs quality, not sound.
+- **It is bound to the output it opened and cannot follow one.** That is right —
+  a stream cannot chase a moving target — and it is why `outputId()` and
+  `healthy()` exist. Somebody switching a speaker on changes what the machine's
+  *default* output is, and the sink goes on feeding whatever was default before:
+  reported from use as a scrub that stopped making a noise. Opening another
+  device is the only answer, so what the seam provides is the two questions that
+  say when to. `refreshAudioDevice` asks them, and a scrub asks at most twice a
+  second — the burst that notices still plays, late once, because reopening
+  happens before the burst is published.
 
 `core/audio_render.h` is what the callback calls. `renderAudio` turns an
 `AudioProgram` — the soundtracks, their placements, a rate, a start slot, and

@@ -255,6 +255,11 @@ private:
                   const QString& more = QString(), const std::vector<shortcuts::Id>& also = {});
     // Changes what one keyed tooltip says, keeping the key it names.
     void setKeyedTipText(QWidget* on, const QString& what);
+    // The same for an action, and it replaces both halves of the tip rather
+    // than the first: a control that has just been greyed out wants a different
+    // second paragraph too, and the one it had is about a gesture that can no
+    // longer be started.
+    void setKeyedTipText(QAction* on, const QString& what, const QString& more);
     void syncTooltips();
     // Edit > Keyboard shortcuts. Opens the dialog, and on Apply installs what it
     // hands back and writes it down.
@@ -687,6 +692,10 @@ private:
     // not retried on every edit either.
     QString audio_trouble_;
     int audio_tried_rate_ = 0;
+    // When the output was last checked against the machine's default. A drag is
+    // dozens of scrub bursts a second and what the check costs is not known, so
+    // it is bounded rather than repeated.
+    QElapsedTimer audio_device_checked_;
 
     QTimer* playback_timer_ = nullptr;
     QTimer* autosave_timer_ = nullptr;

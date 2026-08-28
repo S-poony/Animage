@@ -804,6 +804,17 @@ void MainWindow::setKeyedTipText(QWidget* on, const QString& what) {
     }
 }
 
+void MainWindow::setKeyedTipText(QAction* on, const QString& what, const QString& more) {
+    for (KeyedTip& tip : keyed_tips_) {
+        if (tip.action != on) continue;
+        if (tip.what == what && tip.more == more) return;  // syncTooltips is not free
+        tip.what = what;
+        tip.more = more;
+        syncTooltips();
+        return;
+    }
+}
+
 void MainWindow::syncTooltips() {
     const shortcuts::Bindings& keys = shortcuts::current();
     const auto spelled = [&keys](shortcuts::Id id) {
@@ -1529,19 +1540,27 @@ void MainWindow::chooseTransformTool() {
     stopPlayback();
     if (canvas_->transformIsLive()) return;
 
-    // **An imported picture goes through the placement path, whichever door was
+    // **An imported *still* goes through the placement path, whichever door was
     // used.** The tool takes the drawing in front of you, and for a reference
-    // layer that is one picture shown from a file -- so both doors mean the
-    // same thing here and there is nothing for them to disagree about. Refusing
-    // and pointing at the other button would be a rule with no consequence
-    // behind it, which is the kind of rule people learn as "this program is
-    // fussy".
+    // layer of one file that is one picture -- so both doors mean the same
+    // thing and there is nothing for them to disagree about. Refusing and
+    // pointing at the other button would be a rule with no consequence behind
+    // it, which is the kind of rule people learn as "this program is fussy".
+    //
+    // **A sequence is where the argument stops**, and the routing stops with
+    // it. "Both doors mean one thing when there is one picture" was always the
+    // reason, and a sequence is several -- so the tool, which says it moves
+    // *this drawing*, has nothing here it can honestly do. It refuses through
+    // the ordinary path, where `Refusal::ReferenceLayer` already names the way
+    // in: convert it to drawings first. The tool is greyed out there too, so
+    // the refusal is something you see before you reach for it rather than
+    // after -- see syncLayerButtons.
     //
     // "Two doors and no switch" is untouched by this: what that refuses is
     // changing the scope of a gesture already on screen, and this is decided
     // before there is one.
-    if (const Layer* layer = currentLayer();
-        layer && layer->kind == LayerKind::Reference) {
+    if (const Layer* layer = currentLayer(); layer && layer->kind == LayerKind::Reference &&
+                                             layer->reference_sources.size() <= 1) {
         transformLayerThroughTime();
         return;
     }
@@ -3546,7 +3565,17 @@ void MainWindow::refreshAudioDevice() {
         audio_trouble_.clear();
         return;
     }
-    if (audio_.running() && audio_.openedFor() == rate) return;
+    // **And the output it is on may have moved.** A device is bound to the
+    // output it opened and cannot follow one, so somebody switching a speaker
+    // on -- which changes what the machine's default is -- leaves the scrub
+    // playing to whatever was default before. Asked here rather than watched
+    // for, because this already runs whenever anything changes and the answer
+    // is only acted on by opening another device, which is not a thing to do in
+    // the background. Reported from use.
+    if (audio_.running() && audio_.openedFor() == rate && audio_.onTheRightOutput()) return;
+    // A rate that has not changed and a device that has: forget the failure so
+    // the open below is attempted rather than skipped by the guard.
+    if (audio_.running()) audio_tried_rate_ = 0;
 
     // **A failure is remembered rather than retried.** This runs whenever the
     // document changes and opening a device is a third of a second, so a
@@ -3592,6 +3621,23 @@ void MainWindow::scrubAudio(std::size_t slot) {
     // Playback has the device while a take is running, and dragging the ruler
     // during one is a request to move the playhead rather than to hear a frame.
     if (playback_timer_->isActive()) return;
+
+    // **Has the machine's idea of where sound goes changed under us?** Somebody
+    // switching a speaker on does not touch the document, so nothing else here
+    // would ask -- and the first they would know of it is a scrub that makes no
+    // noise. Asked at most a few times a second rather than on every frame the
+    // playhead passes. Bounded rather than measured: a drag is dozens of these a
+    // second and what the check costs has not been measured, so it is asked at a
+    // rate that cannot matter either way.
+    //
+    // Reopening costs a third of a second, and it happens *before* the burst is
+    // published, so the burst that noticed still plays -- late, once, and then
+    // it is right again.
+    if (!audio_device_checked_.isValid() || audio_device_checked_.elapsed() > 500) {
+        audio_device_checked_.restart();
+        if (audio_.running() && !audio_.onTheRightOutput()) refreshAudioDevice();
+    }
+
     if (!audio_.running()) return;
 
     auto program = std::make_shared<AudioProgram>(audioProgramAt(slot));
@@ -4629,13 +4675,23 @@ void MainWindow::syncLayerButtons() {
         refusal = QStringLiteral("this layer is hidden");
     } else if (layer->kind != LayerKind::Reference &&
                doc_.layerDrawings(track_, layer->id).empty()) {
-        // Last, because beginLayerTransform asks it last. Cels and not ink: a
-        // layer with no cel anywhere has nothing to move and is the case worth
-        // catching, which is a brand-new layer. Asking about the ink would mean
-        // paintedBounds over every drawing, which reads pixels -- too much to
-        // pay every time the playhead moves, and the answer it would add is a
-        // layer whose cels are all empty, which the grid releases anyway.
+        // Last but one, because beginLayerTransform asks these two last. Cels
+        // and not ink: a layer with no cel anywhere has nothing to move and is
+        // the case worth catching, which is a brand-new layer. Asking about the
+        // ink would mean paintedBounds over every drawing, which reads pixels
+        // -- too much to pay every time the playhead moves, and the answer it
+        // would add is a layer whose cels are all empty, which the grid
+        // releases anyway.
         refusal = QStringLiteral("nothing is drawn on this layer yet");
+    } else if (layer->kind != LayerKind::Reference &&
+               doc_.layerDrawings(track_, layer->id).size() == 1) {
+        // **Through time needs a second drawing to be through.** With one, this
+        // button used to hand the gesture to the Transform tool -- which is the
+        // right gesture and the wrong button: it read "Transform layer through
+        // time" and did something else, on the most ordinary layer there is.
+        refusal = QStringLiteral("there is only one drawing on this layer.\n"
+                                 "Through time needs a second one to be through; use the\n"
+                                 "Transform tool, which is the same gesture with one.");
     }
 
     layer_transform_->setEnabled(refusal.isEmpty());
@@ -4665,6 +4721,41 @@ void MainWindow::syncLayerButtons() {
                              "It is baked on Apply: every drawing in the layer is written,\n"
                              "in one undo step. A nudge or a flip is exact; turning or\n"
                              "scaling resamples every drawing, once."));
+
+    // **And the Transform tool itself, which a sequence import has nothing for.**
+    //
+    // A still routes to the placement and the tool is the right door for it. A
+    // sequence is several pictures, so "move this drawing" has nothing it can
+    // honestly do -- the way in is to convert it to drawings, which is what the
+    // tooltip says. Greyed rather than left to refuse when pressed, because a
+    // tool that looks available and then bounces you back to the brush is a
+    // tool you try twice.
+    if (transform_action_) {
+        const bool sequence = layer && layer->kind == LayerKind::Reference &&
+                              layer->reference_sources.size() > 1;
+        // Left checked while disabled it would sit there looking chosen and
+        // doing nothing, so the brush takes over -- the same thing
+        // chooseTransformTool does when the canvas refuses.
+        if (sequence && transform_action_->isChecked()) {
+            brush_action_->setChecked(true);
+            canvas_->setTool(CanvasWidget::Tool::Brush);
+            syncToolSettings();
+        }
+        transform_action_->setEnabled(!sequence);
+        setKeyedTipText(
+            transform_action_,
+            sequence ? QStringLiteral("Cannot transform an imported sequence")
+                     : QStringLiteral("Move, turn or resize this drawing on the layer you are on"),
+            sequence ? QStringLiteral(
+                           "It is shown from its files rather than drawn, so there is nothing\n"
+                           "here to move. Convert it to drawings first.\n\n"
+                           "Where the whole sequence sits is a placement rather than a\n"
+                           "transform: \"Place this picture\", in the layer panel.")
+                     : QStringLiteral(
+                           "With nothing selected it takes the whole drawing.\n"
+                           "%1 applies, %2 cancels, and the nudge keys move it a pixel at a "
+                           "time."));
+    }
 
     // Remove layer, which had the same fault the button above was built to
     // avoid and had it from the start: `removeCurrentLayer` returns without a

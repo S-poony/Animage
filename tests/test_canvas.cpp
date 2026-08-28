@@ -874,6 +874,24 @@ void theLayerTransformButtonSaysWhichReasonItIs() {
     }
     QCoreApplication::processEvents();
 
+    // One drawing is not enough, and this is the reason a fresh track meets
+    // first. It used to hand the gesture to the Transform tool instead, which
+    // meant a button reading "Transform layer through time" doing something
+    // else on the most ordinary layer there is.
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("only one drawing")));
+
+    // A second drawing, inked on the same layer, and now there is something for
+    // "through time" to be through. A frame change is what asks the button
+    // again -- the stroke went into the document directly and nothing heard it.
+    const ImageId second = doc.insertImage(track, 1);
+    strokeOn(doc, track, second, ink, 40.0f, 140.0f, 200.0f, 140.0f);
+    timeline->refresh();
+    timeline->setCurrentSlot(1);
+    QCoreApplication::processEvents();
+    timeline->setCurrentSlot(0);
+    QCoreApplication::processEvents();
+
     // An ordinary ink layer with a drawing under the playhead: pressable, and
     // the tooltip says what pressing it will cost rather than why it cannot.
     CHECK(button->isEnabled());
@@ -10148,15 +10166,64 @@ void aFrameDerivedAtAnotherPlacementIsNotServed() {
     CHECK(doc.referenceFrameFor(track, drawing, layer, elsewhere) == nullptr);
 }
 
-// The one-drawing case, which is what gave the lasso back.
+// **A sequence import is where "both doors mean one thing" stops being true.**
 //
-// A layer of one drawing is the Transform tool's job, so the layer button hands
-// it over rather than running the whole-layer path with the selection thrown
-// away. Asserted through the box's own report of what it is doing, because that
-// is what the colour and the bar label are read from.
-void aLayerOfOneDrawingIsTheOrdinaryTransform() {
-    TEST("the layer button on a one-drawing layer keeps the selection and is not a whole-layer "
-         "gesture");
+// The Transform tool routes a reference layer to the placement, on the stated
+// reasoning that with one picture the two gestures mean the same thing. A
+// sequence is several, so the tool -- which says it moves *this drawing* -- has
+// nothing here it can honestly do, and it is greyed rather than left to bounce
+// you back to the brush when pressed. The still is checked beside it, because
+// what would be easy to break is the half that still works.
+void theTransformToolIsOffForASequenceImportAndOnForAStill() {
+    TEST("the Transform tool is off for an imported sequence and on for an imported still");
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    if (!dir.isValid()) return;
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QAction* transform = actionCalled(window, QStringLiteral("Transform"));
+    CHECK(transform != nullptr);
+    if (!transform) return;
+    CHECK(transform->isEnabled());  // an ordinary drawing layer
+
+    const QString still = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(still, QColor(200, 60, 60)));
+    CHECK(window.importImageFrom(still, nullptr));
+    QCoreApplication::processEvents();
+
+    // One file, so the tool is the placement's other door and stays open.
+    CHECK(transform->isEnabled());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(60, 60 * i, 200)));
+        files.push_back(file);
+    }
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK(!transform->isEnabled());
+    // And it says which way in, rather than only that this one is shut.
+    CHECK(transform->toolTip().contains(QStringLiteral("Convert it to drawings")));
+    CHECK(transform->toolTip().contains(QStringLiteral("Place this picture")));
+}
+
+// The one-drawing case, which used to be handed over and is now refused.
+//
+// A layer of one drawing *is* the Transform tool's job, and the door used to
+// hand it over on exactly that reasoning. What that produced was a button
+// reading "Transform layer through time" that quietly did something else, on
+// the most ordinary layer there is -- so the door refuses and names the tool
+// instead, which says the same thing without the button lying about it. The
+// lasso comes back by the same route: the tool is where you are sent.
+void aLayerOfOneDrawingIsRefusedAndNamesTheTool() {
+    TEST("the layer door refuses a one-drawing layer and names the tool");
 
     MainWindow window;
     window.resize(1000, 700);
@@ -10181,14 +10248,25 @@ void aLayerOfOneDrawingIsTheOrdinaryTransform() {
     // this fixture does not send -- the stroke above went into the document
     // directly, which nothing in the window heard.
     canvas->setActiveLayer(layer);
-    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::None);
+    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::OneDrawing);
     QCoreApplication::processEvents();
+    CHECK(!canvas->transformIsLive());
 
+    // And the reason names the way forward rather than only the obstacle, which
+    // is the rule every refusal on this list follows.
+    const QString said = CanvasWidget::explain(CanvasWidget::Refusal::OneDrawing);
+    CHECK(said.contains(QStringLiteral("one drawing")));
+    CHECK(said.contains(QStringLiteral("Transform tool")));
+
+    // A second drawing on the same layer, and the door opens.
+    Document& document = window.documentForTesting();
+    const ImageId second = document.insertImage(track.id, 1);
+    strokeOn(document, track.id, second, layer, 100.0f, 140.0f, 300.0f, 140.0f);
+    canvas->refreshAll();
+    QCoreApplication::processEvents();
+    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::None);
     CHECK(canvas->transformIsLive());
-    // Handed to the tool, so it is not a whole-layer gesture -- which is what
-    // makes the box blue and what lets a lasso through. Both used to be wrong
-    // here for the same reason: the layer door assumed several drawings.
-    CHECK(!canvas->transformIsWholeLayer());
+    CHECK(canvas->transformIsWholeLayer());
 }
 
 }  // namespace
@@ -10208,7 +10286,8 @@ int main(int argc, char** argv) {
     twoImportsOfOneFileAreToldApart();
     placingAnImportStoresRatherThanBakes();
     aFrameDerivedAtAnotherPlacementIsNotServed();
-    aLayerOfOneDrawingIsTheOrdinaryTransform();
+    theTransformToolIsOffForASequenceImportAndOnForAStill();
+    aLayerOfOneDrawingIsRefusedAndNamesTheTool();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();

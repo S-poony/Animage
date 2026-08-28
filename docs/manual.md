@@ -304,6 +304,16 @@ wiped out by putting something down: standing on the first frame of a hold the
 new drawing starts one frame later, and a hold of one frame has nothing to spare
 at all, so there the track goes back to getting longer.
 
+**Transform layer through time** needs more than one drawing on the layer — with
+one there is no "through time" to speak of, and the Transform tool is the same
+gesture. The button says so when it is greyed.
+
+**An imported sequence cannot be transformed.** Its pictures come from files
+rather than from drawings, so the Transform tool is greyed out on one: convert it
+to drawings first. Moving the whole sequence around the canvas is a different
+thing and still works — that is "Place this picture" in the layer panel, and it
+writes nothing.
+
 ## Colour layers
 
 **Colour layers.** "Add colour layer" makes a layer that holds scribbles rather
@@ -392,6 +402,10 @@ after you move or delete the original.
 of frame numbers at the top of the timeline — and you hear the sound under it as
 you go. Click a frame in the ruler and you hear that frame. That is how you find
 which frame a consonant is on, which is most of what a soundtrack is for.
+
+If you switch a speaker on, or plug one in, Animage notices within about half a
+second of the next time you scrub and moves to it. The burst that noticed is a
+little late; the ones after it are not.
 
 Pressing **Play** does not carry the sound with it yet. That is the next thing
 being built.

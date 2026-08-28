@@ -220,6 +220,15 @@ public:
         // drawings first, and the message says so -- a refusal that does not
         // name its remedy is the disabled control nobody can find twice.
         ReferenceLayer,
+        // A whole-layer transform on a layer with one drawing.
+        //
+        // **Not a technical limit: "through time" needs a second drawing to be
+        // through.** With one, the gesture is the Transform tool's, and the
+        // door used to hand it over on exactly that reasoning -- which meant a
+        // button that did something different from what it said, on the most
+        // ordinary layer there is. Refusing and naming the tool says the same
+        // thing without the button having to lie.
+        OneDrawing,
         NothingDrawn,
         NothingSelected,  // erase takes a loop as its argument and had none
         NothingCopied,

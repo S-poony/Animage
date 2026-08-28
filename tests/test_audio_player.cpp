@@ -50,6 +50,12 @@ public:
     std::int64_t playedFrames() const override { return played_; }
     void stop() override { stopped_ = true; }
 
+    // A fake is always on the output it opened and always running: what those
+    // two answer for is a machine whose speakers move about, which is not a
+    // thing this test is about and not a thing a fake can be.
+    QString outputId() const override { return QStringLiteral("fake"); }
+    bool healthy() const override { return !stopped_; }
+
     // The driver asking for samples.
     std::vector<float> pull(std::size_t frames) {
         std::vector<float> out(frames * static_cast<std::size_t>(channels_), 7.0f);
