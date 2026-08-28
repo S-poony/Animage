@@ -3963,10 +3963,25 @@ things in it are decisions rather than shape:
   `healthy()` exist. Somebody switching a speaker on changes what the machine's
   *default* output is, and the sink goes on feeding whatever was default before:
   reported from use as a scrub that stopped making a noise. Opening another
-  device is the only answer, so what the seam provides is the two questions that
-  say when to. `refreshAudioDevice` asks them, and a scrub asks at most twice a
-  second — the burst that notices still plays, late once, because reopening
-  happens before the burst is published.
+  device is the only answer, so the seam provides the two questions that say
+  when to, and `watchOutputs` so that nothing has to keep asking.
+
+  **The asking version was built first and it was reported broken**, in a way
+  worth keeping because it is a shape rather than a slip: it worked for a scrub
+  and not for Play. Both call the same check. What differed was *when* — Qt
+  learns about a device from the system, and holding a `QMediaDevices` is what
+  makes it listen at all, so a question asked in the moment after somebody
+  flicks a switch gets yesterday's answer. Polling more often would not have
+  fixed it; being told is what fixes it.
+
+  Two things fall out of being told. A take already running is **re-anchored on
+  the frame it has reached** rather than the one Play was pressed on, because the
+  count it derives from starts again with the new device. And the remembered
+  failure — the one that stops a machine with no output spending a third of a
+  second retrying on every edit — is cleared here and nowhere else: news that the
+  outputs changed is exactly the news that makes retrying worthwhile, and
+  without it, plugging a speaker into a machine that had none would be remembered
+  as still having none.
 
 `core/audio_render.h` is what the callback calls. `renderAudio` turns an
 `AudioProgram` — the soundtracks, their placements, a rate, a start slot, and

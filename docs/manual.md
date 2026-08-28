@@ -403,9 +403,9 @@ of frame numbers at the top of the timeline — and you hear the sound under it 
 you go. Click a frame in the ruler and you hear that frame. That is how you find
 which frame a consonant is on, which is most of what a soundtrack is for.
 
-If you switch a speaker on, or plug one in, Animage notices within about half a
-second of the next time you scrub and moves to it. The burst that noticed is a
-little late; the ones after it are not.
+If you switch a speaker on, plug one in, or pull one out, Animage moves to
+whatever the machine now uses. It does not wait to be asked: a take that is
+playing carries on from the frame it had reached, on the new speaker.
 
 **Play carries the sound with it**, and the picture follows the sound rather
 than the other way round — so what you see on a frame is what you hear on it,

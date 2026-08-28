@@ -126,4 +126,20 @@ public:
 
     // The machine's current default output, or empty where there is none.
     static QString defaultOutputId();
+
+    // Be told when the machine's outputs change, instead of asking.
+    //
+    // **Two things at once, and the second is the one that bites.** It says the
+    // answer to `defaultOutputId()` may have moved -- and holding the watch is
+    // also what makes that answer *prompt*: Qt learns about devices coming and
+    // going from the system, and it is only listening while something is
+    // watching. Asking on its own is what the first version of this did, and it
+    // was reported as working for a scrub and not for Play -- which is what a
+    // question asked before the answer has arrived looks like.
+    //
+    // The callback runs on the interface thread, so it may do anything a slot
+    // may do, including open another device. **One watcher at a time**: setting
+    // one replaces the last, and `{}` clears it. Whoever sets it must clear it
+    // before it is destroyed.
+    static void watchOutputs(std::function<void()> changed);
 };

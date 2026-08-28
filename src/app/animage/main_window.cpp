@@ -67,6 +67,7 @@
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
+#include "audio_device.h"
 #include "audio_import.h"
 #include "audio_import_dialog.h"
 #include "sequence_import_dialog.h"
@@ -337,6 +338,12 @@ MainWindow::MainWindow() {
     // the panels are built and this is what fills the key in.
     syncTooltips();
 
+    // And the machine's speakers, which change without the document changing --
+    // so nothing else here would ever ask. After the panels, because the
+    // callback reads the timeline. Cleared in the destructor: the watch outlives
+    // this window. See AudioDevice::watchOutputs.
+    AudioDevice::watchOutputs([this] { onAudioOutputsChanged(); });
+
     connect(canvas_, &CanvasWidget::brushSizeChanged, this, [this](double radius) {
         if (!radius_) return;
         const QSignalBlocker block(radius_);
@@ -456,6 +463,13 @@ MainWindow::~MainWindow() {
     // `canvas_` already deleted.
     qApp->removeEventFilter(this);
     disconnect(qApp, nullptr, this, nullptr);
+
+    // And it stops listening to the machine's speakers, for the same reason and
+    // one moment earlier than it would matter: the watch outlives this window
+    // -- one QMediaDevices for the life of the process, see
+    // AudioDevice::watchOutputs -- and a callback into a window that is taking
+    // itself apart is a callback into `timeline_widget_` after it has gone.
+    AudioDevice::watchOutputs({});
 
     // A rename still open is given up here, in the last moment this is still a
     // MainWindow.
@@ -4239,25 +4253,7 @@ void MainWindow::togglePlayback() {
     // press, so a third of a second spent opening the right device is a cost
     // worth paying once, where doing it on a scrub would not be.
     refreshAudioDevice();
-    playing_to_audio_ = false;
-    if (audio_.running()) {
-        auto program = std::make_shared<AudioProgram>(audioProgramAt(playback_start_slot_));
-        if (!program->sources.empty() && program->rate > 0) {
-            // The loop, which is one number here and one number in
-            // slotForPlayedFrames -- the picture wraps because the count it is
-            // derived from wrapped, and the sound wraps because the position it
-            // is read from wrapped. There is nothing to keep in agreement. See
-            // docs/importing.md, "the playback clock".
-            program->loop_slots = doc_.scene().shotFrames();
-            // A ramp in, so a take that starts part-way up a waveform does not
-            // open with a click. Nothing at the seam: a loop is the same shot
-            // again and a dip at every pass would be the more noticeable of the
-            // two.
-            program->fade = std::int64_t(program->rate) * kScrubFadeMs / 1000;
-            audio_.play(std::move(program));
-            playing_to_audio_ = true;
-        }
-    }
+    startPlaybackAudio(playback_start_slot_);
 
     playback_clock_.start();
     rate_samples_.clear();
@@ -4279,6 +4275,57 @@ void MainWindow::togglePlayback() {
     if (play_action_) play_action_->setText(QStringLiteral("Stop"));
     if (play_button_) play_button_->setText(QStringLiteral("Stop"));
     syncStatus();
+}
+
+void MainWindow::startPlaybackAudio(std::size_t slot) {
+    playing_to_audio_ = false;
+    if (!audio_.running()) return;
+
+    auto program = std::make_shared<AudioProgram>(audioProgramAt(slot));
+    if (program->sources.empty() || program->rate <= 0) return;
+
+    // The loop, which is one number here and one number in slotForPlayedFrames
+    // -- the picture wraps because the count it is derived from wrapped, and
+    // the sound wraps because the position it is read from wrapped. There is
+    // nothing to keep in agreement. See docs/importing.md, "the playback clock".
+    program->loop_slots = doc_.scene().shotFrames();
+    // A ramp in, so a take that starts part-way up a waveform does not open
+    // with a click. Nothing at the seam: a loop is the same shot again and a
+    // dip at every pass would be the more noticeable of the two.
+    program->fade = std::int64_t(program->rate) * kScrubFadeMs / 1000;
+    audio_.play(std::move(program));
+    playing_to_audio_ = true;
+}
+
+// Somebody plugged a speaker in, switched one on, or pulled one out.
+//
+// **Told rather than asked**, which is the whole of the fix here. The first
+// version only looked when something else made it look -- at Play, and a few
+// times a second during a scrub -- and it was reported as working for a scrub
+// and not for Play. That is what a question asked before the answer has arrived
+// looks like: Qt learns about a device from the system, and holding the watch
+// is what makes it listen at all. See AudioDevice::watchOutputs.
+void MainWindow::onAudioOutputsChanged() {
+    const bool was_playing = playing_to_audio_;
+    // **The remembered failure is forgotten here and nowhere else.** It exists
+    // so that a machine with no audio output does not spend a third of a second
+    // trying again on every edit -- and the news that the machine's outputs
+    // have changed is exactly the news that makes trying again worthwhile.
+    // Without this, plugging a speaker into a machine that had none when the
+    // project opened would be remembered as still having none.
+    audio_tried_rate_ = 0;
+    refreshAudioDevice();
+    if (!was_playing) return;
+
+    // A take was running on the device that has just been replaced, and the
+    // count it derives from starts again with the new one. **Re-anchored on the
+    // frame it has reached** rather than the frame Play was pressed on, or the
+    // take would jump back to where it started.
+    playback_start_slot_ = timeline_widget_->currentSlot();
+    startPlaybackAudio(playback_start_slot_);
+    playback_clock_.start();
+    rate_samples_.clear();
+    last_rate_sample_ms_ = 0;
 }
 
 void MainWindow::stopPlayback() {

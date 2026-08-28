@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "audio_device.h"
 
+#include <functional>
+#include <utility>
+
 #ifdef ANIMAGE_HAVE_AUDIO
 #include <QAudioDevice>
 #include <QAudioFormat>
@@ -20,6 +23,36 @@ bool AudioDevice::available() {
 #else
     return false;
 #endif
+}
+
+namespace {
+
+// The one watcher, and the callback it hands on to.
+std::function<void()>& outputsChanged() {
+    static std::function<void()> changed;
+    return changed;
+}
+
+}  // namespace
+
+void AudioDevice::watchOutputs(std::function<void()> changed) {
+#ifdef ANIMAGE_HAVE_AUDIO
+    // **Made once and never destroyed**, which is deliberate rather than
+    // careless. A `QMediaDevices` is what subscribes to the system's device
+    // notifications, so it has to outlive every caller for the answers to stay
+    // fresh -- and a static QObject destroyed at exit is destroyed *after*
+    // QApplication, which is its own class of crash. One object for the life of
+    // the process is the cheaper of the two.
+    static QMediaDevices* devices = [] {
+        auto* watcher = new QMediaDevices;
+        QObject::connect(watcher, &QMediaDevices::audioOutputsChanged, watcher, [] {
+            if (outputsChanged()) outputsChanged()();
+        });
+        return watcher;
+    }();
+    (void)devices;
+#endif
+    outputsChanged() = std::move(changed);
 }
 
 QString AudioDevice::defaultOutputId() {

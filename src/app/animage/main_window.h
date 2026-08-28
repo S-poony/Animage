@@ -454,6 +454,19 @@ private:
     // drawing is not that, and makes no noise.
     void scrubAudio(std::size_t slot);
 
+    // Hand the running take's sound to the device, from `slot`.
+    //
+    // Two callers, which is why it is not inside togglePlayback: pressing Play,
+    // and the machine's outputs changing under a take that is already running.
+    // The second re-anchors on the frame it has reached rather than the one
+    // Play was pressed on, because the count it derives from starts again with
+    // the device.
+    void startPlaybackAudio(std::size_t slot);
+
+    // The machine's outputs changed: somebody plugged a speaker in, switched
+    // one on, or pulled one out.
+    void onAudioOutputsChanged();
+
     // Where an imported file's bytes are: inside the project once it has been
     // saved, and at the path it came from until then. Empty when neither.
     QString importPathFor(const std::string& name) const;
