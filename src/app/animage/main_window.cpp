@@ -406,6 +406,8 @@ MainWindow::MainWindow() {
                 : QStringLiteral("Transformed %1 drawings on this layer").arg(drawings),
             4000);
     });
+    connect(canvas_, &CanvasWidget::drawingRefusedOnImport, this,
+            &MainWindow::offerToConvertRefusedLayer);
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
         // **Drawing says you are done with the sound.** A soundtrack clicked
@@ -1978,6 +1980,16 @@ void MainWindow::buildLayerPanel() {
     // drawing in the layer.
     layer_transform_ = panelButton(QStringLiteral("Transform layer through time"),
                                    &MainWindow::transformLayerThroughTime);
+
+    // Beside it because it is the same scale of thing -- one press writes every
+    // drawing in the layer -- and because a button is the half of this feature
+    // that can be *found*. The popup on a refused stroke is the other half and
+    // is not a substitute: a control that comes and goes as you move between
+    // layers is one nobody can find twice, and "why can I not do this here" is
+    // the question a disabled control exists to answer. So it is here on every
+    // layer, greyed with a reason on all but one.
+    layer_convert_ =
+        panelButton(QStringLiteral("Convert to drawings"), &MainWindow::convertLayerToDrawings);
 
     // No Move up and Move down. The stack is restacked by dragging a row, which
     // is one gesture for any distance where the buttons were one click per
@@ -3732,6 +3744,153 @@ TileGrid MainWindow::importAtOneToOne(const Layer& layer, int frame, QString* tr
     return image_import::decode(path, trouble);
 }
 
+// What converting this layer would cost, from the file headers.
+//
+// Surveyed and never decoded, which is the same division the sequence import
+// already makes and for the same reason: on a hundred and fifty frames the
+// decode *is* the cost being described, so paying it to describe it would make
+// the recap the slow part. A survey is a header read, and doing one per frame
+// is milliseconds against a conversion that is seconds.
+MainWindow::ConversionCost MainWindow::conversionCostFor(TrackId track_id,
+                                                         LayerId layer_id) const {
+    ConversionCost cost;
+
+    const Track* track = doc_.scene().findTrack(track_id);
+    const Layer* layer = track ? track->findLayer(layer_id) : nullptr;
+    if (!layer || layer->kind != LayerKind::Reference) return cost;
+
+    // The one question the popup's wording turns on, asked of the placement
+    // rather than guessed at from it. Both exact paths keep every pixel: a
+    // whole-pixel move re-keys tile handles and a mirror permutes them, and
+    // neither reads a pixel through a filter. See Transform.
+    cost.resampled =
+        !layer->placement.isWholePixelTranslation() && !layer->placement.isAxisMirror();
+
+    const std::vector<ImageId> drawings = doc_.referenceDrawings(track_id, layer_id);
+    cost.drawings = drawings.size();
+
+    // Two drawings can point at one frame -- a duplicated drawing does exactly
+    // that -- and the file is then surveyed once and counted twice, because
+    // each drawing gets a cel of its own and the memory is per cel.
+    struct Sized {
+        bool ok = false;
+        std::size_t tiles = 0;
+    };
+    std::unordered_map<int, Sized> by_frame;
+
+    for (const ImageId drawing : drawings) {
+        const Image* record = track->findImage(drawing);
+        if (!record) continue;
+        const int frame = record->sourceFrameFor(layer_id);
+
+        auto known = by_frame.find(frame);
+        if (known == by_frame.end()) {
+            Sized measured;
+            if (frame >= 0 && static_cast<std::size_t>(frame) < layer->reference_sources.size()) {
+                const QString path =
+                    importPathFor(layer->reference_sources[static_cast<std::size_t>(frame)]);
+                const image_import::Survey survey = image_import::survey(path);
+                if (survey.ok) {
+                    measured.ok = true;
+                    // Through the placement, because that is what the pixels
+                    // being written have been through -- an import at half size
+                    // converts to a quarter of the tiles, and a recap quoting
+                    // the file's own size would be describing a picture nobody
+                    // is looking at. transformedBounds is what the resampler
+                    // itself uses to size its destination.
+                    const PixelRect placed = transformedBounds(
+                        matrixOf(layer->placement), PixelRect{0, 0, survey.width, survey.height});
+                    measured.tiles = tilesCovering(placed);
+                }
+            }
+            known = by_frame.emplace(frame, measured).first;
+        }
+
+        if (known->second.ok) {
+            cost.tiles += known->second.tiles;
+        } else {
+            ++cost.unreadable;
+        }
+    }
+    return cost;
+}
+
+// Converts a reference layer into ordinary drawings. The doing; the asking is
+// convertLayerToDrawings.
+//
+// **The decode is the whole cost and it happens here, on the interface thread.**
+// That is the opposite of everywhere else an import is read -- a scrub decodes
+// on a worker precisely so the program does not stop -- and it is right here for
+// a reason a worker would not improve: this is one command that has to be all or
+// nothing, so there is nothing useful to do while it runs and nothing that may
+// be allowed to touch the document meanwhile. What it costs is a window that
+// sits still, which is why the caller puts the frame count in front of somebody
+// first and why the cursor says so while it happens.
+bool MainWindow::convertReferenceLayerFrom(TrackId track_id, LayerId layer_id, QString* trouble) {
+    const Track* track = doc_.scene().findTrack(track_id);
+    const Layer* layer = track ? track->findLayer(layer_id) : nullptr;
+    if (!layer || layer->kind != LayerKind::Reference) {
+        if (trouble) *trouble = QStringLiteral("that is not an imported picture");
+        return false;
+    }
+    if (doc_.referenceDrawings(track_id, layer_id).empty()) {
+        if (trouble) *trouble = QStringLiteral("this import shows nothing on any drawing");
+        return false;
+    }
+
+    // Copied, because `convertReferenceLayer` rewrites the layer as it goes and
+    // this closure is read on every frame it has not got from the cache.
+    const std::vector<std::string> sources = layer->reference_sources;
+    const Transform placement = layer->placement;
+
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    const Document::LayerBake done = doc_.convertReferenceLayer(
+        track_id, layer_id, [&](const int frame) -> TileGrid {
+            if (frame < 0 || static_cast<std::size_t>(frame) >= sources.size()) return {};
+            const QString path = importPathFor(sources[static_cast<std::size_t>(frame)]);
+            if (path.isEmpty()) return {};
+            TileGrid decoded = image_import::decode(path);
+            // Placed here rather than by the document, for ReferenceDecoder's
+            // reason: what the conversion writes has to be what the compositor
+            // draws, and the compositor is handed grids that are already placed.
+            // Doing it anywhere else would be a second answer to "what is this
+            // layer showing", which is the one thing the derive step exists to
+            // have only one of.
+            if (decoded.empty() || placement.isIdentity()) return decoded;
+            return transformTiles(decoded, placement);
+        });
+    QGuiApplication::restoreOverrideCursor();
+
+    if (done.ran_out_of_memory) {
+        if (trouble) {
+            *trouble = QStringLiteral(
+                "there was not enough memory to convert the whole layer -- every drawing it "
+                "had already written has been put back, so nothing has changed");
+        }
+        return false;
+    }
+    if (done.drawings == 0) {
+        if (trouble) *trouble = QStringLiteral("nothing was converted");
+        return false;
+    }
+
+    // The frames this layer had derived are still in the cache and are left
+    // there rather than swept out, which is worth a line because sweeping looks
+    // like the tidy thing to do. They are keyed on the drawing and the layer
+    // and are valid under the placement they were made at -- so undoing the
+    // conversion brings the import back with its pictures already in hand,
+    // instead of re-decoding a sequence somebody has just decided against.
+    // Nothing reads them meanwhile: the layer is no longer a Reference one, so
+    // requestReferenceFrames does not ask about it. The cache's own bound is
+    // what eventually drops them.
+    // Which reaches rebuildLayerList and through it syncLayerButtons, and both
+    // have something to say now: the row's flag stops calling this an import,
+    // and the two whole-layer buttons swap over -- Place this picture becomes
+    // Transform layer through time, and Convert to drawings greys out.
+    refreshEverything();
+    return true;
+}
+
 MainWindow::ImportsReady MainWindow::importsReady() const {
     ImportsReady out;
     const ReferenceCache& cache = doc_.referenceCache();
@@ -4831,6 +4990,46 @@ void MainWindow::syncLayerButtons() {
                                  "Transform tool, which is the same gesture with one.");
     }
 
+    // Convert to drawings, whose refusals are its own and mostly the opposite
+    // of the ones above: this is the one button in the panel that works on an
+    // import and nothing else.
+    if (layer_convert_) {
+        QString convert;
+        if (!layer) {
+            convert = QStringLiteral("there is no layer selected");
+        } else if (layer->kind != LayerKind::Reference) {
+            // The common case by far, so it says what the button is *for*
+            // rather than only that this is not it. A greyed control whose
+            // tooltip merely restates the greying teaches nobody what the
+            // control does.
+            convert = QStringLiteral("this layer is already drawings.\n"
+                                     "Converting is the way back from an imported picture, "
+                                     "which\nis shown from its files and holds no pixels of its "
+                                     "own.");
+        } else if (layer->locked) {
+            convert = QStringLiteral("this layer is locked");
+        } else if (doc_.referenceDrawings(track_, layer->id).empty()) {
+            // referenceDrawings and not layerDrawings, which would answer
+            // "empty" about every import there is: a reference layer has no
+            // cels, and what says it is not blank at a drawing is its source
+            // frame. See Document::referenceDrawings.
+            convert = QStringLiteral("this import shows nothing on any drawing");
+        }
+        layer_convert_->setEnabled(convert.isEmpty());
+        layer_convert_->setToolTip(
+            !convert.isEmpty()
+                ? QStringLiteral("Cannot convert to drawings: %1").arg(convert)
+                : QStringLiteral(
+                      "Write what the imported picture shows into ordinary drawings.\n\n"
+                      "Every drawing of the layer at once, in one undo step. Afterwards it "
+                      "can\nbe painted on and erased, and a colour layer can cut against it -- "
+                      "which\nan import cannot be used for at all.\n\n"
+                      "What you see is what is kept. It is where the picture comes from "
+                      "afterwards\nthat changes: the drawings become the truth and the files "
+                      "stop being read.\nThey stay in the project folder, so it can be taken "
+                      "back."));
+    }
+
     layer_transform_->setEnabled(refusal.isEmpty());
     // An imported picture is *placed* and not transformed, and the button says
     // so. One word for two things whose costs differ by everything -- one
@@ -4958,6 +5157,193 @@ void MainWindow::transformLayerThroughTime() {
     // canvas is where the keyboard lives; this is the one that also matters for
     // the pen, because the gesture that follows is entirely on the canvas.
     canvas_->setFocus();
+}
+
+// The way back from an import: the whole layer, converted to drawings.
+//
+// **Everything before the conversion is this function saying what it will do**,
+// and the reason it is this much text is that all of it is either irreversible
+// or expensive. What is said, in order: how many drawings, what they weigh,
+// what happens to the quality, and what happens to the undo history. See
+// docs/importing.md, "convert to drawings", which is where each was argued.
+void MainWindow::convertLayerToDrawings() {
+    stopPlayback();
+
+    const Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Reference) {
+        statusBar()->showMessage(
+            QStringLiteral("Cannot convert to drawings: this is not an imported picture"), 6000);
+        return;
+    }
+    const LayerId layer_id = layer->id;
+    const QString name = QString::fromStdString(layer->name);
+    // Taken now rather than read off `layer` further down, because two of the
+    // ways out below run an event loop and a pointer into the layer vector is
+    // good for exactly as long as nothing edits the document.
+    const bool one_file = layer->reference_sources.size() == 1;
+
+    const ConversionCost cost = conversionCostFor(track_, layer_id);
+    if (cost.drawings == 0) {
+        statusBar()->showMessage(
+            QStringLiteral("Cannot convert to drawings: this import shows nothing on any drawing"),
+            6000);
+        return;
+    }
+
+    // **Sometimes it refuses, and that is not a gap to be closed later.** The
+    // case this serves is scanned line art -- tens of drawings, which is what
+    // colouring an import means -- and it cannot serve a two-hundred-frame
+    // video, because nothing can: those pixels do not fit in memory and
+    // colouring them was never the point. Said before the work rather than
+    // discovered partway through it, which is the difference between a number
+    // somebody can act on and a window that stops.
+    //
+    // The same ceiling one drawing's commit is measured against, and it is a
+    // ceiling rather than a bound on the growth -- `commitFitsInBudget`'s layer
+    // form measures against what the layer already holds, and a reference layer
+    // holds nothing at all, so that form would answer about zero.
+    if (cost.tiles > kCommitTileBudget) {
+        QMessageBox::warning(
+            this, QStringLiteral("Convert to drawings"),
+            QStringLiteral(
+                "This layer is too long to convert.\n\n"
+                "%1 is %2 drawings, about %3 GB of pixels, and converting writes all of them "
+                "at once. The most that can be written in one go is about %4 GB.\n\n"
+                "Two things make it fit: importing a shorter range of the source, and "
+                "importing at half size, which is a quarter of the pixels.")
+                .arg(name)
+                .arg(cost.drawings)
+                .arg(static_cast<double>(cost.tiles) / 8192.0, 0, 'f', 1)
+                .arg(static_cast<double>(kCommitTileBudget) / 8192.0, 0, 'f', 1));
+        return;
+    }
+
+    // A tile is 128x128 RGBA half = exactly 128 KB, so tiles/8 is megabytes.
+    const double megabytes = static_cast<double>(cost.tiles) / 8.0;
+    QString recap =
+        QStringLiteral("Convert %1 to drawings?\n\n"
+                       "%2 %3 will be written, about %4 MB of pixels. Until now this layer has "
+                       "held no pixels at all: it is shown from its files.\n\n")
+            .arg(name)
+            .arg(cost.drawings)
+            .arg(cost.drawings == 1 ? QStringLiteral("drawing") : QStringLiteral("drawings"))
+            .arg(megabytes, 0, 'f', megabytes < 10.0 ? 1 : 0);
+
+    // **What is lost is the future, and not this step.** The conversion writes
+    // the grid that is already on screen, so any resampling a placement asked
+    // for happened when the picture was derived and happens once. The user's
+    // instinct was to say whether this is lossless; that is the right thing to
+    // key on and the wrong tense to say it in.
+    //
+    // And it must not claim more than that. A JPEG or a video frame was lossy
+    // before it reached this program, so "every pixel is kept" is a statement
+    // about this step and never about the artwork.
+    recap += cost.resampled
+                 ? QStringLiteral(
+                       "The drawings will hold exactly what you see now. Placing it again "
+                       "afterwards would resample what has already been resampled -- so if you "
+                       "have not placed it yet, place it first.\n\n")
+                 : QStringLiteral("Every pixel of the files is kept exactly as it is.\n\n");
+
+    if (cost.unreadable > 0) {
+        // Said rather than refused, which is the house rule, and said here
+        // rather than afterwards because afterwards is one undo too late.
+        recap += QStringLiteral("%1 of the frames cannot be read and will convert to empty "
+                                "drawings.\n\n")
+                     .arg(cost.unreadable);
+    }
+
+    // **This paragraph said the wrong thing first, and what it says now was
+    // measured.** docs/importing.md predicted that a conversion "will clear the
+    // rest of the undo history", by analogy with a layer bake, and this recap
+    // was written to warn about that. It does not: a bake displaces every tile
+    // of every drawing and the journal holds all of them, where a conversion
+    // writes into cels that did not exist and so displaces nothing. The history
+    // is charged nothing at all -- pinned in test_transform, because a wrong
+    // sentence in a dialog is worse than no sentence.
+    //
+    // What is true, and is the thing worth saying instead: the files stay in
+    // the project, so this is reversible in the strong sense and not only in
+    // the undo-stack sense. That was the user's call and it took a change to
+    // the save -- which used to carry forward only the files something still
+    // named, and would therefore have taken the scan out of the project the
+    // next time it wrote. See ProjectIO::save.
+    // Keyed on the number of *files* and not on the number of drawings, which
+    // are not the same number: a duplicated drawing is two drawings showing one
+    // file. Small, and it is the sort of small that reads as the program not
+    // knowing what it is talking about.
+    recap += QStringLiteral(
+        "It can be undone, and it costs the undo history almost nothing. The imported %1 "
+        "in the project folder %2 kept either way, so nothing is thrown away.")
+                 .arg(one_file ? QStringLiteral("file") : QStringLiteral("files"),
+                      one_file ? QStringLiteral("is") : QStringLiteral("are"));
+
+    if (QMessageBox::question(this, QStringLiteral("Convert to drawings"), recap,
+                              QMessageBox::Ok | QMessageBox::Cancel,
+                              QMessageBox::Ok) != QMessageBox::Ok) {
+        return;
+    }
+
+    QString trouble;
+    if (!convertReferenceLayerFrom(track_, layer_id, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Convert to drawings"),
+                             QStringLiteral("%1 was not converted: %2").arg(name, trouble));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Converted %1 to %2 %3 -- it can be painted on now")
+                                 .arg(name)
+                                 .arg(cost.drawings)
+                                 .arg(cost.drawings == 1 ? QStringLiteral("drawing")
+                                                         : QStringLiteral("drawings")),
+                             8000);
+}
+
+// Somebody tried to draw on an imported picture. The refusal is where the
+// question actually gets asked, so this is where the offer is made.
+//
+// **Queued rather than raised from inside the press**, and that is not caution
+// about re-entrancy alone. `tabletEvent` ignores every event while a modal
+// dialog is up, which is right -- the dialog has a better claim on the pen --
+// but the pen *release* is one of those events, and a gesture that loses its
+// release is the trap docs/handover.md puts first among the traps. Nothing is
+// open here, the stroke having been refused before it began, so this is the
+// cheap end of that rule rather than an instance of it; the queue is what keeps
+// it the cheap end.
+void MainWindow::offerToConvertRefusedLayer() {
+    // Pen-downs arrive faster than a dialog opens, and a hand resting on the
+    // canvas is a stream of them. One at a time, and asking again after a
+    // Cancel is right -- somebody who tries to draw a second time has asked the
+    // question a second time.
+    if (offering_conversion_) return;
+
+    const Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Reference) return;
+
+    offering_conversion_ = true;
+    QTimer::singleShot(0, this, [this] {
+        // Asked again on the way in: the queue means a frame has passed, and a
+        // layer that is no longer an import -- converted from the panel in the
+        // meantime, or undone away -- must not be offered a conversion.
+        const Layer* still = currentLayer();
+        if (still && still->kind == LayerKind::Reference) {
+            const QMessageBox::StandardButton answer = QMessageBox::question(
+                this, QStringLiteral("Convert to drawings"),
+                QStringLiteral(
+                    "%1 is an imported picture, shown from its files rather than drawn, so "
+                    "there is nothing here to paint on.\n\n"
+                    "Convert the layer to drawings? It can then be painted on, erased, and "
+                    "used as the line art a colour layer cuts against.")
+                    .arg(QString::fromStdString(still->name)),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            // Cleared before the second dialog, not after: convertLayerToDrawings
+            // is modal too, and leaving this set across it would be leaving it
+            // set for as long as somebody reads the recap.
+            offering_conversion_ = false;
+            if (answer == QMessageBox::Yes) convertLayerToDrawings();
+            return;
+        }
+        offering_conversion_ = false;
+    });
 }
 
 // What the panel's rename editor typed, applied to the document.

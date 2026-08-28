@@ -115,6 +115,52 @@ public:
     bool importSequenceFrom(const std::vector<QString>& paths, int start_frame, bool half_size,
                             QString* trouble = nullptr);
 
+    // What converting a reference layer to drawings would cost, asked before it
+    // is paid and from the file headers rather than by decoding anything.
+    //
+    // The tile count is what the refusal is decided on and what the popup
+    // quotes, so it is one number worked out in one place: a survey of each
+    // frame the conversion would read, through the layer's placement, counted
+    // in tiles the way the grid would key them.
+    //
+    // Not exact, and it does not have to be: sizes may differ from frame to
+    // frame and a survey is a header read, so this is the same kind of bound
+    // `commitFitsInBudget` is -- conservative enough to refuse before the
+    // machine does, with `Document::convertReferenceLayer`'s rescue as the
+    // other half. See docs/importing.md, "convert to drawings".
+    struct ConversionCost {
+        std::size_t drawings = 0;
+        std::size_t tiles = 0;
+        // How many of those frames could not be read at all. They convert to
+        // empty drawings rather than stopping the conversion, and the popup
+        // says so -- a hole somebody is told about is a hole they can fix by
+        // undoing, and one they are not told about is a hole they find months
+        // later.
+        int unreadable = 0;
+        // Whether the placement resamples. The two exact paths -- a whole-pixel
+        // move and an axis mirror -- keep every pixel, and this is the same
+        // question `transformTiles` branches on rather than a second opinion
+        // about it. It decides which of the two things the popup is allowed to
+        // say about quality.
+        bool resampled = false;
+    };
+    ConversionCost conversionCostFor(animage::TrackId track, animage::LayerId layer) const;
+
+    // Converts a reference layer to ordinary drawings: every frame it was
+    // showing written into a cel, in one command, and the layer left a raster
+    // one. See Document::convertReferenceLayer, which is where the loop is.
+    //
+    // Public and dialog-free for importImageFrom's reason: the asking and the
+    // doing want separating, and a modal dialog is not something `shots` or a
+    // test can drive. Nothing here asks whether it fits -- the caller does,
+    // through conversionCostFor -- because a refusal has to arrive before the
+    // wait rather than after it.
+    //
+    // False with `trouble` filled in when nothing was converted, and the
+    // document is untouched in that case.
+    bool convertReferenceLayerFrom(animage::TrackId track, animage::LayerId layer,
+                                   QString* trouble = nullptr);
+
     // Brings a soundtrack in from `path` and adds it to the scene, starting on
     // `start_frame` (1 for the first frame of the shot, and less than 1 is
     // allowed -- a breath in front of a word falls off the start).
@@ -383,6 +429,15 @@ private:
     // The layer panel's button: every drawing of the active layer, moved
     // together. Issue #25.
     void transformLayerThroughTime();
+    // The layer panel's other whole-layer button: the way back from an import.
+    // Puts the cost, and what is and is not lost, before doing any of it.
+    void convertLayerToDrawings();
+    // The same offer, arriving from the other side: somebody has just tried to
+    // draw on an imported picture, and the refusal is where the question
+    // actually gets asked. Both doors are wanted -- the popup is
+    // discoverability and the button is findability, and a control that comes
+    // and goes as you move between layers is one nobody can find twice.
+    void offerToConvertRefusedLayer();
     // Whether the layer panel's two buttons that can refuse can be pressed on
     // the layer in front of you, and what their tooltips say when they cannot.
     void syncLayerButtons();
@@ -479,6 +534,7 @@ private:
     // to be the unplaced ones.
     animage::TileGrid importAtOneToOne(const animage::Layer& layer, int frame,
                                        QString* trouble = nullptr) const;
+
 
     // Derives the pixels of every reference layer whose picture is missing or
     // was derived at a placement the layer no longer has. Cheap when there is
@@ -624,6 +680,14 @@ private:
     // Enabled per layer rather than per program: a colour layer cannot be
     // transformed at all, and a locked or hidden one is not being edited.
     QPushButton* layer_transform_ = nullptr;
+    // The way back from an import, and the one panel button that is greyed on
+    // every layer but one. Beside Transform layer through time because it is
+    // the same scale of thing: one press writes every drawing in the layer.
+    QPushButton* layer_convert_ = nullptr;
+    // Whether the popup offered on a refused stroke is already up. A pen-down
+    // on an import raises it, and pen-downs arrive faster than a dialog opens;
+    // without this a hand resting on the canvas stacks them.
+    bool offering_conversion_ = false;
     // The transform bar's Apply, kept because what it does depends on the
     // gesture: it bakes a drawing and it stores a placement, and one tooltip
     // for both would be false half the time.

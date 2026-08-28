@@ -38,6 +38,7 @@ the shape of the program. Those five maps are.
 | [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
 | [**Importing a sequence**](#importing-a-sequence) | which frame a drawing shows, a bounded cache, and a decode the paint asks for |
 | [**Importing a soundtrack**](#importing-a-soundtrack) | its own list, two selections, a row you can move and crop, and the picture derived from the sound rather than from a clock |
+| [**Converting an import to drawings**](#converting-an-import-to-drawings) | the way back, one command; and the save that had been quietly deleting the scan |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -3366,12 +3367,6 @@ generation counter included.
   is done ([what taking Qt Multimedia
   costs](#what-taking-qt-multimedia-costs)). What is left is `AudioDevice` and
   the scrub.
-- **Convert to drawings**, which is the way back — an import cannot be a CTG
-  barrier, so colouring imported line art needs it. Whole layer, on a popup, and
-  it is `Document::transformLayer`'s loop with a decode where the resample is:
-  one command, the `bad_alloc` rescue, the deferred trim, the redo stack held
-  aside. All four are bugs if omitted and all four were found the expensive way
-  once already.
 - **Telling a reference layer from an ordinary one in the panel**, which is
   [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
   sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
@@ -3576,12 +3571,6 @@ gives up is named there rather than dropped.
 
 ### What is not built
 
-- **Convert to drawings**, which is the way back — an import cannot be a CTG
-  barrier, so colouring imported line art needs it. Whole layer, on a popup, and
-  it is `Document::transformLayer`'s loop with a decode where the resample is:
-  one command, the `bad_alloc` rescue, the deferred trim, the redo stack held
-  aside. All four are bugs if omitted and all four were found the expensive way
-  once already.
 - **Telling a reference layer from an ordinary one in the panel**, which is
   [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
   sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
@@ -4122,6 +4111,200 @@ drag the body to move, drag the ends to crop — and not the data. Pre-shaping t
 model for a second caller whose shape is different would have been reuse in name
 only, against this repository's own rule of extracting when the second caller
 arrives.
+
+## Converting an import to drawings
+
+**The way back.** An import holds no pixels, so nothing can be painted on it and
+nothing can cut against it — `ctg_sources` resolve to a cel-bearing layer in the
+same track, so a reference layer cannot be a CTG barrier at all. For an
+application whose headline is a colour solver, that is the whole of what
+importing gives up, and this is the command that gives it back:
+`Document::convertReferenceLayer` writes every frame the layer was showing into
+a cel, in one command, and leaves the layer an ordinary raster one.
+
+Why it is the whole layer rather than a drawing at a time, and why it is offered
+by a popup as well as a button, is [importing.md](importing.md#convert-to-drawings).
+This is what was built, and **two of that note's predictions turned out to be
+wrong** — both in ways that mattered to what the interface says, and both found
+by measuring rather than by reading.
+
+### It is the bake's loop, and now they share it rather than resemble it
+
+The note said to write it as `Document::transformLayer`'s loop with a decode
+where the resample is, and to **extract the loop when the second caller
+arrived**. This is that caller, so `writeWholeLayer` now holds the six decisions
+both of them depend on and neither of them may get right differently:
+
+- one command for the whole layer, which is what makes it one undo step;
+- the trim held until the outcome is known, because a history spent on a write
+  that is about to be undone is a session's undo history spent on nothing;
+- the redo stack held aside rather than cleared;
+- the `bad_alloc` caught **inside** the command's own scope, letting it out
+  being a terminate rather than an error;
+- the rescue undoing everything that landed;
+- and the rescued undo popped off the redo stack, so a redo cannot put the layer
+  back into the half-written state the rescue just took it out of.
+
+All six were found the expensive way once already — see [running out of memory,
+and why that is a rescue rather than a
+crash](#running-out-of-memory-and-why-that-is-a-rescue-rather-than-a-crash).
+`test_transform` asserts the rescue through *both* callers, because what is
+being tested is that it is one rescue.
+
+`finish` is the one thing the bake did not need: the layer has to stop being an
+import in the same command its cels arrive in — kind, source list, placement and
+every drawing's source frame — because half of either is a layer nothing can
+draw.
+
+### Which drawings an import has is not which drawings have cels
+
+`layerDrawings` filters on `Image::cels` and therefore reports **every import as
+empty**. What says a reference layer is not blank at a drawing is its
+`source_frames` entry, which is the sparse map beside `cels` and means exactly
+what a cel means. So there is a second list, `referenceDrawings`, and a
+conversion built on the first would have converted nothing and reported success.
+
+### The cache is asked before the decode, and that is not an optimisation
+
+What is in `ReferenceCache` is what is on screen, derived under this very
+placement — the cache [refuses to answer under any
+other](#a-bound-and-the-rule-that-is-not-obvious) — and what the conversion
+promises to keep is what is on screen. So a frame already derived is used as it
+stands; only the rest are decoded. Deciding it the other way would let a fresh
+decode disagree with the picture at the moment somebody converted it.
+
+The decode itself runs on the **interface thread**, which is the opposite of
+everywhere else an import is read, and deliberately: this is one command that
+has to be all or nothing, so there is nothing useful to do while it runs and
+nothing that may touch the document meanwhile. What it costs is a window that
+sits still, which is why the recap puts the frame count in front of somebody
+first.
+
+### The first prediction that was wrong: it costs the history nothing
+
+[importing.md](importing.md#convert-to-drawings) said the popup had to warn that
+converting **"will clear the rest of the undo history"**, reasoning from the
+bake, and the popup was written to say so.
+
+Measured: **nothing at all.** `Command::retainedBytes` counts the tiles a
+command *displaced* — the ones it is keeping alive for undo. A bake displaces
+every tile of every drawing. A conversion writes into cels that **did not
+exist**, so it displaces nothing, and a 60-tile conversion charges the history
+zero bytes and trims not one older command. The pixels are entirely real; what
+they are not in is the history.
+
+Pinned in `test_transform` against a history budget small enough that anything
+charged at all would empty it, so a zero there means zero rather than "under the
+budget".
+
+### The second, which was a bug rather than a sentence: the save deleted the scan
+
+This is the one worth reading, because it had no symptom at the time.
+
+A save builds a new folder and swaps it in, so it carried forward only the
+imports something still **named**. Converting is the first thing in the program
+that stops naming a file without anybody having said to remove it — so the next
+save took the scanned sequence out of the project folder.
+
+Nothing looked wrong. The pictures were still in the reference cache, so undoing
+the conversion put them straight back on screen. **The save after that failed
+outright**, on a layer naming three files that by then existed nowhere, and it
+was the failing save that found this.
+
+Two things are worth separating in it. The deletion was arguably intended —
+[importing.md](importing.md#convert-to-drawings) says the drawings become the
+truth and the files stop being read. What was not intended is that undo landed
+you somewhere the project could not be written from at all.
+
+**Fixed on the user's call, by keeping the files rather than by explaining the
+loss:** `ProjectIO::save` now carries forward every file already in `imports/`
+and `audio/`, whether or not anything names it — as a best effort, unlike the
+named ones, because a file nothing is asking for going missing is not a project
+that cannot be written. The whole sequence is pinned in `test_canvas`, reopen
+included: the reopen is what empties the pending list, so that the copy inside
+the project is the only one the document can reach.
+
+**What that trades, and it cannot be scoped away.** The imports folder now only
+ever grows: nothing there can tell a file left behind by a conversion from one
+left behind by a track somebody deleted, and telling them apart would need a
+layer recording where it came from — the field
+[importing.md](importing.md#where-an-import-lands) refuses, and refuses for
+reasons that have not changed. Keeping both is the price, and it is the same
+principle the video plan already states about keeping a source beside the frames
+drawn from it. It also closes a trap that was there before any of this: import a
+scan, save, delete the track, save, and the project's copy was gone.
+
+### What it refuses, and why that is not a gap
+
+Above `kCommitTileBudget` — about 2 GB of placed pixels, which is roughly 120
+frames of HD — it refuses with the number, before the wait rather than partway
+through it. The case this serves is scanned line art, tens of drawings, which is
+what colouring an import means; it cannot serve a two-hundred-frame video
+because nothing can. The recap names the two things that make a long import fit:
+a shorter range, and half size, which is a quarter of the pixels.
+
+The ceiling is `kCommitTileBudget` itself and **not** `commitFitsInBudget`'s
+layer form, which bounds the growth against what the layer already holds — a
+reference layer holds nothing, so that form would be answering about zero.
+
+The count in front of it comes from `MainWindow::conversionCostFor`, which
+surveys each frame's header rather than decoding it, and sizes it through the
+layer's placement: an import at half size converts to a quarter of the tiles,
+and a recap quoting the file's own dimensions would be describing a picture
+nobody is looking at. It counts with `tilesCovering` and not from the pixel
+dimensions, because **where a picture sits counts** — 200×150 at the origin
+crosses the tile boundary on both axes and is four tiles, not one.
+
+### Both doors, and why the popup is queued
+
+A command in the layer panel beside "Transform layer through time", greyed with
+a reason everywhere else; and a popup on the attempt to draw, which is where the
+question actually gets asked. They are not alternatives — the popup is
+discoverability, the button is findability, and a control that comes and goes as
+you move between layers is one nobody can find twice.
+
+The canvas emits `drawingRefusedOnImport` and does not raise the dialog itself.
+`MainWindow::offerToConvertRefusedLayer` queues it through a zero-delay timer,
+and the reason is [what a missing pen release takes down with
+it](#what-a-missing-pen-release-takes-down-with-it): `tabletEvent` ignores every
+event while a modal dialog is up, and a release is one of those events. Nothing
+is open here — the stroke was refused before it began — so this is the cheap end
+of that rule rather than an instance of it, and the queue is what keeps it the
+cheap end. A flag stops a hand resting on the canvas stacking dialogs, and the
+layer is asked about again on the way in, a frame having passed.
+
+### The grey row, which this was supposed to expire and did not
+
+[What I would do next](#what-i-would-do-next) parked a warning against this
+landing: a reference layer's row is drawn in the theme's disabled grey, and what
+that grey was said to mean is *"nothing here can be acted on"* — true then, and
+due to stop being true the day a conversion existed. Revisit it rather than
+inherit it, it said. So, revisited:
+
+**The paraphrase had already drifted from what the code says, and the code was
+the accurate one.** `applyLayerFlag`'s tooltip has always read "the brush, the
+eraser and the transform all refuse here", which is still exactly true — and it
+ends "the way in is to convert it to drawings first", which was pointing at
+something that did not exist and now points at something that does. Two things
+act on a reference layer and neither is a mark: placing it, which predates this,
+and converting it. So the grey means *not drawn on*, which is what a disabled
+foreground reads as anyway, and nothing here had to change.
+
+What the panel's colours should be at all is
+[#84](https://github.com/S-poony/Animage/issues/84), and picking one ahead of it
+would be deciding that issue sideways.
+
+### What it does not do
+
+- **Per drawing.** Deliberately, and it is the user's call: a layer that is
+  drawings at some drawings and reference at others is a state nobody can see.
+- **Reach the popup from `shots`.** Both dialogs are modal, so the shot drives
+  `convertReferenceLayerFrom` — the same division every import here already has,
+  where the menu item is a dialog in front of a function that does the work.
+- **Free anything on undo.** The cels survive so the redo can bring them back,
+  and the reference cache keeps its frames on purpose: undoing brings the import
+  back with its pictures already in hand rather than re-decoding a sequence
+  somebody has just decided against. Its own bound is what eventually drops them.
 
 ## What a pan costs
 
@@ -7424,14 +7607,9 @@ come off it since the first build, with where the reasoning went:
      the paint path. The one open measurement in the whole note belongs to it —
      whether `QMediaPlayer` at 1× extracts every frame — and it is the only
      question left whose answer could change what gets built.
-   - **Convert to drawings**, the way back from a reference layer, without which
-     imported line art cannot be coloured at all.
-
-     **It expires a colour, and this is where that is written down.** A
-     reference layer's row in the layer panel is drawn in the theme's disabled
-     grey — see `applyLayerFlag` — and what that grey says is "nothing here can
-     be acted on", which is exactly true today and stops being true the day this
-     lands. Revisit it then rather than inheriting it.
+   Convert to drawings was the other half of this and is now built — see
+   [converting an import to drawings](#converting-an-import-to-drawings), which
+   also settles the colour question this entry used to park here.
 
 2. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the

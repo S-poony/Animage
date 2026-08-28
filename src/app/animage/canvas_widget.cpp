@@ -3538,7 +3538,16 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool 
     // asks about the layer, so the cursor does not either -- the pen simply
     // leaves no mark. Reported by the user against issue #43 and left alone
     // here, because where a refused pen-down should say so is its own question.
-    if (refuseToEditHere() != Refusal::None) return;
+    //
+    // **One of the five is answered, and it is the one with an answer.** On an
+    // import the refusal is not "not here" but "not until you convert it", so
+    // the attempt to draw is exactly where to offer that -- see
+    // docs/importing.md. What is emitted is the fact; what to do about it is
+    // MainWindow's, the reply being a modal dialog and this being a pen-down.
+    if (const Refusal why = refuseToEditHere(); why != Refusal::None) {
+        if (why == Refusal::ReferenceLayer) Q_EMIT drawingRefusedOnImport();
+        return;
+    }
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;

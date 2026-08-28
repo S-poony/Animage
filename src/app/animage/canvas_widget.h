@@ -501,6 +501,20 @@ Q_SIGNALS:
     // told once per document is MainWindow's, which is where the document is
     // opened and where the last such decision already lives.
     void importUnreadable(const QString& name, const QString& trouble);
+    // Somebody tried to draw on an imported picture, which holds no pixels and
+    // has nowhere to put a mark.
+    //
+    // **The refusal is where the question actually gets asked**, so it is the
+    // right moment to offer the way back -- and offering it is not this
+    // widget's job for `importUnreadable`'s reason, plus one of its own: what
+    // it takes is a modal dialog, and this fires from inside a pen-down. See
+    // MainWindow::offerToConvertRefusedLayer, which queues rather than raising
+    // one from in here.
+    //
+    // Every refused press, not the first: how often to say it is a question
+    // about a conversation with a person, and this end knows nothing about
+    // that.
+    void drawingRefusedOnImport();
     void brushSizeChanged(double radius);
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);

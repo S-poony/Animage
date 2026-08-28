@@ -47,6 +47,19 @@ rather than in an appendix, with what decided them.
 > the thing it was measured for.** `bench_import` exists now; the decode it
 > found was four times slower than it needed to be, and that was our own tiling
 > loop rather than anything about a file. See the section on benchmarking.
+>
+> **[Convert to drawings](#convert-to-drawings) is built, and two of the things
+> this note says about it below are wrong.** They are left standing, because
+> what a plan predicted is worth having beside what happened, and each is
+> corrected in place where it is said. In short: converting costs the undo
+> history *nothing*, not most of it — a bake displaces tiles and a conversion
+> writes into cels that did not exist. And this note's line about the files
+> ceasing to be read turned out to have a consequence it did not follow through:
+> the save carried forward only files something still named, so converting and
+> saving deleted the scan from the project, and undoing then left a project that
+> would not save at all. Fixed on the user's call by keeping the files. Both are
+> written up in [converting an import to
+> drawings](handover.md#converting-an-import-to-drawings).
 
 The French documents in [fr/](fr/) are still the specification. This note fills
 in something the specification reserved a place for and deferred:
@@ -1033,6 +1046,25 @@ dropped — but everything older goes. That is inherent to writing cels rather t
 a fault, and it is the same sentence [transforming a layer through
 time](handover.md#what-it-costs-and-the-bound-that-had-to-change) already had to
 write about itself.
+
+> **Wrong, and the popup was written to say it before anybody measured.** It
+> costs the history *nothing*. The history's budget counts the tiles a command
+> **displaced** and is keeping alive for undo — a bake displaces every tile of
+> every drawing, where a conversion writes into cels that did not exist and
+> displaces none. The 4 GB is real and is in the document; it is simply not in
+> the history, and nothing older is dropped. The mistake was reasoning from the
+> bake by analogy instead of from what `Command::retainedBytes` counts.
+> Measured, and pinned in `test_transform`.
+>
+> **And the sentence below about the files has a consequence this note did not
+> follow through.** A save carries forward the imports something still *names*,
+> and a converted layer names none — so converting and saving took the scan out
+> of the project folder, with no symptom at the time, and undoing then left a
+> layer naming files that existed nowhere and a project that would not save at
+> all. Fixed on the user's call by keeping the files rather than by explaining
+> the loss, which costs an imports folder that only ever grows. Both in
+> [converting an import to
+> drawings](handover.md#converting-an-import-to-drawings).
 
 **Sometimes it refuses, and that is not a gap to be closed later.** Whole-layer
 conversion serves the case it is for — scanned line art, tens of drawings, which

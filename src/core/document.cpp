@@ -985,6 +985,21 @@ std::vector<ImageId> Document::layerDrawings(TrackId track_id, LayerId layer_id)
     return drawings;
 }
 
+std::vector<ImageId> Document::referenceDrawings(TrackId track_id, LayerId layer_id) const {
+    const Track* track = scene_.findTrack(track_id);
+    if (!track) return {};
+
+    std::vector<ImageId> drawings;
+    drawings.reserve(track->images.size());
+    // A `source_frames` entry and not a cel, which is the whole reason this is
+    // a second function. See the header.
+    for (const auto& [id, image] : track->images) {
+        if (image.sourceFrameFor(layer_id) != Image::kNoSourceFrame) drawings.push_back(id);
+    }
+    std::sort(drawings.begin(), drawings.end());
+    return drawings;
+}
+
 std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId layer_id) const {
     std::vector<const TileGrid*> grids;
     for (const ImageId image : layerDrawings(track_id, layer_id)) {
@@ -1008,6 +1023,112 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
     const std::vector<ImageId> drawings = layerDrawings(track_id, layer_id);
     if (drawings.empty()) return {};
 
+    return writeWholeLayer(
+        "Transform layer through time", drawings, fail_after, [&](const ImageId image) {
+            Cel* cel = celForWriting(track_id, image, layer_id);
+            if (!cel) return false;
+            // Nothing is created here: every drawing in the list already has a
+            // cel, which is what keeps this off the inheriting path a colour
+            // layer would take. Read into a new grid and swapped in one step,
+            // so no drawing is ever half moved.
+            cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
+            return true;
+        });
+}
+
+// Every drawing of a reference layer given the picture it was showing, and the
+// layer left an ordinary one. See the header, and docs/importing.md.
+Document::LayerBake Document::convertReferenceLayer(
+    TrackId track_id, LayerId layer_id, const std::function<TileGrid(int)>& pixels) {
+    // Taken here for transformLayer's reason, and it has to be the first thing
+    // in either of them: the hook belongs to whichever whole-layer write comes
+    // next, and a call that returns below without writing has still been that
+    // one.
+    const std::optional<std::size_t> fail_after = std::exchange(fail_bake_after_, std::nullopt);
+
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return {};
+    const Layer* layer = track->findLayer(layer_id);
+    if (!layer || layer->kind != LayerKind::Reference) return {};
+
+    // Copied rather than pointed at, because the layer is about to be rewritten
+    // inside the command below and the placement is read on every drawing.
+    const Transform placement = layer->placement;
+
+    const std::vector<ImageId> drawings = referenceDrawings(track_id, layer_id);
+    if (drawings.empty()) return {};
+
+    return writeWholeLayer(
+        "Convert to drawings", drawings, fail_after,
+        [&](const ImageId image) {
+            const Track* now = scene_.findTrack(track_id);
+            const Image* record = now ? now->findImage(image) : nullptr;
+            if (!record) return false;
+            const int frame = record->sourceFrameFor(layer_id);
+            if (frame == Image::kNoSourceFrame) return false;
+
+            // **The cache first, and it is not merely an optimisation.** What
+            // is in it is what is on screen, derived under this very placement
+            // -- ReferenceCache refuses to answer under any other -- so using
+            // it is both the cheaper answer and the one this conversion
+            // promises. `find` and not `has`: this is a use.
+            const TileGrid* derived = reference_frames_.find(CtgKey{image, layer_id}, placement);
+            TileGrid grid = derived ? *derived : pixels(frame);
+
+            Cel* cel = celForWriting(track_id, image, layer_id);
+            if (!cel) return false;
+            // A frame that would not read arrives here as an empty grid and is
+            // written as an empty cel rather than skipped. Skipping would leave
+            // a hole the layer could not express once it is no longer a
+            // reference one -- absence on a raster layer is a drawing that is
+            // not there at all, which would shift nothing and lose the slot.
+            cel->replaceTiles(std::move(grid), journal());
+            return true;
+        },
+        [&] {
+            // Inside the same command, so the layer stops being an import in
+            // the same step its cels arrive in -- and a rescue that puts the
+            // cels back puts this back with them. Half of either is a layer
+            // nothing can draw.
+            Track* writing = scene_.findTrack(track_id);
+            const Layer* found = writing ? writing->findLayer(layer_id) : nullptr;
+            if (!found) return;
+
+            // The frames each drawing pointed at, dropped one at a time because
+            // that is what `setSourceFrame` records. They have to go: what they
+            // mean is "this layer is not blank here, and the picture is in a
+            // file", and both halves have just stopped being true.
+            for (const ImageId image : drawings) {
+                setSourceFrame(track_id, image, layer_id, Image::kNoSourceFrame);
+            }
+
+            Layer converted = *found;
+            converted.kind = LayerKind::Raster;
+            // Emptied, not left pointing at files nobody reads. A raster layer
+            // holding a source list is the shape of a field that decides
+            // nothing, which is what docs/importing.md warns about under "where
+            // an import lands" -- and it would make a save copy files the
+            // picture no longer comes from.
+            converted.reference_sources.clear();
+            // Back to the identity, and this is the one that would be a bug
+            // rather than untidiness. The placement is applied in the derive
+            // step, so it is *already in* the pixels just written; leaving it
+            // on the layer would mean nothing at all today -- a raster layer's
+            // placement is never read -- and would apply the move a second time
+            // the day anything started reading it.
+            converted.placement = Transform{};
+            updateLayer(track_id, layer_id, converted);
+        });
+}
+
+// The scaffolding both whole-layer writes share. Every paragraph below was
+// written for the bake and is quoted from where it was argued; see the header
+// for the list of what is here and why none of it may be dropped.
+Document::LayerBake Document::writeWholeLayer(const char* name,
+                                              const std::vector<ImageId>& drawings,
+                                              const std::optional<std::size_t>& fail_after,
+                                              const std::function<bool(ImageId)>& write,
+                                              const std::function<void()>& finish) {
     // Where the history stood before any of this, so that the rescue below can
     // tell whether there is anything to put back. A depth would not do: the
     // history trims itself from the bottom, so it can gain a command and lose
@@ -1042,19 +1163,18 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
         // inside it. The newest is never dropped, so the bake itself always
         // undoes. See "what the history is allowed to cost" in
         // docs/handover.md.
-        ScopedCommand command(*this, "Transform layer through time");
+        ScopedCommand command(*this, name);
         try {
             for (const ImageId image : drawings) {
                 if (fail_after && done.drawings >= *fail_after) throw std::bad_alloc();
-                Cel* cel = celForWriting(track_id, image, layer_id);
-                if (!cel) continue;
-                // Nothing is created here: every drawing in the list already
-                // has a cel, which is what keeps this off the inheriting path a
-                // colour layer would take. Read into a new grid and swapped in
-                // one step, so no drawing is ever half moved.
-                cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
-                ++done.drawings;
+                if (write(image)) ++done.drawings;
             }
+            // After every drawing and inside the command, so that whatever is
+            // not per drawing lands with them or does not land at all. Also
+            // inside the `try`: a conversion's finish copies a layer and a
+            // vector of names, which is not a pixel and can still be the
+            // allocation that fails.
+            if (finish) finish();
         } catch (const std::bad_alloc&) {
             // Caught inside the command's own scope on purpose. Letting it out
             // would unwind through ~ScopedCommand, and an exception escaping a

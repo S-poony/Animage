@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -387,13 +388,17 @@ public:
     // long as the history can bring it back.
     void clearCel(TrackId track, ImageId image, LayerId layer);
 
-    // What a layer bake did, which is two facts and not one: how many drawings
-    // it wrote, and whether it ran out of memory partway and put them back.
+    // What a whole-layer write did, which is two facts and not one: how many
+    // drawings it wrote, and whether it ran out of memory partway and put them
+    // back.
     //
     // A count alone could not say that. Nothing written is the answer for an
     // identity, for a layer with no drawings on it and for a layer that would
     // not fit -- and the last of those is the only one anybody has to be told
     // about.
+    //
+    // Named for the bake because that is the one it was written for. It is the
+    // answer `convertReferenceLayer` gives too, the two being the same loop.
     struct LayerBake {
         std::size_t drawings = 0;
         bool ran_out_of_memory = false;
@@ -439,6 +444,51 @@ public:
     // than merely shrugging.
     LayerBake transformLayer(TrackId track, LayerId layer, const Transform& t);
 
+    // Every drawing of a reference layer replaced by a cel holding the picture
+    // it was showing, and the layer left an ordinary raster one. The way back
+    // from an import: see docs/importing.md, "convert to drawings".
+    //
+    // **It is `transformLayer` with a decode where the resample is**, and
+    // sharing the scaffolding rather than copying it is the whole reason
+    // `writeWholeLayer` exists -- the bake's four hard-won details are four
+    // bugs if any of them is omitted here, and every one of them was found the
+    // expensive way once already. See docs/handover.md, "running out of memory,
+    // and why that is a rescue rather than a crash".
+    //
+    // **The whole layer, and that is the user's call rather than a limitation.**
+    // A layer that is drawings at some drawings and reference at others is a
+    // state nobody asked for and nobody can see, and the first question it
+    // produces is "why can I draw here and not there".
+    //
+    // `pixels` is asked for one frame of the import, by its index into
+    // `Layer::reference_sources`, and must hand back what the compositor would
+    // draw -- **already placed**, because that is what is on screen and what
+    // the conversion promises to keep. It is only called for the frames not
+    // already derived: a frame in the reference cache at the layer's current
+    // placement is used as it stands, which is both cheaper and the same
+    // answer. An empty grid from it is taken as a frame that would not read,
+    // and the drawing gets an empty cel rather than the conversion failing --
+    // the same rule the derive step has, for the same reason.
+    //
+    // **What is lost is the future and not the pixels.** The grid written is
+    // the grid on screen, so any resampling a placement asked for happened in
+    // the derive step and happens once. Afterwards the pixels are the truth, so
+    // placing the layer again would bake on top of what is already baked. That
+    // is what the interface has to say, and it is not entitled to say more:
+    // a JPEG was lossy before it reached this program.
+    //
+    // Nothing here asks whether the layer is too long to fit. That is the
+    // caller's, asked before the work, in `commitFitsInBudget`'s shape and
+    // against `kCommitTileBudget` -- which is the difference between refusing
+    // with a number and failing in the middle. This end is the other half: the
+    // allocation failing is caught and every drawing already written is put
+    // back, exactly as a bake's is.
+    //
+    // Nothing written, and the document untouched, for a layer that is not a
+    // Reference one or that points at no frames.
+    LayerBake convertReferenceLayer(TrackId track, LayerId layer,
+                                    const std::function<TileGrid(int source_frame)>& pixels);
+
     // **A rescued bake leaves the history exactly as it found it**, which is
     // what its refusal message promises and what the first version of it did
     // not do. Closing a command trims the history to its byte budget, and one
@@ -457,10 +507,14 @@ public:
     // a test can arrange -- a machine with room to swap succeeds and is merely
     // slow, and one without it takes the test process down with it.
     //
-    // Nothing in the interface reaches this, and the next call to
-    // transformLayer takes it whether or not that call gets as far as writing
-    // anything -- so a hook armed before an identity, or before a layer with no
-    // drawings on it, cannot go off on some later bake instead.
+    // Nothing in the interface reaches this, and the next whole-layer write
+    // takes it whether or not that call gets as far as writing anything -- so a
+    // hook armed before an identity, or before a layer with no drawings on it,
+    // cannot go off on some later bake instead.
+    //
+    // **The next one of either**, `transformLayer` or `convertReferenceLayer`,
+    // because they are one loop and the rescue being tested is one rescue.
+    // Named for the bake because that is the caller it was written for.
     void failLayerBakeAfterForTesting(std::size_t drawings) { fail_bake_after_ = drawings; }
 
     // The drawings `transformLayer` would move, in the order it would move
@@ -476,6 +530,21 @@ public:
     // anything about, and a ghost picture merged in that order would be a
     // different picture each time it was drawn.
     std::vector<ImageId> layerDrawings(TrackId track, LayerId layer) const;
+
+    // The same for a reference layer, which needs its own because the question
+    // "is this layer empty here" has a different answer on one.
+    //
+    // A reference layer has no cels at all, so `layerDrawings` reports every
+    // import as having nothing in it. What says the layer is not blank at a
+    // drawing is a `source_frames` entry, which is the sparse map beside `cels`
+    // and means exactly what a cel means -- see Image::source_frames.
+    //
+    // Sorted, for `layerDrawings`' reason and not for tidiness: `images` is an
+    // unordered_map whose walk order is not the timeline's and is not stable
+    // between two runs, and a conversion that journalled its tiles in a
+    // different order each time would be one no test could assert anything
+    // about.
+    std::vector<ImageId> referenceDrawings(TrackId track, LayerId layer) const;
 
     // The same list as grids, for the budget. The pointers are the document's
     // and are good for exactly as long as it is not edited.
@@ -717,6 +786,34 @@ private:
     // that took only the first came back blank on an import, which is what a
     // duplicate that "did nothing" turned out to be.
     std::optional<Image> copyOfImage(Track& track, ImageId source);
+
+    // Everything a whole-layer write has to get right, in one place, so that
+    // the two of them cannot get it right differently.
+    //
+    // **Six decisions live in here and all six are bugs if omitted**, which is
+    // why this exists at all rather than the second caller copying the first:
+    // one command for the whole layer, the trim held until the outcome is
+    // known, the redo stack held aside rather than cleared, the `bad_alloc`
+    // caught *inside* the command's own scope, the rescue undoing what landed,
+    // and the rescued undo popped off the redo stack so it cannot be redone
+    // into the half-written state. Each of them is argued where it happens
+    // below, and `transformLayer`'s comment is where they were first written
+    // down. docs/importing.md said to extract this when the second caller
+    // arrived; this is that.
+    //
+    // `write` is called for each drawing in turn and says whether it wrote one;
+    // it may throw `std::bad_alloc`, which is the whole point. `finish` runs
+    // inside the same command once every drawing is written, for the part of a
+    // whole-layer write that is not per drawing -- a conversion leaves the
+    // layer an ordinary raster one, and that has to land or not land with the
+    // cels rather than beside them.
+    //
+    // `fail_after` is the test hook, taken by the caller so that it is consumed
+    // whether or not the call gets this far.
+    LayerBake writeWholeLayer(const char* name, const std::vector<ImageId>& drawings,
+                              const std::optional<std::size_t>& fail_after,
+                              const std::function<bool(ImageId)>& write,
+                              const std::function<void()>& finish = {});
 
     Scene scene_;
     std::unordered_map<CelId, std::shared_ptr<Cel>> cels_;

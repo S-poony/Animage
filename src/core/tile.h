@@ -150,6 +150,22 @@ inline int tileLocal(int p) {
     return (m < 0) ? m + kTileSize : m;
 }
 
+// How many tiles a rectangle touches, which is what a picture of that size and
+// at that position costs to hold.
+//
+// **Where it is counts**, and that is the whole reason this is not a division
+// of the width and the height. A 1920x1080 picture on the origin is 15 by 9
+// tiles; the same picture moved one pixel right and one down straddles 16 by
+// 10, which is a seventh more memory for a nudge. Anything sizing an import
+// from its file's dimensions alone is quoting the best case.
+inline std::size_t tilesCovering(const PixelRect& rect) {
+    if (rect.isEmpty()) return 0;
+    const TileCoord first = tileCoordFor(rect.x, rect.y);
+    const TileCoord last = tileCoordFor(rect.x + rect.width - 1, rect.y + rect.height - 1);
+    return static_cast<std::size_t>(last.x - first.x + 1) *
+           static_cast<std::size_t>(last.y - first.y + 1);
+}
+
 // A sparse grid. An absent tile is fully transparent, and stays absent: an
 // empty layer on a 500-image track costs nothing.
 class TileGrid {

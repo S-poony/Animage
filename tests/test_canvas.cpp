@@ -10320,6 +10320,242 @@ void aLayerOfOneDrawingIsRefusedAndNamesTheTool() {
     CHECK(canvas->transformIsWholeLayer());
 }
 
+// The way back from an import, driven end to end through real files.
+//
+// `test_transform` pins the loop and the rescue against a decode a test writes
+// itself; what only this end can answer is whether the pixels that arrive are
+// the ones in the files, and whether the layer really stops being an import as
+// far as everything downstream is concerned.
+void convertingAnImportGivesEveryDrawingItsOwnPixels() {
+    TEST("converting an imported sequence writes each file into its own drawing");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    // The three pure channels, for the reason the sequence test uses them: they
+    // land on 1.0 and 0.0 exactly in linear light, so a drawing holding its
+    // neighbour's picture is a failed assertion rather than a near miss.
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    std::vector<QString> files;
+    for (int i = 0; i < 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i + 1));
+        CHECK(writeATestPicture(file, colours[i]));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    // What the recap would have said, asked before the work exactly as the menu
+    // item asks it. Three 200x150 pictures at the origin is one tile each.
+    const MainWindow::ConversionCost cost = window.conversionCostFor(track_id, layer_id);
+    CHECK_EQ(cost.drawings, std::size_t{3});
+    // Four tiles each and not one: 200x150 at the origin crosses the 128-pixel
+    // boundary on both axes, so it is two columns by two rows. Counting from
+    // the pixel dimensions alone would say one.
+    CHECK_EQ(cost.tiles, std::size_t{12});
+    CHECK_EQ(cost.unreadable, 0);
+    // Nothing has been placed, so the popup gets to promise every pixel.
+    CHECK(!cost.resampled);
+
+    // **No cels before**, which is what a reference layer is.
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+
+    QString trouble;
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, &trouble));
+    QCoreApplication::processEvents();
+
+    const Track* after = doc.scene().findTrack(track_id);
+    CHECK(after != nullptr);
+    if (!after) return;
+    const Layer* layer = after->findLayer(layer_id);
+    CHECK(layer != nullptr);
+    if (!layer) return;
+
+    // An ordinary layer now, in all three of the ways that matter downstream.
+    CHECK_EQ(static_cast<int>(layer->kind), static_cast<int>(LayerKind::Raster));
+    CHECK(layer->reference_sources.empty());
+    CHECK(layer->placement.isIdentity());
+
+    // And the pixels are the files': each drawing its own colour, in the linear
+    // premultiplied half the rest of the program works in.
+    for (int i = 0; i < 3; ++i) {
+        const ImageId drawing = after->imageAtSlot(static_cast<std::size_t>(i));
+        const Cel* cel = doc.celAt(track_id, drawing, layer_id);
+        CHECK(cel != nullptr);
+        if (!cel) continue;
+        CHECK_EQ(after->findImage(drawing)->sourceFrameFor(layer_id), Image::kNoSourceFrame);
+
+        const Rgba got = cel->pixel(20, 20);
+        CHECK_NEAR(got.a, 1.0, 1e-2);
+        CHECK_NEAR(got.r, i == 0 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(got.g, i == 1 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(got.b, i == 2 ? 1.0 : 0.0, 1e-2);
+    }
+
+    // The brush stops refusing, which is the whole point of the feature: what
+    // it refused on was the kind, and there is now somewhere to put a mark.
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (canvas) {
+        canvas->setActiveLayer(layer_id);
+        CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::None);
+    }
+
+    // One step back to the import, cels and kind and frame pointers together.
+    CHECK(doc.undo());
+    const Layer* back = doc.scene().findTrack(track_id)->findLayer(layer_id);
+    CHECK_EQ(static_cast<int>(back->kind), static_cast<int>(LayerKind::Reference));
+    CHECK_EQ(back->reference_sources.size(), std::size_t{3});
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+}
+
+// **Converting does not take the scan out of the project**, and this is the
+// test for a failure with no symptom at the time -- the same shape as the one
+// anImportSurvivesSavingAndOpening pins, and found the same way.
+//
+// A save builds a new folder and swaps it in, so it carried forward only the
+// files something still named. Converting is the first thing in the program
+// that stops naming a file without anybody having said to remove it, so the
+// save after a conversion deleted the imported scan from the project. Nothing
+// looked wrong: the pictures were still in the reference cache, so undoing the
+// conversion put them back on screen. **The save after that failed outright**,
+// on a layer naming files that now existed nowhere -- which is where it was
+// found.
+//
+// So the sequence below is the whole bug and not a part of it, and every step
+// of it is load-bearing: the reopen is what empties the pending list, so that
+// the copy inside the project is the only one the document can reach.
+void convertingDoesNotTakeTheImportOutOfTheProject() {
+    TEST("converting and saving keeps the imported files, so the conversion can be taken back");
+    QTemporaryDir sources;
+    QTemporaryDir where;
+    CHECK(sources.isValid() && where.isValid());
+    const QString folder = where.filePath(QStringLiteral("shot"));
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = sources.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    const auto importsIn = [&] {
+        return QDir(folder + QStringLiteral("/imports")).entryList(QDir::Files).size();
+    };
+
+    {
+        MainWindow first;
+        first.resize(1000, 700);
+        first.show();
+        QCoreApplication::processEvents();
+        CHECK(first.importSequenceFrom(files, 1, false, nullptr));
+        QCoreApplication::processEvents();
+        CHECK(first.saveTo(folder));
+    }
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // Reopened, so the only copy the document can reach is the one in
+    // `imports/`: nothing is left on the pending list of where files came from.
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    QString error;
+    CHECK(window.openProjectAt(folder, &error));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+    CHECK(window.saveTo(folder));
+
+    // The three files are still there, named by nothing at all.
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // And that is what makes taking it back work rather than only look like it.
+    CHECK(doc.undo());
+    QCoreApplication::processEvents();
+    const Layer* back = doc.scene().findTrack(track_id)->findLayer(layer_id);
+    CHECK_EQ(static_cast<int>(back->kind), static_cast<int>(LayerKind::Reference));
+    // The save that used to fail. Asserted before the picture, because a
+    // project that will not write is the worse half of this.
+    CHECK(window.saveTo(folder));
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // The picture comes from the files and not from what happens to be cached:
+    // emptying the cache is how "is it really still on disk" is asked.
+    doc.forgetReferenceFrames();
+    CHECK(window.settleReferenceFrames());
+    const ImageId first_drawing = doc.scene().findTrack(track_id)->imageAtSlot(0);
+    const TileGrid* frame =
+        doc.referenceFrameFor(track_id, first_drawing, layer_id, back->placement);
+    CHECK(frame != nullptr);
+    if (frame) CHECK_NEAR(frame->pixel(20, 20).r, 1.0, 1e-2);
+}
+
+// The button, which is the half of this feature somebody can find without
+// having tried to draw on an import first.
+void theConvertButtonIsGreyedWithAReasonEverywhereElse() {
+    TEST("Convert to drawings says what it is for on a layer it cannot be used on");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* convert = buttonCalled(window, QStringLiteral("Convert to drawings"));
+    CHECK(convert != nullptr);
+    if (!convert) return;
+
+    // On an ordinary layer it is off -- and the tooltip says what the control
+    // is *for*, not merely that this is not it. A greyed control whose reason
+    // restates the greying teaches nobody what it does.
+    CHECK(!convert->isEnabled());
+    CHECK(convert->toolTip().contains(QStringLiteral("already drawings")));
+    CHECK(convert->toolTip().contains(QStringLiteral("imported picture")));
+
+    const QString still = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(still, QColor(200, 60, 60)));
+    CHECK(window.importImageFrom(still, nullptr));
+    QCoreApplication::processEvents();
+
+    // An import makes its track current and selects its layer, so the button
+    // comes on without anybody having to go and find it.
+    CHECK(convert->isEnabled());
+
+    Document& doc = window.documentForTesting();
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const LayerId layer_id = doc.scene().findTrack(track_id)->layers.front().id;
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+
+    // And off again once there is nothing left to convert, without anybody
+    // changing layer -- which is the refresh that would otherwise be missing.
+    CHECK(!convert->isEnabled());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -10340,6 +10576,9 @@ int main(int argc, char** argv) {
     playbackRunsOnAMachineWithNoAudioOutput();
     theTransformToolIsOffForASequenceImportAndOnForAStill();
     aLayerOfOneDrawingIsRefusedAndNamesTheTool();
+    convertingAnImportGivesEveryDrawingItsOwnPixels();
+    convertingDoesNotTakeTheImportOutOfTheProject();
+    theConvertButtonIsGreyedWithAReasonEverywhereElse();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();

@@ -1183,6 +1183,43 @@ const std::vector<Situation>& situations() {
              s.settlePicture();
          }},
 
+        {"an-import-converted-to-drawings",
+         "the way back from an import, photographed after it: the same three frames, now held "
+         "as cels. Four things should have changed and nothing else -- the status bar's tile "
+         "count is no longer 0, the layer row has come out of the disabled grey an import is "
+         "drawn in, the panel button reads 'Transform layer through time' where it read 'Place "
+         "this picture', and 'Convert to drawings' beside it has greyed out because there is "
+         "nothing left to convert. The picture on the canvas should not have moved a pixel: "
+         "what is written is what was on screen",
+         [](Stage& s) {
+             std::vector<QString> files;
+             for (int i = 1; i <= 3; ++i) {
+                 const QString file =
+                     s.scratch() + QStringLiteral("/board%1.png").arg(i, 3, 10, QLatin1Char('0'));
+                 writeNumberedBoard(file, i);
+                 files.push_back(file);
+             }
+             QString trouble;
+             if (!s.window.importSequenceFrom(files, 1, false, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             s.timeline->setCurrentSlot(2);
+             s.settlePicture();
+
+             // Through the function the button drives, and not through the
+             // button: the button raises a modal recap, and a shot cannot
+             // answer one. Same division every import here already uses.
+             const Document& doc = s.window.documentForTesting();
+             const Track& track = doc.scene().tracks.back();
+             if (!track.layers.empty() &&
+                 !s.window.convertReferenceLayerFrom(track.id, track.layers.front().id,
+                                                     &trouble)) {
+                 std::printf("  could not convert: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+         }},
+
         {"a-transform-box-round-a-drawing",
          "the box should sit on the ink: #28 was raised on one drawn 128 px clear of "
          "the drawing on every side, because it was made from tile-aligned bounds",
