@@ -50,8 +50,34 @@ add_library(animage_ui STATIC
   animage/exr_writer.h
   animage/crash_report.cpp
   animage/crash_report.h
+  animage/audio_check.cpp
+  animage/audio_check.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
+
+# ---------------------------------------------------- Qt Multimedia, optional
+#
+# **Never in the root find_package.** A component in that list which the
+# installed Qt does not have fails the whole call: Qt6_FOUND comes back false,
+# the if(Qt6_FOUND) around this directory skips every GUI target, and configure,
+# build and ctest all report success while the application quietly stops being
+# built. Every Qt this project builds against today is such an install. Asked
+# for as its own package, a missing module disables one feature instead.
+# See docs/handover.md, "what asking for a private Qt component at the top level
+# switches off", which is this mistake already paid for once.
+#
+# What it is for right now is the deployment spike in docs/importing.md and not
+# audio: the three packaging tools read what `animage` imports, so the module
+# has to be linked into the application before any of them can be asked whether
+# they bundle a backend for it. audio_check.cpp is that import and comes out
+# again -- see its header.
+find_package(Qt6Multimedia QUIET)
+if(Qt6Multimedia_FOUND)
+  target_link_libraries(animage_ui PUBLIC Qt6::Multimedia)
+  target_compile_definitions(animage_ui PUBLIC ANIMAGE_HAVE_AUDIO)
+else()
+  message(STATUS "Qt Multimedia not found: building without audio")
+endif()
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
 
 # OpenEXR, via tinyexr: one vendored BSD-3 header, compiled in exr_writer.cpp
