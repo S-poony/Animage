@@ -10422,6 +10422,80 @@ void convertingAnImportGivesEveryDrawingItsOwnPixels() {
     CHECK_EQ(doc.totalTileCount(), std::size_t{0});
 }
 
+// A placed import, which is the other half of the conversion and the half the
+// popup's wording turns on.
+//
+// The conversion writes what is *on screen*, and on a placed layer that is the
+// derived grid rather than the file -- so this is where writing the file's own
+// pixels instead would show up, and where a cost quoted from the file's own
+// dimensions would be describing a picture nobody is looking at.
+void convertingAPlacedImportWritesItWhereItSits() {
+    TEST("converting a placed import writes the picture where it sits, at what it now costs");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    const QString file = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(file, QColor(255, 0, 0)));  // 200x150
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(file, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    // Moved by a whole number of tiles and scaled to half. A whole-pixel move
+    // on its own would take the exact path and answer "not resampled", which is
+    // the branch this test is *not* about.
+    Layer placed = *track->findLayer(layer_id);
+    placed.placement.dx = 256.0;
+    placed.placement.dy = 128.0;
+    placed.placement.scale_x = 0.5;
+    placed.placement.scale_y = 0.5;
+    doc.updateLayer(track_id, layer_id, placed);
+    QCoreApplication::processEvents();
+
+    // Half size is a quarter of the pixels: 100x75 landing at (256, 128) is one
+    // tile, where the file at 1:1 on the origin was four. A cost quoted from
+    // the file's own 200x150 would say four and be describing the wrong
+    // picture -- and the popup would promise every pixel, on a layer that has
+    // been resampled.
+    const MainWindow::ConversionCost cost = window.conversionCostFor(track_id, layer_id);
+    CHECK_EQ(cost.drawings, std::size_t{1});
+    CHECK_EQ(cost.tiles, std::size_t{1});
+    CHECK(cost.resampled);
+
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+
+    const Track* after = doc.scene().findTrack(track_id);
+    const ImageId drawing = after->imageAtSlot(0);
+    const Cel* cel = doc.celAt(track_id, drawing, layer_id);
+    CHECK(cel != nullptr);
+    if (!cel) return;
+
+    // Where it was placed, and not where the file would have landed. Both
+    // assertions are needed: the second is what fails if the file's own pixels
+    // were written instead of the derived ones.
+    CHECK_NEAR(cel->pixel(300, 160).r, 1.0, 1e-2);
+    CHECK_NEAR(cel->pixel(300, 160).a, 1.0, 1e-2);
+    CHECK_EQ(cel->pixel(20, 20).a, 0.0f);
+    // And it ends where half size ends, rather than at the file's full width.
+    CHECK_EQ(cel->pixel(380, 160).a, 0.0f);
+
+    // The placement is not left on the layer to be applied a second time by
+    // anything that starts reading it.
+    CHECK(after->findLayer(layer_id)->placement.isIdentity());
+}
+
 // **Converting does not take the scan out of the project**, and this is the
 // test for a failure with no symptom at the time -- the same shape as the one
 // anImportSurvivesSavingAndOpening pins, and found the same way.
@@ -10577,6 +10651,7 @@ int main(int argc, char** argv) {
     theTransformToolIsOffForASequenceImportAndOnForAStill();
     aLayerOfOneDrawingIsRefusedAndNamesTheTool();
     convertingAnImportGivesEveryDrawingItsOwnPixels();
+    convertingAPlacedImportWritesItWhereItSits();
     convertingDoesNotTakeTheImportOutOfTheProject();
     theConvertButtonIsGreyedWithAReasonEverywhereElse();
     thePointerSaysWhereTheBrushWillNotDraw();
