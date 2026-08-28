@@ -3709,9 +3709,50 @@ already records for the rename editor and the layer panel already paid for.
 The block is where the sound sits; its *height* is the level, so at the bottom
 it is silent and no separate mute is needed; its *ends* are where the crop is.
 The extent stays visible at any level, because a row that vanished when it was
-silenced would be a row nobody could grab to bring back. No waveform: a labelled
-bar is enough to place a sound, and peaks would be a second derived thing to
-build, bound and invalidate before anything is audible.
+silenced would be a row nobody could grab to bring back.
+
+**And its top edge is the waveform**, which was left out of the first cut and is
+in now. [importing.md](importing.md) put it out on the grounds that a labelled
+bar is enough to *place* a sound and peaks are a second derived thing to build
+before anything is audible. That was right, and it expired the day scrubbing
+worked: a bar says where the sound is, and somebody reading a track needs to see
+where the syllables are.
+
+**It is the block's own top edge and not a picture laid over it**, which is what
+keeps all three sentences above true. The whole shape is scaled by the gain, so
+turning the sound down flattens the syllables with it and at the bottom there is
+a flat line — which is what silent looks like, and is the same statement the
+height was already making. The alternative, a centred waveform with a level bar
+behind it, would have taken the level off the shape and needed a second thing to
+carry it.
+
+Two decisions in it that are not obvious:
+
+- **Normalised to the file's own loudest moment, not to full scale.** A dialogue
+  take recorded at a sensible level is a low ripple against full scale, with no
+  syllables in it — and a waveform that cannot be read has not earned its row.
+  So the shape says *where the sound is* and the block's height says *how loud
+  it will be*. What that costs is that two takes recorded at different levels
+  look equally loud.
+- **A quiet passage draws a one-pixel line rather than a gap.** Without the
+  floor the row breaks into islands, which reads as a sound that is not there
+  rather than a sound that is soft — and the gaps are also where somebody has to
+  grab to move the block.
+
+`AudioPeaks` in `core/audio_peaks.h` is what it draws from: one bucket per 64
+frames of audio, built when a file decodes and thrown away with the samples.
+Derived from derived data, never written to a project, about 30 KB for a
+ten-second take. **The bucket is narrower than a pixel column by construction** —
+a cell is 26 pixels and a frame at 24 fps is 2000 samples at 48 kHz, so a column
+is about 77 — which is what stops the row drawing a shape it invented between
+two of them. It is rectified rather than signed, because a shape rising from the
+bottom needs one number per column and not a pair.
+
+A trap worth keeping, from the situation that photographs it: **a tone at one
+level draws as a flat-topped block**, which is exactly what this row looked like
+before. `writeTone` in `tests/shots.cpp` shapes its amplitude into six bursts
+for that reason — a shot taken with a flat tone would have come back green
+having shown nothing.
 
 ### Three gestures, one of them decided rather than chosen
 
@@ -3857,12 +3898,6 @@ somebody imported that was not a WAV.
 - **Synchronised playback**, which is `slotForPlayedFrames` wired into
   `onPlaybackTick` in place of the wall clock. Both halves are built and tested;
   what is missing is a device that is running, to ask for the sample count.
-- **A waveform**, and it is worth saying why it is still absent because the
-  reason has changed. It was left out because peaks are a second derived thing
-  to build, bound and invalidate, and that was not worth doing *before anything
-  could make a noise*. Something can now, so that argument has expired: what is
-  left is a peak table built once beside the samples a decode already puts in
-  memory, drawn behind the level bar.
 - **More than one soundtrack** — the model is a list and the row loop walks it,
   so what is missing is only the interface for a second one.
 

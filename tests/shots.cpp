@@ -586,9 +586,34 @@ private:
 // the samples after it. Built here rather than committed as a binary, for
 // writeSwatchGrid's reason -- a situation that makes its own input cannot be
 // broken by somebody tidying away a file nothing appears to reference.
+//
+// **The amplitude is shaped and that is not decoration.** A tone at one level
+// draws as a flat-topped block, which is exactly what the row looked like
+// before it had a waveform -- so a situation photographing the waveform with a
+// flat tone would come back green having shown nothing. Six bursts with gaps
+// between them is roughly what a line of dialogue looks like from a distance,
+// which is the thing the row now has to be able to say.
 void writeTone(const QString& path, double seconds) {
     constexpr int kRate = 48000;
     const int frames = static_cast<int>(kRate * seconds);
+
+    // Where the syllables fall, as fractions of the file: start, end, level.
+    struct Burst {
+        double from, to, level;
+    };
+    const Burst bursts[] = {{0.02, 0.14, 0.55}, {0.17, 0.27, 0.95}, {0.31, 0.40, 0.40},
+                            {0.47, 0.62, 0.85}, {0.68, 0.76, 0.30}, {0.82, 0.97, 0.70}};
+    const auto envelopeAt = [&](double t) {
+        for (const Burst& burst : bursts) {
+            if (t < burst.from || t > burst.to) continue;
+            // Eased in and out over a tenth of the burst, so the shape has
+            // shoulders rather than being a row of rectangles.
+            const double into = (t - burst.from) / (burst.to - burst.from);
+            const double edge = std::min(1.0, std::min(into, 1.0 - into) / 0.1);
+            return burst.level * edge;
+        }
+        return 0.0;
+    };
 
     const auto put32 = [](QByteArray& out, quint32 v) {
         for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
@@ -599,8 +624,9 @@ void writeTone(const QString& path, double seconds) {
 
     QByteArray data;
     for (int i = 0; i < frames; ++i) {
+        const double level = envelopeAt(frames > 0 ? double(i) / frames : 0.0);
         const auto v = static_cast<qint16>(
-            std::lround(0.4 * 32767.0 * std::sin(2.0 * M_PI * 440.0 * i / kRate)));
+            std::lround(level * 32767.0 * std::sin(2.0 * M_PI * 440.0 * i / kRate)));
         put16(data, static_cast<quint16>(v));
     }
 
@@ -978,9 +1004,10 @@ const std::vector<Situation>& situations() {
 
         {"a-soundtrack-in-the-timeline",
          "the soundtrack is a row under every drawing row, with the sound drawn where it sits "
-         "in the shot -- a block from frame 5 to the end of the clip, filled to its level, with "
-         "the level said as a number too. No waveform: a labelled bar is enough to place a "
-         "sound, and peaks would be a second derived thing to build before anything is audible",
+         "in the shot -- a block from frame 5 to the end of the clip, shaped by the sound "
+         "itself and scaled to its level, with the level said as a number too. The waveform is "
+         "the block's own top edge and not a picture laid over it, so the height of the fill is "
+         "still the level and the block's ends are still the crop",
          [](Stage& s) {
              const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
              writeTone(file, 1.0);  // 24 frames at 24 fps
@@ -992,9 +1019,11 @@ const std::vector<Situation>& situations() {
          }},
 
         {"a-soundtrack-turned-down",
-         "the same row with the level dragged most of the way down. The block stays visible at "
-         "any level including none -- a row that vanished when it was silenced would be a row "
-         "nobody could grab to bring back -- and the height of the fill is the number",
+         "the same row with the level dragged most of the way down. The whole shape is scaled "
+         "by the level, syllables and all, which is what makes it one shape rather than a "
+         "waveform with a bar behind it -- and at the bottom it flattens to a line, which is "
+         "what silent looks like. The block stays visible at any level including none: a row "
+         "that vanished when it was silenced would be a row nobody could grab to bring back",
          [](Stage& s) {
              const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
              writeTone(file, 1.0);

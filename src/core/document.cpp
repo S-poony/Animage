@@ -137,6 +137,7 @@ void Document::removeAudioTrack(TrackId track) {
         // restoring -- the same bargain a reference frame makes. Keeping them
         // would be keeping megabytes alive against a redo that may never come.
         audio_samples_.erase(track);
+        audio_peaks_.erase(track);
         AudioTrack extracted = std::move(scene_.audio_tracks[i]);
         scene_.audio_tracks.erase(scene_.audio_tracks.begin() +
                                   static_cast<std::ptrdiff_t>(i));
@@ -195,6 +196,10 @@ void Document::setAudioTrackPlacement(TrackId track, AudioPlacement placement) {
 }
 
 void Document::setAudioSamples(TrackId track, AudioClip clip) {
+    // The peaks first, from the clip that is about to be moved from. Both maps
+    // are written in the one call so that neither can be left describing a file
+    // the other one has stopped holding.
+    audio_peaks_[track] = peaksOf(clip);
     audio_samples_[track] = std::make_shared<const AudioClip>(std::move(clip));
 }
 
@@ -208,7 +213,15 @@ std::shared_ptr<const AudioClip> Document::sharedAudioSamplesFor(TrackId track) 
     return it == audio_samples_.end() ? nullptr : it->second;
 }
 
-void Document::forgetAudioSamples() { audio_samples_.clear(); }
+const AudioPeaks* Document::audioPeaksFor(TrackId track) const {
+    const auto it = audio_peaks_.find(track);
+    return it == audio_peaks_.end() ? nullptr : &it->second;
+}
+
+void Document::forgetAudioSamples() {
+    audio_samples_.clear();
+    audio_peaks_.clear();
+}
 
 std::size_t Document::timelineFrames() const {
     std::size_t frames = scene_.timelineFrames();

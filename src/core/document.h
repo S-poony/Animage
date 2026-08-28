@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "audio_peaks.h"
 #include "cel.h"
 #include "command.h"
 #include "ctg_fill.h"
@@ -207,6 +208,13 @@ public:
     // samples. Everything on the interface thread should go on using
     // `audioSamplesFor`.
     std::shared_ptr<const AudioClip> sharedAudioSamplesFor(TrackId track) const;
+
+    // How loud that file is, column by column, for the row that draws it.
+    //
+    // Worked out when the samples are installed and thrown away with them:
+    // derived from derived data, and never written to a project. Null before a
+    // file has decoded, exactly as `audioSamplesFor` is.
+    const AudioPeaks* audioPeaksFor(TrackId track) const;
 
     // Throws the decoded samples away. Everything a clip depends on that is not
     // in its key says so by calling this: a track being repointed at another
@@ -750,6 +758,12 @@ private:
     // alive until the callback is finished with it; nothing else about the map
     // changes, and copying no samples is what makes handing one over free.
     std::unordered_map<TrackId, std::shared_ptr<const AudioClip>> audio_samples_;
+
+    // And what a row draws from them. Kept beside rather than inside the clip
+    // because a clip is what a decode produced and this is what somebody worked
+    // out afterwards -- see audio_peaks.h. Written and cleared with the samples
+    // in every case, so the two cannot disagree about which file they describe.
+    std::unordered_map<TrackId, AudioPeaks> audio_peaks_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

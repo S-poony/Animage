@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// What a device gets handed, checked without a device.
+// What is read out of a decoded clip: the samples a device gets handed, and the
+// shape a timeline row draws.
 //
 // **The companion to test_audio.cpp and the same argument.** That one pins the
 // picture's side of the arithmetic -- which slot the playhead should be on --
@@ -16,6 +17,7 @@
 #include <memory>
 #include <vector>
 
+#include "audio_peaks.h"
 #include "audio_render.h"
 #include "testing.h"
 
@@ -342,6 +344,95 @@ void twoSoundtracksAreSummedAndCannotPushEachOtherPastFullScale() {
     for (float v : render(program, 0, 4)) CHECK_NEAR(v, 1.0f, 1e-6);
 }
 
+// --- the shape a row draws --------------------------------------------------
+
+// A clip whose loudness is known bucket by bucket: four blocks of 64 frames at
+// four levels, which is exactly one bucket each at the default size.
+std::shared_ptr<const AudioClip> steps(const std::vector<float>& levels, int channels = 1) {
+    auto clip = std::make_shared<AudioClip>();
+    clip->rate = kRate;
+    clip->channels = channels;
+    for (float level : levels)
+        for (int f = 0; f < 64; ++f)
+            for (int c = 0; c < channels; ++c) clip->samples.push_back(c == 0 ? level : 0.0f);
+    return clip;
+}
+
+void aBucketHoldsTheLoudestSampleInIt() {
+    TEST("a bucket holds the loudest sample in it");
+    const AudioPeaks peaks = peaksOf(*steps({0.25f, 1.0f, 0.5f, 0.0f}));
+    CHECK_EQ(peaks.per_bucket, 64);
+    CHECK_EQ(peaks.buckets.size(), std::size_t(4));
+    CHECK_NEAR(peaks.buckets[0], 0.25f, 1e-6);
+    CHECK_NEAR(peaks.buckets[1], 1.0f, 1e-6);
+    CHECK_NEAR(peaks.buckets[2], 0.5f, 1e-6);
+    CHECK_NEAR(peaks.buckets[3], 0.0f, 1e-6);
+    CHECK_NEAR(peaks.loudest, 1.0f, 1e-6);
+}
+
+// **The magnitude and not the value.** A waveform drawn from signed samples
+// would be a row of half-height shapes wherever the sound happened to swing
+// negative, which is most of it.
+void theLoudnessIsAMagnitude() {
+    TEST("loudness is a magnitude, so a negative sample is as loud as a positive one");
+    const AudioPeaks peaks = peaksOf(*steps({-0.8f, 0.4f}));
+    CHECK_NEAR(peaks.buckets[0], 0.8f, 1e-6);
+    CHECK_NEAR(peaks.loudest, 0.8f, 1e-6);
+}
+
+// A line recorded onto one side of a stereo file is still a line. Averaging the
+// channels would draw it at half the height it is.
+void aChannelOnItsOwnIsAsLoudAsTheFile() {
+    TEST("a sound on one channel is drawn at its own height, not at half of it");
+    const AudioPeaks peaks = peaksOf(*steps({1.0f}, 2));
+    CHECK_NEAR(peaks.buckets[0], 1.0f, 1e-6);
+}
+
+// Normalised to the file's own peak, which is the choice this makes: a quiet
+// dialogue take drawn against full scale is a ripple with no syllables in it.
+void loudnessIsRelativeToTheLoudestThingInTheFile() {
+    TEST("loudness is relative to the loudest thing in the file");
+    const AudioPeaks peaks = peaksOf(*steps({0.1f, 0.2f}));
+    CHECK_NEAR(loudnessBetween(peaks, 0, 64), 0.5f, 1e-6);
+    CHECK_NEAR(loudnessBetween(peaks, 64, 128), 1.0f, 1e-6);
+    // Across both, the louder one wins -- a column narrower than a syllable
+    // must not average it away.
+    CHECK_NEAR(loudnessBetween(peaks, 0, 128), 1.0f, 1e-6);
+}
+
+// A row draws columns that are past the sound at both ends, and what is there
+// is silence rather than an error.
+void offEitherEndIsSilence() {
+    TEST("off either end of the file is silence");
+    const AudioPeaks peaks = peaksOf(*steps({1.0f, 1.0f}));
+    CHECK_NEAR(loudnessBetween(peaks, -5000, -4000), 0.0f, 1e-6);
+    CHECK_NEAR(loudnessBetween(peaks, 100000, 200000), 0.0f, 1e-6);
+    // Straddling the front still reads the part that is there.
+    CHECK_NEAR(loudnessBetween(peaks, -100, 64), 1.0f, 1e-6);
+}
+
+void aSilentFileAnswersRatherThanDividingByZero() {
+    TEST("a silent file answers rather than dividing by zero");
+    const AudioPeaks peaks = peaksOf(*steps({0.0f, 0.0f}));
+    CHECK_NEAR(peaks.loudest, 0.0f, 1e-9);
+    CHECK_NEAR(loudnessBetween(peaks, 0, 128), 0.0f, 1e-9);
+
+    // And so does a clip nothing has decoded into.
+    const AudioPeaks none = peaksOf(AudioClip{});
+    CHECK(none.empty());
+    CHECK_NEAR(loudnessBetween(none, 0, 128), 0.0f, 1e-9);
+}
+
+// A bucket has to be narrower than a column of the timeline, or the row draws a
+// shape it invented between two of them. A cell is 26 pixels and a frame at
+// 24 fps is 2000 samples at 48 kHz, so a column is about 77.
+void aBucketIsNarrowerThanAColumnOfTheTimeline() {
+    TEST("a bucket is narrower than a column of the timeline");
+    const AudioPeaks peaks = peaksOf(*steps({1.0f}));
+    const double samples_per_column = double(kRate) / (double(kFps) * 26.0);
+    CHECK(double(peaks.per_bucket) < samples_per_column);
+}
+
 }  // namespace
 
 int main() {
@@ -364,5 +455,12 @@ int main() {
     nothingToPlayIsSilenceAndNotAnUntouchedBuffer();
     nonsenseRatesAnswerRatherThanDivideByZero();
     twoSoundtracksAreSummedAndCannotPushEachOtherPastFullScale();
+    aBucketHoldsTheLoudestSampleInIt();
+    theLoudnessIsAMagnitude();
+    aChannelOnItsOwnIsAsLoudAsTheFile();
+    loudnessIsRelativeToTheLoudestThingInTheFile();
+    offEitherEndIsSilence();
+    aSilentFileAnswersRatherThanDividingByZero();
+    aBucketIsNarrowerThanAColumnOfTheTimeline();
     return testing::summarise("audio render");
 }

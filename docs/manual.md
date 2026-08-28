@@ -402,13 +402,22 @@ will not overrule a decision you made. It never makes the shot *shorter*.
 ### The soundtrack's row
 
 A soundtrack gets a row under every drawing row. The block in it is where the
-sound sits in the shot, and it does three things:
+sound sits in the shot, **shaped by the sound itself** so you can see where the
+syllables are, and it does three things:
 
 | gesture | what it does |
 |---|---|
 | drag the block **sideways** | moves the sound along the shot |
 | drag the block **up or down** | sets the level — the height of the fill *is* the level, and at the bottom it is silent |
 | drag either **end** | crops the sound, without changing the file |
+
+The waveform is the block's own top edge rather than a picture drawn on it, so
+the level scales the whole shape: turn the sound down and the syllables shrink
+with it, and at the bottom it is a flat line. It is drawn relative to the
+loudest moment in that file rather than to full scale — a take recorded at a
+sensible level would otherwise be a ripple with nothing readable in it — so the
+shape tells you *where* the sound is and the block's height tells you how loud
+it will be.
 
 Nothing snaps to whole frames. A frame at 24 fps is 42 milliseconds, which is
 most of the way to a syllable, so placing a sound to the nearest frame is not

@@ -1,4 +1,5 @@
 ﻿add_library(animage_core
+  audio_peaks.cpp
   audio_render.cpp
   audio_track.cpp
   brush.cpp

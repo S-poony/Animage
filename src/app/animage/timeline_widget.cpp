@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QToolTip>
 #include <algorithm>
+#include <cmath>
 
 #include "marks.h"
 #include "name_limits.h"
@@ -137,9 +138,18 @@ Palette paletteFor(const QWidget& widget) {
 // *height* is the gain. At the bottom it is silent, so nothing needs a separate
 // mute; at the top it is unchanged.
 //
-// Deliberately no waveform. docs/importing.md puts that out of the first cut: a
-// labelled bar is enough to place a sound, and peaks would be a second derived
-// thing to build, bound and invalidate before anybody can hear anything at all.
+// **And the waveform, which was left out of the first cut and is in now.**
+// docs/importing.md put it out on the grounds that a labelled bar is enough to
+// *place* a sound and peaks are a second derived thing to build before anything
+// is audible. That was right and it expired the day scrubbing worked: a bar
+// says where the sound is, and what somebody reading a track needs is where the
+// syllables are.
+//
+// It is drawn as the block's own top edge rather than as a picture laid over
+// it, which is what keeps every sentence already written about this row true.
+// The height of the fill is still the level -- the whole shape is scaled by the
+// gain, so at the bottom it is flat and silent -- and the block's ends are still
+// the crop. One shape, one more fact.
 //
 // A free function taking what it draws, like the other painting helpers here,
 // so that the palette can stay private to this file.
@@ -153,6 +163,14 @@ struct AudioRowPaint {
     // being finer than a frame is visible at all.
     double first = 0.0;
     double last = 0.0;
+
+    // How loud the sound is, column by column, or null before the file has
+    // decoded -- in which case the block is drawn flat-topped as it always was.
+    const animage::AudioPeaks* peaks = nullptr;
+    // What the columns have to be turned into sample positions with.
+    animage::AudioPlacement placement;
+    int clip_rate = 0;
+    int fps = 24;
 };
 
 void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPaint& row) {
@@ -186,10 +204,59 @@ void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPain
     painter.fillRect(extent, colours.cell_held);
 
     // And the level, filled from the bottom, because the height *is* the number.
+    //
+    // Flat-topped where there is nothing to shape it with, and shaped by the
+    // sound where there is. Both are the same rectangle scaled by the same
+    // gain: the waveform is the top edge of the level bar and not a second
+    // drawing on top of it, so turning the sound down shrinks the syllables
+    // with it and at the bottom there is a flat line, which is what silent
+    // looks like.
     const int filled = static_cast<int>(std::lround(row.gain * band_height));
     if (filled > 0) {
-        painter.fillRect(QRect(x0, band_top + band_height - filled, extent.width(), filled),
-                         colours.carried);
+        const int bottom = band_top + band_height;
+        const bool shaped = row.peaks && !row.peaks->empty() && row.clip_rate > 0 &&
+                            row.fps > 0 && extent.width() > 1;
+        if (!shaped) {
+            painter.fillRect(QRect(x0, bottom - filled, extent.width(), filled),
+                             colours.carried);
+        } else {
+            // One column of the row at a time, each asking the peaks what the
+            // loudest thing between its own left and right edges was. The
+            // buckets are narrower than a column by construction -- see
+            // peaksOf -- so nothing here is invented between two of them.
+            const double seconds_per_pixel =
+                1.0 / (static_cast<double>(row.fps) * kCellWidth);
+            const double at_x0 =
+                (static_cast<double>(x0 - kGutterWidth) / kCellWidth - row.placement.offset_frames) /
+                    static_cast<double>(row.fps) +
+                row.placement.trim_start_seconds;
+
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(colours.carried);
+            QPolygon shape;
+            shape.reserve(extent.width() * 2 + 2);
+            // Along the top, left to right...
+            for (int i = 0; i < extent.width(); ++i) {
+                const double left = at_x0 + i * seconds_per_pixel;
+                const auto sample = [&](double seconds) {
+                    return static_cast<std::int64_t>(
+                        std::floor(seconds * static_cast<double>(row.clip_rate)));
+                };
+                const float loud = animage::loudnessBetween(
+                    *row.peaks, sample(left), sample(left + seconds_per_pixel));
+                // A floor of one pixel, so a quiet passage is a thin line
+                // rather than a gap. A row broken into islands would read as a
+                // sound that is not there rather than a sound that is soft, and
+                // the gaps are also where somebody has to grab to move it.
+                const int height = std::max(1, static_cast<int>(std::lround(loud * filled)));
+                shape << QPoint(x0 + i, bottom - height);
+            }
+            // ...and back along the bottom, which closes it into one polygon
+            // rather than a column of rectangles with seams between them.
+            shape << QPoint(x0 + extent.width() - 1, bottom) << QPoint(x0, bottom);
+            painter.drawPolygon(shape);
+            painter.setBrush(Qt::NoBrush);
+        }
     }
     painter.setPen(QPen(colours.outline, 1));
     painter.drawRect(extent.adjusted(0, 0, -1, -1));
@@ -606,6 +673,10 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             band.current = sound->id == audio_row_;
             band.name = QString::fromStdString(sound->name);
             band.gain = sound->placement.gain;
+            band.placement = sound->placement;
+            band.fps = std::max(1, doc_.scene().framerate);
+            band.peaks = doc_.audioPeaksFor(sound->id);
+            if (const AudioClip* clip = doc_.audioSamplesFor(sound->id)) band.clip_rate = clip->rate;
             std::tie(band.first, band.last) = audioExtent(*sound);
             paintAudioRow(painter, colours, band);
             continue;
