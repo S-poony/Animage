@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "audio_import_dialog.h"
 
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -121,6 +122,30 @@ AudioImportDialog::AudioImportDialog(const Found& found, int playhead_frame, QWi
                        "wants. The playhead is at %1.")
             .arg(std::max(1, playhead_frame)));
     form->addRow(QStringLiteral("Start at frame"), start_);
+
+    // Only when it would change something. See Answer::extend_shot for the
+    // three cases and why the tick is where it is.
+    if (found.sound_frames > found.shot_frames) {
+        extend_ = new QCheckBox(QStringLiteral("Make the shot reach the end of the sound"),
+                                choices);
+        extend_->setChecked(!found.length_is_fixed);
+        extend_->setToolTip(
+            found.length_is_fixed
+                ? QStringLiteral(
+                      "The shot is set to %1 frames and the sound runs to %2. Ticking this "
+                      "moves the end of the shot; leaving it alone keeps the length you set, "
+                      "and the sound past it can still be scrubbed over.")
+                      .arg(found.shot_frames)
+                      .arg(found.sound_frames)
+                : QStringLiteral(
+                      "Nothing has said how long this shot is, so it is as long as its "
+                      "drawings — %1 frames — and the sound runs to %2. Without this, Play "
+                      "would stop before the sound does.")
+                      .arg(found.shot_frames)
+                      .arg(found.sound_frames));
+        form->addRow(QString(), extend_);
+    }
+
     layout->addWidget(choices);
 
     // **The one sentence that has to be here**, because it is otherwise found
@@ -144,5 +169,8 @@ AudioImportDialog::AudioImportDialog(const Found& found, int playhead_frame, QWi
 AudioImportDialog::Answer AudioImportDialog::answer() const {
     Answer out;
     out.start_frame = start_ ? start_->value() : 1;
+    // No box means nothing to extend, which is a false rather than a default
+    // somebody has to remember.
+    out.extend_shot = extend_ && extend_->isChecked();
     return out;
 }

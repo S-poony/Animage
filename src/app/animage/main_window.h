@@ -132,7 +132,11 @@ public:
     // document is untouched in that case. True with `trouble` *also* filled in
     // when something was read and there is still something to say -- a file cut
     // short, or one read only as far as the cap.
-    bool importAudioFrom(const QString& path, int start_frame, QString* trouble = nullptr);
+    // `extend_shot` makes the shot reach the end of the sound, which is what
+    // the dialog's checkbox asks. Off for a caller that says nothing, because a
+    // programmatic import should not quietly redefine what gets exported.
+    bool importAudioFrom(const QString& path, int start_frame, QString* trouble = nullptr,
+                         bool extend_shot = false);
 
     // Waits for every imported picture on screen to be decoded and installed.
     //

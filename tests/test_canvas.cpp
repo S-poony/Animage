@@ -2735,6 +2735,112 @@ void aSoundtrackSurvivesAnImportASaveAndAReopen() {
     }
 }
 
+
+// --- the timeline reaches the sound, and the shot may be told to ------------
+
+// **The rule is: the box appears when it would change something, and is ticked
+// only when nothing has decided the length yet.** Three cases, and this drives
+// the two halves that are not the dialog -- what the timeline reaches, and what
+// asking for the shot to be extended does.
+void aSoundtrackWidensTheTimelineWithoutWideningTheShot() {
+    TEST("a soundtrack past the drawings can be scrubbed over but is not exported");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second = 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    const animage::Document& doc = window.documentForTesting();
+    const std::size_t shot_before = doc.scene().shotFrames();
+    CHECK(shot_before < 24);  // a fresh document is nowhere near a second long
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble));  // no extend
+    QCoreApplication::processEvents();
+
+    // **The timeline reaches it and the shot does not.** That is the split
+    // Scene::shotFrames and Document::timelineFrames exist to make: everything
+    // that draws or scrubs wants the second, everything that plays or writes
+    // files wants the first.
+    CHECK_EQ(doc.scene().shotFrames(), shot_before);
+    CHECK(doc.timelineFrames() >= 24);
+}
+
+void extendingTheShotToTheSoundIsAskedForRatherThanAssumed() {
+    TEST("the shot reaches the sound only when the import is told to");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+
+    QString trouble;
+    // Placed at frame 5, so the sound reaches slot 4 + 24 = 28.
+    CHECK(window.importAudioFrom(file, 5, &trouble, true));
+    QCoreApplication::processEvents();
+
+    CHECK(doc.scene().fixed_length);
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{28});
+
+    // **And the whole import is one undo step.** Adding the track, placing it
+    // and lengthening the shot are three edits that join one command, so a
+    // mistaken import is one Ctrl+Z rather than three.
+    CHECK(doc.undo());
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+    CHECK(!doc.scene().fixed_length);
+}
+
+void extendingTheShotNeverShortensIt() {
+    TEST("extending the shot to a short sound does not cut the drawings out of it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("blip.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 4800, 440.0));  // a tenth of a second
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+    doc.setSceneLength(true, 200);
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    // The box says "reach the end of the sound", not "be exactly the sound". A
+    // shot that shrank would take drawings out of the export, which is not
+    // something an audio import may do.
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{200});
+}
+
 void aProjectSurvivesSavingAndLoading() {
     TEST("a project comes back from disk with its pixels intact");
     QTemporaryDir scratch;
@@ -10112,6 +10218,9 @@ int main(int argc, char** argv) {
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
     aSoundtrackSurvivesAnImportASaveAndAReopen();
+    aSoundtrackWidensTheTimelineWithoutWideningTheShot();
+    extendingTheShotToTheSoundIsAskedForRatherThanAssumed();
+    extendingTheShotNeverShortensIt();
     aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     aFailedSwapPutsThePreviousProjectBack();

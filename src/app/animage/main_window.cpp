@@ -2878,9 +2878,19 @@ void MainWindow::syncStatus() {
 void MainWindow::syncTimelineHeight() {
     if (!timeline_scroll_ || !timeline_widget_ || !timeline_dock_) return;
 
-    const int rows = std::min(static_cast<int>(std::max<std::size_t>(doc_.scene().tracks.size(),
-                                                                     1)),
-                              kMaxDockRows);
+    // **Soundtracks are rows too**, and this is the function that has to know
+    // it. It moves the dock by the rows that came or went rather than sizing
+    // it, so a route that adds a row without telling it leaves the strip at the
+    // height for the count before -- which is issue #74, where a load that added
+    // two tracks left the strip at the height for one and the symptom was that
+    // Ctrl+Z put it back, undo being the next thing that called this at all.
+    //
+    // An audio import adds a row that is not a track, which is a case this
+    // function had never seen.
+    const std::size_t row_count =
+        doc_.scene().tracks.size() + doc_.scene().audio_tracks.size();
+    const int rows =
+        std::min(static_cast<int>(std::max<std::size_t>(row_count, 1)), kMaxDockRows);
     const int was = timeline_rows_shown_;
     if (rows == was) return;  // nothing about the height has changed
 
@@ -3359,7 +3369,8 @@ void MainWindow::importAudio() {
 // test and `shots` drive an import. That is the same division the still and the
 // sequence have, arranged differently because here the decode has to happen
 // before the question can be put.
-bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* trouble) {
+bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* trouble,
+                                 bool extend_shot) {
     const audio_import::Decoded decoded = audio_import::decode(path);
     if (!decoded.ok) {
         if (trouble) *trouble = decoded.trouble;
@@ -3375,11 +3386,16 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
         found.scene_fps = doc_.scene().framerate;
         found.file_bytes = QFileInfo(path).size();
         found.trouble = decoded.trouble;
+        found.sound_frames = decoded.clip.framesAtFps(doc_.scene().framerate);
+        found.shot_frames = doc_.scene().shotFrames();
+        found.length_is_fixed = doc_.scene().fixed_length;
 
         AudioImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1,
                                  this);
         if (dialog.exec() != QDialog::Accepted) return true;  // cancelled, not failed
-        start_frame = dialog.answer().start_frame;
+        const AudioImportDialog::Answer answer = dialog.answer();
+        start_frame = answer.start_frame;
+        extend_shot = answer.extend_shot;
     }
 
     // Named against what the document already spoke for, exactly as a picture
@@ -3394,17 +3410,44 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
     // conversion is here rather than in the dialog for the reason the sequence
     // import has it here: a slot index is this file's unit and a frame number
     // is the user's.
-    const TrackId added =
-        doc_.addAudioTrack(QFileInfo(path).completeBaseName().toStdString(), source);
-    doc_.setAudioTrackPlacement(added, start_frame - 1, 1.0);
+    const int offset = start_frame - 1;
+
+    TrackId added = kNoId;
+    {
+        // One command for the whole import, so it undoes in one step. Nested
+        // commands join the outermost, which is what makes three calls one
+        // entry -- without this, adding the track and placing it were already
+        // two, and lengthening the shot would have been a third.
+        doc_.beginCommand("Import audio");
+        added = doc_.addAudioTrack(QFileInfo(path).completeBaseName().toStdString(), source);
+        doc_.setAudioTrackPlacement(added, offset, 1.0);
+
+        if (extend_shot) {
+            // **Never shorter than it is**, whatever the offset. The box says
+            // "reach the end of the sound", not "be exactly the sound" -- and a
+            // shot that shrank would take drawings out of the export, which is
+            // not something an audio import may do.
+            const long long reach =
+                static_cast<long long>(offset) +
+                static_cast<long long>(decoded.clip.framesAtFps(doc_.scene().framerate));
+            const long long now = static_cast<long long>(doc_.scene().shotFrames());
+            doc_.setSceneLength(true, static_cast<int>(std::max(reach, now)));
+        }
+        doc_.endCommand();
+    }
+
+    // Outside the command, because it is not an edit: installing decoded
+    // samples changes no document state, only the memo of what a file decodes
+    // to. Same rule as setReferenceFrame.
     doc_.setAudioSamples(added, decoded.clip);
 
     // What a save copies from, until the project has a folder of its own.
     imports_.pending_audio[source] = path;
 
     if (trouble) *trouble = decoded.trouble;
-    // A soundtrack adds no track and no row that the timeline draws yet, so
-    // there is nothing here to size. It will when the row lands.
+    // refreshEverything calls syncTimelineHeight, which is what an import that
+    // adds a row has to reach. A soundtrack's row is not a track's, and that
+    // function now counts both.
     refreshEverything();
     return true;
 }
@@ -3767,8 +3810,10 @@ void MainWindow::onSlotChanged(std::size_t slot) {
 // stepping walks the whole shot however long the track being edited is.
 void MainWindow::stepFrame(int delta) {
     // Everything reachable rather than the shot: stepping has to get to a
-    // drawing that sits past a fixed scene length, or it could not be edited.
-    const int count = static_cast<int>(doc_.scene().timelineFrames());
+    // drawing that sits past a fixed scene length, or it could not be edited --
+    // and to a soundtrack running past the drawings, which is the ordinary
+    // first state of a lipsync shot and the one place stepping matters most.
+    const int count = static_cast<int>(doc_.timelineFrames());
     if (count <= 0) return;
 
     int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;

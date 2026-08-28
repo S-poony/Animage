@@ -170,6 +170,23 @@ const AudioClip* Document::audioSamplesFor(TrackId track) const {
 
 void Document::forgetAudioSamples() { audio_samples_.clear(); }
 
+std::size_t Document::timelineFrames() const {
+    std::size_t frames = scene_.timelineFrames();
+    for (const AudioTrack& sound : scene_.audio_tracks) {
+        const auto it = audio_samples_.find(sound.id);
+        if (it == audio_samples_.end()) continue;
+        const std::size_t length = it->second.framesAtFps(scene_.framerate);
+        if (length == 0) continue;
+        // A soundtrack that starts before the shot contributes only what is
+        // inside it: the part before frame 0 is not somewhere the playhead can
+        // go, so it is not length the timeline has to reach.
+        const long long last = static_cast<long long>(sound.offset_frames) +
+                               static_cast<long long>(length);
+        if (last > 0) frames = std::max(frames, static_cast<std::size_t>(last));
+    }
+    return frames;
+}
+
 TrackId Document::addTrack(std::string name) {
     ScopedCommand command(*this, "Add track");
 

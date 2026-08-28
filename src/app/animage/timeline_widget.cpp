@@ -123,6 +123,77 @@ Palette paletteFor(const QWidget& widget) {
     return p;
 }
 
+
+// A soundtrack's row: where the sound is, and how loud it will be.
+//
+// **One shape carrying both facts**, which is what makes the row worth having.
+// The block is where the sound sits in the shot -- that is what a placement
+// offset means, and there is otherwise nothing to see it by -- and the block's
+// *height* is the gain. At the bottom it is silent, so nothing needs a separate
+// mute; at the top it is unchanged.
+//
+// Deliberately no waveform. docs/importing.md puts that out of the first cut: a
+// labelled bar is enough to place a sound, and peaks would be a second derived
+// thing to build, bound and invalidate before anybody can hear anything at all.
+//
+// A free function taking what it draws, like the other painting helpers here,
+// so that the palette can stay private to this file.
+struct AudioRowPaint {
+    int top = 0;
+    bool current = false;
+    QString name;
+    double gain = 1.0;
+    std::size_t first = 0;  // the extent, in slots; last <= first means nothing
+    std::size_t last = 0;
+};
+
+void paintAudioRow(QPainter& painter, const Palette& colours, const AudioRowPaint& row) {
+    // The gutter reads exactly as a track's does, because from the outside it is
+    // the same thing: the name of the row, and whether this is the row you are
+    // pointed at.
+    const QRect gutter(0, row.top, kGutterWidth - 2, kRowHeight - 2);
+    painter.fillRect(gutter, row.current ? colours.gutter_current : colours.gutter);
+    painter.setPen(row.current ? colours.current_text : colours.text);
+    painter.drawText(gutter.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft, row.name);
+
+    if (row.last <= row.first) {
+        // Nothing decoded, or nothing left in the shot. Said rather than drawn
+        // as an empty block: a block of a made-up size would be a picture of
+        // something that is not there.
+        painter.setPen(colours.tick);
+        painter.drawText(QRect(kGutterWidth + 4, row.top, 240, kRowHeight - 4),
+                         Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("no sound loaded"));
+        return;
+    }
+
+    const int x0 = kGutterWidth + static_cast<int>(row.first) * kCellWidth;
+    const int x1 = kGutterWidth + static_cast<int>(row.last) * kCellWidth;
+    const int band_top = row.top + 2;
+    const int band_height = kRowHeight - 8;
+
+    // The whole extent, faint: where the sound is, at any level including none.
+    // Without it a track dragged to silence would vanish, and a row you cannot
+    // see is a row you cannot grab to bring back.
+    const QRect extent(x0, band_top, std::max(1, x1 - x0), band_height);
+    painter.fillRect(extent, colours.cell_held);
+
+    // And the level, filled from the bottom, because the height *is* the number.
+    const int filled = static_cast<int>(std::lround(row.gain * band_height));
+    if (filled > 0) {
+        painter.fillRect(QRect(x0, band_top + band_height - filled, extent.width(), filled),
+                         colours.carried);
+    }
+    painter.setPen(QPen(colours.outline, 1));
+    painter.drawRect(extent.adjusted(0, 0, -1, -1));
+
+    // The level as a number too. A bar says "louder than that one"; an animator
+    // setting a reference level under a dialogue track wants to be able to come
+    // back to the same place.
+    painter.setPen(colours.text);
+    painter.drawText(extent.adjusted(4, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                     QStringLiteral("%1%").arg(std::lround(row.gain * 100.0)));
+}
+
 }  // namespace
 
 TimelineWidget::TimelineWidget(Document& document, QWidget* parent)
@@ -137,7 +208,57 @@ const Track* TimelineWidget::trackAt(std::size_t row) const {
     return (row < tracks.size()) ? &tracks[row] : nullptr;
 }
 
+// Soundtracks occupy the rows after the drawing tracks. Null for a drawing
+// row, and null past the end, exactly as trackAt is.
+const AudioTrack* TimelineWidget::audioAt(std::size_t row) const {
+    const std::vector<AudioTrack>& sounds = doc_.scene().audio_tracks;
+    if (row < drawingRowCount()) return nullptr;
+    const std::size_t at = row - drawingRowCount();
+    return (at < sounds.size()) ? &sounds[at] : nullptr;
+}
+
 const Track* TimelineWidget::currentTrack() const { return doc_.scene().findTrack(track_); }
+
+// Where the sound sits, in slots.
+//
+// The length comes from the decoded clip and not from anything stored, because
+// nothing stores it: a clip is derived, and a soundtrack whose file has not
+// decoded yet has no length to draw. That is the honest picture -- an empty row
+// says "nothing here to place" rather than a block of a made-up size.
+std::pair<std::size_t, std::size_t> TimelineWidget::audioExtent(const AudioTrack& sound) const {
+    const AudioClip* clip = doc_.audioSamplesFor(sound.id);
+    if (!clip || clip->empty()) return {0, 0};
+    const std::size_t length = clip->framesAtFps(doc_.scene().framerate);
+    if (length == 0) return {0, 0};
+
+    // A soundtrack may start before the shot does -- a breath in front of a
+    // word -- and what is off the front simply is not drawn. The extent is
+    // clamped rather than the offset, so the part that *is* in the shot stays
+    // where it belongs.
+    const long long first = sound.offset_frames;
+    const long long last = first + static_cast<long long>(length);
+    if (last <= 0) return {0, 0};
+    return {static_cast<std::size_t>(std::max<long long>(0, first)),
+            static_cast<std::size_t>(last)};
+}
+
+// Measured from the bottom of the row, because the bar's height in the row *is*
+// the level. Nothing here converts to decibels: what is stored is what the
+// height is read off, and a curve belongs at a gesture rather than in a field.
+double TimelineWidget::gainForY(std::size_t row, int y) const {
+    const int top = rowTop(row) + 2;
+    const int height = kRowHeight - 8;
+    if (height <= 0) return 0.0;
+    return std::clamp(double(top + height - y) / double(height), 0.0, 1.0);
+}
+
+void TimelineWidget::applyGain(int pointer_y) {
+    const AudioTrack* sound = doc_.scene().findAudioTrack(gain_track_);
+    if (!sound) return;
+    doc_.setAudioTrackPlacement(gain_track_, sound->offset_frames, gainForY(gain_row_, pointer_y));
+    Q_EMIT documentChanged();
+    update();
+}
 
 std::size_t TimelineWidget::rowOf(TrackId track) const {
     const std::vector<Track>& tracks = doc_.scene().tracks;
@@ -184,7 +305,7 @@ void TimelineWidget::setTrack(TrackId track) {
 void TimelineWidget::setCurrentSlot(std::size_t slot) {
     // Against the scene and not against one track: the playhead is the
     // timeline's, so it can stand on a frame that this track does not reach.
-    const std::size_t frames = doc_.scene().timelineFrames();
+    const std::size_t frames = doc_.timelineFrames();
     if (frames == 0) return;
     const std::size_t clamped = std::min(slot, frames - 1);
     if (clamped == current_slot_) return;
@@ -205,7 +326,7 @@ void TimelineWidget::refresh() {
         }
     }
 
-    const std::size_t frames = doc_.scene().timelineFrames();
+    const std::size_t frames = doc_.timelineFrames();
     if (frames > 0 && current_slot_ >= frames) {
         current_slot_ = frames - 1;
         Q_EMIT currentSlotChanged(current_slot_);
@@ -218,13 +339,13 @@ void TimelineWidget::refresh() {
 }
 
 QSize TimelineWidget::sizeHint() const {
-    const int frames = static_cast<int>(doc_.scene().timelineFrames());
+    const int frames = static_cast<int>(doc_.timelineFrames());
     const int rows = static_cast<int>(std::max<std::size_t>(rowCount(), 1));
     return {kGutterWidth + (frames + 2) * kCellWidth, kRulerHeight + rows * kRowHeight};
 }
 
 std::size_t TimelineWidget::slotAt(int x) const {
-    const std::size_t frames = doc_.scene().timelineFrames();
+    const std::size_t frames = doc_.timelineFrames();
     if (frames == 0) return 0;
     const int index = std::clamp((x - kGutterWidth) / kCellWidth, 0, static_cast<int>(frames) - 1);
     return static_cast<std::size_t>(index);
@@ -335,7 +456,7 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     font.setPointSizeF(8.5);
     painter.setFont(font);
 
-    const std::size_t frames = doc_.scene().timelineFrames();
+    const std::size_t frames = doc_.timelineFrames();
     const std::size_t shot = doc_.scene().shotFrames();
 
     // The ruler, once, across the whole width: it is the scene's time and not
@@ -349,6 +470,20 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     }
 
     for (std::size_t row = 0; row < rowCount(); ++row) {
+        // **Asked for rather than dereferenced**, which is the one line in this
+        // file that a soundtrack row would otherwise have walked straight off
+        // the end of. trackAt already answered null past the end; what changed
+        // is that there is now something after the end.
+        if (const AudioTrack* sound = audioAt(row)) {
+            AudioRowPaint band;
+            band.top = rowTop(row);
+            band.current = sound->id == audio_row_;
+            band.name = QString::fromStdString(sound->name);
+            band.gain = sound->gain;
+            std::tie(band.first, band.last) = audioExtent(*sound);
+            paintAudioRow(painter, colours, band);
+            continue;
+        }
         const Track& line = *trackAt(row);
         const int top = rowTop(row);
         const bool is_current = line.id == track_;
@@ -515,8 +650,36 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
 
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return;
+
+    // **A soundtrack row moves the highlight and leaves the brush where it
+    // was.** Handing this id to setTrack would call findTrack with something
+    // that is not a Track: the canvas, the panel and the menus would all find
+    // nothing to point at, the brush would stop working, and nothing would say
+    // why. See docs/importing.md, "the two selections".
+    if (const AudioTrack* sound = audioAt(row)) {
+        audio_row_ = sound->id;
+        update();
+        // The name strip is the handle for nothing here -- a soundtrack has no
+        // compositing order, so there is no restack to start -- and the rest of
+        // the row is the level.
+        if (x >= kGutterWidth) {
+            dragging_gain_ = true;
+            gain_track_ = sound->id;
+            gain_row_ = row;
+            // One command for the whole drag, as the exposure stretch does:
+            // nested commands collapse, so a level found by ear undoes in a
+            // single step rather than in fifty.
+            doc_.beginCommand("Set level");
+            applyGain(y);
+        }
+        return;
+    }
+
     const Track* line = trackAt(row);
     if (!line) return;
+
+    // Selecting a drawing row puts the highlight back on it.
+    audio_row_ = kNoId;
 
     // Pressing anywhere in a row selects its track. Selecting is what a row is
     // for, and requiring people to find the name strip to do it would make the
@@ -596,6 +759,14 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    // The level follows the pointer's height wherever it goes sideways: a drag
+    // that wandered out of its row is still the drag it started as, and letting
+    // go of the level because the hand moved along would be maddening.
+    if (dragging_gain_) {
+        applyGain(y);
+        return;
+    }
+
     // A row is picked up by moving *down or up* the strip, where a drawing is
     // picked up by moving along it. Neither can start the other: they begin on
     // different sides of the gutter.
@@ -667,11 +838,16 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 // The boundary between rows nearest y: 0 is above the first row, rowCount() is
 // below the last. A boundary and not a row, because a drop lands *between* two
 // rows and there is one more of those than there are rows.
+// **Bounded by the drawing rows and not by all of them.** Soundtracks sit
+// under every track and are not part of the compositing stack, so there is no
+// boundary below them to drop a track on -- and `moveTrack` counts in
+// `scene.tracks`, so a caret that reached into the audio rows would hand it an
+// index past the end of the list it indexes.
 int TimelineWidget::trackDropRowFor(int y) const {
-    if (rowCount() == 0) return 0;
+    if (drawingRowCount() == 0) return 0;
     const int at = static_cast<int>(
         std::lround(static_cast<double>(y - kRulerHeight) / kRowHeight));
-    return std::clamp(at, 0, static_cast<int>(rowCount()));
+    return std::clamp(at, 0, static_cast<int>(drawingRowCount()));
 }
 
 // What the row is, and what it does with a drawing put down on it.
@@ -683,6 +859,19 @@ int TimelineWidget::trackDropRowFor(int y) const {
 // status bar still says it about the track being edited.
 void TimelineWidget::refreshTooltip(int x, int y) {
     std::size_t row = 0;
+    if (rowAtY(y, &row)) {
+        if (const AudioTrack* sound = audioAt(row)) {
+            // On the whole row rather than the gutter only. A track's tooltip
+            // is on its name because the cells beside it are full of drawings
+            // to say things about; a soundtrack's row has one thing in it, and
+            // "drag this up and down" is not discoverable from a coloured bar.
+            setToolTip(QStringLiteral("%1\n\nDrag up or down to set the level. "
+                                      "At the bottom it is silent.\n"
+                                      "Audio is not exported.")
+                           .arg(QString::fromStdString(sound->name)));
+            return;
+        }
+    }
     const Track* line = (x < kGutterWidth && rowAtY(y, &row)) ? trackAt(row) : nullptr;
     if (!line) {
         setToolTip(QString());
@@ -717,6 +906,15 @@ Qt::CursorShape TimelineWidget::cursorAt(int x, int y) const {
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return Qt::ArrowCursor;
 
+    // A soundtrack's row. Its name strip picks nothing up -- there is no
+    // compositing order to restack -- and the rest of it is the level, dragged
+    // up and down. The pointer says which of those two it is before the hand
+    // arrives, which is what stops the open hand promising a restack that
+    // cannot happen here.
+    if (isAudioRow(row)) {
+        return x < kGutterWidth ? Qt::ArrowCursor : Qt::SizeVerCursor;
+    }
+
     // The name strip, which the row is restacked by. The hand still means one
     // thing -- this can be picked up and moved -- and now there are two things
     // it is true of: a drawing along its track, and a track up its stack.
@@ -748,7 +946,9 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         // counts the destination with the row already taken out. Dropping a row
         // on either of its own edges is a move to where it already is, and both
         // land on `from` here rather than needing a case of their own.
-        const int rows = static_cast<int>(rowCount());
+        // The drawing rows, for trackDropRowFor's reason: this is an index
+        // into scene.tracks and the soundtrack rows are not in it.
+        const int rows = static_cast<int>(drawingRowCount());
         if (boundary >= 0 && rows > 1) {
             const int to = std::clamp(boundary > from ? boundary - 1 : boundary, 0, rows - 1);
             if (to != from) {
@@ -810,6 +1010,15 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         scrubbing_ = false;
         return;
     }
+
+    if (dragging_gain_) {
+        dragging_gain_ = false;
+        gain_track_ = kNoId;
+        doc_.endCommand();
+        Q_EMIT documentChanged();
+        return;
+    }
+
     if (!stretching_) return;
     stretching_ = false;
     refreshCursor(x, y);
@@ -828,6 +1037,12 @@ void TimelineWidget::abandonGesture() {
     }
     if (stretching_) {
         stretching_ = false;
+        doc_.endCommand();
+        Q_EMIT documentChanged();
+    }
+    if (dragging_gain_) {
+        dragging_gain_ = false;
+        gain_track_ = animage::kNoId;
         doc_.endCommand();
         Q_EMIT documentChanged();
     }
@@ -871,6 +1086,12 @@ bool TimelineWidget::renameAt(int x, int y) {
     if (x >= kGutterWidth) return false;
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return false;
+    // Renaming a soundtrack is not built. Refused here rather than left to
+    // beginRenaming's own null check, because a double click that opened an
+    // editor over a soundtrack's name and then wrote the result to a *track*
+    // is the shape of failure this whole two-selections arrangement exists to
+    // prevent -- and beginRenaming looks the row up in the track list.
+    if (isAudioRow(row)) return false;
     beginRenaming(row);
     return true;
 }

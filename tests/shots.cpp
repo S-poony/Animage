@@ -110,6 +110,7 @@
 #include <QScrollBar>
 #include <QStatusBar>
 #include <QTimer>
+#include <QFile>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLayout>
@@ -581,6 +582,47 @@ private:
 // A board with a number on it, for the sequence shots. The number is the point:
 // a sequence photographed with three identical pictures cannot show whether the
 // playhead is looking at the frame it says it is.
+// A 16-bit PCM WAV of a sine, written by hand: forty-four bytes of header and
+// the samples after it. Built here rather than committed as a binary, for
+// writeSwatchGrid's reason -- a situation that makes its own input cannot be
+// broken by somebody tidying away a file nothing appears to reference.
+void writeTone(const QString& path, double seconds) {
+    constexpr int kRate = 48000;
+    const int frames = static_cast<int>(kRate * seconds);
+
+    const auto put32 = [](QByteArray& out, quint32 v) {
+        for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+    const auto put16 = [](QByteArray& out, quint16 v) {
+        for (int i = 0; i < 2; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+
+    QByteArray data;
+    for (int i = 0; i < frames; ++i) {
+        const auto v = static_cast<qint16>(
+            std::lround(0.4 * 32767.0 * std::sin(2.0 * M_PI * 440.0 * i / kRate)));
+        put16(data, static_cast<quint16>(v));
+    }
+
+    QByteArray out;
+    out.append("RIFF");
+    put32(out, static_cast<quint32>(36 + data.size()));
+    out.append("WAVEfmt ");
+    put32(out, 16);
+    put16(out, 1);              // PCM
+    put16(out, 1);              // mono
+    put32(out, kRate);
+    put32(out, kRate * 2);      // byte rate
+    put16(out, 2);              // block align
+    put16(out, 16);             // bits
+    out.append("data");
+    put32(out, static_cast<quint32>(data.size()));
+    out.append(data);
+
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly)) file.write(out);
+}
+
 bool writeNumberedBoard(const QString& path, int number) {
     QImage board(640, 400, QImage::Format_RGBA8888);
     board.fill(QColor(246, 244, 238));
@@ -931,6 +973,39 @@ const std::vector<Situation>& situations() {
              }());
              s.settle();
              s.choose("Apply");
+             s.settlePicture();
+         }},
+
+        {"a-soundtrack-in-the-timeline",
+         "the soundtrack is a row under every drawing row, with the sound drawn where it sits "
+         "in the shot -- a block from frame 5 to the end of the clip, filled to its level, with "
+         "the level said as a number too. No waveform: a labelled bar is enough to place a "
+         "sound, and peaks would be a second derived thing to build before anything is audible",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);  // 24 frames at 24 fps
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+         }},
+
+        {"a-soundtrack-turned-down",
+         "the same row with the level dragged most of the way down. The block stays visible at "
+         "any level including none -- a row that vanished when it was silenced would be a row "
+         "nobody could grab to bring back -- and the height of the fill is the number",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             animage::Document& doc = s.window.documentForTesting();
+             if (!doc.scene().audio_tracks.empty()) {
+                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, 4, 0.2);
+             }
              s.settlePicture();
          }},
 

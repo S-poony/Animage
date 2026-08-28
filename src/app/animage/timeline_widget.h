@@ -32,10 +32,26 @@ class TimelineWidget : public QWidget {
 public:
     explicit TimelineWidget(animage::Document& document, QWidget* parent = nullptr);
 
-    // Which track is being edited. Clicking a row is the other way this changes,
-    // and either way it is reported by trackChanged.
+    // Which track is being edited. Clicking a *drawing* row is the other way
+    // this changes, and either way it is reported by trackChanged.
+    //
+    // **This is one of two selections and it is the narrow one.** Five things
+    // read it -- the canvas, the layer panel, the Track menu, the drawing
+    // buttons and the status bar -- and every one of them wants a real `Track`.
+    // Clicking an audio row leaves it exactly where it was, which is why there
+    // is a second selection below rather than a guard in five places. See
+    // docs/importing.md, "the two selections".
     void setTrack(animage::TrackId track);
     animage::TrackId track() const { return track_; }
+
+    // Which row is highlighted, when that row is a soundtrack rather than a
+    // track. `kNoId` means a drawing row is highlighted and `track()` says
+    // which.
+    //
+    // The wide selection: it may name something that is not a `Track` at all,
+    // so nothing that needs a `Track` may read it. What it drives today is the
+    // painting; what it will drive is the properties panel.
+    animage::TrackId highlightedAudio() const { return audio_row_; }
 
     void setCurrentSlot(std::size_t slot);
     std::size_t currentSlot() const { return current_slot_; }
@@ -90,11 +106,27 @@ private:
     // instead of landing wherever the pointer happened to be.
     void abandonGesture();
 
+    // **Rows are drawing tracks first and soundtracks under all of them.** A
+    // soundtrack has no compositing order, so letting one be dragged into the
+    // middle of the stack would imply a depth it does not have -- and putting
+    // them last means every row index a drawing track has is the index it
+    // always had.
+    //
+    // `trackAt` answers null for a soundtrack's row, which is not a special
+    // case bolted on: it already answered null for a row past the end, so every
+    // call site that was written to survive that survives this too. The one
+    // that dereferenced without asking is the paint loop, and it now asks.
     const animage::Track* trackAt(std::size_t row) const;
+    const animage::AudioTrack* audioAt(std::size_t row) const;
+    bool isAudioRow(std::size_t row) const { return audioAt(row) != nullptr; }
+
     const animage::Track* currentTrack() const;
     // Which row a track is in, and how many there are.
     std::size_t rowOf(animage::TrackId track) const;
-    std::size_t rowCount() const { return doc_.scene().tracks.size(); }
+    std::size_t drawingRowCount() const { return doc_.scene().tracks.size(); }
+    std::size_t rowCount() const {
+        return drawingRowCount() + doc_.scene().audio_tracks.size();
+    }
 
     // The row under a y, clamped to a real row; false if y is in the ruler.
     bool rowAtY(int y, std::size_t* row) const;
@@ -173,9 +205,44 @@ private:
     void applyStretch(int pointer_x);
     int dropIndexFor(int pointer_x) const;
 
+    // --- a soundtrack's row -------------------------------------------------
+    //
+    // **The bar is painted here and hit-tested here, and is not a QSlider.**
+    // A widget placed on a row disables that row's own hit testing -- the trap
+    // this file already records for the rename editor and the layer panel
+    // already paid for. A real slider would work, and everything else in that
+    // row would stop responding.
+    //
+    // The axis is free, which is worth knowing rather than discovering: in a
+    // drawing row a horizontal drag moves a drawing and a vertical drag in the
+    // gutter restacks the track. A soundtrack row has no cards to pick up, so a
+    // vertical drag inside it collides with nothing.
+
+    // Where the sound sits, in slots: [first, last). Empty when the clip has
+    // not decoded or the track is silent-length.
+    std::pair<std::size_t, std::size_t> audioExtent(const animage::AudioTrack& sound) const;
+
+    // The gain a press or drag at `y` in this row means. Clamped to 0..1, and
+    // measured from the *bottom* of the row: the bar's height in the row is the
+    // level, so at the bottom it is silent and no separate mute is needed.
+    double gainForY(std::size_t row, int y) const;
+    void applyGain(int pointer_y);
+
     animage::Document& doc_;
     animage::TrackId track_ = animage::kNoId;
+
+    // The second selection. See highlightedAudio(): kNoId means the highlighted
+    // row is a drawing row, and `track_` says which.
+    animage::TrackId audio_row_ = animage::kNoId;
+
     std::size_t current_slot_ = 0;
+
+    // Dragging a soundtrack's bar up and down sets its gain. One command for
+    // the whole drag, as the exposure stretch does, so a level found by ear
+    // undoes in a single step rather than in fifty.
+    bool dragging_gain_ = false;
+    animage::TrackId gain_track_ = animage::kNoId;
+    std::size_t gain_row_ = 0;
 
     bool stretching_ = false;
     std::size_t stretch_row_ = 0;

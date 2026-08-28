@@ -4,6 +4,9 @@
 #include <QDialog>
 #include <QString>
 
+#include <cstddef>
+
+class QCheckBox;
 class QSpinBox;
 
 // What File ▸ Import ▸ Audio… asks before it adds a soundtrack.
@@ -38,6 +41,15 @@ public:
         int scene_fps = 24;       // to say the length in frames as well as seconds
         qint64 file_bytes = 0;    // what is on disk, to compare against
         QString trouble;          // a decode that succeeded with something to say
+
+        // How long the sound runs, in frames of picture, and how long the shot
+        // is now. Together these decide whether the shot needs lengthening at
+        // all -- see `extend_shot` below.
+        std::size_t sound_frames = 0;
+        std::size_t shot_frames = 0;
+        // Whether the scene has been *told* how long the shot is, as against
+        // taking it from whatever the tracks add up to.
+        bool length_is_fixed = false;
     };
 
     struct Answer {
@@ -49,6 +61,29 @@ public:
         // The box lets that in rather than clamping, because refusing it would
         // refuse an ordinary thing to want.
         int start_frame = 1;
+
+        // Whether to make the shot reach the end of the sound.
+        //
+        // **The box appears only when it would change something, and is ticked
+        // only when nothing has decided the length yet.** Three cases, and the
+        // rule reads the same in all of them:
+        //
+        // - the sound fits inside the shot: no box at all, because there is
+        //   nothing to offer;
+        // - the sound runs past a shot whose length nobody has fixed: ticked,
+        //   because a shot being made up as it goes has no length yet and the
+        //   sound is the thing being animated to;
+        // - the sound runs past a length somebody has fixed: offered and *not*
+        //   ticked. Saying how long the shot is is a decision, and an import
+        //   has no business overruling one that has already been made.
+        //
+        // Why it matters at all: playback derives its slot from
+        // `Scene::shotFrames`, so a three-second soundtrack in a shot of one
+        // drawing plays one frame and stops. Widening the timeline lets the
+        // playhead be dragged over the sound; only this lets Play run it.
+        // `scene.h` names animating to a soundtrack as the case `fixed_length`
+        // exists for.
+        bool extend_shot = false;
     };
 
     AudioImportDialog(const Found& found, int playhead_frame, QWidget* parent = nullptr);
@@ -57,4 +92,5 @@ public:
 
 private:
     QSpinBox* start_ = nullptr;
+    QCheckBox* extend_ = nullptr;  // absent when the sound already fits
 };

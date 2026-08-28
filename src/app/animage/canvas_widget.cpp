@@ -533,7 +533,13 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // tracks have, and there is nothing here to draw on until one is added.
     // Everything reachable, not just the shot: a track may run past a fixed
     // scene length, and those drawings are still there to be worked on.
-    const std::size_t frames = doc_.scene().timelineFrames();
+    //
+    // The document's answer and not the scene's, so that a soundtrack running
+    // past the drawings is reachable too. If this clamped tighter than the
+    // timeline does, the playhead would be in two places at once: the strip
+    // would show it out over the sound and the canvas would be showing an
+    // earlier frame.
+    const std::size_t frames = doc_.timelineFrames();
     slot_ = (frames == 0) ? 0 : std::min(slot, frames - 1);
 
     // What the track *holds* here, not what it shows. Past its last drawing

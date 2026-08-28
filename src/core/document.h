@@ -188,6 +188,24 @@ public:
     // same ids.
     void forgetAudioSamples();
 
+    // How far the timeline reaches: `Scene::timelineFrames`, widened by any
+    // soundtrack that runs past it.
+    //
+    // **Here and not on the Scene, because the Scene cannot answer it.** A
+    // soundtrack's length is its decoded clip's, and a clip is derived data
+    // held on this class -- so the one object that knows both the tracks and
+    // the sound is this one.
+    //
+    // **And it widens the timeline without touching the shot**, which is
+    // exactly the split `Scene::shotFrames` and `Scene::timelineFrames` already
+    // make: everything that draws or scrubs wants this one, everything that
+    // plays or writes files wants `shotFrames`. Importing three seconds of
+    // dialogue into a shot with one drawing in it is the *ordinary* first move
+    // of a lipsync shot, and a playhead that could not be dragged onto the
+    // sound would make the whole feature unusable -- while a shot that grew to
+    // the length of its reference would export twenty seconds of blank frames.
+    std::size_t timelineFrames() const;
+
     // Restacks a track: index 0 is the top row of the timeline and the top group
     // of the composite. `to` is counted in the list with the track already taken
     // out of it, which is the same convention moveLayer uses and is what makes
