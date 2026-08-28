@@ -11,12 +11,18 @@ what shape a sequence is stored in — have both been answered, and the answer t
 the first changed the answer to the second. They are settled in place below
 rather than in an appendix, with what decided them.
 
-> **The first two items are built: a single image imports and can be placed, and
-> so can a sequence.** This note stays a plan and is not rewritten into a
-> description — what was built is recorded in ["importing a
-> picture"](handover.md#importing-a-picture) and ["importing a
-> sequence"](handover.md#importing-a-sequence), which is where a reader who
+> **Three of the four imports are built, and audio is most of the way.** A
+> single image imports and can be placed, so can a sequence, and a soundtrack
+> imports, saves, and has a row it can be moved and cropped in — it does not yet
+> make a noise. This note stays a plan and is not rewritten into a description:
+> what was built is recorded in ["importing a
+> picture"](handover.md#importing-a-picture), ["importing a
+> sequence"](handover.md#importing-a-sequence) and ["importing a
+> soundtrack"](handover.md#importing-a-soundtrack), which is where a reader who
 > wants the code should start. Read this one for *why*, and those for *what*.
+>
+> What taking Qt Multimedia actually cost — measured before a line of audio was
+> written, because this note said to — is [audio-spike.md](audio-spike.md).
 >
 > Three things this note predicted are worth knowing before trusting the rest of
 > it, because they are the evidence its remaining predictions rest on. The
@@ -64,6 +70,7 @@ call twice over, and this note leans on it.
 | [Where an import lands](#where-an-import-lands) | bottom, in import order |
 | [What the export says](#what-the-export-says) | a recap, which fixes something already broken |
 | [The project folder and the file format](#the-project-folder-and-the-file-format) | |
+| [**What was built that this note did not plan**](#what-was-built-that-this-note-did-not-plan) | the shot's length, and moving and cropping a sound |
 | [**What the spike measured**](#what-the-spike-measured) | and the two things in this note it corrects |
 | [**What the handover already knows about this**](#what-the-handover-already-knows-about-this) | the traps this note would otherwise walk into |
 | [Not in scope](#not-in-scope) | |
@@ -100,7 +107,10 @@ Three things follow from that and they are worth stating before anything else:
 
 ## The order of work
 
-1. **Audio**, because it is what the shot is for.
+1. ~~**Audio**~~ — **built as far as it can go without a device.** The model,
+   the sync arithmetic, the import, the format, the row, and moving and cropping
+   the sound in it. What is left is `AudioDevice` and the scrub. See
+   ["importing a soundtrack"](handover.md#importing-a-soundtrack).
 2. ~~**A single image**~~ — **built**, and it did build most of 3: the layer
    kind, the derive step, the cache, the placement, the format and the
    `imports/` folder all exist. See
@@ -1290,6 +1300,44 @@ Three ways to lose work quietly, behind one number.
 The incremental save is unaffected and cheaply so. A converted import's cels have
 revisions like any others, so after the first write they are carried forward as
 hard links and cost nothing; an unconverted one has no cels to carry.
+
+## What was built that this note did not plan
+
+Two things, both on the user's call and both worth recording here rather than
+only in the handover, because each one answers a question this note asks and
+answers differently.
+
+**The shot can be told to reach the sound.** This note has audio never touching
+the shot's length, and that is right as far as it goes — a soundtrack running
+long is reference, and a scene that grew when one was imported would take the
+shot's length from the wrong thing. What it missed is that
+[`onPlaybackTick`](#the-playback-clock) derives its slot from `shotFrames`: a
+one-second soundtrack in a shot of one drawing plays *one frame* and stops, so
+the feature this whole note is written around does not work. Widening the
+timeline lets the playhead be dragged over the sound and does nothing for Play.
+
+So the import dialog offers it, with a rule: **the box appears when it would
+change something, and is ticked only when nothing has decided the length yet.**
+`scene.h` already named animating to a soundtrack as the case `fixed_length`
+exists for, which is the part this note could have found and did not.
+
+**A soundtrack can be moved and cropped in its row, finer than a frame.** Not in
+this note at all. Dragging the block sideways moves the sound; dragging its ends
+crops it, non-destructively, by moving two numbers and touching no samples. The
+placement is fractional because 1/24 of a second is 42 ms — most of the way to a
+syllable — so a sound placed to the nearest frame is not placed at all.
+
+That last point is a correction to something this note *does* say. [Audio is not
+a track](#audio-is-not-a-track) observes that "the axis is free" in a soundtrack
+row, meaning a vertical drag collides with nothing. Both axes turned out to be
+wanted: sideways moves, up and down is the level, and the ends crop.
+
+**None of it is shared with video, and that is a decision.** A video is
+[extracted to frames at import](#video-is-a-sequence-with-a-decoder-in-front),
+so its row is a track row with cards — moving it is a slot operation, cropping
+it is which drawings exist, and it wants no sub-frame placement. The reuse point
+would be the gesture code and not the data, so nothing has been pre-shaped for
+it.
 
 ## What the spike measured
 

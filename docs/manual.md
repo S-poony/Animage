@@ -361,6 +361,52 @@ landed on nothing — and it was taken out because it fired on drawings whose
 colour was perfectly good. What it was measuring, and why the measurement cannot
 carry a flag, is in [handover.md](handover.md).
 
+## Importing a soundtrack
+
+**File ▸ Import ▸ Audio…** brings in a `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`
+or `.opus`. The file is copied into the project, so the project goes on working
+after you move or delete the original.
+
+**It does not play yet.** You can place it, see it and crop it; the sound itself
+is the next thing being built.
+
+The dialog says how long the sound is **in frames** as well as in seconds —
+which frame a sound is on is the whole of lipsync — and asks one thing: which
+frame it starts on. **Before frame 1 is allowed**, and it is what you want when
+a line of dialogue has a breath in front of the word: put the word on frame 1
+and let the breath fall off the start.
+
+If the sound runs past the end of your shot, the dialog offers to **make the
+shot reach the end of the sound**. It is ticked when nothing has said how long
+the shot is, and offered unticked when you have already set a length — an import
+will not overrule a decision you made. It never makes the shot *shorter*.
+
+### The soundtrack's row
+
+A soundtrack gets a row under every drawing row. The block in it is where the
+sound sits in the shot, and it does three things:
+
+| gesture | what it does |
+|---|---|
+| drag the block **sideways** | moves the sound along the shot |
+| drag the block **up or down** | sets the level — the height of the fill *is* the level, and at the bottom it is silent |
+| drag either **end** | crops the sound, without changing the file |
+
+Nothing snaps to whole frames. A frame at 24 fps is 42 milliseconds, which is
+most of the way to a syllable, so placing a sound to the nearest frame is not
+placing it — the drag is as fine as the pixels are.
+
+**Cropping takes nothing away.** It moves two numbers, so the whole take is
+still there: drag the end back out and it returns. Cropping the front does not
+move the rest of the sound — the audio under every frame you kept is the audio
+that was there before.
+
+**Clicking a soundtrack's row does not change which track you are drawing on.**
+The row is highlighted, the brush stays where it was.
+
+**Audio is not exported.** It is there to animate against; an exported sequence
+has no sound in it.
+
 ## Exporting
 
 **Exporting.** File ▸ Export sequences asks what to write — a sequence per

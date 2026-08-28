@@ -36,6 +36,7 @@ the shape of the program. Those five maps are.
 | [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
 | [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
 | [**Importing a sequence**](#importing-a-sequence) | which frame a drawing shows, a bounded cache, and a decode the paint asks for |
+| [**Importing a soundtrack**](#importing-a-soundtrack) | its own list, two selections, a row you can move and crop, and the one line lipsync rests on |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -3252,10 +3253,11 @@ generation counter included.
 - **Video.** A sequence with a decoder in front of it and no new storage at all:
   extracted to frames once, at import, so `QMediaPlayer` never reaches the paint
   path. The shape is settled in [importing.md](importing.md).
-- **Audio**, which is what the shot is for and is blocked on nothing here. The
-  deployment spike is **done** — see [what taking Qt Multimedia
-  costs](#what-taking-qt-multimedia-costs) — so what is left is the audio layer
-  itself.
+- **Playing a soundtrack.** Importing one is built and so is its row — see
+  [importing a soundtrack](#importing-a-soundtrack) — and the deployment spike
+  is done ([what taking Qt Multimedia
+  costs](#what-taking-qt-multimedia-costs)). What is left is `AudioDevice` and
+  the scrub.
 - **Convert to drawings**, which is the way back — an import cannot be a CTG
   barrier, so colouring imported line art needs it. Whole layer, on a popup, and
   it is `Document::transformLayer`'s loop with a decode where the resample is:
@@ -3476,6 +3478,286 @@ gives up is named there rather than dropped.
   [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
   sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
   layers.
+
+## Importing a soundtrack
+
+**File ▸ Import ▸ Audio.** A sound comes in, is decoded, is copied into the
+project, and gets a row in the timeline it can be moved and cropped in. **It
+does not play yet** — the device is not built, and what that leaves is set out
+at the end of this section.
+
+Why audio is not a `Track`, what scrubbing is for and what the playback clock
+has to be derived from is [importing.md](importing.md). What taking Qt
+Multimedia cost, measured before a line of this was written, is
+[audio-spike.md](audio-spike.md). This is what was built.
+
+### Audio is its own list, and that is what keeps everything else meaning what it meant
+
+`Scene::audio_tracks` sits beside `Scene::tracks` rather than being a kind of
+one. The specification has it that way and the code makes it sharper: `Track`
+carries layers, slots, an image map, drawing numbers, `overwrite_drawings`,
+`TrackEnd`, `blend`, `celSourceFor` and `nearestWithCel`, and audio answers *not
+applicable* to every one. About twenty places walk `scene.tracks`; a kind flag
+would put a guard in all of them.
+
+`theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem` asserts the property
+that argument rests on rather than assuming it — adding a soundtrack leaves
+`scene.tracks` empty, so every one of those loops is untouched.
+
+**It does not enter `shotFrames`.** A shot's length is what the drawings make it
+or what the scene was told; a soundtrack running long is reference, and a scene
+that grew when one was imported would be taking the shot's length from the wrong
+thing. What it *does* enter is `Document::timelineFrames` — see below.
+
+### The one line that will make lipsync right, built before anything can play it
+
+`slotForPlayedFrames` derives the picture's slot from how much audio has come
+out of the device, replacing a slot derived from the system clock. Three of the
+four ways two clocks come apart stop existing rather than being separately
+corrected: the device's output latency is already inside the count, a loop seam
+wraps both together because there is only one number, and an interface stall
+cannot reach a number that is not counted on that thread.
+
+**It takes the sample count as an argument, and that is a requirement rather
+than a style.** The runners have no audio device, so anything opening one there
+fails or hangs — which means the arithmetic the whole of lipsync rests on is
+exactly the part that could never be tested if it lived inside something owning
+a `QAudioSink`. `test_audio` drives it with a fake and pins the loop seam and
+the stall case on every platform on every push, with no hardware at all. The
+precedent is `exporting::Solve`.
+
+Four things in it that are not obvious, each of which was a bug avoided rather
+than a style choice:
+
+- **`played * fps / rate` in one step.** Going through whole milliseconds
+  truncates a fortieth of a frame away on every tick.
+- **A count that goes backwards is clamped.** A driver misreporting across a
+  restart would otherwise turn a small negative into a colossal slot through the
+  unsigned arithmetic — a picture on a random frame, which is much harder to
+  recognise as a fault than a picture that has stopped.
+- **`sampleForSlot` floors rather than truncates.** Truncation rounds towards
+  zero, so a slot a fraction *before* the sound would come back as sample 0:
+  audible, on a frame that should be silent, and only on the negative side.
+- **A negative index says how far before the sound the slot is**, rather than
+  being a sentinel. A caller plays silence until it reaches zero and then reads
+  on, which is what a sound placed halfway into a frame needs.
+
+### It decodes on the way in, where a picture does not
+
+A sequence points its drawings at files and lets the paint ask for them, because
+two hundred decodes on the interface thread is not a thing to do. A soundtrack
+cannot: what would ask for it later is a device callback that must never wait on
+a disk. So `audio_import::decode` reads the whole file before the track exists —
+one file, tens of milliseconds — which is also what lets the recap say how long
+the sound is.
+
+It runs a **nested event loop**, because `QAudioDecoder` is asynchronous by
+construction and there is no call that returns samples. The header says why that
+is safe here and where it would not be. Three things in it are bugs if dropped:
+
+- **Every buffer is read at its own format.** Setting a format is a request; a
+  backend may hand back its own, and reading Int16 bytes as Float is a scream
+  through somebody's headphones.
+- **A silence timeout.** A backend that fails in a way it has no error for
+  simply stops emitting, and the loop would otherwise spin for ever behind a
+  modal dialog — which from the outside is the program hanging on a file
+  somebody double-clicked.
+- **Int16 divides by 32768, not 32767**, or a full-scale negative sample comes
+  out past −1.0 and clips on the way to the device.
+
+The decoded `AudioClip` is **derived data on the `Document`**, like a reference
+frame's tiles and for the same bargain: losing it costs a decode of a file
+sitting in the project folder. It is unbounded unlike the reference cache,
+because a shot's worth of PCM is single-digit megabytes where one HD picture
+frame is 17. `refreshAudioSamples` re-decodes after a load and nowhere else.
+
+### The timeline reaches the sound; the shot is asked before it does
+
+Two different questions, and the split is what makes both answers right.
+
+`Document::timelineFrames` is the scene's own answer widened by any decoded
+soundtrack. **It is on the Document because the Scene cannot answer it** — a
+clip is derived data held here, so this is the one object that knows both the
+tracks and the sound. The canvas and `stepFrame` moved onto it too, or the
+playhead would be in two places at once: the strip showing it out over the sound
+and the canvas showing an earlier frame.
+
+The **shot** is a separate matter, and importing asks. Playback derives its slot
+from `Scene::shotFrames`, so a one-second soundtrack in a shot of one drawing
+played one frame and stopped — widening the timeline lets the playhead be
+*dragged* over the sound and does nothing for Play. So the import dialog offers
+to make the shot reach the end of the sound, and the rule is:
+
+> **The box appears when it would change something, and is ticked only when
+> nothing has decided the length yet.**
+
+No box when the sound fits; ticked when no length is fixed; offered and unticked
+when one is — saying how long a shot is is a decision, and an import has no
+business overruling one already made. It never *shortens* the shot, whatever
+offset is picked: the box says "reach the end of the sound", and a shot that
+shrank would take drawings out of the export.
+
+`scene.h` already named animating to a soundtrack as the case `fixed_length`
+exists for, which is worth knowing before arguing with any of this.
+
+### Two selections where the timeline had one
+
+`MainWindow::track_` is read by five things — the canvas, the layer panel, the
+Track menu, the drawing buttons and the status bar — and every one of them wants
+a real `Track`. Clicking an audio row through the old path would have handed
+`findTrack` an id that is not one: nothing to point at, the brush stops working,
+and nothing says why.
+
+So the timeline has a **narrow selection** (`track()`, only ever a drawing
+track) and a **wide one** (`highlightedAudio()`, which may name something that
+is not a `Track` at all and therefore may not be read by anything needing one).
+Clicking a soundtrack row moves the highlight and leaves the brush where it was.
+
+**Three things a soundtrack row walks into**, found by auditing every place that
+assumed a row is a track:
+
+- The paint loop dereferenced `trackAt` without asking. Every other call site
+  already guarded — `trackAt` has always answered null past the end, and what
+  changed is only that there is now something *after* the end.
+- Restacking was bounded by `rowCount()`. A drawing row dropped below the
+  soundtracks would hand `moveTrack` an index past the list it indexes, so it is
+  bounded by `drawingRowCount()` now.
+- `renameAt` would have opened an editor over a soundtrack's name and written
+  the result to a track, which is the exact confusion the two selections exist
+  to prevent.
+
+### The row: one shape carrying three facts
+
+Painted by `paintEvent` and hit-tested in `mousePressEvent`, **not a `QSlider`**
+— a widget placed on a row disables that row's own hit testing, which this file
+already records for the rename editor and the layer panel already paid for.
+
+The block is where the sound sits; its *height* is the level, so at the bottom
+it is silent and no separate mute is needed; its *ends* are where the crop is.
+The extent stays visible at any level, because a row that vanished when it was
+silenced would be a row nobody could grab to bring back. No waveform: a labelled
+bar is enough to place a sound, and peaks would be a second derived thing to
+build, bound and invalidate before anything is audible.
+
+### Three gestures, one of them decided rather than chosen
+
+Dragging an end crops. Dragging the body sideways moves the sound along the
+shot. Dragging it up and down sets the level.
+
+The ends are unambiguous and start on the press. The other two share a press and
+are told apart by **which way the pointer goes first** — the same way this file
+already tells a drawing drag (along a row) from a track restack (across one),
+except that both of these start inside the row so the threshold decides rather
+than the side of the gutter.
+
+**A press that never moves opens no command and applies nothing.** Selecting a
+soundtrack must not change it, which the first version got wrong by setting the
+level to wherever the click landed.
+
+**Nothing rounds to a frame**, on the user's call, and there is no snap
+modifier. 1/24 of a second is 42 ms, which is most of the way to a syllable, so
+a sound placed to the nearest frame is not placed at all. A pixel is 1/26 of a
+frame at this cell width, which is the precision the gesture actually has.
+
+Every drag is computed *from* the placement as it was when the press landed,
+never by accumulating deltas — the same reason the transform box holds absolute
+numbers. Accumulating makes the result depend on how many mouse events arrived,
+which is not something a person can aim at.
+
+### Two units, and neither is the other one's
+
+**The offset is in frames and the trim is in seconds.** That is not an
+inconsistency waiting to be tidied: it is what keeps both numbers correct after
+somebody changes the scene's frame rate.
+
+| | is a fact about | so a rate change |
+|---|---|---|
+| `offset_frames` | the shot — you placed the sound so a consonant lands on the drawing at frame 12 | leaves it on that drawing |
+| `trim_start_seconds`, `trim_end_seconds` | the sound — "start 0.3 seconds into the take" | leaves it pointing at the same moment of audio |
+
+In the other units each would drift, and the drift would be invisible until
+somebody wondered why their lipsync had moved.
+
+**Cropping the front moves the in-point and the offset together**, so the audio
+under every remaining frame is the audio that was there before. Moving only the
+trim would slide the whole take earlier, which is a different gesture and not
+this one. `croppingTheFrontMovesTheReadHeadAndNotTheSound` pins it by asserting
+that a given slot hears the same sample before and after a crop.
+
+The crop is **non-destructive by construction**: two numbers, no samples
+touched. It undoes by putting them back and can be taken out to the whole take
+at any point. It is bounded so a frame of audio always survives, because a sound
+trimmed to nothing draws no block and a row with no block is one nobody can take
+hold of.
+
+### On disk
+
+`audio/` in the project folder, carried forward by every save exactly as
+`imports/` is and for the identical reason: nothing in the document can rebuild
+a sound. The carry-forward is now **one function run twice** rather than a loop
+written twice, which is this repository's own rule about extracting when the
+second caller arrives.
+
+`imports/` and `audio/` are two namespaces on purpose — a picture and a sound
+may both be called `take-3.x` without either shadowing the other.
+
+**The format version went to 4**, in two steps and for two reasons, both of them
+the same standard: bump when an older build would get it *wrong*, not merely
+when it would not understand.
+
+- **3 is soundtracks.** A build that does not know `audio_tracks` drops the key
+  and autosaves over the project without it — and unlike a cel there is nothing
+  in the document to write it back from, so the file would sit in `audio/`
+  orphaned, with the placement that timed the shot to it gone.
+- **4 is the trim and the fractional offset.** A build reading `offset_frames`
+  as an integer puts a sound placed at frame 12.4 back on frame 12 — 17 ms,
+  which is where a consonant lives — and drops the in and out points entirely,
+  playing whole takes where a line had been cropped out of one.
+
+A project with no sound writes no `audio_tracks` key and an untrimmed sound
+writes no trim, so every file that existed before each step is the same bytes it
+was.
+
+### What it costs
+
+Nothing a save can see: the samples are derived and are never written. In memory
+it is about 384 KB a second of decoded float, which is what the import recap says
+— **beside the size of the file**, because a 799 KB mp3 announcing 7.5 MB reads
+as the program having gone wrong and does not stop reading that way until the two
+numbers are shown together. That was reported from use on the first file
+somebody imported that was not a WAV.
+
+### What is not built
+
+- **The device, and therefore the scrub.** `AudioDevice` — open at rate R,
+  receive a callback asking for N frames, report frames consumed, stop — is the
+  seam [importing.md](importing.md) asks for, and the reason it is a seam is in
+  [audio-spike.md](audio-spike.md): the arithmetic must stay drivable by a fake.
+  `src/app/animage/audio_check.*` and the `--audio-check` flag come out when it
+  lands; they are the deployment spike and their header says so.
+- **Synchronised playback**, which is `slotForPlayedFrames` wired into
+  `onPlaybackTick` in place of the wall clock. The function is built and tested;
+  what is missing is something to ask for a sample count.
+- **A waveform**, deliberately, and **more than one soundtrack** — the model is
+  a list and the row loop walks it, so what is missing is only the interface for
+  a second one.
+- **Renaming a soundtrack.** `renameAt` refuses on an audio row rather than
+  renaming the wrong thing; making it work needs a rename command for audio
+  tracks and nothing else.
+
+### And what a video will not share with this
+
+Worth saying because it looks like it should. A video is [extracted to frames at
+import](importing.md#video-is-a-sequence-with-a-decoder-in-front), so its row is
+a **track row with cards**, not a block: moving it in time is a slot operation
+and cropping it is a question of which drawings exist. Neither reaches
+`AudioPlacement`, and a video does not want sub-frame placement at all.
+
+So the reuse point, if there is one, is the *gesture* code in `TimelineWidget` —
+drag the body to move, drag the ends to crop — and not the data. Pre-shaping the
+model for a second caller whose shape is different would have been reuse in name
+only, against this repository's own rule of extracting when the second caller
+arrives.
 
 ## What a pan costs
 
@@ -6767,15 +7049,32 @@ come off it since the first build, with where the reasoning went:
    the shot is for: a lipsync shot is the thing the note is written around, and
    video is reference for it.
 
-   - **Audio.** Its deployment spike is **done** and cost none of what it was
-     feared to — all three packaging tools bundle a backend unprompted, it
-     weighs about 20 MB and no startup time, and scrubbing needs none of that
-     20 MB. See [what taking Qt Multimedia
-     costs](#what-taking-qt-multimedia-costs). Qt Multimedia still must not go
-     in the root `find_package`, and does not. What is left is the layer
-     itself: the `AudioDevice` seam, a decode to PCM, a row in the timeline
-     with a gain bar painted by `paintEvent`, two selections where the timeline
-     has one, and the scrub.
+   - **Making the sound audible**, which is all that is left of audio. The
+     model, the sync arithmetic, the import, the format, the row and moving and
+     cropping the sound in it are built — see [importing a
+     soundtrack](#importing-a-soundtrack) — and its deployment spike is done and
+     cost none of what it was feared to ([what taking Qt Multimedia
+     costs](#what-taking-qt-multimedia-costs)).
+
+     Two pieces, in this order. **`AudioDevice`**: open at rate R, receive a
+     callback asking for N frames, report frames consumed, stop. It is a seam
+     rather than a `QAudioSink` used directly, and the reason is not insurance
+     against Qt — it is that the arithmetic must stay drivable by a fake on a
+     runner with no sound card, which is what `test_audio` does today and must
+     go on doing. Then **the scrub**: on each frame change while dragging, play
+     about one frame's worth from that position. `sampleForSlot` already answers
+     where to read from, trim and fractional offset included.
+
+     After that, **synchronised playback** is one line —
+     `slotForPlayedFrames` in place of the wall clock in `onPlaybackTick` — and
+     the function is built and tested. What is missing is only something to ask
+     for a sample count.
+
+     Two things to know before starting. `processedUSecs()` counts audio
+     **played out** of the device, measured, so `playedMs()` uses it as it comes
+     with nothing subtracted. And `src/app/animage/audio_check.*` and the
+     `--audio-check` flag come out when the seam lands: they are the spike, and
+     their header says so.
    - **A video**, which is a sequence with a decoder in front and no new
      storage: extracted to frames once, at import, so the decoder never reaches
      the paint path. The one open measurement in the whole note belongs to it —
