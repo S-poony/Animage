@@ -11,10 +11,11 @@ what shape a sequence is stored in — have both been answered, and the answer t
 the first changed the answer to the second. They are settled in place below
 rather than in an appendix, with what decided them.
 
-> **Three of the four imports are built, and audio is most of the way.** *(Since
-> this was written: the sound is audible — scrubbing works — and the row has a
-> waveform, which this note puts out of the first cut below. Both are recorded
-> in the handover; this note is left as it was, being a plan.)* A
+> **Three of the four imports are built, and audio is done.** *(Since this was
+> written: the sound is audible — scrubbing and synchronised playback both work
+> — and the row has a waveform, which this note puts out of the first cut below.
+> All three are recorded in the handover; this note is left as it was, being a
+> plan.)* A
 > single image imports and can be placed, so can a sequence, and a soundtrack
 > imports, saves, and has a row it can be moved and cropped in — it does not yet
 > make a noise. This note stays a plan and is not rewritten into a description:

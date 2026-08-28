@@ -37,7 +37,7 @@ the shape of the program. Those five maps are.
 | [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
 | [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
 | [**Importing a sequence**](#importing-a-sequence) | which frame a drawing shows, a bounded cache, and a decode the paint asks for |
-| [**Importing a soundtrack**](#importing-a-soundtrack) | its own list, two selections, a row you can move and crop, and the one line lipsync rests on |
+| [**Importing a soundtrack**](#importing-a-soundtrack) | its own list, two selections, a row you can move and crop, and the picture derived from the sound rather than from a clock |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
@@ -3591,9 +3591,8 @@ gives up is named there rather than dropped.
 
 **File ▸ Import ▸ Audio.** A sound comes in, is decoded, is copied into the
 project, and gets a row in the timeline it can be moved and cropped in. **It
-does not play yet** — the device that would make a noise is built and so is the
-mixing that feeds it, and nothing has been wired to the playhead. What that
-leaves is set out at the end of this section.
+plays**: dragging the playhead along the ruler scrubs it, and Play carries it
+with the picture. What is left is set out at the end of this section.
 
 Why audio is not a `Track`, what scrubbing is for and what the playback clock
 has to be derived from is [importing.md](importing.md). What taking Qt
@@ -3991,6 +3990,61 @@ Two things in it that are not obvious:
   the two neighbours gives N − 1. Swapping it for nearest-neighbour reddens
   tests that have no resampling in them at all, which is how this was found.
 
+### The scrub, and the burst it is made of
+
+Dragging or clicking in the ruler plays about a frame's worth of sound from
+where the playhead landed. `TimelineWidget::scrubbed` is what fires it, and it
+is **narrower than `currentSlotChanged` on purpose**: stepping frames with the
+arrow keys is what somebody does all day while drawing, and it is not a request
+to hear anything.
+
+**A burst is one frame's worth or 90 ms, whichever is longer.** One frame's
+worth is what [importing.md](importing.md) asks for and at 24 fps it is 42 ms,
+which is under half a syllable — fine while dragging, because each burst is cut
+off by the next, and a blip you cannot tell a *b* from a *d* in the moment you
+stop to listen. 120 ms was the first guess and came back as slightly long from
+the first person to drag a playhead over a line of dialogue. Three milliseconds
+of ramp at each end, because a buffer that starts part-way up a waveform is a
+click on every frame you pass.
+
+### The one line, and the quarter of a second it costs
+
+`onPlaybackTick` derives the picture's slot from `AudioPlayer::playedFrames`
+instead of from `QElapsedTimer::elapsed`, which is the change the whole of
+[the playback clock](importing.md#the-playback-clock) is written about. Three of
+the four ways two clocks come apart stop existing rather than being separately
+corrected, and the loop is one number in two places that cannot disagree —
+`AudioProgram::loop_slots` and `slotForPlayedFrames`'s `% count` — because both
+wrap on the same count of played samples.
+
+**Only when a device is actually running with something to play.**
+`playing_to_audio_` is that condition, and everywhere else the wall clock is
+untouched. "Everywhere else" includes every machine CI runs on, which is why
+`playbackRunsOnAMachineWithNoAudioOutput` exists: the way to get this wrong is
+total — a take waiting for a count that will never move sits on one frame for
+ever — and every arithmetic test would still pass. Forcing `playing_to_audio_`
+true reddens exactly that one test.
+
+**What it costs is visible and is the point.** `playedFrames` is zero until the
+program's first sample is out of the buffer, so the picture holds on the frame
+Play was pressed on for about a buffer — a quarter of a second on the machine
+the spike measured. That hold *is* starting together; a picture that moved first
+would be the error this exists to remove. Two things follow from it:
+
+- **The rate readout is not sampled through the hold.** It counts paints against
+  wall time, and a quarter-second of deliberate stillness inside its first
+  window reads as dropped frames — a warning crying wolf on the one take it
+  should be trusted on.
+- **The wait is bounded.** `kAudioStartWaitMs` is a second, four times the
+  measured buffer, after which the take falls back to the wall clock and the
+  clock restarts so it begins now rather than a second in. What that catches is
+  a driver that accepted the stream and reports nothing.
+
+The readout goes on measuring against the wall clock and deliberately: what it
+asks is whether the *interface* is keeping up, and judging a picture derived
+from the sound against the sound would make the instrument and the thing it
+measures the same number.
+
 ### On disk
 
 `audio/` in the project folder, carried forward by every save exactly as
@@ -4030,14 +4084,13 @@ somebody imported that was not a WAV.
 
 ### What is not built
 
-- **The scrub**, which is the first thing that will make a noise: on each frame
-  change while dragging, about one frame's worth of sound from that position.
-  `AudioDevice` and `renderAudio` are both built and are what it is made of —
-  see above — so what is missing is the part that decides *when* a burst
-  happens and holds the device open while somebody is working.
-- **Synchronised playback**, which is `slotForPlayedFrames` wired into
-  `onPlaybackTick` in place of the wall clock. Both halves are built and tested;
-  what is missing is a device that is running, to ask for the sample count.
+- **A manual sync offset**, which [importing.md](importing.md) defers on the
+  user's call and this has not needed. What survives the subtraction is a
+  constant per machine and per driver, and the spike measured two drivers on one
+  machine twelve milliseconds apart — a third of a frame. It is a preference and
+  not a project setting, so adding it later touches no file and is not a format
+  change.
+- **Audio in an export**, which is out of scope in the plan and stays there.
 - **More than one soundtrack** — the model is a list and the row loop walks it,
   so what is missing is only the interface for a second one.
 
@@ -7334,47 +7387,23 @@ come off it since the first build, with where the reasoning went:
 | Capping the undo history (#23) | "what the history is allowed to cost" |
 | Importing a single image, and placing it | "importing a picture" |
 | Importing an image sequence | "importing a sequence" |
+| A soundtrack, and making it audible: the device, the scrub, and the picture derived from the sound | "importing a soundtrack" |
 
 1. **The rest of importing**, which is the thing in flight and the only entry
    here with a design note of its own: [importing.md](importing.md) settles the
-   shape, and "importing a picture" and "importing a sequence" above record
-   what is built.
+   shape, and "importing a picture", "importing a sequence" and "importing a
+   soundtrack" above record what is built.
 
-   **Audio is next, and that is a decision rather than the order falling out.**
-   This list used to run video-then-audio, because a video is the sequence with
-   one thing added and building it second means building nothing twice. That
-   argument is about the *pictures*, and audio shares none of that machinery —
-   so the tie was broken the way [importing.md](importing.md) breaks it, on what
-   the shot is for: a lipsync shot is the thing the note is written around, and
-   video is reference for it.
+   **Audio went first, and that was a decision rather than the order falling
+   out.** This list used to run video-then-audio, because a video is the
+   sequence with one thing added and building it second means building nothing
+   twice. That argument is about the *pictures*, and audio shares none of that
+   machinery — so the tie was broken the way [importing.md](importing.md)
+   breaks it, on what the shot is for: a lipsync shot is the thing the note is
+   written around, and video is reference for it. It is built; what it has left
+   is the manual sync offset the note defers on the user's call, and nothing has
+   needed one yet.
 
-   - **Making the sound audible**, which is all that is left of audio. The
-     model, the sync arithmetic, the import, the format, the row and moving and
-     cropping the sound in it are built — see [importing a
-     soundtrack](#importing-a-soundtrack) — and its deployment spike is done and
-     cost none of what it was feared to ([what taking Qt Multimedia
-     costs](#what-taking-qt-multimedia-costs)).
-
-     **`AudioDevice` is built**, and so is `renderAudio`, which is what a
-     device callback calls — see [the device is a seam, and what goes through
-     it is a value](#the-device-is-a-seam-and-what-goes-through-it-is-a-value).
-     The spike came out with it.
-
-     What is left is **the scrub**: on each frame change while dragging, play
-     about one frame's worth from that position. Everything it reads from
-     exists — `sampleForSlot` answers where in the file to start, trim and
-     fractional offset included, and `renderAudio` does the reading — so what
-     it needs is the part that decides when a burst happens and holds a device
-     open while somebody is working.
-
-     After that, **synchronised playback** is one line —
-     `slotForPlayedFrames` in place of the wall clock in `onPlaybackTick`.
-     Both halves of that line are built and tested. What is missing is a device
-     that is running, to ask for the sample count.
-
-     One thing to know before starting: `processedUSecs()` counts audio
-     **played out** of the device, measured, so `AudioDevice::playedFrames()`
-     uses it as it comes with nothing subtracted.
    - **A video**, which is a sequence with a decoder in front and no new
      storage: extracted to frames once, at import, so the decoder never reaches
      the paint path. The one open measurement in the whole note belongs to it —

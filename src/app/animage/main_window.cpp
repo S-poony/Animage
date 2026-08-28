@@ -103,6 +103,19 @@ namespace {
 // long from the first person to drag the playhead over a line of dialogue.
 constexpr int kScrubFloorMs = 90;
 
+// How long to wait for the first sample of a take to come out of the device
+// before giving up on it and playing to the wall clock instead.
+//
+// **A bound on a wait that is normally a fifth of a second.** The picture holds
+// on the frame Play was pressed on until the sound reaches it, which is what
+// starting together means -- the spike measured a 250 ms buffer, so that hold
+// is about a quarter of a second and is the cost of the whole feature. What
+// this catches is the case where it never arrives: a driver that accepted the
+// stream and reports nothing, or hardware that went away between the import and
+// the press. A second is four times the measured buffer, and a picture that
+// starts a second late is recoverable where one that never starts is not.
+constexpr int kAudioStartWaitMs = 1000;
+
 // And a ramp at each end of it. A buffer that begins and ends part-way up a
 // waveform steps the speaker cone, which is a click on every frame dragged
 // past. Three milliseconds is inaudible as a fade and removes all of it.
@@ -4216,6 +4229,36 @@ void MainWindow::togglePlayback() {
     if (doc_.scene().shotFrames() < 2) return;
 
     playback_start_slot_ = timeline_widget_->currentSlot();
+
+    // **The sound first, because the picture is about to be derived from it.**
+    // A take with a soundtrack in it plays to the device's count of what has
+    // come out; one without plays to the wall clock exactly as it always did,
+    // and `playing_to_audio_` is which. See onPlaybackTick.
+    //
+    // The output is checked here rather than trusted: Play is a deliberate
+    // press, so a third of a second spent opening the right device is a cost
+    // worth paying once, where doing it on a scrub would not be.
+    refreshAudioDevice();
+    playing_to_audio_ = false;
+    if (audio_.running()) {
+        auto program = std::make_shared<AudioProgram>(audioProgramAt(playback_start_slot_));
+        if (!program->sources.empty() && program->rate > 0) {
+            // The loop, which is one number here and one number in
+            // slotForPlayedFrames -- the picture wraps because the count it is
+            // derived from wrapped, and the sound wraps because the position it
+            // is read from wrapped. There is nothing to keep in agreement. See
+            // docs/importing.md, "the playback clock".
+            program->loop_slots = doc_.scene().shotFrames();
+            // A ramp in, so a take that starts part-way up a waveform does not
+            // open with a click. Nothing at the seam: a loop is the same shot
+            // again and a dip at every pass would be the more noticeable of the
+            // two.
+            program->fade = std::int64_t(program->rate) * kScrubFadeMs / 1000;
+            audio_.play(std::move(program));
+            playing_to_audio_ = true;
+        }
+    }
+
     playback_clock_.start();
     rate_samples_.clear();
     last_rate_sample_ms_ = 0;
@@ -4241,6 +4284,11 @@ void MainWindow::togglePlayback() {
 void MainWindow::stopPlayback() {
     if (!playback_timer_->isActive()) return;
     playback_timer_->stop();
+    // The device stays open and goes quiet, which is the whole reason it is
+    // kept open: the next scrub is a burst away rather than a third of a
+    // second away. See audio_device.h.
+    audio_.silence();
+    playing_to_audio_ = false;
     playback_rate_->hide();
     rate_samples_.clear();
     canvas_->setPlaying(false);
@@ -4267,17 +4315,59 @@ void MainWindow::onPlaybackTick() {
         return;
     }
 
+    const int fps = std::max(1, doc_.scene().framerate);
+    std::size_t slot = 0;
+
+    if (playing_to_audio_) {
+        // **The one line the whole of docs/importing.md's "playback clock" is
+        // about.** The picture's position comes from how much audio has come
+        // out of the device rather than from how long ago Play was pressed, and
+        // three of the four ways two clocks come apart stop existing rather
+        // than being separately corrected: the device's output latency is
+        // already inside the count, a loop seam wraps both together because
+        // there is only one number, and an interface stall cannot reach a
+        // number that is not counted on this thread.
+        const std::int64_t played = audio_.playedFrames();
+        if (played <= 0) {
+            // Nothing has been heard yet. **The picture holds on the frame Play
+            // was pressed on**, which is what starting together means and is
+            // the visible cost of the feature: about a buffer, a quarter of a
+            // second on the machine the spike measured.
+            //
+            // The readout is not sampled through the hold. It counts paints
+            // against wall time, and a quarter-second of deliberate stillness
+            // inside its first window reads as dropped frames -- which is a
+            // warning crying wolf on the one take it should be trusted on.
+            rate_samples_.clear();
+            last_rate_sample_ms_ = playback_clock_.elapsed();
+
+            // And a bound on the wait, for a device that will never report. See
+            // kAudioStartWaitMs. The clock restarts so the take begins now
+            // rather than a second in.
+            if (playback_clock_.elapsed() > kAudioStartWaitMs) {
+                playing_to_audio_ = false;
+                playback_clock_.start();
+                last_rate_sample_ms_ = 0;
+            }
+            return;
+        }
+        slot = slotForPlayedFrames(playback_start_slot_, played, audio_.rate(), fps, count);
+    } else {
+        const qint64 elapsed = playback_clock_.elapsed();
+        const qint64 advanced = elapsed * fps / 1000;
+        slot = (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
+    }
+
     // Before the early return below, not after it. This tick fires every
     // millisecond and mostly finds the slot unchanged, and the reading has to
     // keep up during a stall -- which is exactly when the slot is changing
     // least often.
+    //
+    // Still against the wall clock, and deliberately: what it measures is
+    // whether the *interface* is keeping up, so a picture derived from the
+    // sound must not be judged against the sound as well. That would be the
+    // instrument and the thing it measures being the same number.
     updatePlaybackRate();
-
-    const int fps = std::max(1, doc_.scene().framerate);
-    const qint64 elapsed = playback_clock_.elapsed();
-    const qint64 advanced = elapsed * fps / 1000;
-    const std::size_t slot =
-        (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
 
     if (slot == timeline_widget_->currentSlot()) return;
     timeline_widget_->setCurrentSlot(slot);

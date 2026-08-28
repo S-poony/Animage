@@ -702,6 +702,12 @@ private:
     QElapsedTimer playback_clock_;
     std::size_t playback_start_slot_ = 0;
 
+    // Whether this take's picture is being driven by the sound rather than by
+    // the wall clock. True only while a soundtrack is actually coming out of a
+    // device, so a scene with no sound in it plays exactly as it always did.
+    // See onPlaybackTick.
+    bool playing_to_audio_ = false;
+
     // Samples of (milliseconds into this playback, canvas paints so far), taken
     // a few times a second and kept for about a second. The rate is the
     // difference across the window, which is what makes it a rate and not a

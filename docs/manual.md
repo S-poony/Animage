@@ -407,8 +407,11 @@ If you switch a speaker on, or plug one in, Animage notices within about half a
 second of the next time you scrub and moves to it. The burst that noticed is a
 little late; the ones after it are not.
 
-Pressing **Play** does not carry the sound with it yet. That is the next thing
-being built.
+**Play carries the sound with it**, and the picture follows the sound rather
+than the other way round — so what you see on a frame is what you hear on it,
+however busy the drawing is. There is a pause of about a quarter of a second
+between pressing Play and the picture moving: that is the sound reaching the
+speakers, and the picture waiting for it is what starting together means.
 
 Nothing else makes a noise. Stepping through frames with the arrow keys is
 silent on purpose: you do that all day while drawing, and it is not a request to

@@ -10166,6 +10166,57 @@ void aFrameDerivedAtAnotherPlacementIsNotServed() {
     CHECK(doc.referenceFrameFor(track, drawing, layer, elsewhere) == nullptr);
 }
 
+// **What a machine with no speakers must go on doing.**
+//
+// The picture's position now comes from how much audio has come out of a device
+// -- but only when there is one running with something to play. Everywhere else
+// it is the wall clock exactly as it always was, and "everywhere else" includes
+// every machine this test runs on: GitHub's runners have no audio output at all.
+//
+// So what this pins is the fallback, and it is worth pinning because the way to
+// get it wrong is total. A take that waited for a sample count that was never
+// going to move would sit on one frame for ever, on every machine without a
+// sound card, and the arithmetic tests would all still pass.
+void playbackRunsOnAMachineWithNoAudioOutput() {
+    TEST("a scene with a soundtrack in it still plays where there is no audio output");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(timeline != nullptr && play != nullptr);
+    if (!timeline || !play) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 11);  // twelve frames, half a second at 24 fps
+
+    // A soundtrack with no samples: enough to take every branch that asks
+    // whether there is sound in this scene, and it needs no file and no codec.
+    doc.addAudioTrack("dialogue", "take-3.wav");
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    timeline->setCurrentSlot(0);
+    play->trigger();
+    QCoreApplication::processEvents();
+
+    // Long enough for several frames at 24 fps, spun rather than slept so the
+    // 1 ms tick is actually delivered.
+    QElapsedTimer waiting;
+    waiting.start();
+    while (waiting.elapsed() < 300 && timeline->currentSlot() == 0) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+
+    CHECK(timeline->currentSlot() > 0);
+    play->trigger();  // stop
+    QCoreApplication::processEvents();
+}
+
 // **A sequence import is where "both doors mean one thing" stops being true.**
 //
 // The Transform tool routes a reference layer to the placement, on the stated
@@ -10286,6 +10337,7 @@ int main(int argc, char** argv) {
     twoImportsOfOneFileAreToldApart();
     placingAnImportStoresRatherThanBakes();
     aFrameDerivedAtAnotherPlacementIsNotServed();
+    playbackRunsOnAMachineWithNoAudioOutput();
     theTransformToolIsOffForASequenceImportAndOnForAStill();
     aLayerOfOneDrawingIsRefusedAndNamesTheTool();
     thePointerSaysWhereTheBrushWillNotDraw();
