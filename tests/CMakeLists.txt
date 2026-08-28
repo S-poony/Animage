@@ -5,6 +5,7 @@ function(animage_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+animage_test(test_audio)
 animage_test(test_brush)
 animage_test(test_ctg)
 animage_test(test_ctg_solver)
