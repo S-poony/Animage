@@ -232,12 +232,18 @@ std::pair<double, double> TimelineWidget::audioExtent(const AudioTrack& sound) c
     const AudioClip* clip = doc_.audioSamplesFor(sound.id);
     if (!clip || clip->empty()) return {0.0, 0.0};
     // The *audible* length, so a cropped sound draws the part that is left
-    // rather than the part that was imported.
-    const std::size_t length = audibleFrames(*clip, sound.placement, doc_.scene().framerate);
-    if (length == 0) return {0.0, 0.0};
+    // rather than the part that was imported -- and **unrounded**, which is
+    // what makes the crop sub-frame in the picture as well as in the model.
+    //
+    // Rounding here made the block's right edge jump a whole frame at a time
+    // while its left edge slid, so trimming the front looked like it was not
+    // sub-frame. It always was; the drawing was lying about it. What the
+    // rounded count is for is the timeline's *reach* -- see audibleFrames.
+    const double length = audibleFrameSpan(*clip, sound.placement, doc_.scene().framerate);
+    if (length <= 0.0) return {0.0, 0.0};
 
     const double first = sound.placement.offset_frames;
-    const double last = first + static_cast<double>(length);
+    const double last = first + length;
     if (last <= 0.0) return {0.0, 0.0};
     // Only the front is clamped. A soundtrack may start before the shot does --
     // a breath in front of a word -- and what is off the front is not drawn,

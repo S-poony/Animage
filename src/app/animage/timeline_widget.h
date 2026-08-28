@@ -143,6 +143,18 @@ public:
     // dragged by, and what a double click renames.
     QPoint gutterPointForTesting(std::size_t row) const;
 
+    // Where a soundtrack's block is drawn, in slots, fractional.
+    //
+    // Exposed for the same reason the points above are: a test that works the
+    // extent out for itself agrees happily with a block drawn somewhere else.
+    // What this pins is that cropping the front does not move the back -- the
+    // one property a person can see, and the one that was wrong when the length
+    // was rounded to whole frames while the start was not.
+    std::pair<double, double> audioExtentForTesting(std::size_t row) const {
+        const animage::AudioTrack* sound = audioAt(row);
+        return sound ? audioExtent(*sound) : std::pair<double, double>{0.0, 0.0};
+    }
+
 private:
 
     std::size_t slotAt(int x) const;

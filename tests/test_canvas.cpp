@@ -2841,6 +2841,72 @@ void extendingTheShotNeverShortensIt() {
     CHECK_EQ(doc.scene().shotFrames(), std::size_t{200});
 }
 
+// Reported from use: trimming the front looked like it moved the sound without
+// cropping it. Both numbers were sub-frame all along -- the *drawing* rounded
+// the length up to whole frames while leaving the start fractional, so the
+// block's right edge jumped a frame at a time while its left edge slid.
+//
+// This is the test that would have caught it, and it asserts what a person
+// sees rather than what the arithmetic does.
+void croppingTheFrontOfASoundDoesNotMoveItsEndOnScreen() {
+    TEST("cropping the front of a sound leaves its drawn end where it was");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second, 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    animage::Document& doc = window.documentForTesting();
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    if (doc.scene().audio_tracks.empty()) return;
+    const animage::TrackId sound = doc.scene().audio_tracks.front().id;
+
+    TimelineWidget* strip = window.findChild<TimelineWidget*>();
+    CHECK(strip != nullptr);
+    if (!strip) return;
+
+    // The soundtrack's row is under every drawing row.
+    const std::size_t row = doc.scene().tracks.size();
+    const auto [was_first, was_last] = strip->audioExtentForTesting(row);
+    CHECK(was_last > was_first);
+
+    // Crop the front by a third of a frame, the way the drag does: the in-point
+    // and the offset move together.
+    const int fps = doc.scene().framerate;
+    const double delta = 1.0 / 3.0;
+    animage::AudioPlacement cropped = doc.scene().findAudioTrack(sound)->placement;
+    cropped.offset_frames += delta;
+    cropped.trim_start_seconds += delta / fps;
+    doc.setAudioTrackPlacement(sound, cropped);
+    strip->refresh();
+
+    // Localising: the stored numbers first, then what is drawn from them.
+    const animage::AudioPlacement& stored = doc.scene().findAudioTrack(sound)->placement;
+    CHECK_NEAR(stored.offset_frames, cropped.offset_frames, 1e-9);
+    CHECK_NEAR(stored.trim_start_seconds, cropped.trim_start_seconds, 1e-9);
+
+    const auto [now_first, now_last] = strip->audioExtentForTesting(row);
+    // The front moved by exactly what was asked for -- a third of a frame, not
+    // rounded to none of one and not rounded to a whole one.
+    CHECK_NEAR(now_first - was_first, delta, 1e-6);
+    // And the back did not move at all, which is the whole claim.
+    CHECK_NEAR(now_last, was_last, 1e-6);
+}
+
 void aProjectSurvivesSavingAndLoading() {
     TEST("a project comes back from disk with its pixels intact");
     QTemporaryDir scratch;
@@ -10221,6 +10287,7 @@ int main(int argc, char** argv) {
     aSoundtrackWidensTheTimelineWithoutWideningTheShot();
     extendingTheShotToTheSoundIsAskedForRatherThanAssumed();
     extendingTheShotNeverShortensIt();
+    croppingTheFrontOfASoundDoesNotMoveItsEndOnScreen();
     aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     aFailedSwapPutsThePreviousProjectBack();

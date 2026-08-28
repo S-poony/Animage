@@ -233,6 +233,52 @@ void croppingIsTwoNumbersAndNoSamples() {
     CHECK_EQ(clip.samples.size(), before);
 }
 
+// Reported from use: trimming the front looked like it moved the sound but did
+// not crop it. Both numbers were sub-frame all along; the *drawing* rounded the
+// length up to whole frames while leaving the start fractional, so the block's
+// right edge jumped a frame at a time while its left edge slid.
+//
+// The property that says it is fixed is not "the length is fractional" -- it is
+// that **cropping the front does not move the back**, which is what a person
+// actually sees.
+void croppingTheFrontLeavesTheBackWhereItIs() {
+    TEST("cropping the front of a sound does not move its end");
+    AudioClip clip;
+    clip.rate = kRate;
+    clip.channels = 1;
+    clip.samples.assign(kRate, 0.5f);  // one second, 24 frames
+
+    AudioPlacement whole;
+    whole.offset_frames = 10.0;
+    const double ended = whole.offset_frames + audibleFrameSpan(clip, whole, kFps);
+
+    // Crop the front by a third of a frame, the way the drag does it: the
+    // in-point and the offset move together.
+    const double delta = 1.0 / 3.0;  // frames
+    AudioPlacement cropped = whole;
+    cropped.offset_frames += delta;
+    cropped.trim_start_seconds += delta / kFps;
+
+    CHECK_NEAR(cropped.offset_frames + audibleFrameSpan(clip, cropped, kFps), ended, 1e-9);
+
+    // And it holds for an amount that is not a nice fraction, and for several
+    // crops in a row -- which is what a drag is.
+    AudioPlacement again = cropped;
+    for (int i = 0; i < 5; ++i) {
+        const double step = 0.17;
+        again.offset_frames += step;
+        again.trim_start_seconds += step / kFps;
+    }
+    CHECK_NEAR(again.offset_frames + audibleFrameSpan(clip, again, kFps), ended, 1e-9);
+
+    // The two lengths differ by less than a frame, which is the whole of the
+    // difference between the count and the measurement.
+    const double span = audibleFrameSpan(clip, again, kFps);
+    const double counted = double(audibleFrames(clip, again, kFps));
+    CHECK(counted >= span);
+    CHECK(counted - span < 1.0);
+}
+
 void aLengthThatEndsPartWayIntoAFrameStillUsesThatFrame() {
     TEST("a sound ending a tenth of the way into a frame still occupies it");
     AudioClip clip;
@@ -301,6 +347,7 @@ int main() {
     aSoundtrackCanStartBeforeTheShotDoes();
     croppingTheFrontMovesTheReadHeadAndNotTheSound();
     croppingIsTwoNumbersAndNoSamples();
+    croppingTheFrontLeavesTheBackWhereItIs();
     aLengthThatEndsPartWayIntoAFrameStillUsesThatFrame();
     theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem();
     gainIsWhatYouWillHearAndTheBarHeightIsTheSameNumber();

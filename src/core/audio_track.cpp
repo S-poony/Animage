@@ -63,13 +63,16 @@ double audibleSeconds(const AudioClip& clip, const AudioPlacement& placement) {
 }
 
 std::size_t audibleFrames(const AudioClip& clip, const AudioPlacement& placement, int fps) {
-    if (fps <= 0) return 0;
-    const double seconds = audibleSeconds(clip, placement);
-    if (seconds <= 0.0) return 0;
+    const double span = audibleFrameSpan(clip, placement, fps);
+    if (span <= 0.0) return 0;
     // Rounded up: a sound that ends a tenth of the way into a frame still makes
-    // a noise on it, and a row that stopped short would be drawing less than
-    // you can hear.
-    return static_cast<std::size_t>(std::ceil(seconds * static_cast<double>(fps)));
+    // a noise on it, and a timeline that stopped short could not reach it.
+    return static_cast<std::size_t>(std::ceil(span));
+}
+
+double audibleFrameSpan(const AudioClip& clip, const AudioPlacement& placement, int fps) {
+    if (fps <= 0) return 0.0;
+    return audibleSeconds(clip, placement) * static_cast<double>(fps);
 }
 
 }  // namespace animage

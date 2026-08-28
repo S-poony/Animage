@@ -191,13 +191,26 @@ std::int64_t sampleForSlot(std::size_t slot, const AudioPlacement& placement, in
 // is.
 std::int64_t lastAudibleSample(const AudioClip& clip, const AudioPlacement& placement);
 
-// How long the audible part of the sound is: in seconds, and in frames of
-// picture at `fps`.
-//
-// Rounded up to whole frames, because a sound that ends a tenth of the way into
-// a frame still makes a noise on it -- and the row has to draw that frame or the
-// block would stop short of what you can hear.
+// How long the audible part of the sound is, in seconds.
 double audibleSeconds(const AudioClip& clip, const AudioPlacement& placement);
+
+// The same in frames of picture, and **there are two of these on purpose.**
+// Folding them back into one is a tempting tidy-up and would put a bug back.
+//
+// `audibleFrames` rounds *up* to whole frames and answers "how many frames does
+// this occupy" -- which is what the timeline's reach needs, since a sound
+// ending a tenth of the way into a frame still makes a noise on that frame and
+// the playhead has to be able to get there.
+//
+// `audibleFrameSpan` does not round and answers "how long is it" -- which is
+// what *drawing* it needs. A block whose start is fractional and whose length
+// is rounded has a right edge that jumps a whole frame at a time while its left
+// edge slides, and trimming the front then looks like it is not sub-frame at
+// all even though it is. Reported from use, on the first crop anybody did.
+//
+// The two differ by less than a frame and that is the whole of it: one is a
+// count and the other is a measurement.
 std::size_t audibleFrames(const AudioClip& clip, const AudioPlacement& placement, int fps);
+double audibleFrameSpan(const AudioClip& clip, const AudioPlacement& placement, int fps);
 
 }  // namespace animage
