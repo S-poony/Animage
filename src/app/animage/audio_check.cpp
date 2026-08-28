@@ -83,34 +83,46 @@ QString report() {
     lines << QStringLiteral("  default output is null: %1")
                  .arg(default_null ? QStringLiteral("yes") : QStringLiteral("no"));
 
+    // **A backend that loaded says so, and that line is the verdict.** Counting
+    // warnings instead was the first version of this and it cried wolf on the
+    // first honest machine it met: a Linux runner has no sound server and no
+    // GPU, so a perfectly bundled backend arrives with `pa_context_connect()
+    // failed` and four `Couldn't load va-drm` beside it -- every one of them
+    // about the machine and none about the packaging. What this spike is
+    // actually asking is whether the deployment tool put a backend where the
+    // program could find it, and only the announcement answers that.
+    bool loaded = false;
     bool complained = false;
     for (const Said& m : std::as_const(said)) {
         const bool bad = m.type == QtWarningMsg || m.type == QtCriticalMsg
                          || m.type == QtFatalMsg;
         complained = complained || bad;
+        loaded = loaded || m.text.contains(QLatin1String("Using Qt multimedia"));
         lines << QStringLiteral("  qt %1: %2")
                      .arg(bad ? QStringLiteral("warned") : QStringLiteral("said"), m.text);
     }
 
-    // The four outcomes, named, because a CI log is read by somebody who was not
-    // here and a device count does not say which one this is. The order matters:
-    // a warning outranks a device list, since a backend that half-loaded is the
-    // outcome worth stopping on.
-    if (complained)
+    // The outcomes, named, because a CI log is read by somebody who was not here
+    // and a device count does not say which one this is.
+    if (!loaded)
         lines << QStringLiteral(
-            "  VERDICT: Qt warned. Read the lines above -- a backend that did not load "
-            "is what this spike is looking for.");
-    else if (said.isEmpty())
-        lines << QStringLiteral(
-            "  VERDICT: Qt named no backend at all. Either logging is off here, or "
-            "nothing was loaded. Re-run with QT_LOGGING_RULES=qt.multimedia*=true.");
+            "  VERDICT: no backend announced itself. That is what this spike is looking "
+            "for -- the deployment tool bundled nothing the program can find.");
     else if (outs.isEmpty())
         lines << QStringLiteral(
-            "  VERDICT: a backend loaded and this machine has no audio output. That is "
-            "what a CI runner looks like and it is a pass.");
+            "  VERDICT: a backend loaded; this machine has no audio output. That is what "
+            "a CI runner looks like and it is a pass for the packaging.");
     else
         lines << QStringLiteral(
             "  VERDICT: a backend loaded and found outputs. Audio works here.");
+
+    // Said after the verdict and not folded into it: warnings on a machine with
+    // a working backend are about that machine -- no sound server, no VA-API --
+    // and they are worth reading without being worth failing on.
+    if (loaded && complained)
+        lines << QStringLiteral(
+            "  (The warnings above are the machine, not the package: a backend that "
+            "announced itself was found and loaded.)");
 
     return lines.join(QLatin1Char('\n')) + QLatin1Char('\n');
 #endif
