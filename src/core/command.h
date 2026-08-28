@@ -140,6 +140,23 @@ private:
     std::optional<AudioTrack> state_;
 };
 
+// What a soundtrack is called. Its own inverse, like everything else here.
+//
+// **Separate from the file it names, which is the whole point of it.** An
+// AudioTrack carries a `name`, which is a label, and a `source`, which is the
+// file in the project's `audio/` folder. Two takes imported off a phone are
+// both called `dialogue`, and telling them apart is what a rename is for; the
+// file they came from is untouched by this and is what the row's tooltip says.
+class AudioNameOp final : public Op {
+public:
+    AudioNameOp(TrackId track, std::string name) : track_(track), name_(std::move(name)) {}
+    void applySwap(Document& doc) override;
+
+private:
+    TrackId track_;
+    std::string name_;
+};
+
 // Where a soundtrack sits in the shot, and how loud. One op for both numbers,
 // because they are what the row's drag and the import dialog's box write and
 // neither of those wants half a struct.

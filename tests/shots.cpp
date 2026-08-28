@@ -1012,6 +1012,30 @@ const std::vector<Situation>& situations() {
              s.settlePicture();
          }},
 
+        {"a-soundtrack-highlighted",
+         "one row is pointed at and one row is where the brush is, and they must not read as "
+         "the same thing. The soundtrack's gutter takes the full highlight; the drawing track "
+         "keeps it washed back and drops the highlighted-text pen, so it still says the brush "
+         "lives there without claiming to be selected. Two rows drawn identically current is "
+         "what this replaces, and it read as two selections because that is what it looked like",
+         [](Stage& s) {
+             s.choose("Add track");
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // The soundtrack's row is the one after the drawing rows, and its
+             // gutter is the part of it that starts no gesture at all -- a
+             // press there selects and nothing else.
+             const int row = static_cast<int>(s.window.documentForTesting().scene().tracks.size());
+             s.pressOn(s.timeline, trackName(s, row));
+             s.releaseOn(s.timeline, trackName(s, row));
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
         {"a-soundtrack-cropped-and-nudged",
          "the same sound cropped at both ends and nudged off the frame line. The block's front "
          "and back are where the crop left them, and its left edge sits four tenths of a cell "
@@ -1049,6 +1073,31 @@ const std::vector<Situation>& situations() {
                  std::printf("  could not import: %s\n", qPrintable(trouble));
              }
              s.settlePicture();
+         }},
+
+        {"what-a-layer-row-says",
+         "issue #84: three kinds of layer in one panel, and each one saying which it is. The "
+         "imported row is in the theme's disabled grey, because on a reference layer nothing "
+         "works at all -- no drawing, no cut, no transform -- and grey is the colour every "
+         "theme already uses for that. The colour layer is in the same blue a carried cell is "
+         "drawn in, one panel over, because it is the same machinery. The raster row is left "
+         "alone, being the case that needs nothing said about it. Everything else is in the "
+         "tooltips: the panel is two hundred pixels wide and a row that explains itself is a "
+         "row elided to '...'",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // Onto the import's own track, so that all three kinds are in one
+             // panel -- the comparison is the whole point of the picture.
+             s.choose("Add layer");
+             s.choose("Add colour layer");
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.layerPanel());
          }},
 
         {"an-imported-sequence",

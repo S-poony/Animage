@@ -61,6 +61,7 @@
 #include "ctg_solver.h"
 #include "image_import.h"
 #include "layer_list.h"
+#include "marks.h"
 #include "export_sequence.h"
 #include "project_io.h"
 #include "color.h"
@@ -93,12 +94,14 @@ namespace {
 // syllable: dragging fast it does not matter, because each burst is cut off by
 // the next and what you hear is continuous, but the moment you stop on a frame
 // to listen, 42 ms is a blip you cannot tell a *b* from a *d* in. So a burst is
-// the frame it stands on or 120 ms, whichever is longer -- about a syllable,
-// and at 8 fps or slower the frame is already longer than that and wins.
+// the frame it stands on or 90 ms, whichever is longer -- about a syllable, and
+// at 11 fps or slower the frame is already longer than that and wins.
 //
 // The number is here rather than spread through scrubAudio because it is a
-// judgement about ears and is expected to be argued with.
-constexpr int kScrubFloorMs = 120;
+// judgement about ears and is expected to be argued with. It has been argued
+// with once already: 120 ms was the first guess and came back as slightly too
+// long from the first person to drag the playhead over a line of dialogue.
+constexpr int kScrubFloorMs = 90;
 
 // And a ramp at each end of it. A buffer that begins and ends part-way up a
 // waveform steps the speaker cone, which is a click on every frame dragged
@@ -385,6 +388,13 @@ MainWindow::MainWindow() {
     });
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
+        // **Drawing says you are done with the sound.** A soundtrack clicked
+        // once would otherwise stay lit for the rest of the session while every
+        // stroke landed somewhere else, and the bright row would not be the row
+        // being worked on. This is the canvas's own signal, so what reaches it
+        // is a stroke, a fill or a transform -- all of them drawing.
+        timeline_widget_->clearAudioHighlight();
+        syncTrackMenu();
         timeline_widget_->refresh();
         // The first stroke on a new layer is what takes "nothing is drawn on
         // this layer yet" away, and it arrives here rather than through the
@@ -2019,6 +2029,10 @@ void MainWindow::buildTimelinePanel() {
     // reach the canvas and the layer panel exactly as the menu does.
     connect(timeline_widget_, &TimelineWidget::trackChanged, this,
             &MainWindow::setCurrentTrack);
+    // The Track menu acts on the row you are pointed at, so it has to be told
+    // when that row stops being a track. See TimelineWidget::highlightChanged.
+    connect(timeline_widget_, &TimelineWidget::highlightChanged, this,
+            &MainWindow::syncTrackMenu);
 
     timeline_scroll_ = new ReservingScrollArea(panel);
     timeline_scroll_->setWidget(timeline_widget_);
@@ -3803,14 +3817,25 @@ void MainWindow::addTrack() {
 // the same cap the in-place editors have: the static helper offers no way to
 // reach its line edit, and a dialog that accepts a name the row next to it would
 // refuse is two different rules for one thing.
+// The row you are pointed at, which may be a soundtrack.
+//
+// **The Track menu follows the highlight, and that is the whole of what the two
+// selections owe the interface.** `track_` goes on meaning "where the brush
+// is", because five things read it and every one of them wants a real Track --
+// but a menu item acting on a row that is not the lit one is a menu item acting
+// on something nobody pointed at. Reported from use: Delete track, with a
+// soundtrack highlighted, offered to delete a drawing track.
 void MainWindow::renameTrack() {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track) return;
+    const TrackId sound_id = timeline_widget_->highlightedAudio();
+    const AudioTrack* sound = doc_.scene().findAudioTrack(sound_id);
+    const Track* track = sound ? nullptr : doc_.scene().findTrack(track_);
+    if (!sound && !track) return;
 
     QInputDialog ask(this);
-    ask.setWindowTitle(QStringLiteral("Rename track"));
+    ask.setWindowTitle(sound ? QStringLiteral("Rename soundtrack")
+                             : QStringLiteral("Rename track"));
     ask.setLabelText(QStringLiteral("Name"));
-    ask.setTextValue(QString::fromStdString(track->name));
+    ask.setTextValue(QString::fromStdString(sound ? sound->name : track->name));
     if (auto* field = ask.findChild<QLineEdit*>()) field->setMaxLength(names::kTyped);
     if (ask.exec() != QDialog::Accepted) return;
 
@@ -3819,6 +3844,14 @@ void MainWindow::renameTrack() {
     // files, so the old one is kept rather than accepting the emptiness.
     if (trimmed.isEmpty()) return;
 
+    if (sound) {
+        // The label and not the file: `source` is what is in `audio/` and this
+        // does not touch it. The row's tooltip goes on saying which file it is.
+        doc_.renameAudioTrack(sound_id, trimmed.toStdString());
+        refreshEverything();
+        return;
+    }
+
     TrackProperties props = track->properties();
     props.name = trimmed.toStdString();
     doc_.updateTrack(track_, props);
@@ -3826,6 +3859,28 @@ void MainWindow::renameTrack() {
 }
 
 void MainWindow::removeCurrentTrack() {
+    // A soundtrack first, for renameTrack's reason: the highlight is what the
+    // menu acts on. There is no "a scene needs at least one" rule here -- a
+    // scene with no sound is the ordinary case, not an empty one.
+    if (const AudioTrack* sound = doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio())) {
+        if (QMessageBox::question(
+                this, QStringLiteral("Delete this soundtrack?"),
+                QStringLiteral("\"%1\" will go from the shot. The file stays in the project "
+                               "folder, and this can be undone.")
+                    .arg(QString::fromStdString(sound->name)),
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel) != QMessageBox::Yes) {
+            return;
+        }
+        stopPlayback();
+        doc_.removeAudioTrack(sound->id);
+        // The highlight goes back to the drawing row, because the row it was on
+        // is not there any more.
+        timeline_widget_->clearAudioHighlight();
+        refreshEverything();
+        return;
+    }
+
     if (doc_.scene().tracks.size() <= 1) {
         // The same rule as the last drawing: leave something to draw on.
         QMessageBox::information(this, QStringLiteral("Cannot delete that track"),
@@ -3890,7 +3945,16 @@ void MainWindow::setTrackEnd(TrackEnd behaviour) {
 
 void MainWindow::syncTrackMenu() {
     if (!overwrite_action_) return;
-    const Track* track = doc_.scene().findTrack(track_);
+    // **Off while a soundtrack is highlighted**, because neither of these means
+    // anything for one: a soundtrack has no drawings to overwrite and no last
+    // drawing to be past. They would otherwise act on the track the brush is
+    // on, which is not the row anybody is pointed at -- the same confusion
+    // Rename and Delete had, in the two items that cannot simply follow the
+    // highlight instead.
+    const bool on_sound =
+        timeline_widget_ &&
+        doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio()) != nullptr;
+    const Track* track = on_sound ? nullptr : doc_.scene().findTrack(track_);
     updating_track_menu_ = true;
     overwrite_action_->setEnabled(track != nullptr);
     overwrite_action_->setChecked(track && track->overwrite_drawings);
@@ -4164,7 +4228,57 @@ QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
     return name;
 }
 
+// What a row is, said in the row itself -- issue #84.
+//
+// Three kinds and three treatments, and the reason they are not the same
+// treatment is that **the brush behaves differently on each**, which is the
+// thing a row was failing to say. On a reference layer nothing works at all:
+// there is no cel and none that could be made, so drawing, cutting and
+// transforming all refuse. On a colour layer the brush *does* work -- it lays
+// down scribbles -- and what refuses is cut, copy and transform. On a raster
+// layer everything works.
+//
+// | kind | what the row does | why that colour |
+// |---|---|---|
+// | Raster | nothing | there is nothing to say |
+// | Colour | the carried blue | the same blue a carried cell is drawn in, one panel over: it is the same machinery and saying so twice in two colours would be worse than not saying it |
+// | Reference | the theme's disabled grey | the one colour every theme already uses for "you cannot act here", which is exactly and completely true |
+//
+// **The grey has an expiry date and this is where it is written down.** It says
+// "nothing here can be acted on", and that stops being true the day *convert to
+// drawings* exists -- see docs/importing.md, "convert to drawings", which is on
+// the queue. At that point a reference layer has something you can do to it and
+// this treatment has to be revisited rather than inherited.
+//
+// Everything else goes in the tooltip and not in the row, for `layerLabel`'s
+// reason: the panel is a couple of hundred pixels wide, and a row that spells
+// out what it is doing is a row elided to "..." -- which hides the very words
+// that were the point.
 void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, ImageId here) {
+    if (layer.kind == LayerKind::Reference) {
+        item->setForeground(0, QBrush(palette().color(QPalette::Disabled, QPalette::Text)));
+        QString tip = QStringLiteral(
+            "An imported picture. Its pixels come from a file rather than from a\n"
+            "drawing, so the brush, the eraser and the transform all refuse here.\n"
+            "The way in is to convert it to drawings first.");
+        if (!layer.reference_sources.empty()) {
+            // The file, because the layer's name is a label somebody may have
+            // changed and this is the only place the two can be told apart.
+            // Not the whole list of a sequence: two hundred file names is a
+            // tooltip nobody reads.
+            tip += QStringLiteral("\n\nFrom %1")
+                       .arg(QString::fromStdString(layer.reference_sources.front()));
+            if (layer.reference_sources.size() > 1) {
+                tip += QStringLiteral(" and %1 more, in the project's imports folder.")
+                           .arg(layer.reference_sources.size() - 1);
+            } else {
+                tip += QStringLiteral(", in the project's imports folder.");
+            }
+        }
+        item->setToolTip(0, tip);
+        return;
+    }
+
     if (layer.kind != LayerKind::Ctg) {
         item->setForeground(0, QBrush());
         item->setToolTip(0, QString());
@@ -4188,7 +4302,11 @@ void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, Image
                    .arg(source ? source->number : 0);
     }
 
-    item->setForeground(0, QBrush());
+    // The same blue a carried cell is drawn in, and for the same reason -- see
+    // marks.h. A colour layer is where the colour-through-time machinery lives,
+    // and the row saying so in the colour the timeline already says it in is
+    // one fact learned once instead of two.
+    item->setForeground(0, QBrush(marks::kCarried));
     item->setToolTip(0, tip);
 }
 

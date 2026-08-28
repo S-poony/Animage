@@ -145,6 +145,15 @@ void Document::removeAudioTrack(TrackId track) {
     }
 }
 
+void Document::renameAudioTrack(TrackId track, std::string name) {
+    AudioTrack* found = scene_.findAudioTrack(track);
+    if (!found || name.empty() || name == found->name) return;
+
+    ScopedCommand command(*this, "Rename soundtrack");
+    recordOp(std::make_unique<AudioNameOp>(track, found->name));
+    found->name = std::move(name);
+}
+
 void Document::setAudioTrackPlacement(TrackId track, AudioPlacement placement) {
     AudioTrack* found = scene_.findAudioTrack(track);
     if (!found) return;

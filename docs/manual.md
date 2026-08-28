@@ -250,6 +250,15 @@ Hovering a name says what the track is and what it does with a drawing put down
 on it. Double-click a name to rename it there, and a layer's name in the panel
 the same way; Enter keeps the new name and Escape leaves the old one.
 
+**What a layer row's colour means.** In the layer panel, an ordinary drawing
+layer is in the usual text colour, a **greyed** row is an imported picture, and
+a **blue** row is a colour layer. The grey is the same grey everything else uses
+for "you cannot act here": an imported picture's pixels come from a file, so the
+brush, the eraser and the transform all refuse there. The blue is the same blue
+the timeline draws carried marks in, because it is the same thing — a mark you
+make on a blue row is a label rather than paint. Hover any of them and the
+tooltip says the rest, including which file an imported row came from.
+
 Tracks need not be the same length. What a track shows once the playhead is past
 its last drawing is set under Track ▸ Past the last drawing: nothing (the
 default), hold the last drawing, or cycle — and the status bar says which, for
@@ -367,8 +376,17 @@ carry a flag, is in [handover.md](handover.md).
 or `.opus`. The file is copied into the project, so the project goes on working
 after you move or delete the original.
 
-**It does not play yet.** You can place it, see it and crop it; the sound itself
-is the next thing being built.
+**You can hear it by scrubbing.** Drag the playhead along the ruler — the strip
+of frame numbers at the top of the timeline — and you hear the sound under it as
+you go. Click a frame in the ruler and you hear that frame. That is how you find
+which frame a consonant is on, which is most of what a soundtrack is for.
+
+Pressing **Play** does not carry the sound with it yet. That is the next thing
+being built.
+
+Nothing else makes a noise. Stepping through frames with the arrow keys is
+silent on purpose: you do that all day while drawing, and it is not a request to
+hear anything.
 
 The dialog says how long the sound is **in frames** as well as in seconds —
 which frame a sound is on is the whole of lipsync — and asks one thing: which
@@ -402,7 +420,20 @@ move the rest of the sound — the audio under every frame you kept is the audio
 that was there before.
 
 **Clicking a soundtrack's row does not change which track you are drawing on.**
-The row is highlighted, the brush stays where it was.
+The row you clicked is highlighted; the track your brush is on keeps a fainter
+version of the same highlight, so you can always see where it is. As soon as you
+draw, the brush's row goes back to being the bright one.
+
+**Rename it** by double-clicking its name, or with Track ▸ Rename. This changes
+the label on the row and nothing else — the file in the project keeps the name
+it had, and the row's tooltip says which file that is. Worth doing the moment
+you have two takes both called `dialogue`.
+
+**Delete it** with Track ▸ Delete track while its row is highlighted. The Track
+menu always acts on the row you are pointed at, which is why "Overwrite
+drawings" and "Past the last drawing" go grey while a soundtrack is highlighted:
+neither means anything for a sound. Deleting takes the soundtrack out of the
+shot and leaves the file in the project folder, and it undoes.
 
 **Audio is not exported.** It is there to animate against; an exported sequence
 has no sound in it.

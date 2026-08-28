@@ -53,6 +53,12 @@ public:
     // painting; what it will drive is the properties panel.
     animage::TrackId highlightedAudio() const { return audio_row_; }
 
+    // Put the highlight back on the drawing row. What calls it is a stroke
+    // landing on the canvas: drawing says you are done with the sound, and a
+    // row that stays lit while every stroke lands elsewhere is a row lying
+    // about what is being worked on.
+    void clearAudioHighlight() { setAudioHighlight(animage::kNoId); }
+
     void setCurrentSlot(std::size_t slot);
     std::size_t currentSlot() const { return current_slot_; }
 
@@ -80,6 +86,14 @@ Q_SIGNALS:
     // out of the way when somebody is drawing. Stepping through frames with the
     // keyboard while animating is not a request to hear anything.
     void scrubbed(std::size_t slot);
+
+    // The highlight moved between a drawing row and a soundtrack row.
+    //
+    // What listens is the Track menu, which acts on the row you are pointed at
+    // -- so it has to be told when that stops being a track. `trackChanged`
+    // cannot carry it: clicking a soundtrack row deliberately leaves the
+    // current track exactly where it was.
+    void highlightChanged();
     void trackChanged(animage::TrackId track);
     void documentChanged();
 
@@ -92,6 +106,12 @@ public:
     QLineEdit* renameEditorForTesting() const { return rename_edit_; }
 
 protected:
+    // A soundtrack row says which file it came from, and that is what makes
+    // renaming one safe: the label on the row and the file in the project's
+    // `audio/` folder are two different things, and losing sight of the second
+    // was the one real objection to letting the first be changed.
+    bool event(QEvent* event) override;
+
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -204,6 +224,10 @@ private:
     // While the pointer is moving, only a change is worth a sound -- twenty
     // bursts of the same frame is not scrubbing, it is a buzz.
     void scrubTo(int x, bool always);
+
+    // The one place `audio_row_` is written, so that nothing can move the
+    // highlight without the Track menu hearing about it.
+    void setAudioHighlight(animage::TrackId id);
 
     // What the row under the pointer is, asked for rather than written on it.
     // The gutter is a hundred pixels wide and a track has a name in it; a second
@@ -353,6 +377,11 @@ private:
     // rename the track that took the row's place.
     QLineEdit* rename_edit_ = nullptr;
     animage::TrackId renaming_ = animage::kNoId;
+    // Which of the two lists `renaming_` names, settled when the editor opens.
+    // An id handed to the wrong lookup answers nothing rather than something
+    // plausible, and what that would look like here is a soundtrack's new name
+    // written onto a track.
+    bool renaming_audio_ = false;
     // A pen's double tap, which Qt does not turn into a double click for us.
     DoubleTap taps_;
     // editingFinished also fires when the editor loses focus, which is what

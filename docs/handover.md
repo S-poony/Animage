@@ -3625,7 +3625,56 @@ assumed a row is a track:
   bounded by `drawingRowCount()` now.
 - `renameAt` would have opened an editor over a soundtrack's name and written
   the result to a track, which is the exact confusion the two selections exist
-  to prevent.
+  to prevent. It renames soundtracks now, and what makes that safe is
+  `renaming_audio_`: which list the id belongs to is settled when the editor
+  opens rather than guessed when it closes.
+
+#### What the two selections owed the interface, and did not pay until it was reported
+
+The split above is right and stays. What was wrong is that **the interface drew
+it as one thing and the Track menu read the wrong half of it**, and both were
+reported from use in the same breath — as *"you can't delete an audio track; it
+would be simpler if you could only select one track at a time"*.
+
+That conclusion is the natural one to draw from what was on screen. A drawing
+row was painted current whenever `track_` named it, and a soundtrack row was
+painted current whenever `audio_row_` named it, in the same colour — so clicking
+a soundtrack lit **two rows at once**, which is what two selections look like.
+
+Collapsing them would cost more than it saves, and the cost falls on the exact
+gesture a lipsync shot is made of: with one selection, clicking a soundtrack row
+to nudge the sound half a frame puts the brush away — no track for the canvas,
+an empty layer panel, dead drawing buttons — and getting it back means clicking
+a drawing row again. Every single time you touch the sound.
+
+So the two facts stay and are drawn as two facts:
+
+> **The fill means "pointed at". The washed-back fill means "the brush lives
+> here".** One row has the first at any moment.
+
+- While a soundtrack is highlighted, the drawing track's gutter is the highlight
+  colour at a third of its strength and its name drops back to ordinary text.
+  It is the same colour washed back rather than a new one, so it is right in a
+  dark theme for the reason everything else in this palette is.
+- **A stroke landing on the canvas takes the highlight back**, through
+  `clearAudioHighlight`. Drawing is the unambiguous statement that you are done
+  with the sound, and without it a soundtrack clicked once stays lit for the
+  rest of the session while every stroke lands somewhere else.
+- **The Track menu acts on the row you are pointed at.** Rename and Delete
+  follow the highlight; "Overwrite drawings" and "Past the last drawing" grey
+  out while a soundtrack is highlighted, because neither means anything for one
+  and both would otherwise act on a row nobody pointed at. `highlightChanged`
+  is what tells the menu, and it exists because `trackChanged` cannot: clicking
+  a soundtrack row deliberately leaves the current track where it was.
+
+**Renaming a soundtrack is allowed, and the objection to it is answered rather
+than dismissed.** It was raised that a user should perhaps not be able to rename
+an import at all. The thing that makes it safe is that an `AudioTrack` carries
+two separate strings: `name`, a label, and `source`, the file in the project's
+`audio/` folder, which nothing here touches. What renaming genuinely costs is
+the row's last visible link to the file it came from — so the row has a tooltip
+saying which file that is. Two takes both imported as `dialogue` is the ordinary
+case the rename exists for.
 
 ### The row: one shape carrying three facts
 
@@ -3784,12 +3833,14 @@ somebody imported that was not a WAV.
 - **Synchronised playback**, which is `slotForPlayedFrames` wired into
   `onPlaybackTick` in place of the wall clock. Both halves are built and tested;
   what is missing is a device that is running, to ask for the sample count.
-- **A waveform**, deliberately, and **more than one soundtrack** — the model is
-  a list and the row loop walks it, so what is missing is only the interface for
-  a second one.
-- **Renaming a soundtrack.** `renameAt` refuses on an audio row rather than
-  renaming the wrong thing; making it work needs a rename command for audio
-  tracks and nothing else.
+- **A waveform**, and it is worth saying why it is still absent because the
+  reason has changed. It was left out because peaks are a second derived thing
+  to build, bound and invalidate, and that was not worth doing *before anything
+  could make a noise*. Something can now, so that argument has expired: what is
+  left is a peak table built once beside the samples a decode already puts in
+  memory, drawn behind the level bar.
+- **More than one soundtrack** — the model is a list and the row loop walks it,
+  so what is missing is only the interface for a second one.
 
 ### And what a video will not share with this
 
@@ -7132,6 +7183,12 @@ come off it since the first build, with where the reasoning went:
      question left whose answer could change what gets built.
    - **Convert to drawings**, the way back from a reference layer, without which
      imported line art cannot be coloured at all.
+
+     **It expires a colour, and this is where that is written down.** A
+     reference layer's row in the layer panel is drawn in the theme's disabled
+     grey — see `applyLayerFlag` — and what that grey says is "nothing here can
+     be acted on", which is exactly true today and stops being true the day this
+     lands. Revisit it then rather than inheriting it.
 
 2. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the

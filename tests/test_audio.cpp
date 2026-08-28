@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "audio_track.h"
+#include "document.h"
 #include "scene.h"
 #include "testing.h"
 
@@ -332,6 +333,34 @@ void gainIsWhatYouWillHearAndTheBarHeightIsTheSameNumber() {
     CHECK_NEAR(sound.placement.gain, 0.0, 1e-12);
 }
 
+// The objection to letting a soundtrack be renamed was that the row's name is
+// the only thing saying which file it came from. What answers it is that the
+// two are different fields: the label moves and the file does not.
+void renamingASoundtrackMovesTheLabelAndNotTheFile() {
+    TEST("renaming a soundtrack moves the label and leaves the file alone");
+    Document doc;
+    const TrackId sound = doc.addAudioTrack("dialogue", "take-3.wav");
+
+    doc.renameAudioTrack(sound, "mum, angry");
+    const AudioTrack* after = doc.scene().findAudioTrack(sound);
+    CHECK(after != nullptr);
+    CHECK_EQ(after->name, std::string("mum, angry"));
+    CHECK_EQ(after->source, std::string("take-3.wav"));
+
+    // An edit, so it undoes like one -- and undoing puts back the label without
+    // ever having touched the file.
+    doc.undo();
+    const AudioTrack* back = doc.scene().findAudioTrack(sound);
+    CHECK(back != nullptr);
+    CHECK_EQ(back->name, std::string("dialogue"));
+    CHECK_EQ(back->source, std::string("take-3.wav"));
+
+    // An empty name would leave the row with nothing to tell it by, so it is
+    // refused rather than accepted -- the same answer a track's rename gives.
+    doc.renameAudioTrack(sound, "");
+    CHECK_EQ(doc.scene().findAudioTrack(sound)->name, std::string("dialogue"));
+}
+
 }  // namespace
 
 int main() {
@@ -351,5 +380,6 @@ int main() {
     aLengthThatEndsPartWayIntoAFrameStillUsesThatFrame();
     theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem();
     gainIsWhatYouWillHearAndTheBarHeightIsTheSameNumber();
+    renamingASoundtrackMovesTheLabelAndNotTheFile();
     return testing::summarise("audio");
 }

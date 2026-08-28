@@ -140,6 +140,12 @@ void AudioTrackOp::applySwap(Document& doc) {
     state_ = std::move(extracted);
 }
 
+void AudioNameOp::applySwap(Document& doc) {
+    AudioTrack* track = doc.mutableScene().findAudioTrack(track_);
+    if (!track) return;
+    std::swap(track->name, name_);
+}
+
 void AudioPlacementOp::applySwap(Document& doc) {
     AudioTrack* track = doc.mutableScene().findAudioTrack(track_);
     if (!track) return;

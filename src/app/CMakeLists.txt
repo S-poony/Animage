@@ -56,6 +56,7 @@ add_library(animage_ui STATIC
   animage/audio_import.h
   animage/audio_player.cpp
   animage/audio_player.h
+  animage/marks.h
   animage/audio_import_dialog.cpp
   animage/audio_import_dialog.h
 )

@@ -2,13 +2,16 @@
 #include "timeline_widget.h"
 
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPalette>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QToolTip>
 #include <algorithm>
 
+#include "marks.h"
 #include "name_limits.h"
 
 using namespace animage;
@@ -112,14 +115,16 @@ Palette paletteFor(const QWidget& widget) {
     p.current_text = source.color(QPalette::HighlightedText);
     p.gutter_current = p.current;
     // Not from the palette: this has to mean the same thing in every theme, and
-    // "carried" is not a role a system palette has.
-    p.carried = QColor(0x5b, 0x9c, 0xd6);
+    // "carried" is not a role a system palette has. See marks.h, which is where
+    // it lives now that the layer panel says the same thing about a colour
+    // layer's row.
+    p.carried = marks::kCarried;
     // A wash over cells outside the shot rather than a different cell colour, so
     // whatever the cell was still reads through it -- held, carried, numbered.
     p.outside = QColor(p.background.red(), p.background.green(), p.background.blue(), 150);
     // "The shot ends here" has to mean the same in every theme, and it is not a
-    // role a system palette has.
-    p.boundary = QColor(0xd0, 0x45, 0x3c);
+    // role a system palette has. marks.h, with the one above it.
+    p.boundary = marks::kBoundary;
     return p;
 }
 
@@ -218,6 +223,19 @@ const AudioTrack* TimelineWidget::audioAt(std::size_t row) const {
     if (row < drawingRowCount()) return nullptr;
     const std::size_t at = row - drawingRowCount();
     return (at < sounds.size()) ? &sounds[at] : nullptr;
+}
+
+// The highlight, and the only thing that moves it.
+//
+// **Drawing is the unambiguous statement that you are done with the sound**,
+// which is what `clearAudioHighlight` is for: without it, a soundtrack clicked
+// once stays lit for the rest of the session while every stroke lands somewhere
+// else, and the row that is bright is not the row being worked on.
+void TimelineWidget::setAudioHighlight(TrackId id) {
+    if (audio_row_ == id) return;
+    audio_row_ = id;
+    update();
+    Q_EMIT highlightChanged();
 }
 
 const Track* TimelineWidget::currentTrack() const { return doc_.scene().findTrack(track_); }
@@ -357,7 +375,15 @@ std::size_t TimelineWidget::rowOf(TrackId track) const {
     for (std::size_t i = 0; i < tracks.size(); ++i) {
         if (tracks[i].id == track) return i;
     }
-    return tracks.size();
+    // Then the soundtracks, which are the rows after the drawing rows. An id
+    // belongs to exactly one of the two lists -- they come from one counter, so
+    // they cannot collide -- and this answers past the end for one that belongs
+    // to neither, as it always did.
+    const std::vector<AudioTrack>& sounds = doc_.scene().audio_tracks;
+    for (std::size_t i = 0; i < sounds.size(); ++i) {
+        if (sounds[i].id == track) return tracks.size() + i;
+    }
+    return tracks.size() + sounds.size();
 }
 
 int TimelineWidget::rowTop(std::size_t row) const {
@@ -417,7 +443,9 @@ void TimelineWidget::refresh() {
     // it, none of which the editor would otherwise notice. Its track is held by
     // id, so the only unanswerable case is the track going away.
     if (renaming_ != kNoId) {
-        if (!doc_.scene().findTrack(renaming_)) {
+        const bool gone = renaming_audio_ ? doc_.scene().findAudioTrack(renaming_) == nullptr
+                                          : doc_.scene().findTrack(renaming_) == nullptr;
+        if (gone) {
             finishRenaming(false);
         } else {
             rename_edit_->setGeometry(gutterRectFor(rowOf(renaming_)));
@@ -586,10 +614,26 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
         const int top = rowTop(row);
         const bool is_current = line.id == track_;
 
-        // The gutter: which track this row is, and which one is being edited.
+        // **One row is pointed at, and the highlight says which.** While a
+        // soundtrack is highlighted, the track the brush is on keeps the same
+        // colour washed back rather than the full one, and drops the
+        // highlighted-text pen with it -- so there is one bright row and one
+        // that says "still where the brush is" underneath it.
+        //
+        // Two rows drawn identically current is what this replaces, and it read
+        // as two selections because that is what it looked like. Reported from
+        // use, along with the Track menu acting on the row that was not lit.
+        // The wash is the highlight over the gutter and not a new colour, so it
+        // is right in a dark theme for the same reason everything else here is.
+        const bool dimmed = is_current && audio_row_ != kNoId;
         const QRect gutter(0, top, kGutterWidth - 2, kRowHeight - 2);
-        painter.fillRect(gutter, is_current ? colours.gutter_current : colours.gutter);
-        painter.setPen(is_current ? colours.current_text : colours.text);
+        painter.fillRect(gutter, colours.gutter);
+        if (is_current) {
+            QColor fill = colours.gutter_current;
+            if (dimmed) fill.setAlpha(90);
+            painter.fillRect(gutter, fill);
+        }
+        painter.setPen(is_current && !dimmed ? colours.current_text : colours.text);
         painter.drawText(gutter.adjusted(6, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
                          QString::fromStdString(line.name));
 
@@ -755,8 +799,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     // nothing to point at, the brush would stop working, and nothing would say
     // why. See docs/importing.md, "the two selections".
     if (const AudioTrack* sound = audioAt(row)) {
-        audio_row_ = sound->id;
-        update();
+        setAudioHighlight(sound->id);
         // The name strip is the handle for nothing here -- a soundtrack has no
         // compositing order, so there is no restack to start.
         if (x < kGutterWidth) return;
@@ -793,7 +836,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     if (!line) return;
 
     // Selecting a drawing row puts the highlight back on it.
-    audio_row_ = kNoId;
+    setAudioHighlight(kNoId);
 
     // Pressing anywhere in a row selects its track. Selecting is what a row is
     // for, and requiring people to find the name strip to do it would make the
@@ -1228,13 +1271,31 @@ bool TimelineWidget::renameAt(int x, int y) {
     if (x >= kGutterWidth) return false;
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return false;
-    // Renaming a soundtrack is not built. Refused here rather than left to
-    // beginRenaming's own null check, because a double click that opened an
-    // editor over a soundtrack's name and then wrote the result to a *track*
-    // is the shape of failure this whole two-selections arrangement exists to
-    // prevent -- and beginRenaming looks the row up in the track list.
-    if (isAudioRow(row)) return false;
     beginRenaming(row);
+    return true;
+}
+
+bool TimelineWidget::event(QEvent* event) {
+    if (event->type() != QEvent::ToolTip) return QWidget::event(event);
+
+    auto* help = static_cast<QHelpEvent*>(event);
+    std::size_t row = 0;
+    QString text;
+    if (rowAtY(help->pos().y(), &row)) {
+        if (const AudioTrack* sound = audioAt(row)) {
+            text = sound->source.empty()
+                       ? QStringLiteral("No file.")
+                       : QStringLiteral("From %1, in the project's audio folder.\n"
+                                        "Renaming this row does not rename that file.")
+                             .arg(QString::fromStdString(sound->source));
+        }
+    }
+    if (text.isEmpty()) {
+        QToolTip::hideText();
+    } else {
+        QToolTip::showText(help->globalPos(), text, this);
+    }
+    event->accept();
     return true;
 }
 
@@ -1253,8 +1314,15 @@ void TimelineWidget::beginRenaming(std::size_t row) {
     // the track is looked up, because renaming one is a document change.
     if (renaming_ != kNoId) finishRenaming(true);
 
-    const Track* line = trackAt(row);
-    if (!line) return;
+    // Which list the row is in is settled once, here, and remembered -- because
+    // what `renaming_` names is an id, and an id handed to the wrong lookup
+    // answers nothing rather than something plausible. That is the shape of
+    // failure the two selections exist to prevent, and it would arrive here as
+    // a soundtrack's new name written onto a track.
+    const AudioTrack* sound = audioAt(row);
+    const Track* line = sound ? nullptr : trackAt(row);
+    if (!sound && !line) return;
+    renaming_audio_ = sound != nullptr;
 
     if (!rename_edit_) {
         rename_edit_ = new QLineEdit(this);
@@ -1270,9 +1338,9 @@ void TimelineWidget::beginRenaming(std::size_t row) {
                 [this] { finishRenaming(true); });
     }
 
-    renaming_ = line->id;
+    renaming_ = sound ? sound->id : line->id;
     rename_edit_->setGeometry(gutterRectFor(row));
-    rename_edit_->setText(QString::fromStdString(line->name));
+    rename_edit_->setText(QString::fromStdString(sound ? sound->name : line->name));
     rename_edit_->selectAll();
     rename_edit_->show();
     // Explicitly, because the timeline itself takes no keyboard focus: without
@@ -1294,6 +1362,19 @@ void TimelineWidget::finishRenaming(bool keep) {
     finishing_rename_ = false;
 
     if (!keep) return;
+
+    // A soundtrack's name is a label and its `source` is the file, which is
+    // what makes renaming one safe: nothing on disk is touched and the row's
+    // tooltip goes on saying which file it came from.
+    if (renaming_audio_) {
+        const AudioTrack* sound = doc_.scene().findAudioTrack(renamed);
+        if (!sound || typed.isEmpty() || typed.toStdString() == sound->name) return;
+        doc_.renameAudioTrack(renamed, typed.toStdString());
+        refresh();
+        Q_EMIT documentChanged();
+        return;
+    }
+
     const Track* line = doc_.scene().findTrack(renamed);
     // An empty name leaves the track with no label on its row and no prefix on
     // its exported files, so the old one is kept rather than the emptiness

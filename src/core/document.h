@@ -165,6 +165,14 @@ public:
     TrackId addAudioTrack(std::string name, std::string source);
     void removeAudioTrack(TrackId track);
 
+    // What the row is called. **The label and not the file**: `source` names a
+    // file in the project's `audio/` folder and nothing here touches it. Two
+    // takes both imported as `dialogue` is the ordinary case this exists for.
+    //
+    // An empty name is refused rather than accepted, as a track's is: a row
+    // with no label is a row with nothing to tell it by.
+    void renameAudioTrack(TrackId track, std::string name);
+
     // Where the sound sits, how much of it is used, and how loud.
     //
     // One command for the whole struct, because a caller cannot write half a
