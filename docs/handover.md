@@ -42,6 +42,7 @@ the shape of the program. Those five maps are.
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
 | [**Asking Qt a question directly**](#asking-qt-a-question-directly) | `dock_probe`: plain Qt with docks in it, for "ours or theirs?" |
+| [**What taking Qt Multimedia costs**](#what-taking-qt-multimedia-costs) | the audio spike: all three packagers bundled it, and scrubbing needs none of it |
 | [**The same source, two different pictures**](#the-same-source-two-different-pictures) | what a downloaded build does not share with yours, and where to look first |
 | [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
@@ -3252,7 +3253,9 @@ generation counter included.
   extracted to frames once, at import, so `QMediaPlayer` never reaches the paint
   path. The shape is settled in [importing.md](importing.md).
 - **Audio**, which is what the shot is for and is blocked on nothing here. The
-  deployment spike comes first and is the highest-risk item in that note.
+  deployment spike is **done** — see [what taking Qt Multimedia
+  costs](#what-taking-qt-multimedia-costs) — so what is left is the audio layer
+  itself.
 - **Convert to drawings**, which is the way back — an import cannot be a CTG
   barrier, so colouring imported line art needs it. Whole layer, on a popup, and
   it is `Document::transformLayer`'s loop with a decode where the resample is:
@@ -4103,6 +4106,42 @@ drag has to be a hand. But once a hand has shown that the fault *is* one piece
 of state, that state can be set directly and a dozen candidate fixes tried by
 machine in a second each. That is what `--bench` does, and it is the reason #54
 has a table of eight cures rather than an argument about one.
+
+## What taking Qt Multimedia costs
+
+**Measured, before a line of audio code.** [importing.md](importing.md) puts a
+deployment spike before all of it and calls it the highest-risk item in the
+note: if `windeployqt` does not bundle the FFmpeg backend, that is a disaster to
+find out after the audio layer exists. It was run, and the full record with the
+numbers is [audio-spike.md](audio-spike.md).
+
+Four things from it are worth having here, because each one is a thing somebody
+would otherwise assume.
+
+- **All three deployment tools bundled the backend with no help at all.**
+  `windeployqt`, `macdeployqt` and `linuxdeploy-plugin-qt` each read it out of
+  `animage`'s import table along with its FFmpeg libraries. The expensive
+  outcome did not arrive.
+- **It costs about 20 MB on every platform and nothing at startup.**
+  `Qt6Multimedia` imports no FFmpeg; the backend is a plugin loaded lazily on
+  first use of the media stack, and startup timed through the full window build
+  is 29 ms either way.
+- **Scrub audio needs none of that 20 MB.** With `plugins/multimedia` deleted
+  outright, Qt keeps `QMediaDevices`, `QAudioDevice`, `QAudioSink` and
+  `QAudioSource` — the raw audio path is native inside `Qt6Multimedia` itself.
+  The payload buys `QAudioDecoder` and `QMediaPlayer`: a compressed audio file,
+  and video. So if the backend is ever a problem somewhere, the half that
+  matters degrades to WAV rather than disappearing.
+- **`QAudioSink::processedUSecs()` counts audio played out**, so `playedMs()` is
+  that number as it comes. That was the first of the note's two open
+  measurements; the second belongs to video and is untouched.
+
+`tests/audio_probe.cpp` is the instrument, in the register of the section above
+— built, never run by `ctest`, and there for the first machine whose driver
+disagrees with those numbers. `src/app/animage/audio_check.*` is the other half
+and is **temporary**: it exists because the deployment tools only look at
+`animage`, so the spike had to be inside the application to ask them anything.
+Its header says so.
 
 ## The same source, two different pictures
 
@@ -6718,16 +6757,30 @@ come off it since the first build, with where the reasoning went:
 1. **The rest of importing**, which is the thing in flight and the only entry
    here with a design note of its own: [importing.md](importing.md) settles the
    shape, and "importing a picture" and "importing a sequence" above record
-   what is built. In order, and each is the one before it with one thing added:
+   what is built.
 
+   **Audio is next, and that is a decision rather than the order falling out.**
+   This list used to run video-then-audio, because a video is the sequence with
+   one thing added and building it second means building nothing twice. That
+   argument is about the *pictures*, and audio shares none of that machinery —
+   so the tie was broken the way [importing.md](importing.md) breaks it, on what
+   the shot is for: a lipsync shot is the thing the note is written around, and
+   video is reference for it.
+
+   - **Audio.** Its deployment spike is **done** and cost none of what it was
+     feared to — all three packaging tools bundle a backend unprompted, it
+     weighs about 20 MB and no startup time, and scrubbing needs none of that
+     20 MB. See [what taking Qt Multimedia
+     costs](#what-taking-qt-multimedia-costs). Qt Multimedia still must not go
+     in the root `find_package`, and does not. What is left is the layer
+     itself: the `AudioDevice` seam, a decode to PCM, a row in the timeline
+     with a gain bar painted by `paintEvent`, two selections where the timeline
+     has one, and the scrub.
    - **A video**, which is a sequence with a decoder in front and no new
      storage: extracted to frames once, at import, so the decoder never reaches
-     the paint path.
-   - **Audio**, which is what the shot is for and is blocked on nothing here.
-     The deployment spike comes first and is the highest-risk item in the whole
-     note: Qt Multimedia must not go in the root `find_package` (see the trap),
-     and three packaging tools have to bundle a backend before a line of audio
-     code is worth writing.
+     the paint path. The one open measurement in the whole note belongs to it —
+     whether `QMediaPlayer` at 1× extracts every frame — and it is the only
+     question left whose answer could change what gets built.
    - **Convert to drawings**, the way back from a reference layer, without which
      imported line art cannot be coloured at all.
 
