@@ -150,17 +150,23 @@ jobs:
 
           mkdir -p dist && mv "$OUTPUT" dist/
 
-      # ------------------------------------------------- what the spike asked
+      # -------------------------------------------- what the package picked up
       #
-      # Three questions, and only a packaged build on a runner can answer them:
-      # did the deployment tool bundle a multimedia backend, what did that add
-      # to the download, and does the result find the backend when it runs. The
-      # third is the one that cannot be answered by looking -- a plugin sitting
-      # in the right folder and a plugin that loads are different facts.
+      # Did the deployment tool bundle a multimedia backend, and what did that
+      # add to the download. Only a packaged build on a runner can say, and it
+      # is worth asking on every push rather than once: what it guards against
+      # is a Qt or a packaging-tool change quietly dropping the backend, which
+      # costs QAudioDecoder and so every compressed file somebody imports.
+      #
+      # **It asks by looking, which is less than the spike asked.** A plugin
+      # sitting in the right folder and a plugin that loads are different facts,
+      # and the second needed a flag inside the application to answer. That flag
+      # was the spike and has come out with it -- see docs/audio-spike.md, "what
+      # comes out again". What replaced it is a seam with no reporting in it.
       #
       # Never `set -e` on the reporting: a step that exits on the first thing it
       # cannot find reports less than one that says what is missing.
-      - name: What the AppImage got (spike)
+      - name: What the AppImage got
         if: matrix.name == 'linux'
         run: |
           echo "--- size ---"
@@ -168,9 +174,6 @@ jobs:
           echo "--- multimedia in the AppDir ---"
           find AppDir \( -iname '*multimedia*' -o -iname 'libav*' -o -iname 'libsw*' \) \
             | sort | xargs -r ls -l || echo "  nothing"
-          echo "--- what it says when it runs ---"
-          export APPIMAGE_EXTRACT_AND_RUN=1
-          ./dist/Animage-linux-x86_64.AppImage --audio-check || echo "  exit $?"
 
       - name: Package (macOS)
         if: matrix.name == 'macos'
@@ -186,7 +189,7 @@ jobs:
           # ditto, not zip: the frameworks inside are a web of symlinks.
           ditto -c -k --keepParent "$app" dist/Animage-macos-universal.zip
 
-      - name: What the bundle got (spike)
+      - name: What the bundle got
         if: matrix.name == 'macos'
         run: |
           app=build/src/app/animage.app
@@ -196,8 +199,6 @@ jobs:
           echo "--- multimedia in the bundle ---"
           find "$app" \( -iname '*multimedia*' -o -iname '*ffmpeg*' -o -iname 'libav*' \) \
             | sort || echo "  nothing"
-          echo "--- what it says when it runs ---"
-          "$app/Contents/MacOS/animage" --audio-check || echo "  exit $?"
 
       - name: Package (Windows)
         if: matrix.name == 'windows'
@@ -213,7 +214,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path $stage -DestinationPath dist/Animage-windows-x64.zip
 
-      - name: What the stage got (spike)
+      - name: What the stage got
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
@@ -225,9 +226,6 @@ jobs:
           Write-Output "--- multimedia in the stage ---"
           $f | Where-Object { $_.Name -match 'multimedia|ffmpeg|^av|^sw' } |
             ForEach-Object { "{0,8:N2} MB  {1}" -f ($_.Length/1MB), $_.Name }
-          Write-Output "--- what it says when it runs ---"
-          & "$stage/animage.exe" --audio-check
-          Write-Output "exit $LASTEXITCODE"
 
       - uses: actions/upload-artifact@v7
         with:

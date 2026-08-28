@@ -50,8 +50,8 @@ add_library(animage_ui STATIC
   animage/exr_writer.h
   animage/crash_report.cpp
   animage/crash_report.h
-  animage/audio_check.cpp
-  animage/audio_check.h
+  animage/audio_device.cpp
+  animage/audio_device.h
   animage/audio_import.cpp
   animage/audio_import.h
   animage/audio_import_dialog.cpp
@@ -70,11 +70,14 @@ target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
 # See docs/handover.md, "what asking for a private Qt component at the top level
 # switches off", which is this mistake already paid for once.
 #
-# What it is for right now is the deployment spike in docs/importing.md and not
-# audio: the three packaging tools read what `animage` imports, so the module
-# has to be linked into the application before any of them can be asked whether
-# they bundle a backend for it. audio_check.cpp is that import and comes out
-# again -- see its header.
+# What needs it is `audio_device.cpp`, which owns the one QAudioSink in the
+# program, and `audio_import.cpp`, which decodes a file on the way in. Nothing
+# else in the tree includes a Qt Multimedia header, which is the whole point of
+# the seam -- see audio_device.h.
+#
+# The deployment spike that came before all of this is gone, as its own header
+# said it would be: `audio_check.*` and the `--audio-check` flag are out, and
+# what they found is docs/audio-spike.md. `tests/audio_probe` stays.
 find_package(Qt6Multimedia QUIET)
 if(Qt6Multimedia_FOUND)
   target_link_libraries(animage_ui PUBLIC Qt6::Multimedia)

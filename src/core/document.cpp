@@ -186,12 +186,17 @@ void Document::setAudioTrackPlacement(TrackId track, AudioPlacement placement) {
 }
 
 void Document::setAudioSamples(TrackId track, AudioClip clip) {
-    audio_samples_[track] = std::move(clip);
+    audio_samples_[track] = std::make_shared<const AudioClip>(std::move(clip));
 }
 
 const AudioClip* Document::audioSamplesFor(TrackId track) const {
     const auto it = audio_samples_.find(track);
-    return it == audio_samples_.end() ? nullptr : &it->second;
+    return it == audio_samples_.end() ? nullptr : it->second.get();
+}
+
+std::shared_ptr<const AudioClip> Document::sharedAudioSamplesFor(TrackId track) const {
+    const auto it = audio_samples_.find(track);
+    return it == audio_samples_.end() ? nullptr : it->second;
 }
 
 void Document::forgetAudioSamples() { audio_samples_.clear(); }
@@ -203,7 +208,7 @@ std::size_t Document::timelineFrames() const {
         if (it == audio_samples_.end()) continue;
         // The *audible* length, so a sound cropped short stops asking the
         // timeline to reach where it used to end.
-        const std::size_t length = audibleFrames(it->second, sound.placement, scene_.framerate);
+        const std::size_t length = audibleFrames(*it->second, sound.placement, scene_.framerate);
         if (length == 0) continue;
         // A soundtrack that starts before the shot contributes only what is
         // inside it: the part before frame 0 is not somewhere the playhead can

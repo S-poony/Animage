@@ -190,6 +190,16 @@ public:
     // start a decode, for the reason compositing may not start one.
     const AudioClip* audioSamplesFor(TrackId track) const;
 
+    // The same clip, as something that can be held on to.
+    //
+    // **For the one caller that reads samples off another thread**, which is
+    // whatever is feeding an audio device: the pointer above is into a map that
+    // an import or an undo may rehash, and a device callback cannot be asked to
+    // notice. Taking a share of the clip costs one atomic increment and no
+    // samples. Everything on the interface thread should go on using
+    // `audioSamplesFor`.
+    std::shared_ptr<const AudioClip> sharedAudioSamplesFor(TrackId track) const;
+
     // Throws the decoded samples away. Everything a clip depends on that is not
     // in its key says so by calling this: a track being repointed at another
     // file, a document being replaced by another whose tracks answer to the
@@ -719,7 +729,14 @@ private:
     // above, and unbounded unlike it -- a shot's worth of PCM is single-digit
     // megabytes where one HD picture frame is 17, so there is nothing here to
     // spend a budget on.
-    std::unordered_map<TrackId, AudioClip> audio_samples_;
+    //
+    // **Held by shared pointer, and that is about a thread rather than about
+    // sharing.** What plays a soundtrack is a device callback on somebody
+    // else's thread, and a raw pointer into this map dangles the moment an
+    // import or an undo rehashes it. A clip a callback has taken hold of stays
+    // alive until the callback is finished with it; nothing else about the map
+    // changes, and copying no samples is what makes handing one over free.
+    std::unordered_map<TrackId, std::shared_ptr<const AudioClip>> audio_samples_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

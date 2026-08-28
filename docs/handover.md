@@ -3483,8 +3483,9 @@ gives up is named there rather than dropped.
 
 **File ▸ Import ▸ Audio.** A sound comes in, is decoded, is copied into the
 project, and gets a row in the timeline it can be moved and cropped in. **It
-does not play yet** — the device is not built, and what that leaves is set out
-at the end of this section.
+does not play yet** — the device that would make a noise is built and so is the
+mixing that feeds it, and nothing has been wired to the playhead. What that
+leaves is set out at the end of this section.
 
 Why audio is not a `Track`, what scrubbing is for and what the playback clock
 has to be derived from is [importing.md](importing.md). What taking Qt
@@ -3690,6 +3691,52 @@ at any point. It is bounded so a frame of audio always survives, because a sound
 trimmed to nothing draws no block and a row with no block is one nobody can take
 hold of.
 
+### The device is a seam, and what goes through it is a value
+
+Two files, built before anything uses them, and both of them are shaped by the
+same fact: **the thing that plays a sound runs on another thread.**
+
+`audio_device.h` is the seam [importing.md](importing.md) asks for — open at
+rate R, receive a callback asking for N frames, report what has come out, stop.
+It is the only place in the program that knows what a `QAudioSink` is. Three
+things in it are decisions rather than shape:
+
+- **It is opened once and kept open.** The spike measured `QAudioSink::start()`
+  at 335 ms, and a scrub is a burst of sound on every frame the playhead is
+  dragged past. A device opened per burst would be silent for eight frames and
+  then say something about the ninth. So the device stays and the *content*
+  changes underneath it, which is why the callback is handed in once and must
+  answer with silence rather than with nothing.
+- **`playedFrames` is `processedUSecs()` as it comes**, with no
+  buffer-in-flight subtraction, because the spike measured that it counts audio
+  played *out*. Microseconds to frames in one step, for the reason
+  `slotForPlayedFrames` does its own arithmetic in one step.
+- **The rate asked for is the clip's**, so the ordinary case is an exact
+  sample-for-sample read; a driver that refuses it says what it will take
+  instead, and the renderer resamples. A refusal costs quality, not sound.
+
+`core/audio_render.h` is what the callback calls. `renderAudio` turns an
+`AudioProgram` — the soundtracks, their placements, a rate, a start slot, and
+optionally a loop length and a burst length — into interleaved floats, and it is
+a **pure function of its arguments**, which is the same requirement
+`slotForPlayedFrames` is built to and for the same reason: a runner with no
+sound card can still check the loop seam, the sub-frame offset, the trim and the
+resampling. `test_audio_render` does, with no hardware.
+
+Two things in it that are not obvious:
+
+- **A program holds its clips by shared pointer, and that is about the thread
+  rather than about sharing.** `Document::audioSamplesFor` answers a raw pointer
+  into a map that an import or an undo may rehash, which is fine on the
+  interface thread and fatal on a device's. `Document::sharedAudioSamplesFor` is
+  the one accessor built for the other thread, and taking a share costs one
+  atomic increment and no samples.
+- **The interpolation is what makes the matched-rate case right**, not only the
+  resampled one. An index that should land exactly on sample N arrives as N
+  minus a rounding; interpolating gives sample N back, and taking the nearer of
+  the two neighbours gives N − 1. Swapping it for nearest-neighbour reddens
+  tests that have no resampling in them at all, which is how this was found.
+
 ### On disk
 
 `audio/` in the project folder, carried forward by every save exactly as
@@ -3729,15 +3776,14 @@ somebody imported that was not a WAV.
 
 ### What is not built
 
-- **The device, and therefore the scrub.** `AudioDevice` — open at rate R,
-  receive a callback asking for N frames, report frames consumed, stop — is the
-  seam [importing.md](importing.md) asks for, and the reason it is a seam is in
-  [audio-spike.md](audio-spike.md): the arithmetic must stay drivable by a fake.
-  `src/app/animage/audio_check.*` and the `--audio-check` flag come out when it
-  lands; they are the deployment spike and their header says so.
+- **The scrub**, which is the first thing that will make a noise: on each frame
+  change while dragging, about one frame's worth of sound from that position.
+  `AudioDevice` and `renderAudio` are both built and are what it is made of —
+  see above — so what is missing is the part that decides *when* a burst
+  happens and holds the device open while somebody is working.
 - **Synchronised playback**, which is `slotForPlayedFrames` wired into
-  `onPlaybackTick` in place of the wall clock. The function is built and tested;
-  what is missing is something to ask for a sample count.
+  `onPlaybackTick` in place of the wall clock. Both halves are built and tested;
+  what is missing is a device that is running, to ask for the sample count.
 - **A waveform**, deliberately, and **more than one soundtrack** — the model is
   a list and the row loop walks it, so what is missing is only the interface for
   a second one.
@@ -4420,10 +4466,13 @@ would otherwise assume.
 
 `tests/audio_probe.cpp` is the instrument, in the register of the section above
 — built, never run by `ctest`, and there for the first machine whose driver
-disagrees with those numbers. `src/app/animage/audio_check.*` is the other half
-and is **temporary**: it exists because the deployment tools only look at
-`animage`, so the spike had to be inside the application to ask them anything.
-Its header says so.
+disagrees with those numbers. `src/app/animage/audio_check.*` was the other half
+and is **gone**, as its own header said it would be: the deployment tools only
+look at `animage`, so the spike had to be inside the application to ask them
+anything, and once it had asked there was nothing left for it to do. What
+replaced it is `audio_device.h`, which is a seam and not a report. What that
+cost the packaging steps in CI is in
+[audio-spike.md](audio-spike.md#what-comes-out-again).
 
 ## The same source, two different pictures
 
@@ -7056,25 +7105,26 @@ come off it since the first build, with where the reasoning went:
      cost none of what it was feared to ([what taking Qt Multimedia
      costs](#what-taking-qt-multimedia-costs)).
 
-     Two pieces, in this order. **`AudioDevice`**: open at rate R, receive a
-     callback asking for N frames, report frames consumed, stop. It is a seam
-     rather than a `QAudioSink` used directly, and the reason is not insurance
-     against Qt — it is that the arithmetic must stay drivable by a fake on a
-     runner with no sound card, which is what `test_audio` does today and must
-     go on doing. Then **the scrub**: on each frame change while dragging, play
-     about one frame's worth from that position. `sampleForSlot` already answers
-     where to read from, trim and fractional offset included.
+     **`AudioDevice` is built**, and so is `renderAudio`, which is what a
+     device callback calls — see [the device is a seam, and what goes through
+     it is a value](#the-device-is-a-seam-and-what-goes-through-it-is-a-value).
+     The spike came out with it.
+
+     What is left is **the scrub**: on each frame change while dragging, play
+     about one frame's worth from that position. Everything it reads from
+     exists — `sampleForSlot` answers where in the file to start, trim and
+     fractional offset included, and `renderAudio` does the reading — so what
+     it needs is the part that decides when a burst happens and holds a device
+     open while somebody is working.
 
      After that, **synchronised playback** is one line —
-     `slotForPlayedFrames` in place of the wall clock in `onPlaybackTick` — and
-     the function is built and tested. What is missing is only something to ask
-     for a sample count.
+     `slotForPlayedFrames` in place of the wall clock in `onPlaybackTick`.
+     Both halves of that line are built and tested. What is missing is a device
+     that is running, to ask for the sample count.
 
-     Two things to know before starting. `processedUSecs()` counts audio
-     **played out** of the device, measured, so `playedMs()` uses it as it comes
-     with nothing subtracted. And `src/app/animage/audio_check.*` and the
-     `--audio-check` flag come out when the seam lands: they are the spike, and
-     their header says so.
+     One thing to know before starting: `processedUSecs()` counts audio
+     **played out** of the device, measured, so `AudioDevice::playedFrames()`
+     uses it as it comes with nothing subtracted.
    - **A video**, which is a sequence with a decoder in front and no new
      storage: extracted to frames once, at import, so the decoder never reaches
      the paint path. The one open measurement in the whole note belongs to it —

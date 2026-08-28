@@ -14,11 +14,11 @@ written, and calls it the highest-risk item in the note:
 take, and this for what taking Qt Multimedia actually costs, because two of the
 things that note is weighing turn out to be different from what it assumed.
 
-Nothing here is built. `src/app/animage/audio_check.*` and the two lines it adds
-to `main.cpp` are the spike itself and **come out again** — see [what comes out
-again](#what-comes-out-again). `tests/audio_probe.cpp` stays, as `dock_probe`
-stays: it is an instrument, and the next machine that disagrees with these
-numbers is the reason to keep it.
+Nothing here was built. `src/app/animage/audio_check.*` and the two lines it
+added to `main.cpp` were the spike itself, and **they have now come out** — see
+[what comes out again](#what-comes-out-again), which records what replaced them.
+`tests/audio_probe.cpp` stays, as `dock_probe` stays: it is an instrument, and
+the next machine that disagrees with these numbers is the reason to keep it.
 
 | | |
 |---|---|
@@ -328,15 +328,28 @@ the application something audible of its own.
 
 ## What comes out again
 
-`audio_check.h`, `audio_check.cpp`, their line in `src/app/CMakeLists.txt`'s
-source list, and the `--audio-check` branch in `main.cpp`. The header says so at
-the top so that nobody inherits it as a feature.
+**Done.** `audio_check.h`, `audio_check.cpp`, their line in
+`src/app/CMakeLists.txt`'s source list, and the `--audio-check` branch in
+`main.cpp` are gone, and so are the three lines in
+[ci.yml](../.github/workflows/ci.yml) that ran the flag on a packaged build.
+The header said at the top that it would go, so that nobody inherited it as a
+feature.
 
-What replaces them is the `AudioDevice` seam [importing.md](importing.md) asks
+What replaced them is the `AudioDevice` seam [importing.md](importing.md) asks
 for — open at rate R, receive a callback asking for N frames, report frames
 consumed, stop — which is a different shape and a different purpose: keeping
 Qt's types out of `MainWindow` and `TimelineWidget`, rather than reporting on
-them.
+them. It is `src/app/animage/audio_device.h`, and its header carries the two
+numbers from this note that shaped it.
+
+**What the packaging steps in CI lost, said plainly**, because it is the one
+thing that got worse. They still list what the deployment tool bundled, which is
+the regression worth watching; they no longer *run* the result and ask it
+whether the backend loaded, because the thing that answered that was the flag.
+A plugin in the right folder and a plugin that loads are different facts, and
+only the first is checked now. Buying the second back means a diagnostic flag in
+the application — a reasonable thing to want for somebody reporting "no
+sound", and a different feature from a spike.
 
 **What stays** is `tests/audio_probe.cpp`, the `find_package(Qt6Multimedia)`
 block, and `modules: qtmultimedia` in CI. The probe stays for `dock_probe`'s
