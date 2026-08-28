@@ -23,6 +23,33 @@
 // seam that note asks for -- open at rate R, receive a callback asking for N
 // frames, report frames consumed, stop -- which is a different shape and is
 // keeping Qt's types out of `MainWindow` rather than reporting on them.
+//
+// --- What the backend is actually for, which is less than it looks ----------
+//
+// **A missing backend does not cost this program scrubbing.** Delete
+// `plugins/multimedia` outright and Qt says so, in as many words:
+//
+// > No QtMultimedia backends found. Only QMediaDevices, QAudioDevice,
+// > QSoundEffect, QAudioSink, and QAudioSource are available.
+//
+// That list is the whole of what scrub audio needs. `tests/audio_probe` was run
+// against exactly that -- a plugin tree with the backend removed -- and opened
+// the device, played, and reported the same numbers to the tenth of a
+// millisecond. The raw audio path is native inside `Qt6Multimedia` itself
+// (WASAPI, CoreAudio, ALSA/PulseAudio); the backend plugin is not in it.
+//
+// So the FFmpeg payload -- which is where all the bytes and all three
+// packaging tools' difficulty live -- buys exactly two things:
+//
+// | needs the backend | does not |
+// |---|---|
+// | `QAudioDecoder`: mp3, m4a, opus, anything compressed | `QAudioSink`, and so the whole of scrubbing |
+// | `QMediaPlayer`, and so all of video import | `QMediaDevices`, and so device enumeration |
+//
+// **This is a seam the plan does not currently draw**, and it is worth knowing
+// before the shipping cost is argued: reading a WAV and scrubbing it is
+// available at the price of one 1.4 MB library, and every megabyte after that
+// is bought by decoding a director's `.m4a` and by video.
 
 #include <QString>
 
