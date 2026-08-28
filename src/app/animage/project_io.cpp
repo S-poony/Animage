@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <system_error>
 #include <unordered_set>
 
@@ -746,34 +747,53 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
     // -- so a folder assembled without them is a folder that has lost the
     // picture. See ProjectIO::Imports for where they are looked for and why in
     // that order.
-    for (const std::string& name : importsReferencedBy(doc)) {
-        const QString file = QString::fromStdString(name);
-        if (!root.mkpath(scratch + QStringLiteral("/imports"))) {
-            return giveUp(QStringLiteral("cannot create %1/imports").arg(scratch));
+    //
+    // Written once and run twice, for `imports/` and for `audio/`. The second
+    // caller is what makes this a function rather than a loop; the two folders
+    // differ in nothing but their name and which pending map answers for them.
+    const auto carryFolder =
+        [&](const char* subdir, const std::vector<std::string>& names,
+            const std::unordered_map<std::string, QString>& pending) -> std::optional<QString> {
+        for (const std::string& name : names) {
+            const QString file = QString::fromStdString(name);
+            const QString dir = QLatin1String(subdir);
+            if (!root.mkpath(scratch + QLatin1Char('/') + dir)) {
+                return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
+            }
+            const QString into = scratch + QLatin1Char('/') + dir + QLatin1Char('/') + file;
+
+            QStringList tried;
+            const auto attempt = [&](const QString& from) {
+                if (from.isEmpty()) return false;
+                tried.append(from);
+                return carryForward(from, into);
+            };
+
+            const auto found = pending.find(name);
+            if (attempt(state.folder.isEmpty()
+                            ? QString()
+                            : state.folder + QLatin1Char('/') + dir + QLatin1Char('/') + file)) {
+                continue;
+            }
+            if (found != pending.end() && attempt(found->second)) continue;
+            if (attempt(folder + QLatin1Char('/') + dir + QLatin1Char('/') + file)) continue;
+
+            // Said rather than skipped, and said now: the original is still
+            // wherever it was imported from, and a save that quietly dropped it
+            // would be discovered when the project was next opened somewhere
+            // else.
+            return QStringLiteral("cannot find the imported file \"%1\". Looked in: %2")
+                .arg(file, tried.isEmpty() ? QStringLiteral("nowhere it could be")
+                                           : tried.join(QStringLiteral(", ")));
         }
-        const QString into = scratch + QStringLiteral("/imports/") + file;
+        return std::nullopt;
+    };
 
-        QStringList tried;
-        const auto attempt = [&](const QString& from) {
-            if (from.isEmpty()) return false;
-            tried.append(from);
-            return carryForward(from, into);
-        };
-
-        const auto pending = imports.pending.find(name);
-        if (attempt(state.folder.isEmpty() ? QString()
-                                           : state.folder + QStringLiteral("/imports/") + file)) {
-            continue;
-        }
-        if (pending != imports.pending.end() && attempt(pending->second)) continue;
-        if (attempt(folder + QStringLiteral("/imports/") + file)) continue;
-
-        // Said rather than skipped, and said now: the original is still
-        // wherever it was imported from, and a save that quietly dropped it
-        // would be discovered when the project was next opened somewhere else.
-        return giveUp(QStringLiteral("cannot find the imported file \"%1\". Looked in: %2")
-                          .arg(file, tried.isEmpty() ? QStringLiteral("nowhere it could be")
-                                                     : tried.join(QStringLiteral(", "))));
+    if (const auto why = carryFolder("imports", importsReferencedBy(doc), imports.pending)) {
+        return giveUp(*why);
+    }
+    if (const auto why = carryFolder("audio", audioReferencedBy(doc), imports.pending_audio)) {
+        return giveUp(*why);
     }
 
     const std::string text = writeSceneJson(doc);
@@ -1081,6 +1101,24 @@ std::string ProjectIO::writeSceneJson(const Document& doc) {
     for (const Track& track : scene.tracks) tracks.append(writeTrack(track));
     out.insert("tracks", tracks);
 
+    // Only when there are any. A project with no sound is the same bytes it
+    // always was, which is what keeps a save comparable across the version
+    // bump -- and what stops every existing project's file changing the first
+    // time it is opened by this build.
+    if (!scene.audio_tracks.empty()) {
+        QJsonArray sounds;
+        for (const AudioTrack& track : scene.audio_tracks) {
+            QJsonObject one;
+            one.insert("id", jsonNumber(static_cast<qint64>(track.id)));
+            one.insert("name", QString::fromStdString(track.name));
+            one.insert("source", QString::fromStdString(track.source));
+            one.insert("offset_frames", jsonNumber(track.offset_frames));
+            one.insert("gain", track.gain);
+            sounds.append(one);
+        }
+        out.insert("audio_tracks", sounds);
+    }
+
     const QByteArray text = QJsonDocument(out).toJson(QJsonDocument::Indented);
     return std::string(text.constData(), static_cast<std::size_t>(text.size()));
 }
@@ -1126,6 +1164,23 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
     }
     if (scene.tracks.empty()) return refuse("scene has no tracks");
 
+    // Soundtracks, which a project may simply not have -- an absent key is not
+    // damage and reads as no sound. A track with no id or no source is dropped
+    // rather than refused: it can name no file and so can make no noise, and
+    // refusing the whole project over one would be losing the drawings to save
+    // nothing.
+    for (const QJsonValue& value : object.value("audio_tracks").toArray()) {
+        const QJsonObject one = value.toObject();
+        AudioTrack track;
+        track.id = static_cast<TrackId>(asInt(one.value("id"), 0));
+        track.name = one.value("name").toString().toStdString();
+        track.source = one.value("source").toString().toStdString();
+        track.offset_frames = asInt(one.value("offset_frames"), 0);
+        track.gain = std::clamp(one.value("gain").toDouble(1.0), 0.0, 1.0);
+        if (track.id == kNoId || track.source.empty()) continue;
+        scene.audio_tracks.push_back(std::move(track));
+    }
+
     // Nothing is written into `doc` before this point, so a file that fails any
     // check above leaves whatever was open alone.
     doc.loadScene(std::move(scene));
@@ -1151,6 +1206,19 @@ std::vector<std::string> ProjectIO::importsReferencedBy(const Document& doc) {
                 if (seen.insert(name).second) names.push_back(name);
             }
         }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::vector<std::string> ProjectIO::audioReferencedBy(const Document& doc) {
+    std::vector<std::string> names;
+    std::unordered_set<std::string> seen;
+    for (const AudioTrack& track : doc.scene().audio_tracks) {
+        // De-duplicated for importsReferencedBy's reason: two soundtracks are
+        // allowed to name one file, and that is one file to copy.
+        if (track.source.empty()) continue;
+        if (seen.insert(track.source).second) names.push_back(track.source);
     }
     std::sort(names.begin(), names.end());
     return names;

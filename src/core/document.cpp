@@ -112,6 +112,64 @@ Document::Document() = default;
 
 // --- structure -----------------------------------------------------------
 
+TrackId Document::addAudioTrack(std::string name, std::string source) {
+    ScopedCommand command(*this, "Import audio");
+
+    AudioTrack track;
+    track.id = track_ids_.next();
+    track.name = std::move(name);
+    track.source = std::move(source);
+
+    const std::size_t index = scene_.audio_tracks.size();
+    scene_.audio_tracks.push_back(std::move(track));
+
+    recordOp(std::make_unique<AudioTrackOp>(index, std::nullopt));
+    return scene_.audio_tracks.back().id;
+}
+
+void Document::removeAudioTrack(TrackId track) {
+    for (std::size_t i = 0; i < scene_.audio_tracks.size(); ++i) {
+        if (scene_.audio_tracks[i].id != track) continue;
+        ScopedCommand command(*this, "Remove audio");
+        // The samples go, and that is not part of the command. They are derived
+        // from a file the save still carries, so an undo re-decodes rather than
+        // restoring -- the same bargain a reference frame makes. Keeping them
+        // would be keeping megabytes alive against a redo that may never come.
+        audio_samples_.erase(track);
+        AudioTrack extracted = std::move(scene_.audio_tracks[i]);
+        scene_.audio_tracks.erase(scene_.audio_tracks.begin() +
+                                  static_cast<std::ptrdiff_t>(i));
+        recordOp(std::make_unique<AudioTrackOp>(i, std::move(extracted)));
+        return;
+    }
+}
+
+void Document::setAudioTrackPlacement(TrackId track, int offset_frames, double gain) {
+    AudioTrack* found = scene_.findAudioTrack(track);
+    if (!found) return;
+    // Clamped here rather than at the two call sites, so that a number arriving
+    // from a spin box and a number arriving from a drag cannot disagree about
+    // what a gain is allowed to be.
+    gain = std::clamp(gain, 0.0, 1.0);
+    if (found->offset_frames == offset_frames && found->gain == gain) return;
+
+    ScopedCommand command(*this, "Place audio");
+    recordOp(std::make_unique<AudioPlacementOp>(track, found->offset_frames, found->gain));
+    found->offset_frames = offset_frames;
+    found->gain = gain;
+}
+
+void Document::setAudioSamples(TrackId track, AudioClip clip) {
+    audio_samples_[track] = std::move(clip);
+}
+
+const AudioClip* Document::audioSamplesFor(TrackId track) const {
+    const auto it = audio_samples_.find(track);
+    return it == audio_samples_.end() ? nullptr : &it->second;
+}
+
+void Document::forgetAudioSamples() { audio_samples_.clear(); }
+
 TrackId Document::addTrack(std::string name) {
     ScopedCommand command(*this, "Add track");
 

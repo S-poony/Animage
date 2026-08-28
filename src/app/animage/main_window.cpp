@@ -66,6 +66,8 @@
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
+#include "audio_import.h"
+#include "audio_import_dialog.h"
 #include "sequence_import_dialog.h"
 #include "shortcuts_dialog.h"
 #include "timeline_widget.h"
@@ -887,6 +889,11 @@ void MainWindow::buildMenus() {
     import->addAction(QStringLiteral("&Image..."), this, &MainWindow::importImage);
     import->addAction(QStringLiteral("Image &sequence..."), this,
                       &MainWindow::importImageSequence);
+    // Present whether or not this build can decode anything: an item that comes
+    // and goes with the Qt somebody installed is an item nobody can find twice,
+    // and "why can I not do this here" is the question a disabled control
+    // exists to answer. It says so when pressed.
+    import->addAction(QStringLiteral("&Audio..."), this, &MainWindow::importAudio);
     file->addSeparator();
     // No key, so no row: the table is what the keyboard does, and an action with
     // nothing bound to it has nothing to say there.
@@ -2218,6 +2225,12 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
 }
 
 void MainWindow::afterProjectLoaded() {
+    // Before anything reads the scene. A soundtrack's samples are derived and
+    // went with the document that was replaced, so this is the one moment they
+    // are missing for a project that has them -- an import decodes as it
+    // arrives, and nothing else can lose them.
+    refreshAudioSamples();
+
     const Scene& scene = doc_.scene();
     track_ = scene.tracks.empty() ? kNoId : scene.tracks.front().id;
 
@@ -3295,6 +3308,133 @@ bool MainWindow::importSequenceFrom(const std::vector<QString>& paths, int start
     // height for the track count before. refreshEverything calls it.
     refreshEverything();
     return true;
+}
+
+// File ▸ Import ▸ Audio.
+//
+// A file picker and a decode in front of importAudioFrom, and the decode is
+// deliberately *before* the recap rather than after it. The sequence dialog
+// surveys instead, because there a decode is two hundred files and the whole
+// cost being described; here it is one file and tens of milliseconds, and it is
+// the only thing that knows how long the sound is -- which is the number the
+// recap exists to show.
+void MainWindow::importAudio() {
+    stopPlayback();
+
+    if (!audio_import::available()) {
+        // Present but refusing, rather than absent. An item that comes and goes
+        // with the Qt somebody installed is an item nobody can find twice.
+        QMessageBox::warning(
+            this, QStringLiteral("Import audio"),
+            QStringLiteral("This build has no audio support: Qt Multimedia was not found "
+                           "when it was configured, so there is nothing here that can read a "
+                           "sound file."));
+        return;
+    }
+
+    const QString picked = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import audio"), QString(),
+        QStringLiteral("Audio (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus);;All files (*)"));
+    if (picked.isEmpty()) return;
+
+    QString trouble;
+    if (!importAudioFrom(picked, 0, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import audio"), trouble);
+        return;
+    }
+}
+
+// Brings a soundtrack in. See the header for why this decodes rather than
+// deferring to something later.
+//
+// `start_frame` of 0 means "ask" -- the dialog is raised and the answer used.
+// Any other value is taken as given and nothing is asked, which is what lets a
+// test and `shots` drive an import. That is the same division the still and the
+// sequence have, arranged differently because here the decode has to happen
+// before the question can be put.
+bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* trouble) {
+    const audio_import::Decoded decoded = audio_import::decode(path);
+    if (!decoded.ok) {
+        if (trouble) *trouble = decoded.trouble;
+        return false;
+    }
+
+    if (start_frame == 0) {
+        AudioImportDialog::Found found;
+        found.file = QFileInfo(path).fileName();
+        found.rate = decoded.clip.rate;
+        found.channels = decoded.clip.channels;
+        found.frames = decoded.clip.frames();
+        found.scene_fps = doc_.scene().framerate;
+        found.trouble = decoded.trouble;
+
+        AudioImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1,
+                                 this);
+        if (dialog.exec() != QDialog::Accepted) return true;  // cancelled, not failed
+        start_frame = dialog.answer().start_frame;
+    }
+
+    // Named against what the document already spoke for, exactly as a picture
+    // is, and in the *audio* namespace: `imports/` and `audio/` are two
+    // folders, so a sound and a picture may both be called `take-3.x` without
+    // either shadowing the other.
+    std::unordered_set<std::string> taken;
+    for (const std::string& name : ProjectIO::audioReferencedBy(doc_)) taken.insert(name);
+    const std::string source = importNameIn(taken, path);
+
+    // Frame 1 is slot 0, and a frame before 1 is a negative offset. The
+    // conversion is here rather than in the dialog for the reason the sequence
+    // import has it here: a slot index is this file's unit and a frame number
+    // is the user's.
+    const TrackId added =
+        doc_.addAudioTrack(QFileInfo(path).completeBaseName().toStdString(), source);
+    doc_.setAudioTrackPlacement(added, start_frame - 1, 1.0);
+    doc_.setAudioSamples(added, decoded.clip);
+
+    // What a save copies from, until the project has a folder of its own.
+    imports_.pending_audio[source] = path;
+
+    if (trouble) *trouble = decoded.trouble;
+    // A soundtrack adds no track and no row that the timeline draws yet, so
+    // there is nothing here to size. It will when the row lands.
+    refreshEverything();
+    return true;
+}
+
+// Decodes every soundtrack the scene names and has no samples for.
+//
+// After a load, and nowhere else. A clip is derived data and goes with the
+// document it belonged to, so a project opened from disk has tracks naming
+// files and nothing decoded; an import decodes as it arrives. The test is a
+// hash lookup per soundtrack, so this is free on every call but that one.
+//
+// **A file that will not read is remembered as an empty clip**, which is the
+// same rule a reference frame follows and for a sharper version of the same
+// reason: without it, every caller that finds nothing would try again, and one
+// of those callers is going to be a device callback.
+void MainWindow::refreshAudioSamples() {
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        if (doc_.audioSamplesFor(track.id)) continue;
+        const QString path = audioPathFor(track.source);
+        if (path.isEmpty()) {
+            doc_.setAudioSamples(track.id, AudioClip{});
+            continue;
+        }
+        const audio_import::Decoded decoded = audio_import::decode(path);
+        doc_.setAudioSamples(track.id, decoded.ok ? decoded.clip : AudioClip{});
+    }
+}
+
+// Where a soundtrack file's bytes are right now. importPathFor, for `audio/`.
+QString MainWindow::audioPathFor(const std::string& name) const {
+    if (name.empty()) return QString();
+    const QString file = QString::fromStdString(name);
+    if (!project_folder_.isEmpty()) {
+        const QString inside = project_folder_ + QStringLiteral("/audio/") + file;
+        if (QFileInfo::exists(inside)) return inside;
+    }
+    const auto pending = imports_.pending_audio.find(name);
+    return (pending == imports_.pending_audio.end()) ? QString() : pending->second;
 }
 
 // Where an imported file's bytes are right now.

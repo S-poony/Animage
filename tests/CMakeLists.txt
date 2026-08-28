@@ -164,6 +164,16 @@ if(TARGET animage_ui)
   target_include_directories(test_floating_dock_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_floating_dock_frame COMMAND test_floating_dock_frame -platform offscreen)
 
+  # Decoding a soundtrack, which is the one part of audio that needs Qt
+  # Multimedia's backend -- test_audio and test_serialise cover the model and
+  # the format and run on any Qt. No audio *device* is needed: a decode produces
+  # buffers and opens no output, which is what lets this run on a runner. See
+  # docs/audio-spike.md.
+  add_executable(test_audio_decode test_audio_decode.cpp)
+  target_link_libraries(test_audio_decode PRIVATE animage_ui)
+  target_include_directories(test_audio_decode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_audio_decode COMMAND test_audio_decode -platform offscreen)
+
   add_executable(test_serialise test_serialise.cpp)
   target_link_libraries(test_serialise PRIVATE animage_ui)
   target_include_directories(test_serialise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

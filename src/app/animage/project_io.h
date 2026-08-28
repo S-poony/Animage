@@ -45,6 +45,14 @@ public:
     // changes in a way old builds would misread; a file with a higher version
     // is refused with a message saying the build is older than the file.
     //
+    // **3 is soundtracks.** A build that does not know `audio_tracks` drops the
+    // key on load and then autosaves over the project two minutes later without
+    // it -- and unlike a cel, there is nothing in the document to write it back
+    // from. The soundtrack file would still be sitting in `audio/`, orphaned,
+    // with nothing naming it and the placement that timed the shot to it gone.
+    // Same standard as the bump below: old builds would get it wrong, not
+    // merely fail to understand it.
+    //
     // **2 is imports.** A build that does not know `LayerKind::Reference` reads
     // one as a raster layer -- `kindFromName` falls through to raster for any
     // word it does not recognise -- and would then find no cels on it, conclude
@@ -52,7 +60,7 @@ public:
     // having dropped the import. Silent data loss, which is exactly the
     // standard this number exists to enforce: bump when old builds would get it
     // wrong, not merely when they would not understand.
-    static constexpr int kSceneFormatVersion = 2;
+    static constexpr int kSceneFormatVersion = 3;
 
     // What the last successful save or load left on disk, so the next save can
     // tell which cel files are still current. A cel's revision is bumped by
@@ -119,6 +127,12 @@ public:
         // Import name -- as it appears in `Layer::reference_source` -- to an
         // absolute path holding its bytes today.
         std::unordered_map<std::string, QString> pending;
+
+        // The same, for soundtracks, which live in `audio/` rather than
+        // `imports/`. A second map and not a second key format, because the two
+        // folders are two namespaces: a picture and a sound may both be called
+        // `take-3.x` without either shadowing the other.
+        std::unordered_map<std::string, QString> pending_audio;
     };
 
     // The conventional suffix for a project folder. Not enforced anywhere; a
@@ -270,4 +284,10 @@ public:
     // Sorted, so that two saves of the same scene do the same work in the same
     // order and a failure is reproducible.
     static std::vector<std::string> importsReferencedBy(const animage::Document& doc);
+
+    // The same for `audio/`: every file the scene's soundtracks name. A save
+    // carries these forward exactly as it carries imports, and for the identical
+    // reason -- nothing in the document can rebuild a sound. The decoded samples
+    // are derived and are not written anywhere.
+    static std::vector<std::string> audioReferencedBy(const animage::Document& doc);
 };

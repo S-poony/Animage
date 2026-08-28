@@ -149,6 +149,45 @@ public:
     void removeTrack(TrackId track);
     void updateTrack(TrackId track, const TrackProperties& properties);
 
+    // --- soundtracks -----------------------------------------------------
+    //
+    // Their own list on the Scene rather than a kind of Track, and so their own
+    // three functions here rather than a flag threaded through the ones above.
+    // See audio_track.h.
+    //
+    // Ids come from the same counter as a drawing track's, which is what stops
+    // the two ever colliding; what stops them being *confused* is that they are
+    // looked up by different functions in different lists, and that an id
+    // handed to the wrong one answers nothing rather than something plausible.
+
+    // Adds a soundtrack naming a file inside the project's `audio/` folder.
+    // An edit, journaled and undoable like adding a track.
+    TrackId addAudioTrack(std::string name, std::string source);
+    void removeAudioTrack(TrackId track);
+
+    // Where the sound sits in the shot, and how loud. One command for both,
+    // because the timeline row's drag changes gain and the dialog's box changes
+    // the offset, and neither wants half a struct.
+    void setAudioTrackPlacement(TrackId track, int offset_frames, double gain);
+
+    // Installs decoded samples. **Not an edit**: no command, no journal entry,
+    // no undo step. The document is not changed by this, only the memo of what
+    // a file decodes to -- exactly as setReferenceFrame is not an edit, and for
+    // the same reason. `core` never opens a file; what decodes is the
+    // application, which knows about `audio/` and about Qt.
+    void setAudioSamples(TrackId track, AudioClip clip);
+
+    // What that file decoded to, or null if nothing has decoded it yet. A
+    // caller that finds nothing draws nothing and plays silence -- it must not
+    // start a decode, for the reason compositing may not start one.
+    const AudioClip* audioSamplesFor(TrackId track) const;
+
+    // Throws the decoded samples away. Everything a clip depends on that is not
+    // in its key says so by calling this: a track being repointed at another
+    // file, a document being replaced by another whose tracks answer to the
+    // same ids.
+    void forgetAudioSamples();
+
     // Restacks a track: index 0 is the top row of the timeline and the top group
     // of the composite. `to` is counted in the list with the track already taken
     // out of it, which is the same convention moveLayer uses and is what makes
@@ -649,6 +688,12 @@ private:
     // not slow ones" in docs/handover.md for why the key names the drawing and
     // the layer rather than anything with a revision in it.
     ReferenceCache reference_frames_;
+
+    // What soundtrack files decoded to, by track. Derived, like the cache
+    // above, and unbounded unlike it -- a shot's worth of PCM is single-digit
+    // megabytes where one HD picture frame is 17, so there is nothing here to
+    // spend a budget on.
+    std::unordered_map<TrackId, AudioClip> audio_samples_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

@@ -52,6 +52,10 @@ add_library(animage_ui STATIC
   animage/crash_report.h
   animage/audio_check.cpp
   animage/audio_check.h
+  animage/audio_import.cpp
+  animage/audio_import.h
+  animage/audio_import_dialog.cpp
+  animage/audio_import_dialog.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
 

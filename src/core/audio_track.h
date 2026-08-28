@@ -60,6 +60,44 @@ struct AudioTrack {
     double gain = 1.0;
 };
 
+// What a soundtrack file decoded to.
+//
+// **Derived, and never written to a project.** Losing it costs a decode of a
+// file that is sitting in the project folder -- the same bargain a reference
+// frame's tiles make, and the reason both live on the Document rather than on
+// the thing they describe. A ten-second file is tens of milliseconds to decode
+// and single-digit megabytes to hold, against 17 MB for one HD picture frame,
+// so there is nothing here worth bounding.
+//
+// Interleaved, at whatever rate and channel count the decode produced, because
+// that is the shape a device is fed in and converting on the way in would be a
+// second thing that could be wrong about a file. `rate` is the clip's own and
+// not the device's; whoever opens the device asks for this one.
+struct AudioClip {
+    int rate = 0;
+    int channels = 0;
+    std::vector<float> samples;  // interleaved: frame f, channel c is [f * channels + c]
+
+    // Frames, meaning samples per channel -- the unit the sync arithmetic
+    // speaks. Bytes and interleaved samples both mean different things at
+    // different channel counts, and this is the only one of the three that does
+    // not.
+    std::size_t frames() const {
+        return channels > 0 ? samples.size() / static_cast<std::size_t>(channels) : 0;
+    }
+
+    bool empty() const { return frames() == 0; }
+
+    // How long it runs, in frames of picture. Rounded up, because a file that
+    // ends a tenth of the way into a frame still makes a sound on it.
+    std::size_t framesAtFps(int fps) const {
+        if (rate <= 0 || fps <= 0) return 0;
+        const std::size_t n = frames();
+        return (n * static_cast<std::size_t>(fps) + static_cast<std::size_t>(rate) - 1) /
+               static_cast<std::size_t>(rate);
+    }
+};
+
 // --- the sync arithmetic ----------------------------------------------------
 //
 // **These are pure functions of a sample count, and that is a requirement

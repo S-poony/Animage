@@ -2604,6 +2604,137 @@ std::map<QString, QByteArray> projectBytes(const QString& folder) {
     return out;
 }
 
+
+// --- a soundtrack, from a file to a saved project and back -------------------
+
+// A 16-bit PCM WAV of a sine, written by hand. Forty-four bytes of header, so a
+// fixture that builds its own input is cheaper than one committed as a binary
+// and cannot be broken by somebody tidying the repository.
+QByteArray makeWavBytes(int rate, int channels, int frames, double hz) {
+    const auto put32 = [](QByteArray& out, quint32 v) {
+        for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+    const auto put16 = [](QByteArray& out, quint16 v) {
+        for (int i = 0; i < 2; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+
+    QByteArray data;
+    for (int i = 0; i < frames; ++i) {
+        const auto v = qint16(std::lround(
+            0.5 * 32767.0 * std::sin(2.0 * 3.14159265358979323846 * hz * i / rate)));
+        for (int c = 0; c < channels; ++c) put16(data, quint16(v));
+    }
+
+    QByteArray out;
+    out.append("RIFF");
+    put32(out, quint32(36 + data.size()));
+    out.append("WAVEfmt ");
+    put32(out, 16);
+    put16(out, 1);
+    put16(out, quint16(channels));
+    put32(out, quint32(rate));
+    put32(out, quint32(rate * channels * 2));
+    put16(out, quint16(channels * 2));
+    put16(out, 16);
+    out.append("data");
+    put32(out, quint32(data.size()));
+    out.append(data);
+    return out;
+}
+
+// **The whole of what M2 claims, in one run.** A file outside the project is
+// imported, the project is saved somewhere it has never been, and a second
+// window opens it -- and the sound is still there, still placed where it was
+// put, with its samples decoded again from a copy that the save had to make for
+// itself. Every one of those steps is a place the picture-import path has been
+// wrong before.
+void aSoundtrackSurvivesAnImportASaveAndAReopen() {
+    TEST("a soundtrack imported from outside is carried into the project and comes back");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    // Deliberately *outside* the project folder, and deleted before the reopen.
+    // A project that still worked because the original was where it was left
+    // would be a project that breaks on somebody else's machine, which is the
+    // failure a self-contained folder exists to prevent.
+    const QString outside = scratch.filePath(QStringLiteral("somewhere-else.wav"));
+    {
+        QFile file(outside);
+        CHECK(file.open(QIODevice::WriteOnly));
+        file.write(makeWavBytes(48000, 2, 24000, 440.0));  // half a second
+    }
+
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    animage::TrackId sound = animage::kNoId;
+    {
+        MainWindow window;
+        window.resize(1000, 700);
+        window.show();
+        QCoreApplication::processEvents();
+
+        QString trouble;
+        // start_frame 7, so the placement is a number nothing could produce by
+        // accident: an offset of 6 slots.
+        CHECK(window.importAudioFrom(outside, 7, &trouble));
+        QCoreApplication::processEvents();
+
+        const animage::Scene& scene = window.documentForTesting().scene();
+        CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
+        if (scene.audio_tracks.empty()) return;
+        sound = scene.audio_tracks.front().id;
+        CHECK_EQ(scene.audio_tracks.front().offset_frames, 6);
+
+        // Decoded on the way in, unlike a picture -- there is nothing later to
+        // ask, because what would ask is a device callback that must not wait
+        // on a disk.
+        const animage::AudioClip* clip = window.documentForTesting().audioSamplesFor(sound);
+        CHECK(clip != nullptr);
+        if (clip) {
+            CHECK_EQ(clip->rate, 48000);
+            CHECK_EQ(clip->channels, 2);
+            CHECK(clip->frames() > 20000);
+        }
+
+        CHECK(window.saveTo(folder));
+    }
+
+    // The save had to copy the file into the project, because nothing in the
+    // document can rebuild a sound.
+    const QDir audio(folder + QStringLiteral("/audio"));
+    CHECK(audio.exists());
+    CHECK_EQ(audio.entryList(QDir::Files).size(), 1);
+
+    // And now the original goes. What opens next has only the project.
+    CHECK(QFile::remove(outside));
+
+    MainWindow reopened;
+    reopened.resize(1000, 700);
+    reopened.show();
+    QCoreApplication::processEvents();
+    QString error;
+    CHECK(reopened.openProjectAt(folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    QCoreApplication::processEvents();
+
+    const animage::Scene& scene = reopened.documentForTesting().scene();
+    CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
+    if (scene.audio_tracks.empty()) return;
+    CHECK_EQ(scene.audio_tracks.front().offset_frames, 6);
+
+    // Decoded again from the copy, which is the load path doing its one job.
+    const animage::AudioClip* clip =
+        reopened.documentForTesting().audioSamplesFor(scene.audio_tracks.front().id);
+    CHECK(clip != nullptr);
+    if (clip) {
+        CHECK_EQ(clip->rate, 48000);
+        CHECK(clip->frames() > 20000);
+        float peak = 0.0f;
+        for (float s : clip->samples) peak = std::max(peak, std::abs(s));
+        CHECK(peak > 0.2f);  // audible, not a well-shaped silence
+    }
+}
+
 void aProjectSurvivesSavingAndLoading() {
     TEST("a project comes back from disk with its pixels intact");
     QTemporaryDir scratch;
@@ -9980,6 +10111,7 @@ int main(int argc, char** argv) {
     movedMarksAgreeWithThemselvesInTheWindow();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
+    aSoundtrackSurvivesAnImportASaveAndAReopen();
     aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     aFailedSwapPutsThePreviousProjectBack();

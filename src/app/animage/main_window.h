@@ -114,6 +114,26 @@ public:
     bool importSequenceFrom(const std::vector<QString>& paths, int start_frame, bool half_size,
                             QString* trouble = nullptr);
 
+    // Brings a soundtrack in from `path` and adds it to the scene, starting on
+    // `start_frame` (1 for the first frame of the shot, and less than 1 is
+    // allowed -- a breath in front of a word falls off the start).
+    //
+    // Public for importImageFrom's reasons: the asking and the doing want
+    // separating, and a modal dialog is not something `shots` or a test can
+    // drive.
+    //
+    // **It decodes, and the decode is the whole cost.** Unlike a sequence there
+    // is nothing to defer to a paint: a soundtrack is one file, tens of
+    // milliseconds, and what would ask for it later is a device callback that
+    // must never wait on a disk. So it is read here, in full, before the track
+    // exists.
+    //
+    // False with `trouble` filled in when nothing could be decoded, and the
+    // document is untouched in that case. True with `trouble` *also* filled in
+    // when something was read and there is still something to say -- a file cut
+    // short, or one read only as far as the cap.
+    bool importAudioFrom(const QString& path, int start_frame, QString* trouble = nullptr);
+
     // Waits for every imported picture on screen to be decoded and installed.
     //
     // Public so a test can change a placement directly and then ask for the
@@ -380,10 +400,20 @@ private:
     // different questions. See docs/importing.md.
     void importImage();
     void importImageSequence();
+    void importAudio();
+
+    // Decodes every soundtrack the scene names and has no samples for.
+    //
+    // Called after a load, and that is the only thing that needs it: a decoded
+    // clip is derived data thrown away with the document it belonged to, and an
+    // import decodes as it arrives. Cheap when there is nothing to do, which is
+    // every call but the one after opening a project with sound in it.
+    void refreshAudioSamples();
 
     // Where an imported file's bytes are: inside the project once it has been
     // saved, and at the path it came from until then. Empty when neither.
     QString importPathFor(const std::string& name) const;
+    QString audioPathFor(const std::string& name) const;
 
     // One frame of an import with no placement applied, which is what a
     // placement gesture floats. `frame` indexes `Layer::reference_sources`, so

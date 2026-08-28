@@ -118,6 +118,35 @@ void TrackOp::collectCelIds(std::vector<CelId>& out) const {
     }
 }
 
+// No refcounts either way, unlike TrackOp: a soundtrack has no cels. What it
+// names is a file in the project folder, which a save carries forward whether
+// or not the track is currently in the scene -- see ProjectIO.
+void AudioTrackOp::applySwap(Document& doc) {
+    Scene& scene = doc.mutableScene();
+
+    if (state_) {
+        const std::size_t at = std::min(index_, scene.audio_tracks.size());
+        scene.audio_tracks.insert(
+            scene.audio_tracks.begin() + static_cast<std::ptrdiff_t>(at), std::move(*state_));
+        state_.reset();
+        index_ = at;
+        return;
+    }
+
+    if (index_ >= scene.audio_tracks.size()) return;
+    AudioTrack extracted = std::move(scene.audio_tracks[index_]);
+    scene.audio_tracks.erase(scene.audio_tracks.begin() +
+                             static_cast<std::ptrdiff_t>(index_));
+    state_ = std::move(extracted);
+}
+
+void AudioPlacementOp::applySwap(Document& doc) {
+    AudioTrack* track = doc.mutableScene().findAudioTrack(track_);
+    if (!track) return;
+    std::swap(track->offset_frames, offset_frames_);
+    std::swap(track->gain, gain_);
+}
+
 // No cel refcount moves either way: nothing enters or leaves the scene, the
 // same tracks are in it in another order.
 void TrackOrderOp::applySwap(Document& doc) {

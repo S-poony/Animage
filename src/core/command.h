@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_track.h"
 #include "cel.h"
 #include "image.h"
 #include "layer.h"
@@ -117,6 +118,41 @@ public:
 private:
     std::size_t index_;
     std::optional<Track> state_;
+};
+
+// A soundtrack entering or leaving the scene. Its own inverse: applying it
+// either puts the track back or takes it out, and holds the other half.
+//
+// **Much smaller than TrackOp and for one reason: there are no cels.** That op
+// has to move refcounts on every cel of every image of the track it lifts,
+// because the history holding a track is what keeps its drawings alive. A
+// soundtrack holds a file name and three numbers, and its decoded samples are
+// derived -- so nothing here has to be reference counted and nothing here can
+// be lost by being forgotten.
+class AudioTrackOp final : public Op {
+public:
+    AudioTrackOp(std::size_t index, std::optional<AudioTrack> state)
+        : index_(index), state_(std::move(state)) {}
+    void applySwap(Document& doc) override;
+
+private:
+    std::size_t index_;
+    std::optional<AudioTrack> state_;
+};
+
+// Where a soundtrack sits in the shot, and how loud. One op for both numbers,
+// because they are what the row's drag and the import dialog's box write and
+// neither of those wants half a struct.
+class AudioPlacementOp final : public Op {
+public:
+    AudioPlacementOp(TrackId track, int offset_frames, double gain)
+        : track_(track), offset_frames_(offset_frames), gain_(gain) {}
+    void applySwap(Document& doc) override;
+
+private:
+    TrackId track_;
+    int offset_frames_;
+    double gain_;
 };
 
 // Moves a track from one place in the stack to another. Its own inverse like

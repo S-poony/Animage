@@ -7,8 +7,10 @@
 // tests: the scene that comes back from its own file, the cel bits that come
 // back exactly, and the refusal of files that are not what they claim.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "project_io.h"
 #include "testing.h"
@@ -543,19 +545,167 @@ void everyImportedFileIsNamedOnce() {
 // the import. Nothing about that fails loudly, which is exactly why the number
 // exists. This pins that the number moved.
 void importsRaisedTheFormatVersion() {
-    TEST("scene.json says version 2, which is what stops an older build eating an import");
+    TEST("the version is past 2, which is what stops an older build eating an import");
+    // **A floor and not the number.** This used to assert the exact version its
+    // own bump introduced, and so broke the next time anything else was added
+    // -- which is the wrong failure: what this test is about is that imports
+    // are behind a gate at all, and the gate does not get lower. Whichever bump
+    // is current asserts its own number, next to what it was for.
     const std::string text = ProjectIO::writeSceneJson(buildScene());
-    CHECK(text.find("\"version\": 2") != std::string::npos);
     CHECK(ProjectIO::kSceneFormatVersion >= 2);
+    CHECK(text.find("\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion)) !=
+          std::string::npos);
 
     // And a file from the future is still refused rather than half-read.
     std::string tampered = text;
-    const std::size_t at = tampered.find("\"version\": 2");
-    if (at != std::string::npos) tampered.replace(at, 12, "\"version\": 99");
+    const std::string wrote = "\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion);
+    const std::size_t at = tampered.find(wrote);
+    if (at != std::string::npos) tampered.replace(at, wrote.size(), "\"version\": 99");
     Document loaded;
     std::string error;
     CHECK(!ProjectIO::readSceneJson(tampered, loaded, &error));
     CHECK(!error.empty());
+}
+
+
+// --- soundtracks -----------------------------------------------------------
+
+void aSoundtrackSurvivesTheRoundTrip() {
+    TEST("a soundtrack comes back with its file, its placement and its gain");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+    doc.setAudioTrackPlacement(sound, -4, 0.5);
+
+    // The samples are derived and must not be written. Installing some here is
+    // what makes the next check mean something: a save that carried them would
+    // put megabytes of float into scene.json and nobody would notice until a
+    // ten-second track made the file unreadable in an editor.
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 2;
+    clip.samples.assign(4800, 0.25f);
+    doc.setAudioSamples(sound, std::move(clip));
+
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    CHECK(text.find("dialogue.wav") != std::string::npos);
+    CHECK(text.find("0.25") == std::string::npos);  // no samples anywhere in it
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+
+    const AudioTrack& back = loaded.scene().audio_tracks.front();
+    CHECK_EQ(back.source, std::string("dialogue.wav"));
+    CHECK_EQ(back.name, std::string("dialogue"));
+    CHECK_EQ(back.offset_frames, -4);  // a breath in front of the word
+    CHECK_NEAR(back.gain, 0.5, 1e-9);
+
+    // Derived, so it does not come back -- and nothing pretends it did.
+    CHECK(loaded.audioSamplesFor(back.id) == nullptr);
+
+    // The tracks are untouched by any of it, which is the whole "audio is not a
+    // track" argument surviving a save.
+    CHECK_EQ(loaded.scene().tracks.size(), doc.scene().tracks.size());
+}
+
+void aProjectWithNoSoundIsTheSameBytesItAlwaysWas() {
+    TEST("a scene with no soundtrack writes no audio_tracks key at all");
+    const std::string text = ProjectIO::writeSceneJson(buildScene());
+    // Not tidiness: every project that exists has no sound in it, and a key
+    // appearing in all of them the first time this build opens them would make
+    // every one of those files differ for no reason anybody could point at.
+    CHECK(text.find("audio_tracks") == std::string::npos);
+}
+
+void everySoundtrackFileIsNamedOnce() {
+    TEST("two soundtracks naming one file is one file to carry");
+    Document doc = buildScene();
+    doc.addAudioTrack("take one", "dialogue.wav");
+    doc.addAudioTrack("take two", "dialogue.wav");
+    doc.addAudioTrack("room", "room-tone.wav");
+
+    const std::vector<std::string> named = ProjectIO::audioReferencedBy(doc);
+    CHECK_EQ(named.size(), std::size_t{2});
+    CHECK_EQ(named[0], std::string("dialogue.wav"));
+    CHECK_EQ(named[1], std::string("room-tone.wav"));
+
+    // And a soundtrack is not a picture: the two folders are two namespaces, so
+    // nothing here reaches imports/.
+    const std::vector<std::string> pictures = ProjectIO::importsReferencedBy(doc);
+    for (const std::string& one : pictures) CHECK(one != std::string("dialogue.wav"));
+}
+
+void undoingAnImportTakesTheSoundtrackWithIt() {
+    TEST("adding and placing a soundtrack are edits, and both undo");
+    Document doc = buildScene();
+    doc.clearHistory();
+
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    doc.setAudioTrackPlacement(sound, 12, 0.4);
+    CHECK_EQ(doc.scene().findAudioTrack(sound)->offset_frames, 12);
+
+    CHECK(doc.undo());  // the placement
+    CHECK_EQ(doc.scene().findAudioTrack(sound)->offset_frames, 0);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 1.0, 1e-9);
+
+    CHECK(doc.undo());  // the import
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+
+    CHECK(doc.redo());
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    // The id survives, which is what lets the samples installed against it
+    // still be the right samples after an undo and a redo.
+    CHECK_EQ(doc.scene().audio_tracks.front().id, sound);
+}
+
+void gainIsClampedWhereItIsStoredAndNotAtEachCaller() {
+    TEST("a gain out of range is clamped once, where it is written");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    doc.setAudioTrackPlacement(sound, 0, 4.0);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 1.0, 1e-9);
+    doc.setAudioTrackPlacement(sound, 0, -1.0);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->gain, 0.0, 1e-9);
+
+    // And a file that says something impossible is clamped on the way in too,
+    // rather than being trusted because it was written by us once.
+    std::string text = ProjectIO::writeSceneJson(doc);
+    const std::string wrote = "\"gain\": 0";
+    const std::size_t at = text.find(wrote);
+    CHECK(at != std::string::npos);
+    text.replace(at, wrote.size(), "\"gain\": 900");
+    Document loaded;
+    CHECK(ProjectIO::readSceneJson(text, loaded, nullptr));
+    CHECK_NEAR(loaded.scene().audio_tracks.front().gain, 1.0, 1e-9);
+}
+
+void soundtracksRaisedTheFormatVersion() {
+    TEST("scene.json says version 3, which stops an older build orphaning a soundtrack");
+    Document doc = buildScene();
+    doc.addAudioTrack("dialogue", "dialogue.wav");
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    CHECK(text.find("\"version\": 3") != std::string::npos);
+    CHECK(ProjectIO::kSceneFormatVersion >= 3);
+}
+
+void aSoundtrackDoesNotLengthenTheShot() {
+    TEST("importing an hour of sound does not make the shot an hour long");
+    Document doc = buildScene();
+    const std::size_t before = doc.scene().shotFrames();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 1;
+    clip.samples.assign(48000 * 60, 0.0f);  // a minute
+    doc.setAudioSamples(sound, std::move(clip));
+
+    CHECK_EQ(doc.scene().shotFrames(), before);
+    CHECK_EQ(doc.scene().timelineFrames(), std::max(before, doc.scene().longestTrack()));
 }
 
 }  // namespace
@@ -575,5 +725,12 @@ int main() {
     anImportContributesNoCels();
     everyImportedFileIsNamedOnce();
     importsRaisedTheFormatVersion();
+    aSoundtrackSurvivesTheRoundTrip();
+    aProjectWithNoSoundIsTheSameBytesItAlwaysWas();
+    everySoundtrackFileIsNamedOnce();
+    undoingAnImportTakesTheSoundtrackWithIt();
+    gainIsClampedWhereItIsStoredAndNotAtEachCaller();
+    soundtracksRaisedTheFormatVersion();
+    aSoundtrackDoesNotLengthenTheShot();
     return testing::summarise("serialise");
 }
