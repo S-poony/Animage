@@ -28,7 +28,6 @@ numbers is the reason to keep it.
 | [What the three packagers did](#what-the-three-packagers-did) | all three, unprompted |
 | [What it costs](#what-it-costs) | bigger yes, slower no, harder no |
 | [The licence, which got cheaper](#the-licence-which-got-cheaper) | Qt's FFmpeg is LGPL, not GPL |
-| [**The machine that will want a calibration**](#the-machine-that-will-want-a-calibration) | it is Bluetooth, and it is not hypothetical |
 | [What is still not known](#what-is-still-not-known) | including the one that could change what gets built |
 | [What comes out again](#what-comes-out-again) | |
 | [Found while looking for something else](#found-while-looking-for-something-else) | three of them, one a real defect |
@@ -87,25 +86,39 @@ reported it.
 `handed - processed` has no start instant in it and both its terms are counted
 from the same one. That is the column to decide on.
 
-### A second device says the same thing, and settles what the offset is
+### A second device confirms the verdict, and corrects the paragraph above
 
-Run again on a Bluetooth speaker rather than the monitor's HDMI audio:
+A second output — a Bluetooth speaker — gives the same verdict: `handed -
+processed` identical to the tenth of a millisecond, and `processed - wall` flat
+across the run.
+
+**But it refutes what this document first said about the offset.** That was
+written as "an artefact of where the timer was started", on the strength of two
+runs on two devices showing two different constants. Three runs on each says
+otherwise:
 
 ```
-opening  : 555 ms
-processed - wall  : +24.8 first half, +25.8 second half  (drift +1.0, jitter 13.0)
-handed - processed: +250.0 to +292.0 ms  (buffer 250.0)
+HDMI        +37.6   +37.6   +37.6
+Bluetooth   +25.8   +25.8   +25.8
 ```
 
-Same verdict, and the useful part is what *changed*: the constant offset went
-from +37.6 to +24.8 while everything else stayed. **That is the offset being an
-artefact of where the timer was started and not a property of the number** — the
-claim made above from one device, now with a second one behind it. `handed -
-processed` is identical to the tenth of a millisecond, because it is a fact
-about the buffer and not about the device.
+Rock stable within a device and twelve milliseconds apart between them, against
+a run-to-run wobble of one to three. **So the offset is a property of the
+device, not of the timer.** Whether that is `start()` returning at a different
+point in different drivers' open paths, or `processedUSecs` accounting for some
+of the device's own latency, is not distinguished here and would need a third
+kind of measurement.
 
-Sound was confirmed audible on this one by ear, which is the one thing no check
-here can do.
+**None of it touches the verdict**, which rests on `handed - processed` and not
+on this. What it does is put a small, real number against the thing [the
+playback clock](importing.md#the-playback-clock) defers a calibration for:
+*"whatever survives the subtraction is a constant per machine and per driver"* —
+and here are two drivers, twelve milliseconds apart, on one machine. That is a
+third of a frame, which is not a reason to build the control today and is a
+reason to expect it will be wanted.
+
+Sound was confirmed audible by ear, which is the one thing no check here can
+do.
 
 ### And a pull-mode `QIODevice` must override `bytesAvailable`
 
@@ -286,40 +299,6 @@ Neither of those is a decision this note takes. What it records is that **the
 encoder question does not arise from importing at all** — it arrives with
 [video export](importing.md#video-export-and-what-qt-gives-free), which is last
 and is where it should be argued.
-
-## The machine that will want a calibration
-
-[importing.md](importing.md) defers a manual sync offset in milliseconds, on the
-user's call, and is explicit about what deferring costs:
-
-> What deferring does cost: if `playedMs()` turns out to over- or under-report
-> on some driver, there is nothing the user can do about it but say so.
-
-**That machine has a name, and it is any Bluetooth output.** A2DP puts an encode,
-a radio hop and a decode between the operating system and the speaker, and it is
-ordinarily 100–200 ms — **two and a half to five frames at 24 fps.** That is not
-the sub-frame bias [the playback clock](importing.md#the-playback-clock) is
-written to remove; it is a desync somebody would see.
-
-**This is reasoning and not a measurement, and the difference matters here.**
-What was measured is that `processedUSecs` tracks real time on a Bluetooth
-device exactly as it does on HDMI — same rate, same gap, a different constant.
-What is *inferred* is that the number cannot include the transport delay,
-because what reports it is the operating system's mixer position and the radio
-hop is downstream of that. Very likely, and not established: the offset a timer
-sees is contaminated by where the timer started, which is precisely the trap
-this document already had to correct once.
-
-**What would settle it** is a comparison rather than an absolute: play the same
-file through HDMI and through Bluetooth, and ask whether `playedMs()` differs by
-the transport delay or by nothing. If by nothing, the delay is invisible to the
-number and a calibration is the only way to null it.
-
-Nothing to do now — the deferral is the right call and is cheap to reverse,
-being a preference rather than a field in `scene.json`. What this adds is that
-the case is ordinary rather than hypothetical, so **the first person to report
-that the sound is late is likely to be on Bluetooth**, and that is worth asking
-before looking anywhere else.
 
 ## What is still not known
 
