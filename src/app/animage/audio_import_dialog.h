@@ -36,6 +36,7 @@ public:
         int channels = 0;
         std::size_t frames = 0;   // samples per channel
         int scene_fps = 24;       // to say the length in frames as well as seconds
+        qint64 file_bytes = 0;    // what is on disk, to compare against
         QString trouble;          // a decode that succeeded with something to say
     };
 

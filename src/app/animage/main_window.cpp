@@ -2941,7 +2941,14 @@ namespace {
 // scene already names -- because two modelsheets from two folders are very
 // often both called `model.png`, and the second one silently becoming the first
 // is a picture quietly replaced.
-std::string importNameIn(std::unordered_set<std::string>& taken, const QString& path) {
+// `fallback_suffix` is what a file with no extension at all is called, and it
+// is a parameter because this is shared with soundtracks now. It defaulted to
+// "png" when pictures were the only caller, which would have named an
+// extensionless soundtrack `dialogue.png` inside `audio/` -- harmless to the
+// decoder, which reads the bytes, and confusing to every human who opened the
+// folder afterwards.
+std::string importNameIn(std::unordered_set<std::string>& taken, const QString& path,
+                         const char* fallback_suffix = "png") {
     QString stem = QFileInfo(path).completeBaseName();
     QString suffix = QFileInfo(path).suffix().toLower();
     // Everything that is not a letter, a digit, a dash or a dot becomes a dash,
@@ -2954,7 +2961,7 @@ std::string importNameIn(std::unordered_set<std::string>& taken, const QString& 
         if (!c.isLetterOrNumber() && c != QLatin1Char('-')) c = QLatin1Char('-');
     }
     if (stem.isEmpty()) stem = QStringLiteral("import");
-    if (suffix.isEmpty()) suffix = QStringLiteral("png");
+    if (suffix.isEmpty()) suffix = QLatin1String(fallback_suffix);
 
     const QString base = stem + QLatin1Char('.') + suffix;
     if (!taken.count(base.toStdString())) {
@@ -3366,6 +3373,7 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
         found.channels = decoded.clip.channels;
         found.frames = decoded.clip.frames();
         found.scene_fps = doc_.scene().framerate;
+        found.file_bytes = QFileInfo(path).size();
         found.trouble = decoded.trouble;
 
         AudioImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1,
@@ -3380,7 +3388,7 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
     // either shadowing the other.
     std::unordered_set<std::string> taken;
     for (const std::string& name : ProjectIO::audioReferencedBy(doc_)) taken.insert(name);
-    const std::string source = importNameIn(taken, path);
+    const std::string source = importNameIn(taken, path, "wav");
 
     // Frame 1 is slot 0, and a frame before 1 is a negative offset. The
     // conversion is here rather than in the dialog for the reason the sequence

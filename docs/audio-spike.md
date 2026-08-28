@@ -28,6 +28,7 @@ numbers is the reason to keep it.
 | [What the three packagers did](#what-the-three-packagers-did) | all three, unprompted |
 | [What it costs](#what-it-costs) | bigger yes, slower no, harder no |
 | [The licence, which got cheaper](#the-licence-which-got-cheaper) | Qt's FFmpeg is LGPL, not GPL |
+| [**The codec talks to the console**](#the-codec-talks-to-the-console-and-there-is-no-lever) | `Header missing` is FFmpeg's, costs no audio, and cannot be quieted |
 | [What is still not known](#what-is-still-not-known) | including the one that could change what gets built |
 | [What comes out again](#what-comes-out-again) | |
 | [Found while looking for something else](#found-while-looking-for-something-else) | three of them, one a real defect |
@@ -344,6 +345,41 @@ the numbers above is exactly when somebody will want to re-run it rather than
 rebuild it. It is built and **never run by `ctest`** — the runners have no audio
 device, so opening an output there fails or hangs, which is the same fact that
 makes the sync arithmetic take a sample count as an argument.
+
+## The codec talks to the console, and there is no lever
+
+**Reported as a fault and it is not one**, which is the whole reason it is
+written down: importing an mp3 prints things like
+
+```
+[mp3float @ 00000202d6bda8c0] Header missing
+[mp3float @ 000002a3d2447f00] Could not update timestamps for skipped samples.
+Input #0, mp3, from '...': Duration: 00:00:20.00, bitrate: 321 kb/s
+```
+
+That is FFmpeg's own `av_log` going straight to stderr, on **every** decode of
+that file — not something our code emits and not something that happens only on
+reopen, which is what it looked like when it was first noticed.
+
+**It costs no audio.** `audio_probe --decode` exists to settle exactly this: it
+reads a file twice through a plain `QAudioDecoder` with none of Animage near it,
+and prints the frame count each time. A 20-second mp3 comes back as 882,000
+frames at 44.1 kHz — 20.000 seconds — identically on both passes. A message on
+both passes belongs to the file and the codec; one on only the second would
+belong to whatever happened in between, which would be ours.
+
+**And it cannot be quieted from here.** `QT_LOGGING_RULES` reaches the messages
+Qt routes through its own categories and stops four of the nine lines; the other
+five are `av_log` writing to stderr directly, which Qt does not intercept.
+Silencing those means `av_log_set_callback`, which means linking FFmpeg
+ourselves — a second copy of a library Qt already bundles and does not expose,
+which is [the one genuinely expensive
+outcome](#what-is-still-not-known) this note names. Not worth it for console
+noise.
+
+So it stays, and what changes instead is that it is written down here. The next
+person to see `Header missing` should be able to find this paragraph rather than
+spend an afternoon on it.
 
 ## Found while looking for something else
 

@@ -37,7 +37,16 @@
 // ./build/tests/audio_probe --silent        the same readings, nothing audible
 // ./build/tests/audio_probe --list          the outputs this machine has
 // ./build/tests/audio_probe --device 2      one of them instead of the default
+// ./build/tests/audio_probe --decode f.mp3  decode a file twice, say what it said
 // ```
+//
+// `--decode` is here for a different question from the rest of the file, and it
+// is the question this probe exists for in general: **is a message coming out
+// of a decode ours or the decoder's?** It reads the same file twice through a
+// plain `QAudioDecoder` with none of Animage anywhere near it, and prints what
+// came out each time. A message that appears on both passes belongs to the file
+// and the codec; one that appears only on the second belongs to whatever
+// happened in between, which would be ours.
 //
 // The default output is whatever the desktop last pointed at, which on a
 // machine with a monitor plugged in over HDMI is often the monitor. A buffer
@@ -100,9 +109,14 @@
 #include <QAudioSink>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QIODevice>
 #include <QMediaDevices>
+#include <QAudioBuffer>
+#include <QAudioDecoder>
+#include <QFileInfo>
 #include <QTimer>
+#include <QUrl>
 
 #include <algorithm>
 #include <atomic>
@@ -179,6 +193,104 @@ private:
     std::atomic<qint64> handed_{0};
 };
 
+// Reads a file through a plain QAudioDecoder and reports what happened,
+// including anything Qt or the backend said while it was happening.
+//
+// Deliberately not audio_import::decode. That one is ours, and a reading taken
+// through our code cannot answer a question about whose message this is -- the
+// same reason dock_probe links Qt directly rather than animage_ui.
+struct DecodeReading {
+    bool ok = false;
+    int rate = 0;
+    int channels = 0;
+    qint64 frames = 0;
+    QStringList said;
+    QString error;
+};
+
+QStringList* g_said = nullptr;
+QtMessageHandler g_previous_handler = nullptr;
+
+void captureSaid(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
+    if (g_said) g_said->append(msg);
+    if (g_previous_handler) g_previous_handler(type, ctx, msg);
+}
+
+DecodeReading readOnce(const QString& path) {
+    DecodeReading out;
+    QAudioDecoder decoder;
+    decoder.setSource(QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
+
+    QEventLoop loop;
+    QTimer silence;
+    silence.setSingleShot(true);
+    silence.setInterval(15000);
+    QObject::connect(&silence, &QTimer::timeout, &loop, [&] {
+        out.error = QStringLiteral("stopped responding");
+        loop.quit();
+    });
+    QObject::connect(&decoder, &QAudioDecoder::bufferReady, &loop, [&] {
+        silence.start();
+        const QAudioBuffer buffer = decoder.read();
+        if (!buffer.isValid()) return;
+        if (out.rate == 0) {
+            out.rate = buffer.format().sampleRate();
+            out.channels = buffer.format().channelCount();
+        }
+        out.frames += buffer.frameCount();
+    });
+    QObject::connect(&decoder, &QAudioDecoder::finished, &loop, [&] { loop.quit(); });
+    QObject::connect(&decoder, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), &loop,
+                     [&](QAudioDecoder::Error) {
+                         out.error = decoder.errorString();
+                         loop.quit();
+                     });
+
+    g_said = &out.said;
+    g_previous_handler = qInstallMessageHandler(captureSaid);
+    silence.start();
+    decoder.start();
+    loop.exec();
+    decoder.stop();
+    qInstallMessageHandler(g_previous_handler);
+    g_said = nullptr;
+
+    out.ok = out.frames > 0;
+    return out;
+}
+
+void reportDecode(const QString& path) {
+    const QFileInfo info(path);
+    std::printf("file     : %s\n", info.fileName().toUtf8().constData());
+    std::printf("bytes    : %lld\n", (long long)info.size());
+
+    for (int pass = 1; pass <= 2; ++pass) {
+        const DecodeReading r = readOnce(path);
+        std::printf("\n--- pass %d ---\n", pass);
+        std::printf("  ok      : %s\n", r.ok ? "yes" : "no");
+        std::printf("  format  : %d Hz, %d ch\n", r.rate, r.channels);
+        std::printf("  frames  : %lld", (long long)r.frames);
+        if (r.rate > 0)
+            std::printf("  (%.3f seconds)", double(r.frames) / double(r.rate));
+        std::printf("\n");
+        const double megabytes =
+            double(r.frames) * std::max(1, r.channels) * 4.0 / (1024.0 * 1024.0);
+        std::printf("  decoded : %.2f MB of float, from %.2f MB of file\n", megabytes,
+                    double(info.size()) / (1024.0 * 1024.0));
+        if (!r.error.isEmpty())
+            std::printf("  error   : %s\n", r.error.toUtf8().constData());
+        if (r.said.isEmpty()) {
+            std::printf("  said    : nothing\n");
+        } else {
+            for (const QString& one : r.said)
+                std::printf("  said    : %s\n", one.toUtf8().constData());
+        }
+    }
+    std::printf(
+        "\nA message on BOTH passes belongs to the file and the codec. One on only the\n"
+        "second belongs to whatever happened in between, which would be ours.\n");
+}
+
 double msOfBytes(qint64 bytes) {
     return 1000.0 * double(bytes) / double(kRate * kChannels * sizeof(float));
 }
@@ -190,6 +302,7 @@ int main(int argc, char** argv) {
 
     int seconds = 2;
     int device = -1;
+    QString decode_path;
     bool silent = false;
     bool list = false;
     const QStringList args = QCoreApplication::arguments();
@@ -198,6 +311,12 @@ int main(int argc, char** argv) {
         else if (args[i] == "--list") list = true;
         else if (args[i] == "--seconds" && i + 1 < args.size()) seconds = args[++i].toInt();
         else if (args[i] == "--device" && i + 1 < args.size()) device = args[++i].toInt();
+        else if (args[i] == "--decode" && i + 1 < args.size()) decode_path = args[++i];
+    }
+
+    if (!decode_path.isEmpty()) {
+        reportDecode(decode_path);
+        return 0;
     }
 
     const QList<QAudioDevice> outs = QMediaDevices::audioOutputs();

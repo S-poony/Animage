@@ -37,18 +37,35 @@ QString accountOfClip(const AudioImportDialog::Found& found) {
                                    : QStringLiteral("%1 channels").arg(found.channels));
 }
 
-// Memory, said plainly, because it is the one cost this import has and it is
-// small enough to be reassuring rather than a warning.
+// Memory, said plainly -- **and said next to the size of the file**, which is
+// the whole point of this sentence rather than a decoration.
 //
-// Deliberately not compared against anything. A ten-second shot is single-digit
-// megabytes where one HD picture frame is 17, so there is no budget here to
-// spend and nothing to caution about.
+// A bare number here invites exactly one comparison, and it is the wrong one:
+// a 799 KB mp3 announcing 7.5 MB reads as the program having gone wrong. It has
+// not. Decoded audio is uncompressed -- 48 kHz stereo float is about 384 KB a
+// second whatever the file squeezed it to -- so the two numbers are measuring
+// different things and a recap that shows one without the other is inviting a
+// subtraction that means nothing. Reported from use, on the first file anybody
+// imported that was not a WAV.
 QString costOfClip(const AudioImportDialog::Found& found) {
     const double megabytes =
         double(found.frames) * std::max(1, found.channels) * sizeof(float) / (1024.0 * 1024.0);
-    return QStringLiteral("About %1 MB while the project is open. Nothing is added to what a "
-                          "save writes: the sound is played from its file.")
-        .arg(megabytes, 0, 'f', megabytes < 10.0 ? 1 : 0);
+    const auto shown = [](double mb) {
+        return QStringLiteral("%1 MB").arg(mb, 0, 'f', mb < 10.0 ? 1 : 0);
+    };
+
+    if (found.file_bytes <= 0) {
+        return QStringLiteral("About %1 in memory while the project is open. Nothing is added "
+                              "to what a save writes: the sound is played from its file.")
+            .arg(shown(megabytes));
+    }
+
+    const double on_disk = double(found.file_bytes) / (1024.0 * 1024.0);
+    return QStringLiteral(
+               "About %1 in memory while the project is open — the file is %2. Decoded sound "
+               "is uncompressed, so it is always larger than the file, however small that is. "
+               "Nothing is added to what a save writes: the sound is played from its file.")
+        .arg(shown(megabytes), shown(on_disk));
 }
 
 }  // namespace
