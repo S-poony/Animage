@@ -3,13 +3,32 @@
 #include <QIcon>
 
 #include <cstdio>
+#include <cstring>
 
+#include "audio_check.h"
 #include "crash_report.h"
 #include "main_window.h"
 #include "shortcuts.h"
 
 int main(int argc, char** argv) {
     installCrashHandler();
+
+    // **A spike, and it comes out with audio_check.** `--audio-check` prints
+    // what Qt Multimedia can find here and exits, so that a packaged build --
+    // downloaded onto a machine that never had Qt on it -- can be asked whether
+    // the deployment tool bundled a backend. See audio_check.h for why this is
+    // in the application rather than in a probe under tests/.
+    //
+    // Read before QApplication is built, because on a package with no backend
+    // the interesting failure may arrive during plugin loading, and a flag that
+    // needs a window to be created first cannot report it.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--audio-check") == 0) {
+            QCoreApplication probe(argc, argv);
+            std::fputs(qPrintable(audio_check::report()), stdout);
+            return 0;
+        }
+    }
 
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("Animage"));

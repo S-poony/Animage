@@ -124,6 +124,30 @@ if(TARGET animage_ui)
   target_link_libraries(window_probe PRIVATE animage_ui)
   target_include_directories(window_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+  # The fourth probe, and the one for a question whose answer belongs to a sound
+  # card driver: does `QAudioSink::processedUSecs()` count audio handed to the
+  # device, or audio played out of it? That is the first of the two measurements
+  # docs/importing.md ends on, and the whole playback clock stands on it. Built
+  # but never run by ctest, for dock_probe's reasons and one of its own: the
+  # runners have no audio device, so opening an output there fails or hangs.
+  #
+  # It links Qt directly rather than animage_ui, because being free of this
+  # program is the entire point of it.
+  #
+  # **Multimedia is asked for here as its own package and must never go in the
+  # top-level find_package.** A component in that list which the installed Qt
+  # does not have fails the whole call, Qt6_FOUND comes back false, and every
+  # GUI target is skipped while configure, build and ctest all report success.
+  # No Qt on the CI runners has this module today. See test_pen_promotion above,
+  # which is the same mistake already paid for once.
+  find_package(Qt6Multimedia QUIET)
+  if(Qt6Multimedia_FOUND)
+    add_executable(audio_probe audio_probe.cpp)
+    target_link_libraries(audio_probe PRIVATE Qt6::Multimedia)
+  else()
+    message(STATUS "Qt Multimedia not found: skipping audio_probe")
+  endif()
+
   # The third probe, and the one for questions whose answer belongs to a tablet
   # driver rather than to Qt or to us: every pen and mouse event the canvas is
   # offered, and what the canvas made of each. Built but never run by ctest, for

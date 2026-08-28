@@ -64,6 +64,7 @@ call twice over, and this note leans on it.
 | [Where an import lands](#where-an-import-lands) | bottom, in import order |
 | [What the export says](#what-the-export-says) | a recap, which fixes something already broken |
 | [The project folder and the file format](#the-project-folder-and-the-file-format) | |
+| [**What the spike measured**](#what-the-spike-measured) | and the two things in this note it corrects |
 | [**What the handover already knows about this**](#what-the-handover-already-knows-about-this) | the traps this note would otherwise walk into |
 | [Not in scope](#not-in-scope) | |
 | [The open questions](#the-open-questions) | collected |
@@ -1289,6 +1290,54 @@ Three ways to lose work quietly, behind one number.
 The incremental save is unaffected and cheaply so. A converted import's cels have
 revisions like any others, so after the first write they are carried forward as
 hard links and cost nothing; an unconverted one has no cels to carry.
+
+## What the spike measured
+
+**The deployment spike has been run, and the record is
+[audio-spike.md](audio-spike.md).** It is kept out of this note rather than
+folded into it, for the reason given at the top: this stays a plan and is not
+rewritten into a description. What belongs here is only what it *changes* about
+the plan, which is two things and a confirmation.
+
+**It confirmed the expensive worry was unfounded.** All three deployment tools
+bundled the FFmpeg backend from `animage`'s import table with no help, and a
+downloaded Windows package loads it on a machine that never had Qt. The cost is
+about 20 MB per platform and nothing measurable at startup. Every line of [what
+it costs, and none of it has changed](#what-it-costs-and-none-of-it-has-changed)
+is still a real bill; none of it is a risk any more.
+
+**It corrects two things in this note.**
+
+*The first is small and mechanical.* [Which library](#which-library) says
+`modules: qtmultimedia` goes on **four** Qt install steps. The file has **two**
+`install-qt-action` blocks, one of which the build matrix runs three times. The
+Windows core-only sanitizer installs no Qt deliberately and must not start.
+
+*The second is not small.* [The open questions](#the-open-questions) asks
+whether `processedUSecs()` counts audio handed over or played out, and its
+stated test — *"whether the number ever reports more audio than there has been
+time to play"* — **is the wrong meter and answers wrongly.** There is no instant
+to measure real time from: the stream starts inside `QAudioSink::start()`, which
+takes a third of a second, so the number sits a constant few tens of
+milliseconds ahead of any timer started around that call and reads as "handed
+over" on a device that plainly is not. The answer is **played out**, decided by
+comparing what the sink was handed against what it reports, which has no start
+instant in it at all.
+
+**And it found a seam this note does not draw.** [Scrubbing comes
+first](#scrubbing-comes-first) is right that it is the higher-value half — and
+it turns out to be the half that needs none of the FFmpeg payload.
+`QAudioSink`, `QAudioDevice` and `QMediaDevices` are native inside
+`Qt6Multimedia`; delete the backend plugin entirely and scrubbing still works,
+measured. What the 20 MB buys is `QAudioDecoder` — the codec gap this note takes
+Qt Multimedia partly to close — and `QMediaPlayer`, which is all of video. That
+is not an argument against paying it. It is worth knowing which line item is
+which, because it means the feature the program is *for* does not depend on the
+part of the bill that could go wrong on some platform.
+
+**One measurement is untouched**: whether `QMediaPlayer` at 1× extracts every
+frame. It belongs to video rather than audio, and it is still the only question
+in this note whose answer could change what gets built.
 
 ## What the handover already knows about this
 

@@ -156,7 +156,12 @@ SequenceImportDialog::SequenceImportDialog(const Found& found, int playhead_fram
     // The cost line follows the checkbox, because half size is exactly the
     // thing that changes it and a number that did not move would read as a
     // control that does nothing.
-    connect(half_, &QCheckBox::toggled, this, [this, cost, count, found](bool on) {
+    // No `this` in the capture: costOfFrames is a free function above, so Apple
+    // Clang's -Wunused-lambda-capture makes capturing it a build failure under
+    // -Werror while GCC and MSVC say nothing. The `this` two arguments along is
+    // the context object and is a different thing -- it is what disconnects this
+    // when the dialog goes.
+    connect(half_, &QCheckBox::toggled, this, [cost, count, found](bool on) {
         cost->setText(costOfFrames(count, found.width, found.height, on));
     });
 
