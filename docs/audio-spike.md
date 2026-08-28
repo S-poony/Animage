@@ -28,6 +28,7 @@ numbers is the reason to keep it.
 | [What the three packagers did](#what-the-three-packagers-did) | all three, unprompted |
 | [What it costs](#what-it-costs) | bigger yes, slower no, harder no |
 | [The licence, which got cheaper](#the-licence-which-got-cheaper) | Qt's FFmpeg is LGPL, not GPL |
+| [**The machine that will want a calibration**](#the-machine-that-will-want-a-calibration) | it is Bluetooth, and it is not hypothetical |
 | [What is still not known](#what-is-still-not-known) | including the one that could change what gets built |
 | [What comes out again](#what-comes-out-again) | |
 | [Found while looking for something else](#found-while-looking-for-something-else) | three of them, one a real defect |
@@ -85,6 +86,26 @@ reported it.
 
 `handed - processed` has no start instant in it and both its terms are counted
 from the same one. That is the column to decide on.
+
+### A second device says the same thing, and settles what the offset is
+
+Run again on a Bluetooth speaker rather than the monitor's HDMI audio:
+
+```
+opening  : 555 ms
+processed - wall  : +24.8 first half, +25.8 second half  (drift +1.0, jitter 13.0)
+handed - processed: +250.0 to +292.0 ms  (buffer 250.0)
+```
+
+Same verdict, and the useful part is what *changed*: the constant offset went
+from +37.6 to +24.8 while everything else stayed. **That is the offset being an
+artefact of where the timer was started and not a property of the number** — the
+claim made above from one device, now with a second one behind it. `handed -
+processed` is identical to the tenth of a millisecond, because it is a fact
+about the buffer and not about the device.
+
+Sound was confirmed audible on this one by ear, which is the one thing no check
+here can do.
 
 ### And a pull-mode `QIODevice` must override `bytesAvailable`
 
@@ -266,6 +287,40 @@ encoder question does not arise from importing at all** — it arrives with
 [video export](importing.md#video-export-and-what-qt-gives-free), which is last
 and is where it should be argued.
 
+## The machine that will want a calibration
+
+[importing.md](importing.md) defers a manual sync offset in milliseconds, on the
+user's call, and is explicit about what deferring costs:
+
+> What deferring does cost: if `playedMs()` turns out to over- or under-report
+> on some driver, there is nothing the user can do about it but say so.
+
+**That machine has a name, and it is any Bluetooth output.** A2DP puts an encode,
+a radio hop and a decode between the operating system and the speaker, and it is
+ordinarily 100–200 ms — **two and a half to five frames at 24 fps.** That is not
+the sub-frame bias [the playback clock](importing.md#the-playback-clock) is
+written to remove; it is a desync somebody would see.
+
+**This is reasoning and not a measurement, and the difference matters here.**
+What was measured is that `processedUSecs` tracks real time on a Bluetooth
+device exactly as it does on HDMI — same rate, same gap, a different constant.
+What is *inferred* is that the number cannot include the transport delay,
+because what reports it is the operating system's mixer position and the radio
+hop is downstream of that. Very likely, and not established: the offset a timer
+sees is contaminated by where the timer started, which is precisely the trap
+this document already had to correct once.
+
+**What would settle it** is a comparison rather than an absolute: play the same
+file through HDMI and through Bluetooth, and ask whether `playedMs()` differs by
+the transport delay or by nothing. If by nothing, the delay is invisible to the
+number and a calibration is the only way to null it.
+
+Nothing to do now — the deferral is the right call and is cheap to reverse,
+being a preference rather than a field in `scene.json`. What this adds is that
+the case is ordinary rather than hypothetical, so **the first person to report
+that the sound is late is likely to be on Bluetooth**, and that is worth asking
+before looking anywhere else.
+
 ## What is still not known
 
 Three things, and the first is the only one that could change what gets built.
@@ -283,11 +338,13 @@ loaded it — but "expected" is what [the same source, two different
 pictures](handover.md#the-same-source-two-different-pictures) exists to warn
 about, and the test costs one download on a machine of each kind.
 
-**3. Whether sound is audible from a downloaded build.** `--audio-check`
-enumerates; it does not play. Playback was proved locally with `audio_probe` on
-a machine with MSYS2 Qt, and the packaged binaries prove the backend loads and
-the device is found — but nobody has heard a downloaded build make a noise, and
-no automated check can supply that. It wants one person, once, per platform.
+**3. Whether sound is audible from a *downloaded* build.** A local build has
+been heard — `run-audio-probe.bat`, on two devices, by ear. The packaged
+binaries prove the backend loads and the device is found, but `--audio-check`
+enumerates and does not play, so nobody has heard a downloaded build make a
+noise. It wants one person, once, per platform, and the probe is not in the
+package to do it with — which is a thing to fix on the day the audio layer gives
+the application something audible of its own.
 
 ## What comes out again
 
