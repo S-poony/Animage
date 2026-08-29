@@ -32,6 +32,7 @@
 #include <QFileInfo>
 #include <QColorSpace>
 #include <QTemporaryDir>
+#include <QBuffer>
 #include <QFile>
 #include <QCheckBox>
 #include <QComboBox>
@@ -9518,6 +9519,112 @@ bool writeATestPicture(const QString& path, const QColor& colour) {
     return image.save(path, "PNG");
 }
 
+// A JPEG that says which way up it is: an EXIF APP1 segment carrying
+// orientation 6, "rotate 90 clockwise", spliced in after the SOI of one Qt
+// wrote. Built here rather than checked in as a fixture, because a binary blob
+// in the tree is a file nobody can read or amend -- and the whole of what makes
+// this one interesting is thirty-four bytes that are worth being able to see.
+bool writeAPictureThatSaysItIsRotated(const QString& path, int width, int height) {
+    QImage image(width, height, QImage::Format_RGB32);
+    image.fill(Qt::red);
+
+    QByteArray plain;
+    {
+        QBuffer buffer(&plain);
+        if (!buffer.open(QIODevice::WriteOnly)) return false;
+        if (!image.save(&buffer, "JPEG", 90)) return false;
+    }
+    if (plain.size() < 2) return false;
+
+    static const unsigned char kApp1[] = {
+        0xFF, 0xE1, 0x00, 0x22,                          // APP1, length 34
+        'E',  'x',  'i',  'f',  0x00, 0x00,              // "Exif\0\0"
+        0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,  // TIFF header, LE, IFD0 at 8
+        0x01, 0x00,                                      // one entry
+        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,  // tag 0x0112, SHORT, count 1
+        0x06, 0x00, 0x00, 0x00,                          // value 6: rotate 90
+        0x00, 0x00, 0x00, 0x00,                          // no next IFD
+    };
+
+    QByteArray out;
+    out.append(plain.left(2));
+    out.append(reinterpret_cast<const char*>(kApp1), qsizetype(sizeof(kApp1)));
+    out.append(plain.mid(2));
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    return file.write(out) == out.size();
+}
+
+// **The survey has to describe the picture that lands, not the one on disk.**
+//
+// `decode` sets `setAutoTransform`, so a photograph of a model sheet arrives
+// the way up it was taken. `survey` reads the size off the header to price the
+// import before paying for it -- and measured on Qt 6.11.1, `QImageReader::size`
+// ignores that flag, answering the sensor's own dimensions while `read` answers
+// the turned ones. So the survey applies the quarter turn itself.
+//
+// What is pinned here is the *agreement* and not the arithmetic, because the
+// arithmetic depends on a Qt behaviour this cannot control: CI builds against
+// 6.10 where a local build runs 6.11, and if `size` ever starts applying the
+// transform then applying it again here would be the same bug mirrored. Either
+// way, this is the check that says so.
+void aRotatedPictureIsSurveyedTheWayItWillLand() {
+    TEST("an EXIF-rotated picture is surveyed at the size it decodes to");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString path = scratch.filePath(QStringLiteral("sideways.jpg"));
+    // Wider than it is tall on disk, and tagged to stand on end.
+    CHECK(writeAPictureThatSaysItIsRotated(path, 200, 100));
+
+    const image_import::Survey survey = image_import::survey(path);
+    CHECK(survey.ok);
+    if (!survey.ok) return;
+
+    // What the import will actually hold. Opaque throughout, so the ink is the
+    // whole picture and its bounds are its size.
+    const animage::TileGrid decoded = image_import::decode(path);
+    const animage::PixelRect ink = animage::paintedBounds(decoded);
+    CHECK(!ink.isEmpty());
+    if (ink.isEmpty()) return;
+
+    // The one that matters: the recap quotes `survey`, and the layer holds
+    // `decode`. Two answers to "how big is this" is the defect.
+    CHECK_EQ(survey.width, ink.width);
+    CHECK_EQ(survey.height, ink.height);
+
+    // And the turn was applied rather than the file believed, which is what
+    // makes the agreement above worth anything -- both being 200 x 100 would
+    // agree and both be wrong.
+    CHECK_EQ(ink.width, 100);
+    CHECK_EQ(ink.height, 200);
+}
+
+// An untagged picture is the ordinary case and must come through untouched --
+// the quarter turn is applied on a flag, and a flag read the wrong way round
+// would stand every ordinary import on its end.
+void anUntaggedPictureIsSurveyedAsItIs() {
+    TEST("a picture with no orientation tag is surveyed at its own size");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString path = scratch.filePath(QStringLiteral("upright.png"));
+    CHECK(writeATestPicture(path, QColor(200, 40, 40)));  // 200 x 150
+
+    const image_import::Survey survey = image_import::survey(path);
+    CHECK(survey.ok);
+    if (!survey.ok) return;
+    CHECK_EQ(survey.width, 200);
+    CHECK_EQ(survey.height, 150);
+
+    const animage::PixelRect ink = animage::paintedBounds(image_import::decode(path));
+    CHECK_EQ(ink.width, 200);
+    CHECK_EQ(ink.height, 150);
+}
+
 // The one that would go wrong quietly.
 //
 // A save does not edit the project folder, it builds a new one alongside and
@@ -10846,6 +10953,8 @@ void theConvertButtonIsGreyedWithAReasonEverywhereElse() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    aRotatedPictureIsSurveyedTheWayItWillLand();
+    anUntaggedPictureIsSurveyedAsItIs();
     anImportSurvivesSavingAndOpening();
     animportedLayerRefusesTheBrushAsItself();
     aSequenceShowsADifferentFrameAtEachDrawing();
