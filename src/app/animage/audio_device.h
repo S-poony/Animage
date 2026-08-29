@@ -141,5 +141,11 @@ public:
     // may do, including open another device. **One watcher at a time**: setting
     // one replaces the last, and `{}` clears it. Whoever sets it must clear it
     // before it is destroyed.
+    //
+    // Needs a QApplication to exist, because the watcher it makes is owned by
+    // one -- see the definition, where that ownership is what keeps the object
+    // from outliving the application or leaking instead. Called without one it
+    // remembers the callback and watches nothing, which is the honest answer:
+    // there is no event loop to deliver a change to yet.
     static void watchOutputs(std::function<void()> changed);
 };

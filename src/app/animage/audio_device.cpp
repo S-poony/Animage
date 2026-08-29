@@ -8,8 +8,10 @@
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
+#include <QCoreApplication>
 #include <QIODevice>
 #include <QMediaDevices>
+#include <QPointer>
 
 #include <algorithm>
 #include <cmath>
@@ -37,20 +39,36 @@ std::function<void()>& outputsChanged() {
 
 void AudioDevice::watchOutputs(std::function<void()> changed) {
 #ifdef ANIMAGE_HAVE_AUDIO
-    // **Made once and never destroyed**, which is deliberate rather than
-    // careless. A `QMediaDevices` is what subscribes to the system's device
-    // notifications, so it has to outlive every caller for the answers to stay
-    // fresh -- and a static QObject destroyed at exit is destroyed *after*
-    // QApplication, which is its own class of crash. One object for the life of
-    // the process is the cheaper of the two.
-    static QMediaDevices* devices = [] {
-        auto* watcher = new QMediaDevices;
+    // **Made once, and owned by the application.** A `QMediaDevices` is what
+    // subscribes to the system's device notifications, so it has to outlive
+    // every caller for the answers to stay fresh -- one object for the life of
+    // the process, not one per window.
+    //
+    // The lifetime is the whole of what is delicate here, and it was got wrong
+    // in both directions before this. A plain function-local static QObject is
+    // destroyed at exit, which is *after* QApplication, and that is its own
+    // class of crash. Never destroying it at all avoids the crash and is a
+    // leak -- one LeakSanitizer reports, so `test_canvas` and
+    // `test_floating_dock_frame` both failed the sanitizer job the moment
+    // audio landed, on 440 bytes neither test has anything to do with.
+    //
+    // Parenting to `qApp` is the answer to both: Qt destroys it as part of
+    // destroying the application, which is neither too early nor after. There
+    // is no QApplication before the window that calls this, and never a second
+    // one, so the only case the guard below covers is a caller that has not
+    // built one -- which gets no watcher rather than an unowned one.
+    //
+    // Held by QPointer rather than a raw pointer so that the static goes null
+    // with the object instead of dangling past it. Nothing calls this after the
+    // application is gone today; a static that quietly stopped being true would
+    // be the wrong thing to leave for whoever makes that false.
+    static QPointer<QMediaDevices> watcher;
+    if (!watcher && qApp) {
+        watcher = new QMediaDevices(qApp);
         QObject::connect(watcher, &QMediaDevices::audioOutputsChanged, watcher, [] {
             if (outputsChanged()) outputsChanged()();
         });
-        return watcher;
-    }();
-    (void)devices;
+    }
 #endif
     outputsChanged() = std::move(changed);
 }
