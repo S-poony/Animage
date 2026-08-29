@@ -1,6 +1,6 @@
 # Importing
 
-Written before anything is built, in the register of
+Written before anything was built, in the register of
 [scribbles-through-time.md](scribbles-through-time.md): what is being decided,
 why, and what would change each decision. Anything still **not settled** is
 marked, and the unsettled ones are collected again at the end so nobody has to
@@ -10,6 +10,56 @@ The two large questions the first draft left open — which audio library, and
 what shape a sequence is stored in — have both been answered, and the answer to
 the first changed the answer to the second. They are settled in place below
 rather than in an appendix, with what decided them.
+
+> **Three of the four imports are built, and audio is done.** *(Since this was
+> written: the sound is audible — scrubbing and synchronised playback both work
+> — and the row has a waveform, which this note puts out of the first cut below.
+> All three are recorded in the handover; this note is left as it was, being a
+> plan.)* A
+> single image imports and can be placed, so can a sequence, and a soundtrack
+> imports, saves, and has a row it can be moved and cropped in — it does not yet
+> make a noise. This note stays a plan and is not rewritten into a description:
+> what was built is recorded in ["importing a
+> picture"](handover.md#importing-a-picture), ["importing a
+> sequence"](handover.md#importing-a-sequence) and ["importing a
+> soundtrack"](handover.md#importing-a-soundtrack), which is where a reader who
+> wants the code should start. Read this one for *why*, and those for *what*.
+>
+> What taking Qt Multimedia actually cost — measured before a line of audio was
+> written, because this note said to — is [audio-spike.md](audio-spike.md).
+>
+> Three things this note predicted are worth knowing before trusting the rest of
+> it, because they are the evidence its remaining predictions rest on. The
+> compositor really did cost three lines: `collectPasses` is the one place that
+> resolves a layer to pixels and it already had the branch shape. A stored
+> placement really is free — a picture moved and scaled shows `tiles 0` and
+> `undo 2 (0 MB)`, which is the claim under "placement is stored" made visible.
+> And a sequence really was the still with three things added and nothing
+> reshaped.
+>
+> **Two it got wrong**, both in the cheap direction. The still is a reference
+> layer, not ordinary cels — fixed above. And the decode moving off the
+> interface thread is described here as an optimisation a sequence forces; it is
+> not, it is the only route by which a sequence can notice the playhead has
+> moved at all, because a frame change never calls `refreshEverything`.
+>
+> **And one thing it said would need measuring turned out to matter more than
+> the thing it was measured for.** `bench_import` exists now; the decode it
+> found was four times slower than it needed to be, and that was our own tiling
+> loop rather than anything about a file. See the section on benchmarking.
+>
+> **[Convert to drawings](#convert-to-drawings) is built, and two of the things
+> this note says about it below are wrong.** They are left standing, because
+> what a plan predicted is worth having beside what happened, and each is
+> corrected in place where it is said. In short: converting costs the undo
+> history *nothing*, not most of it — a bake displaces tiles and a conversion
+> writes into cels that did not exist. And this note's line about the files
+> ceasing to be read turned out to have a consequence it did not follow through:
+> the save carried forward only files something still named, so converting and
+> saving deleted the scan from the project, and undoing then left a project that
+> would not save at all. Fixed on the user's call by keeping the files. Both are
+> written up in [converting an import to
+> drawings](handover.md#converting-an-import-to-drawings).
 
 The French documents in [fr/](fr/) are still the specification. This note fills
 in something the specification reserved a place for and deferred:
@@ -37,6 +87,8 @@ call twice over, and this note leans on it.
 | [Where an import lands](#where-an-import-lands) | bottom, in import order |
 | [What the export says](#what-the-export-says) | a recap, which fixes something already broken |
 | [The project folder and the file format](#the-project-folder-and-the-file-format) | |
+| [**What was built that this note did not plan**](#what-was-built-that-this-note-did-not-plan) | the shot's length, and moving and cropping a sound |
+| [**What the spike measured**](#what-the-spike-measured) | and the two things in this note it corrects |
 | [**What the handover already knows about this**](#what-the-handover-already-knows-about-this) | the traps this note would otherwise walk into |
 | [Not in scope](#not-in-scope) | |
 | [The open questions](#the-open-questions) | collected |
@@ -72,12 +124,21 @@ Three things follow from that and they are worth stating before anything else:
 
 ## The order of work
 
-1. **Audio**, because it is what the shot is for.
-2. **A single image**, because it is the smallest instance of the shape
-   everything else uses, and building it builds most of 3.
-3. **An image sequence**, which is 2 with more frames — plus the two things one
-   frame never needs: a bound on what is resident, and a decode that does not
-   happen on the interface thread.
+1. ~~**Audio**~~ — **built as far as it can go without a device.** The model,
+   the sync arithmetic, the import, the format, the row, and moving and cropping
+   the sound in it. What is left is `AudioDevice` and the scrub. See
+   ["importing a soundtrack"](handover.md#importing-a-soundtrack).
+2. ~~**A single image**~~ — **built**, and it did build most of 3: the layer
+   kind, the derive step, the cache, the placement, the format and the
+   `imports/` folder all exist. See
+   ["importing a picture"](handover.md#importing-a-picture).
+3. ~~**An image sequence**~~ — **built**, and all three of the things one frame
+   never needed are in: the per-image source frame map, a bound on what is
+   resident, and a decode off the interface thread. The third was not an
+   optimisation to reach for later and the reason turned out to be sharper than
+   this note guessed — a frame change never calls `refreshEverything` at all, so
+   there was no route by which a sequence could notice the playhead had moved.
+   See ["importing a sequence"](handover.md#importing-a-sequence).
 4. **A video**, which is 3 with a decoder in front of it and no new storage at
    all.
 5. **Video export**, last and deliberately so. It is the only item here that
@@ -762,11 +823,19 @@ this](#what-the-handover-already-knows-about-this).
 ### What is still worth benchmarking, and what is not
 
 `bench_import` was proposed to size a door that is now closed, and most of what
-it was for has gone with it. What is left is worth measuring and is different:
+it was for went with it. **It exists anyway, and it was worth more than this
+section expected** — not because it sized anything, but because a report arrived
+that nothing could otherwise answer, and it turned two guesses with different
+fixes into a number. It takes a folder, so it measures the files somebody
+actually reported about; what a PNG costs depends on what wrote it.
 
-- **Decode time per frame, per format**, because it is what decides whether the
-  cache can keep up with scrubbing. JPEG and PNG are not close.
-- **What a cache bound should be**, in bytes, against a realistic scrub.
+- ~~**Decode time per frame, per format**~~ — **measured, and the first answer
+  was about us.** The tiling loop was paying three `std::pow` per pixel and a
+  hash lookup per pixel: 145 ms against 21 ms of actually reading an HD PNG. A
+  table and a hoist took it to 35. What is left on a large frame is the file
+  reader, which is not ours.
+- **What a cache bound should be**, in bytes, against a realistic scrub. Still
+  open: 512 MB is a number with arithmetic behind it and no measurement.
 - **Time to convert a layer to drawings**, because that one *does* write cels and
   is bounded by the history budget.
 
@@ -913,16 +982,18 @@ looks each one up with `line->findLayer(source)` and reads it with
 `record->celFor(source)` against an `Image` in that same track. So a CTG barrier
 must be a cel-bearing layer in the same track as the colour layer.
 
-Two consequences:
+One consequence, and it is the whole of what reference-only gives up: **a
+reference layer has no cel and cannot be a CTG barrier at all.** So **importing
+scanned line art and colouring it with LazyBrush does not work, until it is
+converted.** For an application whose headline is a colour solver, that is a
+real thing to give up, and it is why the way back is not optional.
 
-- A **reference layer has no cel and cannot be a CTG barrier at all.**
-- Even with cels, an import that always lands in a **new track** cannot be a
-  barrier for a colour layer in a different one.
-
-Which together mean: **importing scanned line art and colouring it with
-LazyBrush does not work, until it is converted.** For an application whose
-headline is a colour solver, that is a real thing to give up, and it is why the
-way back is not optional.
+This used to list a second consequence — that an import landing in a new track
+cannot be a barrier for a colour layer in a different one — and drew a feature
+out of it. The sentence is true and the feature was not needed: the colour layer
+goes in the import's track. See [landing in an existing
+track](#landing-in-an-existing-track), which is now a record of a decision
+reversed rather than an argument for one.
 
 ### Convert to drawings
 
@@ -976,6 +1047,25 @@ a fault, and it is the same sentence [transforming a layer through
 time](handover.md#what-it-costs-and-the-bound-that-had-to-change) already had to
 write about itself.
 
+> **Wrong, and the popup was written to say it before anybody measured.** It
+> costs the history *nothing*. The history's budget counts the tiles a command
+> **displaced** and is keeping alive for undo — a bake displaces every tile of
+> every drawing, where a conversion writes into cels that did not exist and
+> displaces none. The 4 GB is real and is in the document; it is simply not in
+> the history, and nothing older is dropped. The mistake was reasoning from the
+> bake by analogy instead of from what `Command::retainedBytes` counts.
+> Measured, and pinned in `test_transform`.
+>
+> **And the sentence below about the files has a consequence this note did not
+> follow through.** A save carries forward the imports something still *names*,
+> and a converted layer names none — so converting and saving took the scan out
+> of the project folder, with no symptom at the time, and undoing then left a
+> layer naming files that existed nowhere and a project that would not save at
+> all. Fixed on the user's call by keeping the files rather than by explaining
+> the loss, which costs an imports folder that only ever grows. Both in
+> [converting an import to
+> drawings](handover.md#converting-an-import-to-drawings).
+
 **Sometimes it refuses, and that is not a gap to be closed later.** Whole-layer
 conversion serves the case it is for — scanned line art, tens of drawings, which
 is what colouring an import means — and cannot serve a two-hundred-frame video,
@@ -1000,13 +1090,29 @@ instead of failing in the middle.
 
 ### Landing in an existing track
 
-**Settled: the import dialog asks, and it is in the first cut.** The first draft
-left this open as "a small addition to the import dialog rather than a change to
-the model", and what makes it first-cut rather than later is the section above:
-converting an import in its own track leaves the drawings in that track, and
-`ctg_sources` resolve inside the track — so a character's colour layer still
-cannot cut against them. The alternative to the combo box is an operation that
-moves a layer between tracks, which nobody has scoped and which is not smaller.
+**Reversed, on the user's call: an import always makes its own track, and there
+is no combo box.** This section said the dialog asks and that it was in the
+first cut, on the grounds that `ctg_sources` resolve inside the track — so a
+character's colour layer could not cut against an import that landed anywhere
+else.
+
+**The step that argument skips is that the colour layer can be added to the
+import's own track.** `addColourLayer` acts on whichever track is current, and
+an import makes its track current; the source list it builds offers every raster
+layer *of that track*, so a converted import appears in it. Import, convert, add
+a colour layer there, and the whole chain sits inside one track with nothing
+crossing between two. Nothing in the model had to change and nothing new had to
+be built — it was already the shorter route, and the combo box was machinery for
+a problem that only exists if you insist the colour layer was there first.
+
+What the reversal gives up is the case where it *was* there first, and it is
+worth naming so that this is a decision rather than an oversight: **a track you
+have already built cannot cut against a scan imported afterwards.** You would
+want that scan as a layer in that track, and it will arrive in one of its own.
+That is real. It is not the workflow the argument was made for — scanning line
+art and colouring it means the import *is* the drawings, not a second opinion
+about drawings that already exist. The way out is unchanged and still unscoped:
+an operation that moves a layer from one track to another.
 
 ## The menu, and what each dialog asks
 
@@ -1031,12 +1137,21 @@ the first cut, but each import should be a function the drop handler can call.
   `frame9.png` and nobody has ever wanted it to. Files with no number, or two
   numbering schemes in one selection, are *said* rather than guessed at — the
   house rule is to let the input in and explain it, not to silently pick.
-- **Where:** a new track, or a layer in an existing one. See [landing in an
-  existing track](#landing-in-an-existing-track) for why this is in the first cut
-  and not deferred.
+- **Where:** a new track, always. See [landing in an existing
+  track](#landing-in-an-existing-track), which argued for a combo box here and
+  was reversed — a colour layer added to the import's own track reaches the
+  converted drawings without one.
+- **When:** a start frame, defaulting to 1. The default is what anybody wants
+  and the box costs nothing over hard-coding it, which is the only reason it is
+  here rather than deferred.
 - **Exposure:** on 1s. An image sequence has no frame rate of its own; inventing
   one is inventing information. This is the sentence video does *not* inherit —
   see below.
+- **Past the last frame: nothing.** `TrackEnd::Nothing`, which is the default
+  for an animation and the opposite of what a still gets. That is not an
+  inconsistency to tidy up later: a modelsheet is meant to stay up for the whole
+  shot, and an animatic is a stretch of timing that ends where it ends. Both are
+  the track's own setting afterwards.
 - **Size:** the transform box, validated by the user, and stored rather than
   baked.
 - **Import at half size:** offered, off by default. It is a placement of 50% and
@@ -1222,6 +1337,92 @@ The incremental save is unaffected and cheaply so. A converted import's cels hav
 revisions like any others, so after the first write they are carried forward as
 hard links and cost nothing; an unconverted one has no cels to carry.
 
+## What was built that this note did not plan
+
+Two things, both on the user's call and both worth recording here rather than
+only in the handover, because each one answers a question this note asks and
+answers differently.
+
+**The shot can be told to reach the sound.** This note has audio never touching
+the shot's length, and that is right as far as it goes — a soundtrack running
+long is reference, and a scene that grew when one was imported would take the
+shot's length from the wrong thing. What it missed is that
+[`onPlaybackTick`](#the-playback-clock) derives its slot from `shotFrames`: a
+one-second soundtrack in a shot of one drawing plays *one frame* and stops, so
+the feature this whole note is written around does not work. Widening the
+timeline lets the playhead be dragged over the sound and does nothing for Play.
+
+So the import dialog offers it, with a rule: **the box appears when it would
+change something, and is ticked only when nothing has decided the length yet.**
+`scene.h` already named animating to a soundtrack as the case `fixed_length`
+exists for, which is the part this note could have found and did not.
+
+**A soundtrack can be moved and cropped in its row, finer than a frame.** Not in
+this note at all. Dragging the block sideways moves the sound; dragging its ends
+crops it, non-destructively, by moving two numbers and touching no samples. The
+placement is fractional because 1/24 of a second is 42 ms — most of the way to a
+syllable — so a sound placed to the nearest frame is not placed at all.
+
+That last point is a correction to something this note *does* say. [Audio is not
+a track](#audio-is-not-a-track) observes that "the axis is free" in a soundtrack
+row, meaning a vertical drag collides with nothing. Both axes turned out to be
+wanted: sideways moves, up and down is the level, and the ends crop.
+
+**None of it is shared with video, and that is a decision.** A video is
+[extracted to frames at import](#video-is-a-sequence-with-a-decoder-in-front),
+so its row is a track row with cards — moving it is a slot operation, cropping
+it is which drawings exist, and it wants no sub-frame placement. The reuse point
+would be the gesture code and not the data, so nothing has been pre-shaped for
+it.
+
+## What the spike measured
+
+**The deployment spike has been run, and the record is
+[audio-spike.md](audio-spike.md).** It is kept out of this note rather than
+folded into it, for the reason given at the top: this stays a plan and is not
+rewritten into a description. What belongs here is only what it *changes* about
+the plan, which is two things and a confirmation.
+
+**It confirmed the expensive worry was unfounded.** All three deployment tools
+bundled the FFmpeg backend from `animage`'s import table with no help, and a
+downloaded Windows package loads it on a machine that never had Qt. The cost is
+about 20 MB per platform and nothing measurable at startup. Every line of [what
+it costs, and none of it has changed](#what-it-costs-and-none-of-it-has-changed)
+is still a real bill; none of it is a risk any more.
+
+**It corrects two things in this note.**
+
+*The first is small and mechanical.* [Which library](#which-library) says
+`modules: qtmultimedia` goes on **four** Qt install steps. The file has **two**
+`install-qt-action` blocks, one of which the build matrix runs three times. The
+Windows core-only sanitizer installs no Qt deliberately and must not start.
+
+*The second is not small.* [The open questions](#the-open-questions) asks
+whether `processedUSecs()` counts audio handed over or played out, and its
+stated test — *"whether the number ever reports more audio than there has been
+time to play"* — **is the wrong meter and answers wrongly.** There is no instant
+to measure real time from: the stream starts inside `QAudioSink::start()`, which
+takes a third of a second, so the number sits a constant few tens of
+milliseconds ahead of any timer started around that call and reads as "handed
+over" on a device that plainly is not. The answer is **played out**, decided by
+comparing what the sink was handed against what it reports, which has no start
+instant in it at all.
+
+**And it found a seam this note does not draw.** [Scrubbing comes
+first](#scrubbing-comes-first) is right that it is the higher-value half — and
+it turns out to be the half that needs none of the FFmpeg payload.
+`QAudioSink`, `QAudioDevice` and `QMediaDevices` are native inside
+`Qt6Multimedia`; delete the backend plugin entirely and scrubbing still works,
+measured. What the 20 MB buys is `QAudioDecoder` — the codec gap this note takes
+Qt Multimedia partly to close — and `QMediaPlayer`, which is all of video. That
+is not an argument against paying it. It is worth knowing which line item is
+which, because it means the feature the program is *for* does not depend on the
+part of the bill that could go wrong on some platform.
+
+**One measurement is untouched**: whether `QMediaPlayer` at 1× extracts every
+frame. It belongs to video rather than audio, and it is still the only question
+in this note whose answer could change what gets built.
+
 ## What the handover already knows about this
 
 Everything below is already written down in
@@ -1266,6 +1467,22 @@ started before a placement changed will land after it, match, and be installed a
 current. The fill cache learned this the expensive way when its solve stopped
 finishing in the call that started it. Copy `CtgFillCache::generation()`; do not
 rediscover it.
+
+**And a generation is not a document identity, which is the one thing it looks
+like it is.** It counts how many times *that* cache has been emptied, so it
+answers "was the shelf cleared under me" and nothing else. Every project loaded
+from disk arrives at the same count, because `loadScene` empties the cache
+exactly once — so two projects opened one after the other are both at
+generation one, and the questions asked about the first are indistinguishable
+from current when the second arrives. Ids do not save you either: they come from
+a counter that restarts per document, so the small ones collide as a matter of
+course, and an answer about drawing 3 of the old project is installed against
+drawing 3 of the new one and composited. Replacing the document is a *statement*
+rather than a comparison: `CanvasWidget::forgetImports`, called from
+`afterProjectLoaded`, which is the one funnel every replacement of `doc_` goes
+through. Anything that keeps a question across a document swap needs the same
+treatment — `MainWindow::document_epoch_` is the number for the ones that cannot
+simply be dropped.
 
 **And a wrong key here is worse than a slow one.** The lesson from the fill cache
 is that a key which is a bijection today stops being one quietly: *"every cel in
@@ -1342,12 +1559,12 @@ worth having.
    compositor needs nothing at all if the cache holds a `TileGrid`, and shape 2's
    promotion is better as a command than a state machine.
 3. ~~**Whether giving up colouring imported line art is intended**~~ — **no, and
-   both of the answers it proposed are taken.** [Convert to
+   one of the two answers it proposed turned out to be enough.** [Convert to
    drawings](#convert-to-drawings) is an explicit command over the whole layer,
-   offered by a popup when you try to draw; and an import can land as a layer in
-   an existing track, which is in the first cut *because* of this — a converted
-   import in its own track still cannot be a barrier for a colour layer in
-   another one.
+   offered by a popup when you try to draw on a reference layer. The second
+   answer — letting an import land in an existing track — was taken and then
+   [reversed](#landing-in-an-existing-track): the colour layer can be added to
+   the import's own track, so nothing has to cross between two.
 
 **What is left is two things to measure, and this note does not guess at either.**
 A guess written down here would be read later as a decision somebody took, and it

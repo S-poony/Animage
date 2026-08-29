@@ -5,6 +5,8 @@ function(animage_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+animage_test(test_audio)
+animage_test(test_audio_render)
 animage_test(test_brush)
 animage_test(test_ctg)
 animage_test(test_ctg_solver)
@@ -124,6 +126,30 @@ if(TARGET animage_ui)
   target_link_libraries(window_probe PRIVATE animage_ui)
   target_include_directories(window_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+  # The fourth probe, and the one for a question whose answer belongs to a sound
+  # card driver: does `QAudioSink::processedUSecs()` count audio handed to the
+  # device, or audio played out of it? That is the first of the two measurements
+  # docs/importing.md ends on, and the whole playback clock stands on it. Built
+  # but never run by ctest, for dock_probe's reasons and one of its own: the
+  # runners have no audio device, so opening an output there fails or hangs.
+  #
+  # It links Qt directly rather than animage_ui, because being free of this
+  # program is the entire point of it.
+  #
+  # **Multimedia is asked for here as its own package and must never go in the
+  # top-level find_package.** A component in that list which the installed Qt
+  # does not have fails the whole call, Qt6_FOUND comes back false, and every
+  # GUI target is skipped while configure, build and ctest all report success.
+  # No Qt on the CI runners has this module today. See test_pen_promotion above,
+  # which is the same mistake already paid for once.
+  find_package(Qt6Multimedia QUIET)
+  if(Qt6Multimedia_FOUND)
+    add_executable(audio_probe audio_probe.cpp)
+    target_link_libraries(audio_probe PRIVATE Qt6::Multimedia)
+  else()
+    message(STATUS "Qt Multimedia not found: skipping audio_probe")
+  endif()
+
   # The third probe, and the one for questions whose answer belongs to a tablet
   # driver rather than to Qt or to us: every pen and mouse event the canvas is
   # offered, and what the canvas made of each. Built but never run by ctest, for
@@ -138,6 +164,24 @@ if(TARGET animage_ui)
   target_link_libraries(test_floating_dock_frame PRIVATE animage_ui)
   target_include_directories(test_floating_dock_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_floating_dock_frame COMMAND test_floating_dock_frame -platform offscreen)
+
+  # Decoding a soundtrack, which is the one part of audio that needs Qt
+  # Multimedia's backend -- test_audio and test_serialise cover the model and
+  # the format and run on any Qt. No audio *device* is needed: a decode produces
+  # buffers and opens no output, which is what lets this run on a runner. See
+  # docs/audio-spike.md.
+  # The handover between the interface and a device, on a fake one. It needs
+  # animage_ui for AudioPlayer and no audio *device* at all, which is the whole
+  # point of it -- see the header of test_audio_player.cpp.
+  add_executable(test_audio_player test_audio_player.cpp)
+  target_link_libraries(test_audio_player PRIVATE animage_ui)
+  target_include_directories(test_audio_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_audio_player COMMAND test_audio_player)
+
+  add_executable(test_audio_decode test_audio_decode.cpp)
+  target_link_libraries(test_audio_decode PRIVATE animage_ui)
+  target_include_directories(test_audio_decode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_audio_decode COMMAND test_audio_decode -platform offscreen)
 
   add_executable(test_serialise test_serialise.cpp)
   target_link_libraries(test_serialise PRIVATE animage_ui)
@@ -155,6 +199,12 @@ if(TARGET animage_ui)
 
   add_executable(bench_zoom bench_zoom.cpp)
   target_link_libraries(bench_zoom PRIVATE animage_ui)
+
+  # What one imported frame costs to decode, which is the number that decides
+  # whether a reference sequence can be scrubbed over and whether it can be
+  # played. Takes a folder on the command line and measures the real files.
+  add_executable(bench_import bench_import.cpp)
+  target_link_libraries(bench_import PRIVATE animage_ui)
 
   # Whether the canvas gets slower the longer a session runs, and what makes it
   # come back. bench_zoom times a pan on a document that was just built; this

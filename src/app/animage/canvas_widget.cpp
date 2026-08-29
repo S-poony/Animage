@@ -473,6 +473,14 @@ CanvasWidget::CanvasWidget(Document& document, QWidget* parent)
     ctg_poll_->setInterval(16);
     connect(ctg_poll_, &QTimer::timeout, this, &CanvasWidget::collectColour);
 
+    // A second poll rather than a branch in the first, because the two run for
+    // different lengths of time: a decode is tens of milliseconds and a solve is
+    // a second and a half, so a shared timer would be kept alive by whichever
+    // was slower and would tick over the other for nothing.
+    reference_poll_ = new QTimer(this);
+    reference_poll_->setInterval(16);
+    connect(reference_poll_, &QTimer::timeout, this, &CanvasWidget::collectReferenceFrames);
+
     // The one place the cursor is set, from the start. Nothing else in this
     // file calls setCursor.
     refreshPointer();
@@ -486,6 +494,7 @@ CanvasWidget::~CanvasWidget() {
     // has not been told the window is closing goes on running for a second or
     // two after it has, and the process stays up with nothing on screen.
     ctg_solver_.cancelAll();
+    reference_decoder_.cancelAll();
 }
 
 void CanvasWidget::setTrack(TrackId track) {
@@ -524,7 +533,13 @@ void CanvasWidget::setFrame(std::size_t slot) {
     // tracks have, and there is nothing here to draw on until one is added.
     // Everything reachable, not just the shot: a track may run past a fixed
     // scene length, and those drawings are still there to be worked on.
-    const std::size_t frames = doc_.scene().timelineFrames();
+    //
+    // The document's answer and not the scene's, so that a soundtrack running
+    // past the drawings is reachable too. If this clamped tighter than the
+    // timeline does, the playhead would be in two places at once: the strip
+    // would show it out over the sound and the canvas would be showing an
+    // earlier frame.
+    const std::size_t frames = doc_.timelineFrames();
     slot_ = (frames == 0) ? 0 : std::min(slot, frames - 1);
 
     // What the track *holds* here, not what it shows. Past its last drawing
@@ -711,7 +726,7 @@ void CanvasWidget::requestCtgFills() {
     // trap either way: the solve belongs at the end of the stroke.
     if (stroking_) return;
 
-    dropStaleColourRequests(/*only_this_frame=*/true);
+    dropStaleColourRequests();
 
     const std::uint64_t generation = doc_.ctgCache().generation();
     const CtgSettings settings;
@@ -755,11 +770,26 @@ void CanvasWidget::requestCtgFills() {
         // ever, arriving at the same coarse answer every time.
         const CtgFill* held = doc_.ctgFillFor(track_id, image, layer.id);
         const bool current = held && held->valid && held->inputs == wanted.hash;
-        if (current && (held->step <= std::max(1, settings.downscale) ||
+
+        // **A take does not climb the ladder, and that is what makes a take
+        // able to finish anything at all.**
+        //
+        // The coarse answer arrives in about a tenth of a second and the fine
+        // one takes a second and a half, and the ladder asks for the second as
+        // soon as the first lands. On the drawing in front of you that is
+        // exactly right. Across a shot it is forty-eight fine solves nobody
+        // asked for -- and an animator watching a take is judging *motion* and
+        // where the colour went, not an edge at full resolution. The same
+        // argument playback-resolution.md makes about giving up resolution
+        // while a take runs, one subsystem over.
+        //
+        // So while playing, a drawing that has any current answer is finished.
+        if (current && (playing_ || held->step <= std::max(1, settings.downscale) ||
                         held->budget >= kFullSolveBudget)) {
             continue;
         }
-        const long long budget = current ? kFullSolveBudget : kInteractiveSolveBudget;
+        const long long budget =
+            (current && !playing_) ? kFullSolveBudget : kInteractiveSolveBudget;
 
         const ColourAsked asked{image, layer.id, true};
         const auto already = ctg_asked_.find(asked);
@@ -767,9 +797,19 @@ void CanvasWidget::requestCtgFills() {
             continue;  // already being worked out
         }
 
+        // Behind anything interactive while a take is running, which is what
+        // `Whenever` is for. A take fills the queue with a drawing a frame, and
+        // those are answers wanted for the *next* pass rather than for this
+        // one; the moment somebody stops and draws, that stroke's solve has to
+        // jump every one of them. Without this it would go to the back of a
+        // queue two seconds long.
+        const CtgSolver::Priority priority =
+            playing_ ? CtgSolver::Priority::Whenever : CtgSolver::Priority::Now;
+
         ctg_asked_[asked] = {wanted.hash, generation};
         ctg_solver_.request({image, layer.id},
-                            ctgJobFor(doc_, track_id, image, layer.id, settings, budget), true);
+                            ctgJobFor(doc_, track_id, image, layer.id, settings, budget), true,
+                            priority);
       }
     }
 
@@ -794,31 +834,40 @@ void CanvasWidget::noteColourPending() {
     Q_EMIT colourChanged();
 }
 
-// Whether any track shows this drawing at the frame the playhead is on. "The
-// drawing on screen" is no longer one drawing: several tracks are composited
-// and each has its own, so leaving a frame means leaving all of them.
-bool CanvasWidget::isShownNow(ImageId image) const {
-    if (image == kNoId) return false;
-    for (const Track& track : doc_.scene().tracks) {
-        if (track.imageShownAt(slot_) == image) return true;
-    }
-    return false;
-}
-
-// Requests whose answer nobody is waiting for any more.
+// Requests about a document that has since been thrown away, which are the only
+// ones worth calling off.
 //
-// A fill for a frame that has been left, or -- fill or judgement, on screen
-// or not -- one about a document that has since been thrown away. Playing a
-// coloured shot is twenty-four of the first a second against solves taking a
-// tenth of one, and a queue that fills faster than it drains never catches up.
+// **Leaving the frame used to be a reason and is not one, and that is issue
+// #85.** The argument was that playing a coloured shot asks twenty-four
+// questions a second against solves taking a tenth of one, so a queue that
+// fills faster than it drains never catches up. Both halves were wrong.
 //
-// Judgements are not dropped for being about another drawing: being about the
-// drawings you are not looking at is the whole of what they are for.
-void CanvasWidget::dropStaleColourRequests(bool only_this_frame) {
+// It never caught up because nothing ever *finished*. A paint drops stale
+// requests and then asks, so at twenty-four frames a second every solve was
+// called off forty-one milliseconds after it started -- and `abandoned()` is
+// checked inside the max-flow, so it gave up partway and produced nothing at
+// all. `bench_playback`'s cold pass measured the result: one of forty-eight
+// drawings coloured, and no further solve in three more passes. The colour did
+// not load in slowly, it never loaded in.
+//
+// And the queue does not grow without bound anyway. A repeat about the same
+// drawing supersedes, so it holds at most one entry per drawing per layer --
+// the shot, not the take. What each entry costs is a job, and a job's grids are
+// handles to cels that exist regardless.
+//
+// **A finished fill is worth having even for a drawing you have left.** It is
+// the drawing you will be on again next time round, and the cache it lands in
+// is bounded, so keeping it cannot cost more than the bound. Judgements were
+// already kept on exactly that reasoning -- being about the drawings you are
+// not looking at is the whole of what they are for -- and fills have now joined
+// them.
+//
+// An emptied cache is different in kind: those answers are not early, they are
+// about a document that will not exist.
+void CanvasWidget::dropStaleColourRequests() {
     const std::uint64_t generation = doc_.ctgCache().generation();
     for (auto it = ctg_asked_.begin(); it != ctg_asked_.end();) {
-        const bool left = only_this_frame && it->first.tiles && !isShownNow(it->first.image);
-        if (!left && it->second.generation == generation) {
+        if (it->second.generation == generation) {
             ++it;
             continue;
         }
@@ -835,7 +884,7 @@ void CanvasWidget::dropStaleColourRequests(bool only_this_frame) {
 // to the document stays on the thread that owns it.
 void CanvasWidget::collectColour() {
     bool filled = false;
-    dropStaleColourRequests(/*only_this_frame=*/false);
+    dropStaleColourRequests();
 
     for (CtgSolver::Result& result : ctg_solver_.collect()) {
         const ColourAsked key{result.key.image, result.key.layer, result.wanted_labels};
@@ -871,6 +920,246 @@ void CanvasWidget::collectColour() {
     dirty_everything_ = true;
     update();
     Q_EMIT colourChanged();
+}
+
+void CanvasWidget::setImportLocator(std::function<QString(const std::string&)> locate) {
+    locate_import_ = std::move(locate);
+}
+
+// Asks for any imported frame that is on screen and has not been decoded.
+//
+// The same shape as requestCtgFills and for the same reason, which docs/
+// importing.md predicted and the frame-change path confirms: **nothing calls
+// refreshEverything when the playhead moves.** A still could re-derive from
+// there because every drawing of its track showed the same picture; a sequence
+// shows a different frame at every drawing, so the only thing that reliably
+// happens when what is on screen changes is the paint.
+//
+// Nothing is decoded here. What arrives is whatever the decoder had finished by
+// the time this ran, and a frame landing later brings the paint on itself.
+void CanvasWidget::requestReferenceFrames() {
+    // Not during a stroke, for a smaller reason than the colour's: a stroke
+    // cannot change what an import shows, so anything asked here would be a
+    // question already asked. Skipping keeps the per-dab path clear.
+    if (stroking_) return;
+    if (!locate_import_) return;  // nothing can be resolved, so nothing is asked
+
+    dropStaleReferenceRequests();
+
+    const std::uint64_t generation = doc_.referenceCache().generation();
+    for (const Track& track_here : doc_.scene().tracks) {
+        // What is on screen, wherever in its own time it came from -- a track
+        // holding or cycling past its last drawing shows a picture out there
+        // and that picture has to be decoded like any other.
+        const ImageId image = track_here.imageShownAt(slot_);
+        if (image == kNoId) continue;
+        const Image* record = track_here.findImage(image);
+        if (!record) continue;
+
+        for (const Layer& layer : track_here.layers) {
+            if (layer.kind != LayerKind::Reference || !layer.visible) continue;
+
+            const int frame = record->sourceFrameFor(layer.id);
+            if (frame < 0 || static_cast<std::size_t>(frame) >= layer.reference_sources.size()) {
+                continue;  // the layer is empty at this drawing
+            }
+            if (doc_.referenceFrameFor(track_here.id, image, layer.id, layer.placement)) {
+                continue;  // already decoded, at the placement it is asked for
+            }
+
+            const std::pair<ImageId, LayerId> asked{image, layer.id};
+            const auto already = reference_asked_.find(asked);
+            // Asked at the same placement means the question in flight is this
+            // question. Asked at a different one means the layer moved while a
+            // decode was running, and the newer question has to supersede it.
+            if (already != reference_asked_.end() && already->second.under == layer.placement &&
+                already->second.generation == generation) {
+                continue;
+            }
+
+            const std::string& named = layer.reference_sources[static_cast<std::size_t>(frame)];
+            const QString path = locate_import_(named);
+            if (path.isEmpty()) {
+                giveUpOnFrame({image, layer.id}, layer.placement,
+                              QString::fromStdString(named),
+                              QStringLiteral("it is not where the project left it"));
+                continue;
+            }
+
+            reference_asked_[asked] = {layer.placement, generation};
+            reference_decoder_.request({image, layer.id},
+                                       {path, QString::fromStdString(named), layer.placement});
+        }
+    }
+
+    noteReferencePending();
+}
+
+// Records that a frame cannot be had, as an empty picture, and says so once.
+//
+// **The empty picture is the load-bearing half and it is not a tidy-up.** A
+// paint asks for whatever is not in the cache, so a file that will not read
+// would be asked for again on the very next paint, and again sixteen
+// milliseconds later, for as long as the window is open -- a decode a frame, on
+// a worker, for ever. Remembering the failure as an answer is what makes asking
+// stop. It costs nothing: an empty grid has no tiles, so it weighs nothing
+// against the cache's budget and evicts nobody.
+//
+// It comes back on the next `forgetReferenceFrames`, which is what a project
+// being loaded or replaced already does -- so a file that has been put back is
+// not shut out for the life of the process.
+void CanvasWidget::giveUpOnFrame(const animage::CtgKey& key, const Transform& under,
+                                 const QString& name, const QString& trouble) {
+    doc_.setReferenceFrame(kNoId, key.image, key.layer, under, TileGrid{});
+    Q_EMIT importUnreadable(name, trouble);
+}
+
+void CanvasWidget::noteReferencePending() {
+    const bool pending = !reference_asked_.empty();
+    if (reference_poll_) {
+        if (pending && !reference_poll_->isActive()) reference_poll_->start();
+        if (!pending) reference_poll_->stop();
+    }
+    // The last one landing is worth saying as much as the first: it is what
+    // takes the count off the status bar, and a count that stayed up after
+    // everything was in would be reporting work that has finished.
+    if (pending == reference_was_pending_) return;
+    reference_was_pending_ = pending;
+    Q_EMIT referenceFramesChanged();
+}
+
+// Requests about a cache that has since been emptied, which are the only ones
+// worth calling off.
+//
+// **Leaving the frame is deliberately not a reason, and this used to say it
+// was.** The colour's version drops a request the moment its drawing goes off
+// screen, and copying that here was wrong in both halves of the argument.
+//
+// It made playback show nothing at all. A paint runs this and then asks, so at
+// twenty-four frames a second every decode was called off forty-one
+// milliseconds after it started -- and a frame that takes longer than that to
+// decode, which a large one does, never finished. Every pass over the shot
+// decoded every frame and threw all of them away, which is what a log full of
+// the same warning from the same file was really reporting.
+//
+// And the reason the colour drops is not a reason here. A CtgJob holds copies
+// of the tile grids it will solve from, so a queue of them that fills faster
+// than it drains is real memory; a decode job is a path and nine numbers. What
+// is more, **a decoded frame is worth having even for a drawing you have
+// left** -- it is the frame you will be on again next time round, and the cache
+// it lands in is bounded, so keeping it cannot cost more than the bound.
+//
+// An emptied cache is different in kind: those answers are not early, they are
+// about a layer that no longer exists in that form.
+void CanvasWidget::dropStaleReferenceRequests() {
+    const std::uint64_t generation = doc_.referenceCache().generation();
+    for (auto it = reference_asked_.begin(); it != reference_asked_.end();) {
+        if (it->second.generation == generation) {
+            ++it;
+            continue;
+        }
+        reference_decoder_.cancel({it->first.first, it->first.second});
+        it = reference_asked_.erase(it);
+    }
+}
+
+// Takes what the decoder has finished and puts it in the document.
+//
+// On the interface thread, and it is the only place a decoded frame enters the
+// document -- which is the whole of the threading discipline here, and also the
+// whole of the eviction rule: installing is what evicts, and evicting may only
+// happen where the document may be edited. See ReferenceCache.
+void CanvasWidget::collectReferenceFrames() {
+    bool arrived = false;
+    dropStaleReferenceRequests();
+
+    for (ReferenceDecoder::Result& result : reference_decoder_.collect()) {
+        const std::pair<ImageId, LayerId> key{result.key.image, result.key.layer};
+        const auto asked = reference_asked_.find(key);
+        // An answer to a question that has since been asked again, about a
+        // drawing that has since been left, or about a placement the layer has
+        // since moved off. All ordinary, and all dropped -- and the last of
+        // those is the one that matters: installing it would put a picture of
+        // where the import used to be on screen, convincingly, until something
+        // happened to refresh it.
+        if (asked == reference_asked_.end() || !(asked->second.under == result.under)) continue;
+
+        reference_asked_.erase(asked);
+        if (!result.ok) {
+            giveUpOnFrame(result.key, result.under, result.name, result.trouble);
+            continue;
+        }
+
+        // kNoId for the track, which that function ignores: a frame is keyed on
+        // the drawing and the layer, and ImageIds come from one counter per
+        // document so a drawing names itself. Every other caller happens to
+        // have a track to hand and reads better for saying so; this one does
+        // not, because a result carries only what the question did.
+        doc_.setReferenceFrame(kNoId, result.key.image, result.key.layer, result.under,
+                               std::move(result.tiles));
+        arrived = true;
+    }
+
+    if (!arrived) {
+        noteReferencePending();
+        return;
+    }
+    noteReferencePending();
+    // Every arrival and not only the last, because the number moving is the
+    // whole of what tells somebody the program is working rather than stuck.
+    Q_EMIT referenceFramesChanged();
+
+    // A frame that has arrived is a whole layer appearing where there was
+    // nothing, nowhere near wherever the pen was, so all of it is redrawn --
+    // the same reason a regenerated fill marks everything dirty rather than the
+    // stroke's own rectangle.
+    dirty_everything_ = true;
+    // And the ghosts, which nothing else here would reach. OnionState compares
+    // layer lists and cel revisions, and a reference layer has neither a cel nor
+    // a field that moves when its picture arrives -- so a ghost composited
+    // before the decode landed would go on showing a blank import until some
+    // unrelated thing rebuilt the buffer. See "what refreshAll does not refresh"
+    // in docs/handover.md, which is this bug found from the other end.
+    onion_dirty_ = true;
+    update();
+}
+
+// See the header for why a generation cannot do this job.
+void CanvasWidget::forgetImports() {
+    // The decoder first. `cancelAll` drops what is queued, tells what is
+    // running to give up, and waits for it -- so by the time this returns there
+    // is no answer left anywhere that could be collected against the document
+    // that is arriving.
+    reference_decoder_.cancelAll();
+    // And the questions, which are what `collect` matches an answer against.
+    // Left behind, they would keep the poll running for answers that were
+    // thrown away a line ago, and hold `referenceFramesPending` true for ever
+    // -- which is the status bar saying a shot is still loading when nothing is.
+    reference_asked_.clear();
+    noteReferencePending();
+}
+
+bool CanvasWidget::settleReferenceFrames(int timeout_ms) {
+    QElapsedTimer clock;
+    clock.start();
+    while (true) {
+        requestReferenceFrames();
+        if (reference_asked_.empty()) return true;
+        if (clock.elapsed() > timeout_ms) return false;
+        reference_decoder_.waitUntilIdle();
+        collectReferenceFrames();
+
+        // A decode that came back to nobody -- superseded, or about a drawing
+        // that has been left -- leaves its entry behind, and waiting for an
+        // answer that will never arrive is a hang. Nothing outstanding at the
+        // decoder means nothing more is coming.
+        if (!reference_asked_.empty() && reference_decoder_.idle()) {
+            reference_asked_.clear();
+            noteReferencePending();
+            return false;
+        }
+    }
+    return true;
 }
 
 bool CanvasWidget::settleColour(int timeout_ms) {
@@ -1543,6 +1832,12 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // paint on itself.
     requestCtgFills();
 
+    // And the same bargain for an imported picture, which is the reason this is
+    // in the paint at all: nothing calls refreshEverything when the playhead
+    // moves, so a sequence has no other route to notice that the frame on screen
+    // has changed.
+    requestReferenceFrames();
+
     // Asked only when the whole cache is being composited again, which is what
     // every path that can change the ghosts does -- refreshAll is how a layer
     // being switched off, an undo, and an opacity all arrive. A stroke marks a
@@ -1825,12 +2120,41 @@ void CanvasWidget::drawSelection(QPainter& painter) const {
 
 // --- clipboard -----------------------------------------------------------
 
-// Everything the brush checks before it lays a dab down, and nothing else. The
-// layer kind is not here: the brush puts scribbles on a colour layer, the
-// eraser rubs them out again, and so does a Backspace through a loop. Nothing
-// on this list moves a mark from one place to another, so nothing on it has to
-// care which kind of mark it is.
+// Everything the brush checks before it lays a dab down, and nothing else.
+//
+// **One layer kind is here and the others deliberately are not**, which is a
+// finer distinction than this list used to draw. It said the kind was never
+// asked, because the brush puts scribbles on a colour layer, the eraser rubs
+// them out again, and so does a Backspace through a loop -- nothing on this
+// list moves a mark from one place to another, so nothing on it had to care
+// which kind of mark it was. That reasoning is intact and still decides the
+// colour layer.
+//
+// A reference layer is a different case and is the first of its sort: it holds
+// no pixels at all. There is no cel to write into and no cel that could be
+// created, so the question is not what kind of mark this would be but whether
+// there is anywhere to put one. See docs/importing.md.
 CanvasWidget::Refusal CanvasWidget::refuseToEditHere() const {
+    const Track* track = doc_.scene().findTrack(track_);
+    const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;
+    // Ahead of the lock, which is the order refuseHere already uses and for the
+    // reason it gives: unlocking would not make this work, so naming the lock
+    // would send somebody to fix the wrong thing. An import is not locked --
+    // the kind is what refuses -- but a person is free to lock one, and then
+    // the true reason still has to be the one that is said.
+    if (layer && layer->kind == LayerKind::Reference) return Refusal::ReferenceLayer;
+    return refuseToTouchHere();
+}
+
+// The rest of that list, without the kind.
+//
+// Placing an imported picture has to get past the reference check -- being one
+// is why it is being placed -- and must still stop on the other four, which are
+// not about what kind of layer this is but about whether you are working on it
+// at all. A locked layer is one you have said not to change, and a placement
+// changes it; a hidden one is one you cannot see, and placing something you
+// cannot see is aiming in the dark.
+CanvasWidget::Refusal CanvasWidget::refuseToTouchHere() const {
     if (track_ == kNoId || image_ == kNoId) return Refusal::NoDrawing;
 
     const Track* track = doc_.scene().findTrack(track_);
@@ -1972,6 +2296,12 @@ QString CanvasWidget::explain(Refusal refusal) {
         case Refusal::ColourLayer:
             return QStringLiteral("a colour layer holds labels rather than paint, so there is "
                                   "nothing here that can be resampled");
+        case Refusal::ReferenceLayer:
+            return QStringLiteral("this is an imported picture, which is shown from its file "
+                                  "rather than drawn -- convert it to drawings first");
+        case Refusal::OneDrawing:
+            return QStringLiteral("there is only one drawing on this layer, and through time "
+                                  "needs a second one to be through -- use the Transform tool");
         case Refusal::NothingDrawn:
             return QStringLiteral("nothing is drawn on this layer");
         case Refusal::NothingSelected: return QStringLiteral("nothing is selected");
@@ -2062,13 +2392,40 @@ CanvasWidget::Refusal CanvasWidget::beginTransform() {
 // **The ghosts.** Every other drawing of the layer, under the float at low
 // opacity, moving with it -- because what is being placed is the layer and not
 // the drawing, and there is no other way to see whether it has landed.
-CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
+CanvasWidget::Refusal CanvasWidget::beginLayerTransform(TileGrid unplaced) {
     if (transform_) return Refusal::None;
+
+    const Track* holding = doc_.scene().findTrack(track_);
+    const Layer* active = holding ? holding->findLayer(active_layer_) : nullptr;
+    const bool placing = active && active->kind == LayerKind::Reference;
 
     // The same list, in the same order, for the same reasons -- including the
     // layer kind. See beginTransform.
-    const Refusal refusal = refuseHere();
+    //
+    // Except the reference kind, which this door is the only way past: the
+    // brush refuses it because there is nowhere to put a mark, and placing a
+    // picture is not putting a mark anywhere.
+    const Refusal refusal = placing ? refuseToPlaceHere() : refuseHere();
     if (refusal != Refusal::None) return refusal;
+
+    // **A layer with one drawing is refused rather than handed to the tool.**
+    //
+    // It used to be handed over, on the reasoning that with one drawing the two
+    // gestures mean the same thing and the whole-layer path would throw a lasso
+    // away for no reason. That is true and it was the wrong conclusion: what it
+    // produced was a button reading "Transform layer through time" that did
+    // something else, on the most ordinary layer there is. Refusing and naming
+    // the tool says the same thing without the lie -- and the lasso comes back
+    // by the same route, because the tool is where you are now sent.
+    //
+    // Nothing is checked here for a reference layer, whatever the count: there
+    // is no cel for a tool to lift and a placement is a property of the whole
+    // file, so the count of drawings says nothing about it.
+    if (!placing) {
+        const std::size_t drawings = doc_.layerDrawings(track_, active_layer_).size();
+        if (drawings == 0) return Refusal::NothingDrawn;
+        if (drawings == 1) return Refusal::OneDrawing;
+    }
 
     // Sets tool_ by hand, so it ends the stroke itself. See #78 and the note in
     // beginTransform: setTool is not on the way in or on the way out of here.
@@ -2079,6 +2436,7 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
 
     LiveTransform live;
     live.whole_layer = true;
+    live.reference = placing;
     live.track = track_;
     live.image = image_;
     live.layer = active_layer_;
@@ -2088,13 +2446,32 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     // number the status bar promises all have to be about exactly the same set,
     // in the same order.
     std::vector<const TileGrid*> grids;
-    for (const ImageId id : doc_.layerDrawings(track_, active_layer_)) {
-        const Cel* cel = doc_.celAt(track_, id, active_layer_);
-        if (!cel) continue;
-        // Pushed together, so the two lists stay index for index -- which is
-        // what lets the float be found by image and the budget by position.
-        live.layer_images.push_back(id);
-        grids.push_back(&cel->tiles());
+    if (placing) {
+        // One picture, shown on every drawing of the track. The pixels are the
+        // *unplaced* ones and the numbers below are the layer's current
+        // placement, so what is on screen when the box opens is what was on
+        // screen before it opened -- and dragging edits the placement rather
+        // than composing onto it. That is what stops a picture adjusted three
+        // times having been resampled three times.
+        if (unplaced.empty()) return Refusal::NothingDrawn;
+        live.unplaced = std::move(unplaced);
+        for (const auto& [id, image] : track->images) live.layer_images.push_back(id);
+        // Sorted, because an unordered_map's walk order is not the timeline's
+        // and is not stable between two runs of the same program -- and the
+        // ghost picture is composited in this order. The same reason
+        // Document::layerDrawings sorts.
+        std::sort(live.layer_images.begin(), live.layer_images.end());
+        grids.assign(live.layer_images.size(), &live.unplaced);
+    } else {
+        for (const ImageId id : doc_.layerDrawings(track_, active_layer_)) {
+            const Cel* cel = doc_.celAt(track_, id, active_layer_);
+            if (!cel) continue;
+            // Pushed together, so the two lists stay index for index -- which
+            // is what lets the float be found by image and the budget by
+            // position.
+            live.layer_images.push_back(id);
+            grids.push_back(&cel->tiles());
+        }
     }
     // Worked out once and held, because drawnBounds reads pixels and the drag
     // that follows asks the budget on every pointer move.
@@ -2119,6 +2496,18 @@ CanvasWidget::Refusal CanvasWidget::beginLayerTransform() {
     // to go and which is after the bake has already written every drawing.
     clearSelection();
 
+    if (live.reference && active) {
+        // The box opens at the placement the layer already has, which is the
+        // point of storing one: you can see where the picture is and adjust it,
+        // rather than starting from nothing and describing a change to
+        // something you cannot read off the screen. It is also how somebody
+        // finds out that moving it again costs nothing.
+        live.values = active->placement;
+    }
+    // The pivot is the middle of what was picked up, always -- including for a
+    // stored placement, where "what was picked up" is the unplaced picture and
+    // so this is the same number that was stored. endTransformDrag puts it back
+    // here after every drag, so the numeric fields keep meaning one thing.
     live.values.pivot_x = live.bounds.x + live.bounds.width / 2.0;
     live.values.pivot_y = live.bounds.y + live.bounds.height / 2.0;
     transform_ = std::move(live);
@@ -2146,10 +2535,18 @@ void CanvasWidget::rebindLayerTransform() {
 
     live.image = image_;
     live.lifted = TileGrid{};
-    for (std::size_t i = 0; i < live.layer_images.size(); ++i) {
-        if (live.layer_images[i] != live.image) continue;
-        if (i < live.footprint.grids.size()) live.lifted = live.footprint.grids[i];
-        break;
+    if (live.reference) {
+        // Every drawing of a reference track shows the same file, so which one
+        // the playhead is on does not change the float -- and must not leave it
+        // empty when the playhead is past the track's last slot, where a held
+        // import is still very much on screen.
+        live.lifted = live.unplaced;
+    } else {
+        for (std::size_t i = 0; i < live.layer_images.size(); ++i) {
+            if (live.layer_images[i] != live.image) continue;
+            if (i < live.footprint.grids.size()) live.lifted = live.footprint.grids[i];
+            break;
+        }
     }
 
     // The float first, because it settles `covers` and `step` and the ghosts go
@@ -2413,6 +2810,37 @@ bool CanvasWidget::applyTransform() {
     // other commit in this program there is nothing on screen that would change
     // while it ran. A pointer that goes on looking like a transform pointer
     // through a two-second stall reads as a program that has stopped.
+    if (live.reference) {
+        // **Stored, not baked.** No cel is written, nothing is journalled
+        // beyond the layer's own properties, and the picture is derived from
+        // the file again at these numbers -- so adjusting a placement for the
+        // tenth time has still resampled the original once.
+        //
+        // It goes through updateLayer, so it undoes like any other layer
+        // property. What re-derives afterwards is refreshEverything, which
+        // asks whether each reference layer's pixels were made at the
+        // placement it now has; that is also what covers the undo, which
+        // changes a placement without touching anything else that would
+        // notice.
+        const Track* track = doc_.scene().findTrack(live.track);
+        const Layer* layer = track ? track->findLayer(live.layer) : nullptr;
+        if (layer && !(layer->placement == live.values)) {
+            Layer placed = *layer;
+            placed.placement = live.values;
+            doc_.updateLayer(live.track, live.layer, placed);
+        }
+        transform_.reset();
+        refreshAll();
+        refreshPointer();
+        Q_EMIT documentChanged();
+        Q_EMIT transformEnded();
+        // True: a placement always lands. There is no budget to exceed and no
+        // allocation to fail -- what it writes is five numbers -- so the
+        // refusal this returns for a bake that will not fit has nothing to
+        // report here.
+        return true;
+    }
+
     if (live.whole_layer) {
         if (!live.values.isIdentity()) {
             // Said before the wait and not after it. The count is the list the
@@ -2599,15 +3027,31 @@ void CanvasWidget::drawTransformPreview(QPainter& painter) {
     // scale that would take a hundred gigabytes to rasterise as at one that
     // takes eight megabytes -- and looking right up to the moment Enter is
     // pressed is what made this worth reporting. See issue #40.
-    // And green when it is the whole layer through time rather than the drawing
-    // in front of you. Two doors into one gesture that write wildly different
-    // amounts, so the box says which one you came through -- the ghosts say it
-    // too, but a layer of two drawings barely has ghosts and the box always
-    // does. Red still wins: whether it can be committed at all is the more
-    // urgent of the two things this colour is carrying.
-    const QColor ink = !transform_fits_ ? QColor(220, 50, 50)
-                       : live.whole_layer ? QColor(40, 160, 90)
-                                          : QColor(60, 130, 240);
+    // And green when more moves than the thing you pointed at.
+    //
+    // **The rule is about scope and not about which door you came through**,
+    // which is a finer distinction than this used to draw and is the one that
+    // survives a reference layer. It said green for the whole-layer gesture on
+    // the grounds that the two doors "write wildly different amounts" -- true
+    // of a bake, and not true at all of a placement, which writes nothing and
+    // can still move forty drawings. And a one-drawing layer came through the
+    // layer door and moved exactly the drawing in front of you, which is the
+    // blue case wearing green.
+    //
+    // So: blue is what you pointed at -- your selection, or the drawing you are
+    // looking at. Green is more than that. The ghosts say it too, but a layer
+    // of two drawings barely has ghosts and the box always does.
+    //
+    // What the colour deliberately does *not* carry is whether the lasso
+    // applies. That already announces itself, and better: a gesture that
+    // ignores a loop clears it, so the loop visibly goes. One signal per fact.
+    //
+    // Red still wins: whether it can be committed at all is the more urgent of
+    // the two things this colour is carrying.
+    const bool more_than_one_drawing = live.layer_images.size() > 1;
+    const QColor ink = !transform_fits_          ? QColor(220, 50, 50)
+                       : more_than_one_drawing   ? QColor(40, 160, 90)
+                                                 : QColor(60, 130, 240);
 
     painter.save();
     painter.setBrush(Qt::NoBrush);
@@ -3109,7 +3553,16 @@ void CanvasWidget::beginStroke(const QPointF& image_point, float pressure, bool 
     // asks about the layer, so the cursor does not either -- the pen simply
     // leaves no mark. Reported by the user against issue #43 and left alone
     // here, because where a refused pen-down should say so is its own question.
-    if (refuseToEditHere() != Refusal::None) return;
+    //
+    // **One of the five is answered, and it is the one with an answer.** On an
+    // import the refusal is not "not here" but "not until you convert it", so
+    // the attempt to draw is exactly where to offer that -- see
+    // docs/importing.md. What is emitted is the fact; what to do about it is
+    // MainWindow's, the reply being a modal dialog and this being a pen-down.
+    if (const Refusal why = refuseToEditHere(); why != Refusal::None) {
+        if (why == Refusal::ReferenceLayer) Q_EMIT drawingRefusedOnImport();
+        return;
+    }
 
     const Track* track = doc_.scene().findTrack(track_);
     const Layer* layer = track ? track->findLayer(active_layer_) : nullptr;

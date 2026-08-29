@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "audio_track.h"
 #include "track.h"
 
 namespace animage {
@@ -49,6 +50,18 @@ struct Scene {
     PixelRect canvas() const { return {0, 0, width, height}; }
 
     std::vector<Track> tracks;
+
+    // Soundtracks, in their own list rather than as a kind of Track. See
+    // audio_track.h for the argument, which is the specification's and which
+    // the code makes sharper: about twenty places walk `tracks`, and every one
+    // of them goes on meaning what it meant because this is not in there.
+    //
+    // **It does not enter shotFrames or longestTrack**, and that is a decision.
+    // A shot's length is what the drawings make it, or what the scene was told;
+    // a soundtrack running long is reference material, and a scene that grew
+    // every time somebody imported one would be deciding the shot from the
+    // wrong thing.
+    std::vector<AudioTrack> audio_tracks;
 
     // Whether the shot's length is the scene's to say, or is taken from whatever
     // the tracks add up to.
@@ -103,6 +116,25 @@ struct Scene {
 
     Track* findTrack(TrackId id) {
         for (Track& t : tracks) {
+            if (t.id == id) return &t;
+        }
+        return nullptr;
+    }
+
+    // Deliberately a different function from findTrack rather than one that
+    // searches both lists. An id handed to the wrong one answers *nothing here*
+    // rather than something plausible, and the timeline's two selections are
+    // what keep them apart in the first place -- see docs/importing.md, "the
+    // two selections".
+    const AudioTrack* findAudioTrack(TrackId id) const {
+        for (const AudioTrack& t : audio_tracks) {
+            if (t.id == id) return &t;
+        }
+        return nullptr;
+    }
+
+    AudioTrack* findAudioTrack(TrackId id) {
+        for (AudioTrack& t : audio_tracks) {
             if (t.id == id) return &t;
         }
         return nullptr;

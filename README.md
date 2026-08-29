@@ -69,7 +69,8 @@ Everything under [docs/](docs/), and whether it describes something that exists:
 | [scribbles-through-time.md](docs/scribbles-through-time.md) | a scribble staying from one drawing to the next, and moving to follow the animation. **Built** to one translation per region; the lattice past it is built and off by default, close enough to be a choice rather than a gap, and the rung past that is research |
 | [lasso-and-transform.md](docs/lasso-and-transform.md) | selecting part of a drawing, moving, rotating and scaling it, and the clipboard. **Built** |
 | [m0-latency.md](docs/m0-latency.md) | the pen-to-pixel latency gate, and how it is measured. **Built** |
-| [importing.md](docs/importing.md) | bringing in image sequences and audio. Two decisions still open: which audio library, and how an imported sequence is stored. **Not built** |
+| [importing.md](docs/importing.md) | bringing in pictures, sequences, video and audio. Its two open decisions are settled — Qt Multimedia, and a reference layer with no cels. **Built** for a single image, an image sequence, and a soundtrack as far as its row; video, playing the sound, and converting an import to drawings are not |
+| [audio-spike.md](docs/audio-spike.md) | what taking Qt Multimedia costs, measured before any audio code: what the three packaging tools bundled, what it weighs, and the one number the playback clock stands on. **A record of measurements**, not a plan |
 | [playback-resolution.md](docs/playback-resolution.md) | giving up resolution to hold the frame rate, and when. **Not built** |
 
 As the paragraph above says of one of them: a design note written before the

@@ -565,6 +565,178 @@ void halfLookupMatchesTheComputation() {
     }
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A grid holding one flat colour over a rectangle, which is what an imported
+// file decodes to as far as the compositor is concerned. Built here rather than
+// decoded, because what these tests are about is the path from a derived grid
+// to the screen and not the decoder -- and `core` has no decoder.
+TileGrid flatGrid(const PixelRect& area, const Rgba& colour) {
+    std::unordered_map<TileCoord, std::shared_ptr<Tile>, TileCoordHash> built;
+    for (int y = area.y; y < area.y + area.height; ++y) {
+        for (int x = area.x; x < area.x + area.width; ++x) {
+            auto& tile = built[tileCoordFor(x, y)];
+            if (!tile) tile = std::make_shared<Tile>();
+            tile->setPixel(tileLocal(x), tileLocal(y), colour);
+        }
+    }
+    TileGrid grid;
+    for (auto& [coord, tile] : built) grid.set(coord, std::move(tile));
+    return grid;
+}
+
+void aReferenceLayerDrawsWhatWasDerived() {
+    TEST("a reference layer composites its derived frame and holds no cel");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    Compositor compositor;
+    Framebuffer frame;
+    const PixelRect region{495, 495, 10, 10};
+
+    // Nothing derived yet, and this is the case that has to be right rather
+    // than merely not crash: compositing may not start a decode, so the honest
+    // answer while a picture is being worked out is that the layer does not
+    // draw. Silently transparent, exactly as a CTG layer with no fill is.
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.0, 1e-3);
+
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
+                            flatGrid({490, 490, 20, 20}, {0.0f, 0.0f, 1.0f, 1.0f}));
+
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    const Rgba centre = frame.pixel(5, 5);
+    CHECK_NEAR(centre.a, 1.0, 1e-2);
+    CHECK_NEAR(centre.b, 1.0, 1e-2);
+
+    // And it is a layer in every other respect. Opacity and visibility are
+    // properties of a Layer and the pass carries them, so nothing about them
+    // had to know this kind exists -- which is the claim worth pinning, because
+    // the alternative design would have needed both taught about it.
+    Layer faded = *f.tl().findLayer(reference);
+    faded.opacity = 0.5f;
+    f.doc.updateLayer(f.track, reference, faded);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.5, 1e-2);
+
+    Layer hidden = *f.tl().findLayer(reference);
+    hidden.visible = false;
+    f.doc.updateLayer(f.track, reference, hidden);
+    compositor.composite(f.doc, f.track, f.image, region, frame);
+    CHECK_NEAR(frame.pixel(5, 5).a, 0.0, 1e-3);
+}
+
+void aDerivedFrameIsNotDocumentState() {
+    TEST("deriving a frame allocates no cel, records no undo step, and is forgettable");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    const std::size_t tiles_before = f.doc.totalTileCount();
+    const bool could_undo = f.doc.canUndo();
+
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
+                            flatGrid({0, 0, 300, 300}, {1.0f, 1.0f, 1.0f, 1.0f}));
+
+    // The picture is a memo and not an edit. This is what makes an import free
+    // to a save and to the undo history -- a 240-frame sequence would otherwise
+    // be gigabytes in the journal -- and it is the property the whole reference
+    // shape rests on.
+    CHECK_EQ(f.doc.totalTileCount(), tiles_before);
+    CHECK_EQ(f.doc.canUndo(), could_undo);
+    CHECK(f.doc.scene().findTrack(f.track)->findImage(f.image)->celFor(reference) == kNoId);
+
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, Transform{}) != nullptr);
+
+    // Asked at a placement it was not derived at, the answer is absent rather
+    // than stale. A picture of where the import used to be is worse than no
+    // picture: it is convincing.
+    Transform moved;
+    moved.dx = 40.0;
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, moved) == nullptr);
+
+    f.doc.forgetReferenceFrames();
+    CHECK(f.doc.referenceFrameFor(f.track, f.image, reference, Transform{}) == nullptr);
+}
+
+// The rule a still could not exercise and a sequence stands on.
+//
+// A scrub goes back and forth over a handful of frames, so the frames being
+// looked at are the ones that must survive -- which is why a *lookup* renews an
+// entry and a store does not. Get it the other way round and the cache holds
+// whatever was decoded most recently, which during a scrub is exactly the frame
+// you are leaving.
+//
+// Driven against a budget small enough to fill rather than against half a
+// gigabyte of tiles, which is why the bound is settable at all.
+void aLookupIsWhatKeepsAFrameResident() {
+    TEST("a frame that is looked at outlives one that was only stored");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    // One tile each, so the arithmetic is countable: three fit, the fourth does
+    // not, and exactly one has to go.
+    const auto oneTile = [] { return flatGrid({0, 0, 4, 4}, {1.0f, 1.0f, 1.0f, 1.0f}); };
+    const ImageId a = f.image;
+    const ImageId b = f.doc.insertImage(f.track, 1);
+    const ImageId c = f.doc.insertImage(f.track, 2);
+    const ImageId d = f.doc.insertImage(f.track, 3);
+
+    f.doc.setReferenceCacheBudget(3 * sizeof(Tile));
+
+    f.doc.setReferenceFrame(f.track, a, reference, Transform{}, oneTile());
+    f.doc.setReferenceFrame(f.track, b, reference, Transform{}, oneTile());
+    f.doc.setReferenceFrame(f.track, c, reference, Transform{}, oneTile());
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{3});
+    CHECK_EQ(f.doc.referenceCache().bytes(), 3 * sizeof(Tile));
+
+    // Looked at, which is what a paint of that drawing does. `a` is now the
+    // oldest *store* and the newest *use*, and those two disagreeing is the
+    // whole of what this test is about.
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+
+    f.doc.setReferenceFrame(f.track, d, reference, Transform{}, oneTile());
+
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{3});
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, b, reference, Transform{}) == nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, c, reference, Transform{}) != nullptr);
+    CHECK(f.doc.referenceFrameFor(f.track, d, reference, Transform{}) != nullptr);
+
+    // And a frame larger than the whole budget is kept rather than thrown away
+    // before anybody can read it. A 300 dpi A4 scan is 70 MB and nothing stops
+    // a larger one, so this is a real case and not a degenerate one: the budget
+    // is exceeded, deliberately, because the alternative is a layer that can
+    // never draw at all.
+    f.doc.setReferenceCacheBudget(sizeof(Tile) / 2);
+    f.doc.setReferenceFrame(f.track, a, reference, Transform{}, oneTile());
+    CHECK(f.doc.referenceFrameFor(f.track, a, reference, Transform{}) != nullptr);
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{1});
+}
+
+// Emptying the shelf is how everything a frame depends on but is not keyed on
+// says "all of that is wrong now" -- and the count is what lets a decode still
+// in the air be told the same thing when it lands. See CtgFillCache::generation,
+// which learned this the expensive way.
+void emptyingTheFrameCacheIsCounted() {
+    TEST("the reference cache counts how many times it has been emptied");
+    Fixture f;
+    const LayerId reference = f.doc.addLayer(f.track, "import", 0, LayerKind::Reference);
+
+    const std::uint64_t before = f.doc.referenceCache().generation();
+    f.doc.setReferenceFrame(f.track, f.image, reference, Transform{},
+                            flatGrid({0, 0, 4, 4}, {1.0f, 1.0f, 1.0f, 1.0f}));
+    // Storing is not emptying. A counter that moved here would call off every
+    // answer in flight on every frame that arrived, which is the opposite of
+    // what it is for.
+    CHECK_EQ(f.doc.referenceCache().generation(), before);
+
+    f.doc.forgetReferenceFrames();
+    CHECK(f.doc.referenceCache().generation() > before);
+    CHECK_EQ(f.doc.referenceCache().size(), std::size_t{0});
+    CHECK_EQ(f.doc.referenceCache().bytes(), std::size_t{0});
+}
+
 }  // namespace
 
 int main() {
@@ -583,5 +755,9 @@ int main() {
     compositorRespectsOrderAndOpacity();
     compositorHandlesEmptyAndBounds();
     compositorWorksLeftOfTheOrigin();
+    aReferenceLayerDrawsWhatWasDerived();
+    aDerivedFrameIsNotDocumentState();
+    aLookupIsWhatKeepsAFrameResident();
+    emptyingTheFrameCacheIsCounted();
     return testing::summarise("brush");
 }

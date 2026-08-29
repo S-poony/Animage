@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <utility>
@@ -21,6 +22,7 @@ class QTimer;
 #include "ctg.h"
 #include "ctg_solver.h"
 #include "document.h"
+#include "reference_decoder.h"
 #include "selection.h"
 #include "transform.h"
 
@@ -157,6 +159,54 @@ public:
     // blocking on one, but it is entitled to say so.
     bool colourPending() const { return !ctg_asked_.empty(); }
 
+    // --- imported pictures ------------------------------------------------
+
+    // Where an imported file's bytes are, given the name a layer stores.
+    //
+    // **The canvas must not answer this itself and does not try.** Where an
+    // import lives depends on whether the project has been saved and on which
+    // folder it was saved into, which is MainWindow's business -- and it moves,
+    // on the interface thread, while this widget is painting. So the answer is
+    // asked for here, once, on the interface thread, at the moment a decode is
+    // queued; what comes back is put in the job and never looked at.
+    //
+    // Without one, a reference layer simply does not draw. That is the same
+    // answer as a decode that has not finished, which is what makes it safe to
+    // be unset -- a test that never installs one gets a blank import rather
+    // than a crash.
+    void setImportLocator(std::function<QString(const std::string&)> locate);
+
+    // Installs anything the decoder has finished. On a timer while decodes are
+    // outstanding; public so a test can drive it directly.
+    void collectReferenceFrames();
+
+    // Waits for every outstanding decode and installs it. For tests, and for
+    // anything that must not run ahead of the picture -- an export, which has
+    // to write the frames nobody looked at. Never during ordinary drawing.
+    bool settleReferenceFrames(int timeout_ms = 30000);
+
+    bool referenceFramesPending() const { return !reference_asked_.empty(); }
+
+    // Gives up on every decode in flight and forgets every question asked.
+    //
+    // **For the moment the document underneath is replaced**, which is opening
+    // a project and starting a new one, and it has to be called there rather
+    // than left to the generation check in dropStaleReferenceRequests. That
+    // check compares a `ReferenceCache::generation`, which counts how many
+    // times *that* cache has been emptied -- and every document loaded from
+    // disk arrives with the same count, because `loadScene` empties it exactly
+    // once. So two projects opened one after the other are both at generation
+    // one, the questions asked about the first look current against the second,
+    // and an answer about a drawing in the old project is installed against
+    // whatever drawing happens to hold that id in the new one. Ids come from a
+    // counter that restarts per document, so small ones collide as a matter of
+    // course.
+    //
+    // A generation is the right test for "this cache was emptied under me" and
+    // simply is not a test for "this is another document". This is that test,
+    // and it is a statement rather than a comparison.
+    void forgetImports();
+
     // How many times this widget has actually painted.
     //
     // The honest way to ask whether a frame was *shown*. Playback sets a slot
@@ -184,6 +234,21 @@ public:
         LockedLayer,
         HiddenLayer,
         ColourLayer,   // a mark there is a label; interpolating one invents colours
+        // An imported picture. Not "locked" and not "empty": there is no cel
+        // here and none that could be made, because what is on screen is
+        // derived from a file. The way to draw on one is to convert it to
+        // drawings first, and the message says so -- a refusal that does not
+        // name its remedy is the disabled control nobody can find twice.
+        ReferenceLayer,
+        // A whole-layer transform on a layer with one drawing.
+        //
+        // **Not a technical limit: "through time" needs a second drawing to be
+        // through.** With one, the gesture is the Transform tool's, and the
+        // door used to hand it over on exactly that reasoning -- which meant a
+        // button that did something different from what it said, on the most
+        // ordinary layer there is. Refusing and naming the tool says the same
+        // thing without the button having to lie.
+        OneDrawing,
         NothingDrawn,
         NothingSelected,  // erase takes a loop as its argument and had none
         NothingCopied,
@@ -282,8 +347,18 @@ public:
     // Refuses where the tool refuses, and that includes a colour layer: a mark
     // on one is a label, and interpolating it invents a colour that competes
     // for regions on its own account.
-    Refusal beginLayerTransform();
+    // `unplaced` is the imported picture at 1:1 and is only read when the
+    // active layer is a Reference one. It has to come from the caller because
+    // deriving it means opening a file, which the canvas has no business
+    // knowing how to find -- see MainWindow::importAtOneToOne, and see the
+    // definition here for why the *unplaced* pixels are what a placement
+    // gesture floats.
+    Refusal beginLayerTransform(animage::TileGrid unplaced = {});
     bool transformIsWholeLayer() const { return transform_ && transform_->whole_layer; }
+
+    // Whether the gesture on screen is placing an imported picture, which is
+    // what the bar says instead of naming a bake. Nothing is written by one.
+    bool transformIsPlacement() const { return transform_ && transform_->reference; }
 
     // The five numbers on the bar. Setting them puts the pivot back to the
     // middle of what was picked up, so that a typed rotation always means the
@@ -428,6 +503,38 @@ public:
 Q_SIGNALS:
     void viewChanged();
     void documentChanged();
+
+    // A decoded picture arrived, or the last one outstanding did. What listens
+    // is the status bar's count of how much of a sequence is on hand: a paint
+    // is what asks for a frame, but a frame landing is not a paint, so without
+    // this the number would only move when something else happened to refresh
+    // it -- and standing still is exactly what it exists not to do.
+    void referenceFramesChanged();
+
+    // An imported file could not be turned into a picture: it is not where the
+    // project left it, or it is there and will not decode.
+    //
+    // A signal rather than a message box from in here, because how often to say
+    // it is not this widget's question. A paint asks for what is missing, so
+    // this can fire for several frames of one sequence in one go, and it fires
+    // again whenever the cache is emptied -- deciding that a person should be
+    // told once per document is MainWindow's, which is where the document is
+    // opened and where the last such decision already lives.
+    void importUnreadable(const QString& name, const QString& trouble);
+    // Somebody tried to draw on an imported picture, which holds no pixels and
+    // has nowhere to put a mark.
+    //
+    // **The refusal is where the question actually gets asked**, so it is the
+    // right moment to offer the way back -- and offering it is not this
+    // widget's job for `importUnreadable`'s reason, plus one of its own: what
+    // it takes is a modal dialog, and this fires from inside a pen-down. See
+    // MainWindow::offerToConvertRefusedLayer, which queues rather than raising
+    // one from in here.
+    //
+    // Every refused press, not the first: how often to say it is a question
+    // about a conversation with a person, and this end knows nothing about
+    // that.
+    void drawingRefusedOnImport();
     void brushSizeChanged(double radius);
     // Linear light, straight rather than premultiplied.
     void colourPicked(float r, float g, float b);
@@ -578,9 +685,12 @@ private:
     void fitTo(const animage::PixelRect& bounds);
     void drawCanvasFrame(QPainter& painter);
     void requestCtgFills();
-    void dropStaleColourRequests(bool only_this_frame);
-    // Whether any track shows this drawing at the frame the playhead is on.
-    bool isShownNow(animage::ImageId image) const;
+    void dropStaleColourRequests();
+    void requestReferenceFrames();
+    void dropStaleReferenceRequests();
+    void noteReferencePending();
+    void giveUpOnFrame(const animage::CtgKey& key, const animage::Transform& under,
+                       const QString& name, const QString& trouble);
     void noteColourPending();
     void setScribblePreview(animage::LayerId layer, bool previewing);
 
@@ -675,6 +785,13 @@ private:
     // writes -- the eraser included, which is what a Backspace through a loop
     // is.
     Refusal refuseToEditHere() const;
+    // Everything both of the above check except the layer kind: no drawing, no
+    // layer, locked, hidden. Split out because placing an imported picture has
+    // to skip the kind -- being a reference layer is the reason it is being
+    // placed -- while still refusing a locked or hidden one, which are about
+    // whether you are editing this layer at all and mean the same thing here.
+    Refusal refuseToTouchHere() const;
+    Refusal refuseToPlaceHere() const { return refuseToTouchHere(); }
 
     // That list plus the layer kind. Shared by the transform tool and by all
     // three clipboard operations, because "refuse where the brush refuses" is
@@ -748,6 +865,27 @@ private:
     };
     animage::CtgSolver ctg_solver_;
     std::map<ColourAsked, ColourWanted> ctg_asked_;
+
+    // The same bookkeeping for imported frames, and it is the same shape
+    // because it is the same problem: a widget repaints many times a second,
+    // and without a record of what is already being worked out every paint
+    // would supersede the answer the last paint was waiting for and nothing
+    // would ever finish.
+    //
+    // What is recorded is the placement the frame was asked for *at*, alongside
+    // the cache generation. Two things a decode depends on are not in its key --
+    // the placement is on the layer and so is the file list -- and an answer
+    // that lands after either moved is not a late answer, it is one about a
+    // layer that no longer exists in that form.
+    struct ReferenceWanted {
+        animage::Transform under;
+        std::uint64_t generation = 0;
+    };
+    ReferenceDecoder reference_decoder_;
+    std::map<std::pair<animage::ImageId, animage::LayerId>, ReferenceWanted> reference_asked_;
+    QTimer* reference_poll_ = nullptr;
+    bool reference_was_pending_ = false;
+    std::function<QString(const std::string&)> locate_import_;
 
     // Runs only while something is outstanding.
     //
@@ -953,6 +1091,31 @@ private:
         // drawing describes nothing on the other forty; and Apply goes through
         // Document::transformLayer.
         bool whole_layer = false;
+
+        // Whether what is being placed is an imported picture, which changes
+        // what Apply does and nothing else about the gesture.
+        //
+        // A reference layer holds no cels, so there is nothing to bake: Apply
+        // stores these five numbers on the layer and the pixels are derived
+        // from the file again at them. That is why `values` starts at the
+        // layer's current placement rather than at the identity -- the numbers
+        // are absolute and the drag edits them, where every other transform in
+        // the program starts from nothing and describes a change.
+        //
+        // It is also why there is no lasso here whatever the drawing count: a
+        // placement is a property of the whole file, and there is no such thing
+        // as placing half of it.
+        bool reference = false;
+
+        // The imported picture at 1:1, owned for the length of the gesture.
+        //
+        // Owned rather than pointed at, which is LayerFootprint's rule and for
+        // the same reason: a live gesture holding a pointer into something the
+        // document can rebuild is a dangling pointer waiting for a refresh.
+        // Nothing else holds these pixels -- the cache holds the *placed* ones,
+        // which is what composites -- so this is where they live until Apply or
+        // Escape.
+        animage::TileGrid unplaced;
 
         // Every drawing of the layer, and what a fit check needs about them.
         // Empty unless `whole_layer`.

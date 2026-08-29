@@ -59,12 +59,18 @@
 
 #include "canvas_widget.h"
 #include "ctg_solver.h"
+#include "image_import.h"
 #include "layer_list.h"
+#include "marks.h"
 #include "export_sequence.h"
 #include "project_io.h"
 #include "color.h"
 #include "scribble.h"
 #include "scene_settings_dialog.h"
+#include "audio_device.h"
+#include "audio_import.h"
+#include "audio_import_dialog.h"
+#include "sequence_import_dialog.h"
 #include "shortcuts_dialog.h"
 #include "timeline_widget.h"
 
@@ -82,6 +88,40 @@ namespace {
 // track", and a temporary message hides the line while it is up -- so saying
 // the same thing in other words covers over the words that were already saying
 // it. `Refusal::NoDrawing` is exactly that case, and so far the only one.
+// How much sound a scrub burst plays, past the frame it starts on.
+//
+// **One frame's worth is what docs/importing.md asks for, and one frame's worth
+// is too short to recognise.** At 24 fps a frame is 42 ms, which is under half a
+// syllable: dragging fast it does not matter, because each burst is cut off by
+// the next and what you hear is continuous, but the moment you stop on a frame
+// to listen, 42 ms is a blip you cannot tell a *b* from a *d* in. So a burst is
+// the frame it stands on or 90 ms, whichever is longer -- about a syllable, and
+// at 11 fps or slower the frame is already longer than that and wins.
+//
+// The number is here rather than spread through scrubAudio because it is a
+// judgement about ears and is expected to be argued with. It has been argued
+// with once already: 120 ms was the first guess and came back as slightly too
+// long from the first person to drag the playhead over a line of dialogue.
+constexpr int kScrubFloorMs = 90;
+
+// How long to wait for the first sample of a take to come out of the device
+// before giving up on it and playing to the wall clock instead.
+//
+// **A bound on a wait that is normally a fifth of a second.** The picture holds
+// on the frame Play was pressed on until the sound reaches it, which is what
+// starting together means -- the spike measured a 250 ms buffer, so that hold
+// is about a quarter of a second and is the cost of the whole feature. What
+// this catches is the case where it never arrives: a driver that accepted the
+// stream and reports nothing, or hardware that went away between the import and
+// the press. A second is four times the measured buffer, and a picture that
+// starts a second late is recoverable where one that never starts is not.
+constexpr int kAudioStartWaitMs = 1000;
+
+// And a ramp at each end of it. A buffer that begins and ends part-way up a
+// waveform steps the speaker cone, which is a click on every frame dragged
+// past. Three milliseconds is inaudible as a fade and removes all of it.
+constexpr int kScrubFadeMs = 3;
+
 void sayCannot(QStatusBar* bar, const char* verb, CanvasWidget::Refusal refusal) {
     if (!bar || refusal == CanvasWidget::Refusal::None) return;
     if (refusal == CanvasWidget::Refusal::NoDrawing) return;
@@ -260,6 +300,18 @@ MainWindow::MainWindow() {
     canvas_->setTrack(track_);
     canvas_->setFrame(0);
     canvas_->setActiveLayer(first);
+    // Where an import's bytes are is this window's business -- it depends on
+    // whether the project has been saved and into which folder -- so the canvas
+    // asks rather than working it out. See CanvasWidget::setImportLocator.
+    canvas_->setImportLocator(
+        [this](const std::string& name) { return importPathFor(name); });
+    connect(canvas_, &CanvasWidget::importUnreadable, this, &MainWindow::onImportUnreadable);
+    // Queued for the reason the colour's is: this fires from the poll that
+    // installs a frame, and the paint that asked for it may still be on the
+    // stack -- touching the status bar or the panels from inside a paint is how
+    // a widget gets rebuilt underneath itself.
+    connect(canvas_, &CanvasWidget::referenceFramesChanged, this, [this] { syncStatus(); },
+            Qt::QueuedConnection);
     setCentralWidget(canvas_);
 
     playback_timer_ = new QTimer(this);
@@ -285,6 +337,12 @@ MainWindow::MainWindow() {
     // After all of them, because the tooltips that name a key are registered as
     // the panels are built and this is what fills the key in.
     syncTooltips();
+
+    // And the machine's speakers, which change without the document changing --
+    // so nothing else here would ever ask. After the panels, because the
+    // callback reads the timeline. Cleared in the destructor: the watch outlives
+    // this window. See AudioDevice::watchOutputs.
+    AudioDevice::watchOutputs([this] { onAudioOutputsChanged(); });
 
     connect(canvas_, &CanvasWidget::brushSizeChanged, this, [this](double radius) {
         if (!radius_) return;
@@ -348,14 +406,23 @@ MainWindow::MainWindow() {
                 : QStringLiteral("Transformed %1 drawings on this layer").arg(drawings),
             4000);
     });
+    connect(canvas_, &CanvasWidget::drawingRefusedOnImport, this,
+            &MainWindow::offerToConvertRefusedLayer);
     connect(canvas_, &CanvasWidget::selectionChanged, this, &MainWindow::syncStatus);
     connect(canvas_, &CanvasWidget::documentChanged, this, [this] {
+        // **Drawing says you are done with the sound.** A soundtrack clicked
+        // once would otherwise stay lit for the rest of the session while every
+        // stroke landed somewhere else, and the bright row would not be the row
+        // being worked on. This is the canvas's own signal, so what reaches it
+        // is a stroke, a fill or a transform -- all of them drawing.
+        timeline_widget_->clearAudioHighlight();
+        syncTrackMenu();
         timeline_widget_->refresh();
         // The first stroke on a new layer is what takes "nothing is drawn on
         // this layer yet" away, and it arrives here rather than through the
         // panel or the playhead -- so without this the button stays greyed out
         // until you happen to change layer. Cheap: it counts cels, not pixels.
-        syncLayerTransformButton();
+        syncLayerButtons();
         syncStatus();
     });
     // A fill landed. Queued, because a solve installed while the
@@ -398,6 +465,13 @@ MainWindow::~MainWindow() {
     // `canvas_` already deleted.
     qApp->removeEventFilter(this);
     disconnect(qApp, nullptr, this, nullptr);
+
+    // And it stops listening to the machine's speakers, for the same reason and
+    // one moment earlier than it would matter: the watch outlives this window
+    // -- one QMediaDevices for the life of the process, see
+    // AudioDevice::watchOutputs -- and a callback into a window that is taking
+    // itself apart is a callback into `timeline_widget_` after it has gone.
+    AudioDevice::watchOutputs({});
 
     // A rename still open is given up here, in the last moment this is still a
     // MainWindow.
@@ -743,6 +817,33 @@ void MainWindow::keyedTip(QWidget* on, shortcuts::Id id, const QString& what,
     keyed_tips_.push_back({nullptr, on, id, what, more, also});
 }
 
+// Changes what a keyed tooltip says, keeping the key it names.
+//
+// The tooltips are composed from a table so that rebinding a key rewrites every
+// sentence that mentions one; this reaches into that table rather than around
+// it, so a tooltip that changes with the gesture still gets its key from the
+// same place as all the others.
+void MainWindow::setKeyedTipText(QWidget* on, const QString& what) {
+    for (KeyedTip& tip : keyed_tips_) {
+        if (tip.widget != on) continue;
+        if (tip.what == what) return;  // nothing to do, and syncTooltips is not free
+        tip.what = what;
+        syncTooltips();
+        return;
+    }
+}
+
+void MainWindow::setKeyedTipText(QAction* on, const QString& what, const QString& more) {
+    for (KeyedTip& tip : keyed_tips_) {
+        if (tip.action != on) continue;
+        if (tip.what == what && tip.more == more) return;  // syncTooltips is not free
+        tip.what = what;
+        tip.more = more;
+        syncTooltips();
+        return;
+    }
+}
+
 void MainWindow::syncTooltips() {
     const shortcuts::Bindings& keys = shortcuts::current();
     const auto spelled = [&keys](shortcuts::Id id) {
@@ -849,6 +950,20 @@ void MainWindow::buildMenus() {
     file->addAction(makeAction(Id::SaveProject, [this] { saveProject(); }));
     file->addAction(makeAction(Id::SaveProjectAs, [this] { saveProjectAs(); }));
     file->addSeparator();
+    // A still and a sequence are separate items because they arrive at
+    // different times and do different things, not because the file picker
+    // cannot tell them apart. See docs/importing.md for what "Video" will ask
+    // on top of these two.
+    QMenu* import = file->addMenu(QStringLiteral("&Import"));
+    import->addAction(QStringLiteral("&Image..."), this, &MainWindow::importImage);
+    import->addAction(QStringLiteral("Image &sequence..."), this,
+                      &MainWindow::importImageSequence);
+    // Present whether or not this build can decode anything: an item that comes
+    // and goes with the Qt somebody installed is an item nobody can find twice,
+    // and "why can I not do this here" is the question a disabled control
+    // exists to answer. It says so when pressed.
+    import->addAction(QStringLiteral("&Audio..."), this, &MainWindow::importAudio);
+    file->addSeparator();
     // No key, so no row: the table is what the keyboard does, and an action with
     // nothing bound to it has nothing to say there.
     file->addAction(QStringLiteral("&Export sequences..."), this, &MainWindow::exportSequences);
@@ -909,6 +1024,8 @@ void MainWindow::buildMenus() {
     // place of its own.
     QMenu* track_menu = menuBar()->addMenu(QStringLiteral("&Track"));
     track_menu->addAction(QStringLiteral("Add track"), this, &MainWindow::addTrack);
+    track_menu->addAction(QStringLiteral("Duplicate track"), this,
+                          &MainWindow::duplicateCurrentTrack);
     track_menu->addAction(QStringLiteral("Rename track..."), this, &MainWindow::renameTrack);
     track_menu->addAction(QStringLiteral("Delete track"), this, &MainWindow::removeCurrentTrack);
     track_menu->addSeparator();
@@ -930,6 +1047,7 @@ void MainWindow::buildMenus() {
     // drawing" -- which is the same words twice and reads as though the two
     // might mean different things.
     QMenu* end_menu = track_menu->addMenu(QStringLiteral("Past the last drawing"));
+    end_menu_ = end_menu;
     auto* ends = new QActionGroup(this);
     ends->setExclusive(true);
     const TrackEnd choices[] = {TrackEnd::Nothing, TrackEnd::HoldLast, TrackEnd::Cycle};
@@ -1416,10 +1534,11 @@ void MainWindow::buildTransformBar() {
         keyedTip(b, id, what, more);
         connect(b, &QPushButton::clicked, this, handler);
         row->addWidget(b);
+        return b;
     };
-    button(QStringLiteral("Apply"), shortcuts::Id::TransformApply,
-           QStringLiteral("Bake it into the drawing"), QString(),
-           [this] { canvas_->applyTransform(); });
+    transform_apply_ = button(QStringLiteral("Apply"), shortcuts::Id::TransformApply,
+                              QStringLiteral("Bake it into the drawing"), QString(),
+                              [this] { canvas_->applyTransform(); });
     button(QStringLiteral("Cancel"), shortcuts::Id::TransformCancel,
            QStringLiteral("Put it back where it was"),
            QStringLiteral("Nothing was written, so this leaves no undo step."),
@@ -1449,6 +1568,31 @@ void MainWindow::placeTransformBar() {
 void MainWindow::chooseTransformTool() {
     stopPlayback();
     if (canvas_->transformIsLive()) return;
+
+    // **An imported *still* goes through the placement path, whichever door was
+    // used.** The tool takes the drawing in front of you, and for a reference
+    // layer of one file that is one picture -- so both doors mean the same
+    // thing and there is nothing for them to disagree about. Refusing and
+    // pointing at the other button would be a rule with no consequence behind
+    // it, which is the kind of rule people learn as "this program is fussy".
+    //
+    // **A sequence is where the argument stops**, and the routing stops with
+    // it. "Both doors mean one thing when there is one picture" was always the
+    // reason, and a sequence is several -- so the tool, which says it moves
+    // *this drawing*, has nothing here it can honestly do. It refuses through
+    // the ordinary path, where `Refusal::ReferenceLayer` already names the way
+    // in: convert it to drawings first. The tool is greyed out there too, so
+    // the refusal is something you see before you reach for it rather than
+    // after -- see syncLayerButtons.
+    //
+    // "Two doors and no switch" is untouched by this: what that refuses is
+    // changing the scope of a gesture already on screen, and this is decided
+    // before there is one.
+    if (const Layer* layer = currentLayer(); layer && layer->kind == LayerKind::Reference &&
+                                             layer->reference_sources.size() <= 1) {
+        transformLayerThroughTime();
+        return;
+    }
 
     const CanvasWidget::Refusal refusal = canvas_->beginTransform();
     if (refusal == CanvasWidget::Refusal::None) return;
@@ -1504,7 +1648,17 @@ void MainWindow::onTransformBegan() {
     if (transform_scope_) {
         // Set before the bar is placed, because it changes the bar's width and
         // the placement is worked out from the size hint.
-        transform_scope_->setText(canvas_->transformIsWholeLayer()
+        //
+        // Three words rather than two, and the third is the one that carries
+        // news. "Whole layer" and "This drawing" both say how much is about to
+        // be written over; "Placing" says that nothing is -- the numbers are
+        // stored and the picture is derived from the file again at them, so
+        // this box can be opened and adjusted for ever at no cost to the
+        // picture. That is the opposite of what the other two mean, and it is
+        // not something anybody would assume from a box that looks the same.
+        transform_scope_->setText(canvas_->transformIsPlacement()
+                                      ? QStringLiteral("Placing — nothing is written")
+                                  : canvas_->transformIsWholeLayer()
                                       ? QStringLiteral("Whole layer")
                                       : QStringLiteral("This drawing"));
     }
@@ -1515,6 +1669,18 @@ void MainWindow::onTransformBegan() {
         transform_bar_->setVisible(true);
         transform_bar_->raise();
     }
+    // What Apply does depends on which gesture is on screen, and the two
+    // differ in the one way this program is most careful about: a bake writes
+    // every drawing it touches and a placement writes nothing at all. A button
+    // that says "bake" over a gesture that stores would be undoing, in the
+    // place somebody looks for reassurance, exactly what storing is for.
+    if (transform_apply_) {
+        setKeyedTipText(transform_apply_,
+                        canvas_->transformIsPlacement()
+                            ? QStringLiteral("Put the picture down here. Nothing is written")
+                            : QStringLiteral("Bake it into the drawing"));
+    }
+
     setShortcutMode(shortcuts::Mode::Transform);
     syncTransformFields();
     syncStatus();
@@ -1815,10 +1981,20 @@ void MainWindow::buildLayerPanel() {
     layer_transform_ = panelButton(QStringLiteral("Transform layer through time"),
                                    &MainWindow::transformLayerThroughTime);
 
+    // Beside it because it is the same scale of thing -- one press writes every
+    // drawing in the layer -- and because a button is the half of this feature
+    // that can be *found*. The popup on a refused stroke is the other half and
+    // is not a substitute: a control that comes and goes as you move between
+    // layers is one nobody can find twice, and "why can I not do this here" is
+    // the question a disabled control exists to answer. So it is here on every
+    // layer, greyed with a reason on all but one.
+    layer_convert_ =
+        panelButton(QStringLiteral("Convert to drawings"), &MainWindow::convertLayerToDrawings);
+
     // No Move up and Move down. The stack is restacked by dragging a row, which
     // is one gesture for any distance where the buttons were one click per
     // position -- and it is the gesture the timeline's rows now take too.
-    panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
+    layer_remove_ = panelButton(QStringLiteral("Remove layer"), &MainWindow::removeCurrentLayer);
 
     dock->setWidget(panel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
@@ -1905,17 +2081,37 @@ void MainWindow::buildTimelinePanel() {
     timeline_widget_->setTrack(track_);
     connect(timeline_widget_, &TimelineWidget::currentSlotChanged, this,
             &MainWindow::onSlotChanged);
+    // Narrower than the one above, and deliberately: only a drag or a click in
+    // the ruler makes a noise. See TimelineWidget::scrubbed.
+    connect(timeline_widget_, &TimelineWidget::scrubbed, this, &MainWindow::scrubAudio);
     connect(timeline_widget_, &TimelineWidget::documentChanged, this,
             &MainWindow::refreshEverything);
     // Clicking a row is the other way the current track changes, and it has to
     // reach the canvas and the layer panel exactly as the menu does.
     connect(timeline_widget_, &TimelineWidget::trackChanged, this,
             &MainWindow::setCurrentTrack);
+    // The Track menu acts on the row you are pointed at, so it has to be told
+    // when that row stops being a track. See TimelineWidget::highlightChanged.
+    connect(timeline_widget_, &TimelineWidget::highlightChanged, this,
+            &MainWindow::syncTrackMenu);
 
     timeline_scroll_ = new ReservingScrollArea(panel);
     timeline_scroll_->setWidget(timeline_widget_);
     timeline_scroll_->setWidgetResizable(true);
     timeline_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // The ruler stays put while the rows go past it. Soundtracks are under
+    // every drawing row, so a scene with a few tracks is one you scroll down to
+    // reach the sound -- and the ruler is where scrubbing happens, which is the
+    // only way to hear it. See TimelineWidget::setRulerTop.
+    connect(timeline_scroll_->verticalScrollBar(), &QScrollBar::valueChanged, timeline_widget_,
+            &TimelineWidget::setRulerTop);
+    // And the names stay put while the frames go past them, which is the same
+    // sentence on the other axis and the one a timeline needs more often: a
+    // shot is long sideways where it is short downwards, so scrolling right is
+    // ordinary -- and it used to leave rows of identical cells with nothing
+    // saying which track was which. See TimelineWidget::setGutterLeft.
+    connect(timeline_scroll_->horizontalScrollBar(), &QScrollBar::valueChanged, timeline_widget_,
+            &TimelineWidget::setGutterLeft);
     timeline_scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     // A floor low enough to drag the panel down to a single row, and no ceiling
     // at all: how tall the timeline should be is the animator's business, and
@@ -1949,7 +2145,7 @@ bool MainWindow::leaveCurrentDocument() {
 
     if (!project_folder_.isEmpty()) {
         QString error;
-        if (ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
+        if (ProjectIO::save(doc_, project_folder_, save_state_, &error, imports_)) {
             saved_history_stamp_ = doc_.historyStamp();
             updateTitle();
             return true;
@@ -2127,11 +2323,38 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
     doc_ = std::move(loaded);
     save_state_ = std::move(state);
     project_folder_ = home;
+    // Anything the previous project's imports were reachable under belonged to
+    // that project. Kept, a name that both projects happen to use would resolve
+    // to the wrong file on the next save.
+    imports_ = ProjectIO::Imports();
+    // A different document, so what it could not read has not been said yet.
+    reported_missing_imports_ = false;
+    unreadable_imports_.clear();
     afterProjectLoaded();
     return true;
 }
 
 void MainWindow::afterProjectLoaded() {
+    // **First, and before anything can wait.** Everything that replaces `doc_`
+    // comes through here, so this is the one place that can say "the document
+    // under you is not the one you were asked about" -- and two things are
+    // holding questions about the old one: the decodes in flight below, and any
+    // refreshAudioSamples suspended in its own nested event loop, which reads
+    // this number back when it wakes.
+    ++document_epoch_;
+
+    // The imported pictures being decoded for the project that has just gone.
+    // A ReferenceCache generation cannot tell one document from another -- see
+    // CanvasWidget::forgetImports -- so an answer about a drawing in the old
+    // project would be installed against whatever holds that id in this one.
+    canvas_->forgetImports();
+
+    // Then the scene. A soundtrack's samples are derived and went with the
+    // document that was replaced, so this is one of the two moments they are
+    // missing for a project that has them -- an import decodes as it arrives,
+    // and the other is an undo of a deletion, which refreshEverything covers.
+    refreshAudioSamples();
+
     const Scene& scene = doc_.scene();
     track_ = scene.tracks.empty() ? kNoId : scene.tracks.front().id;
 
@@ -2392,7 +2615,7 @@ bool MainWindow::exportSequencesTo(const QString& folder, bool layers, bool flat
 
 bool MainWindow::saveTo(const QString& folder) {
     QString error;
-    if (!ProjectIO::save(doc_, folder, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, folder, save_state_, &error, imports_)) {
         QMessageBox::warning(this, QStringLiteral("Cannot save"), error);
         return false;
     }
@@ -2420,7 +2643,7 @@ void MainWindow::onAutosaveTick() {
     }
 
     QString error;
-    if (!ProjectIO::save(doc_, project_folder_, save_state_, &error)) {
+    if (!ProjectIO::save(doc_, project_folder_, save_state_, &error, imports_)) {
         // Deliberately not a dialog. A failing autosave would otherwise
         // interrupt drawing every two minutes, which is worse than the failure
         // it is reporting -- and Save still says so properly when asked.
@@ -2474,6 +2697,26 @@ void MainWindow::saveProjectAs() {
 void MainWindow::buildStatusBar() {
     status_ = new QLabel(this);
     statusBar()->addWidget(status_);
+
+    // Before the rate, so that the rate stays the right-most thing and keeps
+    // the position its own comment promises: the permanent area is right
+    // aligned as a group, so this appearing widens the group leftwards.
+    //
+    // Red, and the same red the rate uses when it is dropping and the shortcuts
+    // dialog uses for a colliding key -- there is one colour in this program
+    // for "what you are looking at is not right" and a second would only invite
+    // a third. It earns that here: the canvas is blank or part-blank while this
+    // is up, and a shot you cannot see is exactly that state.
+    //
+    // Set once rather than on a transition, because unlike the rate this label
+    // is never anything but red -- it is either saying something wrong is on
+    // screen, or it is hidden.
+    pictures_loading_ = new QLabel(this);
+    QPalette loading = pictures_loading_->palette();
+    loading.setColor(QPalette::WindowText, QColor(190, 40, 40));
+    pictures_loading_->setPalette(loading);
+    pictures_loading_->hide();
+    statusBar()->addPermanentWidget(pictures_loading_);
 
     // Permanent, so it sits at the right-hand end and the main text growing or
     // shrinking cannot move it. Hidden until something is playing: it has
@@ -2579,8 +2822,65 @@ void MainWindow::syncStatus() {
     // moment behind the drawing and there would otherwise be nothing to say so.
     // It is the whole of the visible difference: the program does not stop, and
     // what you are looking at is the last answer until the next one lands.
-    const QString colouring =
-        canvas_->colourPending() ? QStringLiteral("   colouring...") : QString();
+    // `colouring...` said a solve was happening and never how much was left,
+    // which was enough while only the drawing in front of you was ever solved.
+    // With fills accumulating across a take -- issue #85 -- there is a
+    // quantity, and it is the one somebody watching a take wants: how much of
+    // the shot has colour on it yet.
+    //
+    // Same rule as the imported pictures one line down, and the same reason for
+    // it: shown while a solve is outstanding rather than while fills are merely
+    // missing, because a drawing is only solved once it has been looked at and
+    // a number standing still reads as stuck.
+    QString colouring;
+    if (canvas_->colourPending()) {
+        const ImportsReady coloured = drawingsColoured();
+        colouring = coloured.wanted > 0
+                        ? QStringLiteral("   colouring %1/%2")
+                              .arg(coloured.ready)
+                              .arg(coloured.wanted)
+                        : QStringLiteral("   colouring...");
+    }
+
+    // How much of an imported sequence is on hand, and only while some of it is
+    // not. A number rather than a word, because the complaint this answers is
+    // that a shot playing before its pictures are decoded looks exactly like a
+    // shot that is broken -- the playhead advances over a blank canvas and
+    // nothing anywhere says why. "loading" alone would not settle that either;
+    // what tells somebody it is working is that the number moves.
+    //
+    // **Shown while a decode is outstanding, and not while frames are merely
+    // missing**, which is the same rule `colouring...` follows one line up and
+    // is not the rule this had first.
+    //
+    // A frame is only ever asked for when it is on screen, so a sequence you
+    // have scrubbed part of sits at 40 of 151 with nothing whatever happening.
+    // A number that does not move is worse than no number: it is exactly what
+    // "stuck" looks like, and this exists to tell working from stuck.
+    //
+    // The denominator is still the whole sequence rather than what is
+    // outstanding, because during a take every frame is visited and the climb
+    // from 1 to 151 is the progress somebody is actually waiting on. "How many
+    // are being worked out right now" would read 1 for the whole of it.
+    //
+    // Its own widget at the right-hand end rather than a phrase in the middle
+    // of this line, and worded rather than abbreviated. `pictures 43/151` was
+    // both: it sat between the zoom and the tile count where nobody watching
+    // the canvas would find it, and it named a number without saying what the
+    // number was about. The form is the rate's -- "N of M" after a colon --
+    // because the two sit next to each other and read as one instrument.
+    if (pictures_loading_) {
+        const MainWindow::ImportsReady pictures =
+            canvas_->referenceFramesPending() ? importsReady() : ImportsReady{};
+        if (pictures.wanted > 0) {
+            pictures_loading_->setText(QStringLiteral("loading imported pictures: %1 of %2")
+                                           .arg(pictures.ready)
+                                           .arg(pictures.wanted));
+            pictures_loading_->show();
+        } else {
+            pictures_loading_->hide();
+        }
+    }
 
     // Past this track's last drawing there is no slot and no cel, so there is
     // nothing to draw on -- while the canvas may still be showing something,
@@ -2608,6 +2908,13 @@ void MainWindow::syncStatus() {
                 break;
             case CanvasWidget::Refusal::NoLayer:
                 past = QStringLiteral("   no layer is selected");
+                break;
+            case CanvasWidget::Refusal::ReferenceLayer:
+                // Named as what it is rather than as "locked", which is what
+                // this would have said before the kind was asked ahead of the
+                // lock: unlocking would not help, and sending somebody to try
+                // is worse than saying nothing.
+                past = QStringLiteral("   this is an imported picture");
                 break;
             default: break;
         }
@@ -2695,9 +3002,19 @@ void MainWindow::syncStatus() {
 void MainWindow::syncTimelineHeight() {
     if (!timeline_scroll_ || !timeline_widget_ || !timeline_dock_) return;
 
-    const int rows = std::min(static_cast<int>(std::max<std::size_t>(doc_.scene().tracks.size(),
-                                                                     1)),
-                              kMaxDockRows);
+    // **Soundtracks are rows too**, and this is the function that has to know
+    // it. It moves the dock by the rows that came or went rather than sizing
+    // it, so a route that adds a row without telling it leaves the strip at the
+    // height for the count before -- which is issue #74, where a load that added
+    // two tracks left the strip at the height for one and the symptom was that
+    // Ctrl+Z put it back, undo being the next thing that called this at all.
+    //
+    // An audio import adds a row that is not a track, which is a case this
+    // function had never seen.
+    const std::size_t row_count =
+        doc_.scene().tracks.size() + doc_.scene().audio_tracks.size();
+    const int rows =
+        std::min(static_cast<int>(std::max<std::size_t>(row_count, 1)), kMaxDockRows);
     const int was = timeline_rows_shown_;
     if (rows == was) return;  // nothing about the height has changed
 
@@ -2725,11 +3042,1065 @@ void MainWindow::syncTimelineHeight() {
 }
 
 void MainWindow::refreshEverything() {
+    // Nothing about imported pictures happens here any more, and the absence is
+    // worth a line because a call used to be first in this function.
+    //
+    // Re-deriving ran on the interface thread and could afford to, because
+    // every drawing of a still's track showed the same picture and the only
+    // thing that changed it was a placement -- which arrives here. A sequence
+    // shows a different frame at every drawing and the playhead never comes
+    // through this function at all, so the ask moved to the paint, which is the
+    // one thing that reliably happens when what is on screen changes. See
+    // CanvasWidget::requestReferenceFrames.
+    //
+    // What that costs is that a picture arrives a frame or two after the
+    // placement does, instead of within this call. That is the same bargain the
+    // colour already makes and for the same reason.
     syncTimelineHeight();
     timeline_widget_->refresh();
     canvas_->setFrame(timeline_widget_->currentSlot());
     rebuildLayerList();
     syncStatus();
+    // A soundtrack can arrive here by an import and leave by an undo, and the
+    // output should match what the document holds either way. Free when it
+    // already does.
+    //
+    // **The samples and not only the device**, because an undo is the other way
+    // a soundtrack arrives here with nothing decoded: removing one throws its
+    // samples away deliberately, on the understanding that bringing it back
+    // decodes the file again. This is where that happens. It ends in
+    // refreshAudioDevice itself, so the two are one call.
+    refreshAudioSamples();
+}
+
+// --- importing -----------------------------------------------------------
+
+namespace {
+
+// What an imported file is called inside the project, given what it is called
+// outside it.
+//
+// Two things happen here. The name is reduced to something a folder on any of
+// the three platforms will take, and it is made unique against the imports the
+// scene already names -- because two modelsheets from two folders are very
+// often both called `model.png`, and the second one silently becoming the first
+// is a picture quietly replaced.
+// `fallback_suffix` is what a file with no extension at all is called, and it
+// is a parameter because this is shared with soundtracks now. It defaulted to
+// "png" when pictures were the only caller, which would have named an
+// extensionless soundtrack `dialogue.png` inside `audio/` -- harmless to the
+// decoder, which reads the bytes, and confusing to every human who opened the
+// folder afterwards.
+std::string importNameIn(std::unordered_set<std::string>& taken, const QString& path,
+                         const char* fallback_suffix = "png") {
+    QString stem = QFileInfo(path).completeBaseName();
+    QString suffix = QFileInfo(path).suffix().toLower();
+    // Everything in the *stem* that is not a letter, a digit or a dash becomes
+    // a dash, which is the rule the export already uses for track and layer
+    // names -- and the underscore is not an oversight in that list. It is the
+    // export's separator and nothing else is, so a name that kept one would put
+    // an extra field in a file name; see export_sequence.h. One rule rather
+    // than two, so that nothing has to remember which names are allowed what.
+    //
+    // A dot goes the same way, and only one survives: the one put back below,
+    // between the stem and the suffix. `model.v2.png` lands as `model-v2.png`,
+    // so a name has exactly one extension and nothing downstream has to decide
+    // which of two dots ends it.
+    for (QChar& c : stem) {
+        if (!c.isLetterOrNumber() && c != QLatin1Char('-')) c = QLatin1Char('-');
+    }
+    if (stem.isEmpty()) stem = QStringLiteral("import");
+    if (suffix.isEmpty()) suffix = QLatin1String(fallback_suffix);
+
+    const QString base = stem + QLatin1Char('.') + suffix;
+    if (!taken.count(base.toStdString())) {
+        taken.insert(base.toStdString());
+        return base.toStdString();
+    }
+    for (int n = 2;; ++n) {
+        const QString candidate = QStringLiteral("%1-%2.%3").arg(stem).arg(n).arg(suffix);
+        if (taken.count(candidate.toStdString())) continue;
+        taken.insert(candidate.toStdString());
+        return candidate.toStdString();
+    }
+}
+
+// What the document already has spoken for. Gathered once by a caller that is
+// about to name several files, because the answer for the second file has to
+// take account of the first -- and the document does not know about the first
+// until the whole import is over.
+std::unordered_set<std::string> importNamesTaken(const Document& doc) {
+    std::unordered_set<std::string> taken;
+    for (const std::string& name : ProjectIO::importsReferencedBy(doc)) taken.insert(name);
+    return taken;
+}
+
+// The one-file case, which is every caller that is not importing a sequence.
+std::string importNameFor(const Document& doc, const QString& path) {
+    std::unordered_set<std::string> taken = importNamesTaken(doc);
+    return importNameIn(taken, path);
+}
+
+// What to call the track and its layer, given the file's name.
+//
+// Made unique against the tracks already there, which matters more than it
+// looks. Importing the same picture twice is an ordinary thing to do -- one to
+// keep and one to move about -- and two tracks with the same name reach the
+// export as two sequences claiming one folder. The export catches that and
+// refuses with a clear message, so nothing is ever silently overwritten; what
+// it costs is an export that stops until you go and rename something, at the
+// end of the job rather than at the start of it.
+//
+// The file inside `imports/` is made unique separately, in importNameFor, and
+// for a different reason: two pictures from two folders are very often both
+// called `model.png`, and there the collision would be a picture quietly
+// replaced rather than an export refused.
+std::string trackNameFor(const Document& doc, const QString& path) {
+    const QString stem = QFileInfo(path).completeBaseName();
+    const std::string base = stem.isEmpty() ? std::string("import") : stem.toStdString();
+
+    std::unordered_set<std::string> taken;
+    for (const Track& track : doc.scene().tracks) taken.insert(track.name);
+    if (!taken.count(base)) return base;
+    for (int n = 2;; ++n) {
+        const std::string candidate = base + " " + std::to_string(n);
+        if (!taken.count(candidate)) return candidate;
+    }
+}
+
+// What a picture of this size will cost, in the units somebody can act on.
+QString costOf(int width, int height) {
+    const std::size_t tiles = image_import::tileCountFor(width, height);
+    // A tile is 128x128 RGBA half = exactly 128 KB, so tiles/8 is megabytes.
+    const double megabytes = static_cast<double>(tiles) / 8.0;
+    return QStringLiteral("%1 x %2 pixels, %3 tiles, about %4 MB in memory")
+        .arg(width)
+        .arg(height)
+        .arg(tiles)
+        .arg(megabytes, 0, 'f', megabytes < 10.0 ? 1 : 0);
+}
+
+}  // namespace
+
+// File ▸ Import ▸ Image.
+//
+// The picture lands as a **reference layer**: a layer that holds no cels at all
+// and shows the imported file, derived and memoised rather than stored. What
+// that buys and what it gives up is docs/importing.md; the two consequences
+// visible from here are that the brush refuses on the layer's kind, and that a
+// save writes the file rather than a drawing.
+//
+// Placed at 1:1 with its top-left at the origin, which is where this stops
+// short of the plan: positioning it is the transform box, and on a reference
+// layer that box has to store its answer instead of baking it. Until then the
+// canvas is the only rectangle in the model and drawing outside it is already
+// allowed, so a modelsheet larger than the frame is visible and usable, just
+// not yet movable.
+void MainWindow::importImage() {
+    stopPlayback();
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import image"), QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    // Asked before anything is decoded, so that "this is 70 MB" arrives before
+    // the wait rather than after it.
+    const image_import::Survey survey = image_import::survey(path);
+    if (!survey.ok) {
+        QMessageBox::warning(this, QStringLiteral("Import image"),
+                             QStringLiteral("%1 cannot be read: %2")
+                                 .arg(QFileInfo(path).fileName(), survey.trouble));
+        return;
+    }
+
+    const QString recap = QStringLiteral("%1\n\n%2\n\nIt will be shown from its file rather "
+                                         "than drawn, so it cannot be painted on until it is "
+                                         "converted to drawings.")
+                              .arg(QFileInfo(path).fileName(), costOf(survey.width, survey.height));
+    if (QMessageBox::question(this, QStringLiteral("Import image"), recap,
+                              QMessageBox::Ok | QMessageBox::Cancel,
+                              QMessageBox::Ok) != QMessageBox::Ok) {
+        return;
+    }
+
+    QString trouble;
+    if (!importImageFrom(path, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import image"),
+                             QStringLiteral("%1 cannot be read: %2")
+                                 .arg(QFileInfo(path).fileName(), trouble));
+    }
+}
+
+bool MainWindow::importImageFrom(const QString& path, QString* trouble) {
+    QString why;
+    image_import::Converted converted;
+    TileGrid pixels = image_import::decode(path, &why, &converted);
+    if (pixels.empty() && !why.isEmpty()) {
+        if (trouble) *trouble = why;
+        return false;
+    }
+
+    const std::string import_name = importNameFor(doc_, path);
+    const std::string shown = trackNameFor(doc_, path);
+
+    TrackId added = kNoId;
+    ImageId drawing = kNoId;
+    LayerId layer_id = kNoId;
+    {
+        // One command, so that an import undoes in one step. The decoded pixels
+        // are deliberately not in it: they are derived, no cel holds them, and
+        // there is nothing for the journal to put back.
+        doc_.beginCommand("Import image");
+        added = doc_.addTrack(shown);
+        layer_id = doc_.addLayer(added, shown, 0, LayerKind::Reference);
+        drawing = doc_.insertImage(added, 0);
+
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            if (const Layer* layer = track->findLayer(layer_id)) {
+                Layer updated = *layer;
+                updated.reference_sources = {import_name};
+                doc_.updateLayer(added, layer_id, updated);
+            }
+        }
+        // Which of the layer's files this drawing shows: the first, there being
+        // one. Said rather than assumed even here, because absence is what makes
+        // a reference layer empty at a drawing, and a still that did not say so
+        // would be a layer pointed at a file and showing nothing.
+        doc_.setSourceFrame(added, drawing, layer_id, 0);
+
+        // Held past its last drawing, or the modelsheet is on frame 0 and
+        // nowhere else -- which is not a reference, it is a flash.
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            TrackProperties properties = track->properties();
+            properties.end = TrackEnd::HoldLast;
+            doc_.updateTrack(added, properties);
+        }
+        doc_.endCommand();
+    }
+
+    imports_.pending[import_name] = path;
+    // Installed at the placement the layer has, which for a fresh import is the
+    // identity -- so this is the decoded picture unchanged. Going through the
+    // same call refreshReferenceFrames uses is what keeps one answer to "what
+    // is this layer showing".
+    doc_.setReferenceFrame(added, drawing, layer_id, Transform{}, std::move(pixels));
+
+    setCurrentTrack(added);
+    // An import adds a track, which is one of the routes that has to say so:
+    // syncTimelineHeight moves the dock by the rows that came or went rather
+    // than sizing it, so a route that does not call it leaves the strip at the
+    // height for the track count before. refreshEverything calls it.
+    refreshEverything();
+
+    // A colour conversion that nobody is told about is the failure this whole
+    // colour path exists to avoid: the picture arrives, it looks plausible, and
+    // every swatch in it is a different colour from the one the artist chose.
+    // Converting is right; doing it silently is not.
+    if (!converted.from.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Imported %1 and converted its colours from %2 to sRGB")
+                .arg(QFileInfo(path).fileName(), converted.from),
+            8000);
+    }
+    return true;
+}
+
+// File ▸ Import ▸ Image sequence.
+//
+// A file picker, a survey and a recap in front of importSequenceFrom, which is
+// where the importing happens. Same division as the still and for the same
+// reason: a modal dialog is not something `shots` or a test can drive.
+void MainWindow::importImageSequence() {
+    stopPlayback();
+
+    const QStringList picked = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Import image sequence"), QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;All files (*)"));
+    if (picked.isEmpty()) return;
+
+    SequenceImportDialog::Found found;
+    found.ordering = image_import::order(picked);
+
+    // Surveyed rather than decoded, so the recap can say what this costs before
+    // paying it. A survey reads a header; on two hundred frames the decode is
+    // the whole cost being described and doing it here would make the recap the
+    // slow part of the import.
+    //
+    // The size is the first readable file's. Frames of different sizes are
+    // allowed -- each is placed by the same layer placement and simply covers a
+    // different rectangle -- so this is a description of the sequence rather
+    // than a rule it has to meet.
+    for (const QString& path : found.ordering.paths) {
+        const image_import::Survey one = image_import::survey(path);
+        if (!one.ok) {
+            ++found.unreadable;
+            continue;
+        }
+        if (found.width == 0) {
+            found.width = one.width;
+            found.height = one.height;
+        }
+    }
+
+    if (found.width == 0) {
+        QMessageBox::warning(this, QStringLiteral("Import image sequence"),
+                             QStringLiteral("None of those %1 files is a picture this build can "
+                                            "read, so there is nothing to import.")
+                                 .arg(picked.size()));
+        return;
+    }
+
+    SequenceImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const SequenceImportDialog::Answer answer = dialog.answer();
+    QString trouble;
+    if (!importSequenceFrom(found.ordering.paths, answer.start_frame, answer.half_size,
+                            &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import image sequence"), trouble);
+    }
+}
+
+bool MainWindow::importSequenceFrom(const std::vector<QString>& paths, int start_frame,
+                                    bool half_size, QString* trouble) {
+    if (paths.empty()) {
+        if (trouble) *trouble = QStringLiteral("no files were given");
+        return false;
+    }
+
+    // Named against the scene before anything is added, and one at a time,
+    // because two frames of one sequence can arrive from two folders under the
+    // same name -- importNameFor is what makes each unique, and it answers
+    // against the imports the *document* already names.
+    //
+    // So the layer is pointed at its files as they are named, and the pending
+    // list is filled at the same time. That list is what a save copies from
+    // before the project has a folder of its own.
+    const std::string shown = trackNameFor(doc_, paths.front());
+
+    TrackId added = kNoId;
+    LayerId layer_id = kNoId;
+    std::vector<ImageId> drawings;
+    {
+        // One command, so an import of two hundred frames undoes in one step.
+        // It costs the drawings and the slots and no pixels at all: a reference
+        // layer has no cels, so there is nothing here for the journal to hold.
+        doc_.beginCommand("Import image sequence");
+        added = doc_.addTrack(shown);
+        layer_id = doc_.addLayer(added, shown, 0, LayerKind::Reference);
+
+        // The frames the sequence does not start on. A start frame of one adds
+        // none of these; anything later leaves the track empty until then,
+        // which is what "starts at frame 12" has to look like -- there is no
+        // other way for a track to be silent at its beginning.
+        const int before = std::max(0, start_frame - 1);
+        for (int i = 0; i < before; ++i) doc_.insertImage(added, static_cast<std::size_t>(i));
+
+        // Named against the document *and against each other*, in one pass, and
+        // then written to the layer once.
+        //
+        // Once is not tidiness. `updateLayer` journals a copy of the whole layer
+        // list, and the list this is filling in is on it -- so naming the files
+        // one at a time and writing after each would put two hundred copies of a
+        // growing two-hundred-name vector on the undo stack, for one command
+        // that undoes in one step anyway. Quadratic in the length of a sequence,
+        // where nothing else about an import is.
+        std::unordered_set<std::string> taken = importNamesTaken(doc_);
+        std::vector<std::string> named;
+        named.reserve(paths.size());
+        for (const QString& path : paths) {
+            named.push_back(importNameIn(taken, path));
+            imports_.pending[named.back()] = path;
+        }
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            if (const Layer* layer = track->findLayer(layer_id)) {
+                Layer updated = *layer;
+                updated.reference_sources = named;
+                doc_.updateLayer(added, layer_id, updated);
+            }
+        }
+
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            const ImageId drawing = doc_.insertImage(added, static_cast<std::size_t>(before) + i);
+            drawings.push_back(drawing);
+            // On 1s: one drawing per file. An image sequence has no frame rate
+            // of its own and inventing one is inventing information.
+            doc_.setSourceFrame(added, drawing, layer_id, static_cast<int>(i));
+        }
+
+        if (half_size) {
+            // A placement and not a separate kind of import, which is what
+            // makes it undoable, adjustable afterwards through Place this
+            // picture, and cheaper rather than dearer: the derive step applies
+            // the scale, so a half-size frame caches a quarter of the tiles
+            // instead of full ones being shrunk on the way to the screen.
+            if (const Track* track = doc_.scene().findTrack(added)) {
+                if (const Layer* layer = track->findLayer(layer_id)) {
+                    Layer placed = *layer;
+                    placed.placement.scale_x = 0.5;
+                    placed.placement.scale_y = 0.5;
+                    doc_.updateLayer(added, layer_id, placed);
+                }
+            }
+        }
+
+        // Nothing past the last frame, which is what an animation does and is
+        // deliberately not the still's HoldLast. A modelsheet is meant to stay
+        // up for the whole shot; an animatic is a stretch of timing that ends
+        // where it ends. Both are the track's own setting afterwards.
+        if (const Track* track = doc_.scene().findTrack(added)) {
+            TrackProperties properties = track->properties();
+            properties.end = TrackEnd::Nothing;
+            doc_.updateTrack(added, properties);
+        }
+        doc_.endCommand();
+    }
+
+    setCurrentTrack(added);
+    // An import adds a track, which is one of the routes that has to say so:
+    // syncTimelineHeight moves the dock by the rows that came or went rather
+    // than sizing it, so a route that does not call it leaves the strip at the
+    // height for the track count before. refreshEverything calls it.
+    refreshEverything();
+    return true;
+}
+
+// File ▸ Import ▸ Audio.
+//
+// A file picker and a decode in front of importAudioFrom, and the decode is
+// deliberately *before* the recap rather than after it. The sequence dialog
+// surveys instead, because there a decode is two hundred files and the whole
+// cost being described; here it is one file and tens of milliseconds, and it is
+// the only thing that knows how long the sound is -- which is the number the
+// recap exists to show.
+void MainWindow::importAudio() {
+    stopPlayback();
+
+    if (!audio_import::available()) {
+        // Present but refusing, rather than absent. An item that comes and goes
+        // with the Qt somebody installed is an item nobody can find twice.
+        QMessageBox::warning(
+            this, QStringLiteral("Import audio"),
+            QStringLiteral("This build has no audio support: Qt Multimedia was not found "
+                           "when it was configured, so there is nothing here that can read a "
+                           "sound file."));
+        return;
+    }
+
+    const QString picked = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import audio"), QString(),
+        QStringLiteral("Audio (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus);;All files (*)"));
+    if (picked.isEmpty()) return;
+
+    QString trouble;
+    if (!importAudioFrom(picked, 0, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Import audio"), trouble);
+        return;
+    }
+}
+
+// Brings a soundtrack in. See the header for why this decodes rather than
+// deferring to something later.
+//
+// `start_frame` of 0 means "ask" -- the dialog is raised and the answer used.
+// Any other value is taken as given and nothing is asked, which is what lets a
+// test and `shots` drive an import. That is the same division the still and the
+// sequence have, arranged differently because here the decode has to happen
+// before the question can be put.
+bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* trouble,
+                                 bool extend_shot) {
+    const audio_import::Decoded decoded = audio_import::decode(path);
+    if (!decoded.ok) {
+        if (trouble) *trouble = decoded.trouble;
+        return false;
+    }
+
+    if (start_frame == 0) {
+        AudioImportDialog::Found found;
+        found.file = QFileInfo(path).fileName();
+        found.rate = decoded.clip.rate;
+        found.channels = decoded.clip.channels;
+        found.frames = decoded.clip.frames();
+        found.scene_fps = doc_.scene().framerate;
+        found.file_bytes = QFileInfo(path).size();
+        found.trouble = decoded.trouble;
+        found.sound_frames = decoded.clip.framesAtFps(doc_.scene().framerate);
+        found.shot_frames = doc_.scene().shotFrames();
+        found.length_is_fixed = doc_.scene().fixed_length;
+
+        AudioImportDialog dialog(found, static_cast<int>(timeline_widget_->currentSlot()) + 1,
+                                 this);
+        if (dialog.exec() != QDialog::Accepted) return true;  // cancelled, not failed
+        const AudioImportDialog::Answer answer = dialog.answer();
+        start_frame = answer.start_frame;
+        extend_shot = answer.extend_shot;
+    }
+
+    // Named against what the document already spoke for, exactly as a picture
+    // is, and in the *audio* namespace: `imports/` and `audio/` are two
+    // folders, so a sound and a picture may both be called `take-3.x` without
+    // either shadowing the other.
+    std::unordered_set<std::string> taken;
+    for (const std::string& name : ProjectIO::audioReferencedBy(doc_)) taken.insert(name);
+    const std::string source = importNameIn(taken, path, "wav");
+
+    // Frame 1 is slot 0, and a frame before 1 is a negative offset. The
+    // conversion is here rather than in the dialog for the reason the sequence
+    // import has it here: a slot index is this file's unit and a frame number
+    // is the user's.
+    const int offset = start_frame - 1;
+
+    TrackId added = kNoId;
+    {
+        // One command for the whole import, so it undoes in one step. Nested
+        // commands join the outermost, which is what makes three calls one
+        // entry -- without this, adding the track and placing it were already
+        // two, and lengthening the shot would have been a third.
+        doc_.beginCommand("Import audio");
+        added = doc_.addAudioTrack(QFileInfo(path).completeBaseName().toStdString(), source);
+        AudioPlacement placed;
+        placed.offset_frames = offset;
+        doc_.setAudioTrackPlacement(added, placed);
+
+        if (extend_shot) {
+            // **Never shorter than it is**, whatever the offset. The box says
+            // "reach the end of the sound", not "be exactly the sound" -- and a
+            // shot that shrank would take drawings out of the export, which is
+            // not something an audio import may do.
+            const long long reach =
+                static_cast<long long>(offset) +
+                static_cast<long long>(decoded.clip.framesAtFps(doc_.scene().framerate));
+            const long long now = static_cast<long long>(doc_.scene().shotFrames());
+            doc_.setSceneLength(true, static_cast<int>(std::max(reach, now)));
+        }
+        doc_.endCommand();
+    }
+
+    // Outside the command, because it is not an edit: installing decoded
+    // samples changes no document state, only the memo of what a file decodes
+    // to. Same rule as setReferenceFrame.
+    doc_.setAudioSamples(added, decoded.clip);
+
+    // What a save copies from, until the project has a folder of its own.
+    imports_.pending_audio[source] = path;
+
+    if (trouble) *trouble = decoded.trouble;
+    // refreshEverything calls syncTimelineHeight, which is what an import that
+    // adds a row has to reach. A soundtrack's row is not a track's, and that
+    // function now counts both.
+    refreshEverything();
+    return true;
+}
+
+// Decodes every soundtrack the scene names and has no samples for.
+//
+// **On a load, and on every refresh, because there are two ways to arrive here
+// with a track whose samples are gone.** A clip is derived data and goes with
+// the document it belonged to, so a project opened from disk has tracks naming
+// files and nothing decoded. The second way is an undo: `removeAudioTrack`
+// throws the samples away rather than carrying megabytes on the undo stack, and
+// says an undo re-decodes -- which was a promise nothing kept while this ran
+// only after a load. What it produced was a soundtrack that came back on Ctrl+Z
+// with no waveform, no length and no sound, until the project was saved and
+// reopened. So refreshEverything calls this, and the test for "already decoded"
+// is a hash lookup per soundtrack, which is what makes that affordable.
+//
+// **A file that will not read is remembered as an empty clip**, which is the
+// same rule a reference frame follows and for a sharper version of the same
+// reason: without it, every caller that finds nothing would try again, and one
+// of those callers is going to be a device callback.
+void MainWindow::refreshAudioSamples() {
+    // **Re-entrant, and that has to be handled rather than forbidden.** The
+    // decode below runs a nested event loop, so anything the user does inside
+    // it that reaches refreshEverything comes back here -- a second Ctrl+Z, a
+    // gesture ending on the timeline -- and finds the very track being decoded
+    // still missing, because nothing is installed until the decode returns. It
+    // would then decode it again inside itself, once per event.
+    //
+    // Guarded on the document rather than outright, because there is one
+    // re-entry that must be let through: the one afterProjectLoaded makes for a
+    // project opened from inside that loop. That call is about another
+    // document, and refusing it would leave the new project's sound undecoded
+    // for as long as it stayed open.
+    if (decoding_audio_ && decoding_audio_for_ == document_epoch_) return;
+
+    // What is missing, gathered before anything is decoded.
+    //
+    // **The scene's own list may not be walked across a decode.**
+    // `audio_import::decode` runs a nested event loop -- it is the only way to
+    // drive QAudioDecoder, which reports through signals -- and a nested event
+    // loop dispatches user input with no modal dialog in front of it. So File >
+    // Open is reachable from the middle of this, and it replaces the document:
+    // `scene_.audio_tracks` is destroyed and rebuilt, and a range-for standing
+    // in it is then walking freed memory. Ids and names copied out first cannot
+    // be invalidated by anything the decode lets in.
+    std::vector<std::pair<TrackId, std::string>> missing;
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        if (doc_.audioSamplesFor(track.id)) continue;
+        missing.emplace_back(track.id, track.source);
+    }
+    if (missing.empty()) {
+        refreshAudioDevice();
+        return;
+    }
+
+    // Which document these are about. Anything that replaces it goes through
+    // afterProjectLoaded, which moves this on -- and which decodes the new
+    // document's own soundtracks on the way, so abandoning here loses nothing.
+    const std::uint64_t opened = document_epoch_;
+
+    // Saved and put back rather than simply cleared, so that the nested call
+    // described above hands the outer one its own state again on the way out.
+    const bool was_decoding = decoding_audio_;
+    const std::uint64_t was_decoding_for = decoding_audio_for_;
+    decoding_audio_ = true;
+    decoding_audio_for_ = opened;
+
+    bool replaced = false;
+    for (const auto& [id, source] : missing) {
+        const QString path = audioPathFor(source);
+        AudioClip clip;
+        if (!path.isEmpty()) {
+            const audio_import::Decoded decoded = audio_import::decode(path);
+            if (decoded.ok) clip = decoded.clip;
+        }
+
+        // Asked *after* the decode, because the decode is where the event loop
+        // was. A document that has been replaced is not one to write into: the
+        // ids in `missing` name drawings and rows that no longer exist, and the
+        // same small numbers name different ones now.
+        if (document_epoch_ != opened) {
+            replaced = true;
+            break;
+        }
+        // And the row itself, which the same event loop could have deleted or
+        // repointed at another file. Nothing here is worth installing against a
+        // track that has stopped naming the file it was decoded from. Left
+        // uninstalled rather than guessed at, so the next refresh asks again.
+        const AudioTrack* still = doc_.scene().findAudioTrack(id);
+        if (!still || still->source != source) continue;
+
+        doc_.setAudioSamples(id, std::move(clip));
+    }
+
+    decoding_audio_ = was_decoding;
+    decoding_audio_for_ = was_decoding_for;
+
+    // Whoever replaced the document has already opened the output for it.
+    if (replaced) return;
+    refreshAudioDevice();
+}
+
+// The rate to open an output at, which is the first soundtrack's own.
+int MainWindow::audioRate() const {
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        const AudioClip* clip = doc_.audioSamplesFor(track.id);
+        if (clip && clip->rate > 0 && !clip->empty()) return clip->rate;
+    }
+    return 0;
+}
+
+void MainWindow::refreshAudioDevice() {
+    const int rate = audioRate();
+    if (rate <= 0) {
+        // No sound in this project, so no reason to hold somebody's sound card.
+        audio_.close();
+        audio_tried_rate_ = 0;
+        audio_trouble_.clear();
+        return;
+    }
+    // **And the output it is on may have moved.** A device is bound to the
+    // output it opened and cannot follow one, so somebody switching a speaker
+    // on -- which changes what the machine's default is -- leaves the scrub
+    // playing to whatever was default before. Asked here rather than watched
+    // for, because this already runs whenever anything changes and the answer
+    // is only acted on by opening another device, which is not a thing to do in
+    // the background. Reported from use.
+    if (audio_.running() && audio_.openedFor() == rate && audio_.onTheRightOutput()) return;
+    // A rate that has not changed and a device that has: forget the failure so
+    // the open below is attempted rather than skipped by the guard.
+    if (audio_.running()) audio_tried_rate_ = 0;
+
+    // **A failure is remembered rather than retried.** This runs whenever the
+    // document changes and opening a device is a third of a second, so a
+    // machine with no audio output would otherwise spend that again on every
+    // stroke. A soundtrack at another rate arriving is what makes it worth
+    // asking again.
+    if (!audio_.running() && audio_tried_rate_ == rate) return;
+    audio_tried_rate_ = rate;
+
+    QString trouble;
+    if (audio_.open(rate, 2, &trouble)) {
+        audio_trouble_.clear();
+        return;
+    }
+    audio_trouble_ = trouble;
+    // Said, and not raised. A machine with no sound card is not a fault in the
+    // project somebody just opened, and a dialog in front of it would say
+    // otherwise.
+    statusBar()->showMessage(QStringLiteral("No sound: %1").arg(trouble), 8000);
+}
+
+animage::AudioProgram MainWindow::audioProgramAt(std::size_t slot) const {
+    AudioProgram program;
+    // The device's numbers and not a clip's: a driver that refused the rate
+    // asked for is the case renderAudio resamples in, and it can only do that
+    // if it is told what it is rendering for.
+    program.rate = audio_.rate();
+    program.channels = audio_.channels();
+    program.fps = std::max(1, doc_.scene().framerate);
+    program.start_slot = slot;
+    for (const AudioTrack& track : doc_.scene().audio_tracks) {
+        std::shared_ptr<const AudioClip> clip = doc_.sharedAudioSamplesFor(track.id);
+        if (!clip || clip->empty()) continue;
+        // Shared, not copied, and this is the one place in the program that
+        // asks for it that way -- everything after this line is read on the
+        // device's thread. See Document::sharedAudioSamplesFor.
+        program.sources.push_back({std::move(clip), track.placement});
+    }
+    return program;
+}
+
+void MainWindow::scrubAudio(std::size_t slot) {
+    // Playback has the device while a take is running, and dragging the ruler
+    // during one is a request to move the playhead rather than to hear a frame.
+    if (playback_timer_->isActive()) return;
+
+    // **Has the machine's idea of where sound goes changed under us?** Somebody
+    // switching a speaker on does not touch the document, so nothing else here
+    // would ask -- and the first they would know of it is a scrub that makes no
+    // noise. Asked at most a few times a second rather than on every frame the
+    // playhead passes. Bounded rather than measured: a drag is dozens of these a
+    // second and what the check costs has not been measured, so it is asked at a
+    // rate that cannot matter either way.
+    //
+    // Reopening costs a third of a second, and it happens *before* the burst is
+    // published, so the burst that noticed still plays -- late, once, and then
+    // it is right again.
+    if (!audio_device_checked_.isValid() || audio_device_checked_.elapsed() > 500) {
+        audio_device_checked_.restart();
+        if (audio_.running() && !audio_.onTheRightOutput()) refreshAudioDevice();
+    }
+
+    if (!audio_.running()) return;
+
+    auto program = std::make_shared<AudioProgram>(audioProgramAt(slot));
+    if (program->sources.empty() || program->rate <= 0) return;
+
+    const std::int64_t rate = program->rate;
+    program->length = std::max<std::int64_t>(rate / program->fps,
+                                             rate * kScrubFloorMs / 1000);
+    program->fade = rate * kScrubFadeMs / 1000;
+    // Nothing to loop: a burst is a burst, and a shot that ended under it would
+    // wrap the sound round to frame 0 half-way through a syllable.
+    audio_.play(std::move(program));
+}
+
+// Where a soundtrack file's bytes are right now. importPathFor, for `audio/`.
+QString MainWindow::audioPathFor(const std::string& name) const {
+    if (name.empty()) return QString();
+    const QString file = QString::fromStdString(name);
+    if (!project_folder_.isEmpty()) {
+        const QString inside = project_folder_ + QStringLiteral("/audio/") + file;
+        if (QFileInfo::exists(inside)) return inside;
+    }
+    const auto pending = imports_.pending_audio.find(name);
+    return (pending == imports_.pending_audio.end()) ? QString() : pending->second;
+}
+
+// Where an imported file's bytes are right now.
+//
+// The project folder once it has one, and the path it was imported from until
+// then. Same order and same reason as ProjectIO::Imports: the folder is the
+// answer for every import except one that has not been saved yet.
+QString MainWindow::importPathFor(const std::string& name) const {
+    if (name.empty()) return QString();
+    const QString file = QString::fromStdString(name);
+    if (!project_folder_.isEmpty()) {
+        const QString inside = project_folder_ + QStringLiteral("/imports/") + file;
+        if (QFileInfo::exists(inside)) return inside;
+    }
+    const auto pending = imports_.pending.find(name);
+    return (pending == imports_.pending.end()) ? QString() : pending->second;
+}
+
+// The imported picture at 1:1, with no placement applied at all.
+//
+// What a placement gesture floats. The stored placement is *absolute* rather
+// than a delta -- the box opens at the numbers the layer is already placed at,
+// so dragging edits them rather than composing onto them -- which means the
+// pixels underneath have to be the unplaced ones. Feeding it the placed grid
+// from the cache would apply the placement twice.
+//
+// Decoded rather than kept, and only for as long as a gesture holds it. The
+// precedent is LayerFootprint, which owns copies of its grids rather than
+// pointing at the document's; the alternative here is a second permanent grid
+// per import, which is the memory the reference shape exists not to spend.
+TileGrid MainWindow::importAtOneToOne(const Layer& layer, int frame, QString* trouble) const {
+    if (frame < 0 || static_cast<std::size_t>(frame) >= layer.reference_sources.size()) {
+        if (trouble) *trouble = QStringLiteral("this drawing shows no frame of the import");
+        return {};
+    }
+    const QString path = importPathFor(layer.reference_sources[static_cast<std::size_t>(frame)]);
+    if (path.isEmpty()) {
+        if (trouble) *trouble = QStringLiteral("the imported file is not where the project left it");
+        return {};
+    }
+    return image_import::decode(path, trouble);
+}
+
+// What converting this layer would cost, from the file headers.
+//
+// Surveyed and never decoded, which is the same division the sequence import
+// already makes and for the same reason: on a hundred and fifty frames the
+// decode *is* the cost being described, so paying it to describe it would make
+// the recap the slow part. A survey is a header read, and doing one per frame
+// is milliseconds against a conversion that is seconds.
+MainWindow::ConversionCost MainWindow::conversionCostFor(TrackId track_id,
+                                                         LayerId layer_id) const {
+    ConversionCost cost;
+
+    const Track* track = doc_.scene().findTrack(track_id);
+    const Layer* layer = track ? track->findLayer(layer_id) : nullptr;
+    if (!layer || layer->kind != LayerKind::Reference) return cost;
+
+    // The one question the popup's wording turns on, asked of the placement
+    // rather than guessed at from it. Both exact paths keep every pixel: a
+    // whole-pixel move re-keys tile handles and a mirror permutes them, and
+    // neither reads a pixel through a filter. See Transform.
+    cost.resampled =
+        !layer->placement.isWholePixelTranslation() && !layer->placement.isAxisMirror();
+
+    const std::vector<ImageId> drawings = doc_.referenceDrawings(track_id, layer_id);
+    cost.drawings = drawings.size();
+
+    // Two drawings can point at one frame -- a duplicated drawing does exactly
+    // that -- and the file is then surveyed once and counted twice, because
+    // each drawing gets a cel of its own and the memory is per cel.
+    struct Sized {
+        bool ok = false;
+        std::size_t tiles = 0;
+    };
+    std::unordered_map<int, Sized> by_frame;
+
+    for (const ImageId drawing : drawings) {
+        const Image* record = track->findImage(drawing);
+        if (!record) continue;
+        const int frame = record->sourceFrameFor(layer_id);
+
+        auto known = by_frame.find(frame);
+        if (known == by_frame.end()) {
+            Sized measured;
+            if (frame >= 0 && static_cast<std::size_t>(frame) < layer->reference_sources.size()) {
+                const QString path =
+                    importPathFor(layer->reference_sources[static_cast<std::size_t>(frame)]);
+                const image_import::Survey survey = image_import::survey(path);
+                if (survey.ok) {
+                    measured.ok = true;
+                    // Through the placement, because that is what the pixels
+                    // being written have been through -- an import at half size
+                    // converts to a quarter of the tiles, and a recap quoting
+                    // the file's own size would be describing a picture nobody
+                    // is looking at. transformedBounds is what the resampler
+                    // itself uses to size its destination.
+                    const PixelRect placed = transformedBounds(
+                        matrixOf(layer->placement), PixelRect{0, 0, survey.width, survey.height});
+                    measured.tiles = tilesCovering(placed);
+                }
+            }
+            known = by_frame.emplace(frame, measured).first;
+        }
+
+        if (known->second.ok) {
+            cost.tiles += known->second.tiles;
+        } else {
+            ++cost.unreadable;
+        }
+    }
+    return cost;
+}
+
+// Converts a reference layer into ordinary drawings. The doing; the asking is
+// convertLayerToDrawings.
+//
+// **The decode is the whole cost and it happens here, on the interface thread.**
+// That is the opposite of everywhere else an import is read -- a scrub decodes
+// on a worker precisely so the program does not stop -- and it is right here for
+// a reason a worker would not improve: this is one command that has to be all or
+// nothing, so there is nothing useful to do while it runs and nothing that may
+// be allowed to touch the document meanwhile. What it costs is a window that
+// sits still, which is why the caller puts the frame count in front of somebody
+// first and why the cursor says so while it happens.
+bool MainWindow::convertReferenceLayerFrom(TrackId track_id, LayerId layer_id, QString* trouble) {
+    const Track* track = doc_.scene().findTrack(track_id);
+    const Layer* layer = track ? track->findLayer(layer_id) : nullptr;
+    if (!layer || layer->kind != LayerKind::Reference) {
+        if (trouble) *trouble = QStringLiteral("that is not an imported picture");
+        return false;
+    }
+    if (doc_.referenceDrawings(track_id, layer_id).empty()) {
+        if (trouble) *trouble = QStringLiteral("this import shows nothing on any drawing");
+        return false;
+    }
+
+    // Copied, because `convertReferenceLayer` rewrites the layer as it goes and
+    // this closure is read on every frame it has not got from the cache.
+    const std::vector<std::string> sources = layer->reference_sources;
+    const Transform placement = layer->placement;
+
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    const Document::LayerBake done = doc_.convertReferenceLayer(
+        track_id, layer_id, [&](const int frame) -> TileGrid {
+            if (frame < 0 || static_cast<std::size_t>(frame) >= sources.size()) return {};
+            const QString path = importPathFor(sources[static_cast<std::size_t>(frame)]);
+            if (path.isEmpty()) return {};
+            TileGrid decoded = image_import::decode(path);
+            // Placed here rather than by the document, for ReferenceDecoder's
+            // reason: what the conversion writes has to be what the compositor
+            // draws, and the compositor is handed grids that are already placed.
+            // Doing it anywhere else would be a second answer to "what is this
+            // layer showing", which is the one thing the derive step exists to
+            // have only one of.
+            if (decoded.empty() || placement.isIdentity()) return decoded;
+            return transformTiles(decoded, placement);
+        });
+    QGuiApplication::restoreOverrideCursor();
+
+    if (done.ran_out_of_memory) {
+        if (trouble) {
+            *trouble = QStringLiteral(
+                "there was not enough memory to convert the whole layer -- every drawing it "
+                "had already written has been put back, so nothing has changed");
+        }
+        return false;
+    }
+    if (done.drawings == 0) {
+        if (trouble) *trouble = QStringLiteral("nothing was converted");
+        return false;
+    }
+
+    // The frames this layer had derived are still in the cache and are left
+    // there rather than swept out, which is worth a line because sweeping looks
+    // like the tidy thing to do. They are keyed on the drawing and the layer
+    // and are valid under the placement they were made at -- so undoing the
+    // conversion brings the import back with its pictures already in hand,
+    // instead of re-decoding a sequence somebody has just decided against.
+    // Nothing reads them meanwhile: the layer is no longer a Reference one, so
+    // requestReferenceFrames does not ask about it. The cache's own bound is
+    // what eventually drops them.
+    // Which reaches rebuildLayerList and through it syncLayerButtons, and both
+    // have something to say now: the row's flag stops calling this an import,
+    // and the two whole-layer buttons swap over -- Place this picture becomes
+    // Transform layer through time, and Convert to drawings greys out.
+    refreshEverything();
+    return true;
+}
+
+MainWindow::ImportsReady MainWindow::importsReady() const {
+    ImportsReady out;
+    const ReferenceCache& cache = doc_.referenceCache();
+
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference || layer.reference_sources.empty()) continue;
+            // A hidden layer is never asked for, so counting it would put a
+            // denominator in the status bar that nothing can ever reach -- the
+            // number would stick, and a number that does not move is worse than
+            // no number at all, because it reads as stuck rather than as done.
+            if (!layer.visible) continue;
+
+            for (const auto& [id, image] : track.images) {
+                // Absent means the layer is empty at this drawing, exactly as a
+                // missing cel does. Nothing to decode, so nothing to wait for.
+                if (image.sourceFrameFor(layer.id) == Image::kNoSourceFrame) continue;
+                ++out.wanted;
+                // Asked without renewing it: see ReferenceCache::has. Counting
+                // through `find` would touch every frame of the sequence on
+                // every status update and flatten the order that keeps a
+                // scrub's own frames resident.
+                if (cache.has(CtgKey{id, layer.id}, layer.placement)) ++out.ready;
+            }
+        }
+    }
+    return out;
+}
+
+MainWindow::ImportsReady MainWindow::drawingsColoured() const {
+    ImportsReady out;
+    const CtgFillCache& cache = doc_.ctgCache();
+
+    for (const Track& track : doc_.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Ctg) continue;
+            // A hidden layer is never solved, so counting it would put a
+            // denominator up that nothing can reach. Same rule as importsReady,
+            // and wrong in the same way without it.
+            if (!layer.visible) continue;
+
+            for (const auto& [id, image] : track.images) {
+                ++out.wanted;
+                // Asked without renewing it: see CtgFillCache::has.
+                if (cache.has(CtgKey{id, layer.id})) ++out.ready;
+            }
+        }
+    }
+    return out;
+}
+
+// Says, once per document, that some imported pictures could not be read.
+//
+// This is what is left of a function that used to derive every frame here. The
+// deriving moved to a worker the paint asks -- see
+// CanvasWidget::requestReferenceFrames -- and reporting stayed behind, because
+// how often a person should be told is a question about the document and the
+// canvas has no view of one.
+//
+// **Gathered rather than shown as they arrive.** A paint asks for every frame
+// on screen, so one folder going missing is several reports in the same
+// instant, and the cache being emptied brings them all back. So they are
+// collected and one box is shown, and the flag is what stops a second one --
+// a missing file stays missing, and a message box on every refresh would make
+// the program unusable rather than informative.
+//
+// The project still opens either way. An import that will not read costs that
+// picture; the drawings are untouched, and refusing to open a shot because a
+// modelsheet has gone would be a worse trade than any this program makes
+// elsewhere.
+void MainWindow::onImportUnreadable(const QString& name, const QString& trouble) {
+    const QString said = QStringLiteral("%1 (%2)").arg(name, trouble);
+    if (unreadable_imports_.contains(said)) return;
+    unreadable_imports_.append(said);
+
+    // Not in the same turn of the event loop as the paint that found it: this
+    // arrives from requestReferenceFrames, which runs inside paintEvent, and a
+    // modal dialog opened from inside a paint re-enters the widget it is
+    // painting. Queued to the next turn, by which time the rest of the
+    // sequence's failures have been gathered too, so the box says all of them.
+    if (import_report_queued_) return;
+    import_report_queued_ = true;
+    QTimer::singleShot(0, this, &MainWindow::reportUnreadableImports);
+}
+
+void MainWindow::reportUnreadableImports() {
+    import_report_queued_ = false;
+    if (reported_missing_imports_ || unreadable_imports_.isEmpty()) return;
+    reported_missing_imports_ = true;
+    QMessageBox::warning(this, QStringLiteral("Imported pictures"),
+                         QStringLiteral("This project could not read %1 of its imported "
+                                        "pictures, and those layers will be blank:\n\n%2")
+                             .arg(unreadable_imports_.size())
+                             .arg(unreadable_imports_.join(QStringLiteral("\n"))));
+}
+
+// Waits for every imported picture on screen to be decoded and installed.
+//
+// **Never on an ordinary path.** It is here for tests, which change a placement
+// directly and then want the consequence, and for anything that must not run
+// ahead of the picture. Waiting for a decode on the interface thread is the
+// thing the worker exists to stop.
+bool MainWindow::settleReferenceFrames(int timeout_ms) {
+    return canvas_ && canvas_->settleReferenceFrames(timeout_ms);
 }
 
 // --- tracks --------------------------------------------------------------
@@ -2793,14 +4164,25 @@ void MainWindow::addTrack() {
 // the same cap the in-place editors have: the static helper offers no way to
 // reach its line edit, and a dialog that accepts a name the row next to it would
 // refuse is two different rules for one thing.
+// The row you are pointed at, which may be a soundtrack.
+//
+// **The Track menu follows the highlight, and that is the whole of what the two
+// selections owe the interface.** `track_` goes on meaning "where the brush
+// is", because five things read it and every one of them wants a real Track --
+// but a menu item acting on a row that is not the lit one is a menu item acting
+// on something nobody pointed at. Reported from use: Delete track, with a
+// soundtrack highlighted, offered to delete a drawing track.
 void MainWindow::renameTrack() {
-    const Track* track = doc_.scene().findTrack(track_);
-    if (!track) return;
+    const TrackId sound_id = timeline_widget_->highlightedAudio();
+    const AudioTrack* sound = doc_.scene().findAudioTrack(sound_id);
+    const Track* track = sound ? nullptr : doc_.scene().findTrack(track_);
+    if (!sound && !track) return;
 
     QInputDialog ask(this);
-    ask.setWindowTitle(QStringLiteral("Rename track"));
+    ask.setWindowTitle(sound ? QStringLiteral("Rename soundtrack")
+                             : QStringLiteral("Rename track"));
     ask.setLabelText(QStringLiteral("Name"));
-    ask.setTextValue(QString::fromStdString(track->name));
+    ask.setTextValue(QString::fromStdString(sound ? sound->name : track->name));
     if (auto* field = ask.findChild<QLineEdit*>()) field->setMaxLength(names::kTyped);
     if (ask.exec() != QDialog::Accepted) return;
 
@@ -2809,13 +4191,75 @@ void MainWindow::renameTrack() {
     // files, so the old one is kept rather than accepting the emptiness.
     if (trimmed.isEmpty()) return;
 
+    if (sound) {
+        // The label and not the file: `source` is what is in `audio/` and this
+        // does not touch it. The row's tooltip goes on saying which file it is.
+        doc_.renameAudioTrack(sound_id, trimmed.toStdString());
+        refreshEverything();
+        return;
+    }
+
     TrackProperties props = track->properties();
     props.name = trimmed.toStdString();
     doc_.updateTrack(track_, props);
     refreshEverything();
 }
 
+// The whole track again, layers, drawings and all.
+//
+// **On a soundtrack this is also how a scene gets a second one.** The model has
+// been a list since audio arrived and the row loop has always walked it; what
+// was missing was any way to put another one in, and duplicating the one you
+// have is the obvious one -- the same take at two placements is an ordinary
+// thing to want while a shot is being timed.
+void MainWindow::duplicateCurrentTrack() {
+    stopPlayback();
+
+    if (const AudioTrack* sound =
+            doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio())) {
+        const TrackId made = doc_.duplicateAudioTrack(sound->id);
+        if (made == kNoId) return;
+        // The samples across rather than a second decode of the same file:
+        // `core` does not decode, and the clip is already here. A copy of a few
+        // megabytes against tens of milliseconds of disk and codec.
+        if (const AudioClip* clip = doc_.audioSamplesFor(sound->id))
+            doc_.setAudioSamples(made, *clip);
+        refreshEverything();
+        return;
+    }
+
+    const TrackId made = doc_.duplicateTrack(track_);
+    if (made == kNoId) return;
+    // Onto the copy, which is what every other "make me a new one" in this
+    // program does: adding a track, adding a layer and duplicating a drawing
+    // all leave you standing on the thing you just made.
+    setCurrentTrack(made);
+    refreshEverything();
+}
+
 void MainWindow::removeCurrentTrack() {
+    // A soundtrack first, for renameTrack's reason: the highlight is what the
+    // menu acts on. There is no "a scene needs at least one" rule here -- a
+    // scene with no sound is the ordinary case, not an empty one.
+    if (const AudioTrack* sound = doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio())) {
+        if (QMessageBox::question(
+                this, QStringLiteral("Delete this soundtrack?"),
+                QStringLiteral("\"%1\" will go from the shot. The file stays in the project "
+                               "folder, and this can be undone.")
+                    .arg(QString::fromStdString(sound->name)),
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel) != QMessageBox::Yes) {
+            return;
+        }
+        stopPlayback();
+        doc_.removeAudioTrack(sound->id);
+        // The highlight goes back to the drawing row, because the row it was on
+        // is not there any more.
+        timeline_widget_->clearAudioHighlight();
+        refreshEverything();
+        return;
+    }
+
     if (doc_.scene().tracks.size() <= 1) {
         // The same rule as the last drawing: leave something to draw on.
         QMessageBox::information(this, QStringLiteral("Cannot delete that track"),
@@ -2880,7 +4324,16 @@ void MainWindow::setTrackEnd(TrackEnd behaviour) {
 
 void MainWindow::syncTrackMenu() {
     if (!overwrite_action_) return;
-    const Track* track = doc_.scene().findTrack(track_);
+    // **Off while a soundtrack is highlighted**, because neither of these means
+    // anything for one: a soundtrack has no drawings to overwrite and no last
+    // drawing to be past. They would otherwise act on the track the brush is
+    // on, which is not the row anybody is pointed at -- the same confusion
+    // Rename and Delete had, in the two items that cannot simply follow the
+    // highlight instead.
+    const bool on_sound =
+        timeline_widget_ &&
+        doc_.scene().findAudioTrack(timeline_widget_->highlightedAudio()) != nullptr;
+    const Track* track = on_sound ? nullptr : doc_.scene().findTrack(track_);
     updating_track_menu_ = true;
     overwrite_action_->setEnabled(track != nullptr);
     overwrite_action_->setChecked(track && track->overwrite_drawings);
@@ -2888,6 +4341,11 @@ void MainWindow::syncTrackMenu() {
         action->setEnabled(track != nullptr);
         action->setChecked(track && track->end == behaviour);
     }
+    // And the submenu itself. Greying its three items leaves a menu that still
+    // opens to offer a choice and then refuses all of it, which is worse than
+    // one that does not open: the second says there is nothing here, the first
+    // says there is something here you may not have.
+    if (end_menu_) end_menu_->menuAction()->setEnabled(track != nullptr);
     updating_track_menu_ = false;
 }
 
@@ -2907,8 +4365,10 @@ void MainWindow::onSlotChanged(std::size_t slot) {
 // stepping walks the whole shot however long the track being edited is.
 void MainWindow::stepFrame(int delta) {
     // Everything reachable rather than the shot: stepping has to get to a
-    // drawing that sits past a fixed scene length, or it could not be edited.
-    const int count = static_cast<int>(doc_.scene().timelineFrames());
+    // drawing that sits past a fixed scene length, or it could not be edited --
+    // and to a soundtrack running past the drawings, which is the ordinary
+    // first state of a lipsync shot and the one place stepping matters most.
+    const int count = static_cast<int>(doc_.timelineFrames());
     if (count <= 0) return;
 
     int next = static_cast<int>(timeline_widget_->currentSlot()) + delta;
@@ -3048,6 +4508,18 @@ void MainWindow::togglePlayback() {
     if (doc_.scene().shotFrames() < 2) return;
 
     playback_start_slot_ = timeline_widget_->currentSlot();
+
+    // **The sound first, because the picture is about to be derived from it.**
+    // A take with a soundtrack in it plays to the device's count of what has
+    // come out; one without plays to the wall clock exactly as it always did,
+    // and `playing_to_audio_` is which. See onPlaybackTick.
+    //
+    // The output is checked here rather than trusted: Play is a deliberate
+    // press, so a third of a second spent opening the right device is a cost
+    // worth paying once, where doing it on a scrub would not be.
+    refreshAudioDevice();
+    startPlaybackAudio(playback_start_slot_);
+
     playback_clock_.start();
     rate_samples_.clear();
     last_rate_sample_ms_ = 0;
@@ -3070,9 +4542,65 @@ void MainWindow::togglePlayback() {
     syncStatus();
 }
 
+void MainWindow::startPlaybackAudio(std::size_t slot) {
+    playing_to_audio_ = false;
+    if (!audio_.running()) return;
+
+    auto program = std::make_shared<AudioProgram>(audioProgramAt(slot));
+    if (program->sources.empty() || program->rate <= 0) return;
+
+    // The loop, which is one number here and one number in slotForPlayedFrames
+    // -- the picture wraps because the count it is derived from wrapped, and
+    // the sound wraps because the position it is read from wrapped. There is
+    // nothing to keep in agreement. See docs/importing.md, "the playback clock".
+    program->loop_slots = doc_.scene().shotFrames();
+    // A ramp in, so a take that starts part-way up a waveform does not open
+    // with a click. Nothing at the seam: a loop is the same shot again and a
+    // dip at every pass would be the more noticeable of the two.
+    program->fade = std::int64_t(program->rate) * kScrubFadeMs / 1000;
+    audio_.play(std::move(program));
+    playing_to_audio_ = true;
+}
+
+// Somebody plugged a speaker in, switched one on, or pulled one out.
+//
+// **Told rather than asked**, which is the whole of the fix here. The first
+// version only looked when something else made it look -- at Play, and a few
+// times a second during a scrub -- and it was reported as working for a scrub
+// and not for Play. That is what a question asked before the answer has arrived
+// looks like: Qt learns about a device from the system, and holding the watch
+// is what makes it listen at all. See AudioDevice::watchOutputs.
+void MainWindow::onAudioOutputsChanged() {
+    const bool was_playing = playing_to_audio_;
+    // **The remembered failure is forgotten here and nowhere else.** It exists
+    // so that a machine with no audio output does not spend a third of a second
+    // trying again on every edit -- and the news that the machine's outputs
+    // have changed is exactly the news that makes trying again worthwhile.
+    // Without this, plugging a speaker into a machine that had none when the
+    // project opened would be remembered as still having none.
+    audio_tried_rate_ = 0;
+    refreshAudioDevice();
+    if (!was_playing) return;
+
+    // A take was running on the device that has just been replaced, and the
+    // count it derives from starts again with the new one. **Re-anchored on the
+    // frame it has reached** rather than the frame Play was pressed on, or the
+    // take would jump back to where it started.
+    playback_start_slot_ = timeline_widget_->currentSlot();
+    startPlaybackAudio(playback_start_slot_);
+    playback_clock_.start();
+    rate_samples_.clear();
+    last_rate_sample_ms_ = 0;
+}
+
 void MainWindow::stopPlayback() {
     if (!playback_timer_->isActive()) return;
     playback_timer_->stop();
+    // The device stays open and goes quiet, which is the whole reason it is
+    // kept open: the next scrub is a burst away rather than a third of a
+    // second away. See audio_device.h.
+    audio_.silence();
+    playing_to_audio_ = false;
     playback_rate_->hide();
     rate_samples_.clear();
     canvas_->setPlaying(false);
@@ -3099,17 +4627,59 @@ void MainWindow::onPlaybackTick() {
         return;
     }
 
+    const int fps = std::max(1, doc_.scene().framerate);
+    std::size_t slot = 0;
+
+    if (playing_to_audio_) {
+        // **The one line the whole of docs/importing.md's "playback clock" is
+        // about.** The picture's position comes from how much audio has come
+        // out of the device rather than from how long ago Play was pressed, and
+        // three of the four ways two clocks come apart stop existing rather
+        // than being separately corrected: the device's output latency is
+        // already inside the count, a loop seam wraps both together because
+        // there is only one number, and an interface stall cannot reach a
+        // number that is not counted on this thread.
+        const std::int64_t played = audio_.playedFrames();
+        if (played <= 0) {
+            // Nothing has been heard yet. **The picture holds on the frame Play
+            // was pressed on**, which is what starting together means and is
+            // the visible cost of the feature: about a buffer, a quarter of a
+            // second on the machine the spike measured.
+            //
+            // The readout is not sampled through the hold. It counts paints
+            // against wall time, and a quarter-second of deliberate stillness
+            // inside its first window reads as dropped frames -- which is a
+            // warning crying wolf on the one take it should be trusted on.
+            rate_samples_.clear();
+            last_rate_sample_ms_ = playback_clock_.elapsed();
+
+            // And a bound on the wait, for a device that will never report. See
+            // kAudioStartWaitMs. The clock restarts so the take begins now
+            // rather than a second in.
+            if (playback_clock_.elapsed() > kAudioStartWaitMs) {
+                playing_to_audio_ = false;
+                playback_clock_.start();
+                last_rate_sample_ms_ = 0;
+            }
+            return;
+        }
+        slot = slotForPlayedFrames(playback_start_slot_, played, audio_.rate(), fps, count);
+    } else {
+        const qint64 elapsed = playback_clock_.elapsed();
+        const qint64 advanced = elapsed * fps / 1000;
+        slot = (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
+    }
+
     // Before the early return below, not after it. This tick fires every
     // millisecond and mostly finds the slot unchanged, and the reading has to
     // keep up during a stall -- which is exactly when the slot is changing
     // least often.
+    //
+    // Still against the wall clock, and deliberately: what it measures is
+    // whether the *interface* is keeping up, so a picture derived from the
+    // sound must not be judged against the sound as well. That would be the
+    // instrument and the thing it measures being the same number.
     updatePlaybackRate();
-
-    const int fps = std::max(1, doc_.scene().framerate);
-    const qint64 elapsed = playback_clock_.elapsed();
-    const qint64 advanced = elapsed * fps / 1000;
-    const std::size_t slot =
-        (playback_start_slot_ + static_cast<std::size_t>(advanced)) % count;
 
     if (slot == timeline_widget_->currentSlot()) return;
     timeline_widget_->setCurrentSlot(slot);
@@ -3152,7 +4722,57 @@ QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
     return name;
 }
 
+// What a row is, said in the row itself -- issue #84.
+//
+// Three kinds and three treatments, and the reason they are not the same
+// treatment is that **the brush behaves differently on each**, which is the
+// thing a row was failing to say. On a reference layer nothing works at all:
+// there is no cel and none that could be made, so drawing, cutting and
+// transforming all refuse. On a colour layer the brush *does* work -- it lays
+// down scribbles -- and what refuses is cut, copy and transform. On a raster
+// layer everything works.
+//
+// | kind | what the row does | why that colour |
+// |---|---|---|
+// | Raster | nothing | there is nothing to say |
+// | Colour | the carried blue | the same blue a carried cell is drawn in, one panel over: it is the same machinery and saying so twice in two colours would be worse than not saying it |
+// | Reference | the theme's disabled grey | the one colour every theme already uses for "you cannot act here", which is exactly and completely true |
+//
+// **The grey has an expiry date and this is where it is written down.** It says
+// "nothing here can be acted on", and that stops being true the day *convert to
+// drawings* exists -- see docs/importing.md, "convert to drawings", which is on
+// the queue. At that point a reference layer has something you can do to it and
+// this treatment has to be revisited rather than inherited.
+//
+// Everything else goes in the tooltip and not in the row, for `layerLabel`'s
+// reason: the panel is a couple of hundred pixels wide, and a row that spells
+// out what it is doing is a row elided to "..." -- which hides the very words
+// that were the point.
 void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, ImageId here) {
+    if (layer.kind == LayerKind::Reference) {
+        item->setForeground(0, QBrush(palette().color(QPalette::Disabled, QPalette::Text)));
+        QString tip = QStringLiteral(
+            "An imported picture. Its pixels come from a file rather than from a\n"
+            "drawing, so the brush, the eraser and the transform all refuse here.\n"
+            "The way in is to convert it to drawings first.");
+        if (!layer.reference_sources.empty()) {
+            // The file, because the layer's name is a label somebody may have
+            // changed and this is the only place the two can be told apart.
+            // Not the whole list of a sequence: two hundred file names is a
+            // tooltip nobody reads.
+            tip += QStringLiteral("\n\nFrom %1")
+                       .arg(QString::fromStdString(layer.reference_sources.front()));
+            if (layer.reference_sources.size() > 1) {
+                tip += QStringLiteral(" and %1 more, in the project's imports folder.")
+                           .arg(layer.reference_sources.size() - 1);
+            } else {
+                tip += QStringLiteral(", in the project's imports folder.");
+            }
+        }
+        item->setToolTip(0, tip);
+        return;
+    }
+
     if (layer.kind != LayerKind::Ctg) {
         item->setForeground(0, QBrush());
         item->setToolTip(0, QString());
@@ -3176,7 +4796,11 @@ void MainWindow::applyLayerFlag(QTreeWidgetItem* item, const Layer& layer, Image
                    .arg(source ? source->number : 0);
     }
 
-    item->setForeground(0, QBrush());
+    // The same blue a carried cell is drawn in, and for the same reason -- see
+    // marks.h. A colour layer is where the colour-through-time machinery lives,
+    // and the row saying so in the colour the timeline already says it in is
+    // one fact learned once instead of two.
+    item->setForeground(0, QBrush(marks::kCarried));
     item->setToolTip(0, tip);
 }
 
@@ -3306,7 +4930,7 @@ void MainWindow::refreshLayerFlags() {
     // This is the frame-change path, and whether the layer in front of you can
     // be moved through time depends on the frame: past a track's last drawing
     // there is nothing to float. Nothing else here would ask.
-    syncLayerTransformButton();
+    syncLayerButtons();
 }
 
 void MainWindow::rebuildLayerList() {
@@ -3394,7 +5018,7 @@ void MainWindow::onLayerSelected() {
         // An empty panel -- a track whose last layer has just been removed --
         // and the button has to say so rather than go on offering the answer it
         // gave about a layer that is not there any more.
-        syncLayerTransformButton();
+        syncLayerButtons();
         return;
     }
     canvas_->setActiveLayer(layer->id);
@@ -3411,7 +5035,7 @@ void MainWindow::onLayerSelected() {
         syncColourControls();
     }
     syncColourLayerPanel();
-    syncLayerTransformButton();
+    syncLayerButtons();
 }
 
 // Whether the layer in front of you can be moved through time, and what to say
@@ -3431,7 +5055,7 @@ void MainWindow::onLayerSelected() {
 // at this frame" was that reason, and it is the one that changes as the
 // playhead moves rather than as the selection does -- which is why
 // refreshLayerFlags asks this again and not only onLayerSelected.
-void MainWindow::syncLayerTransformButton() {
+void MainWindow::syncLayerButtons() {
     if (!layer_transform_) return;
 
     const Layer* layer = currentLayer();
@@ -3451,29 +5075,185 @@ void MainWindow::syncLayerTransformButton() {
         refusal = QStringLiteral("this layer is locked");
     } else if (!layer->visible) {
         refusal = QStringLiteral("this layer is hidden");
-    } else if (doc_.layerDrawings(track_, layer->id).empty()) {
-        // Last, because beginLayerTransform asks it last. Cels and not ink: a
-        // layer with no cel anywhere has nothing to move and is the case worth
-        // catching, which is a brand-new layer. Asking about the ink would mean
-        // paintedBounds over every drawing, which reads pixels -- too much to
-        // pay every time the playhead moves, and the answer it would add is a
-        // layer whose cels are all empty, which the grid releases anyway.
+    } else if (layer->kind != LayerKind::Reference &&
+               doc_.layerDrawings(track_, layer->id).empty()) {
+        // Last but one, because beginLayerTransform asks these two last. Cels
+        // and not ink: a layer with no cel anywhere has nothing to move and is
+        // the case worth catching, which is a brand-new layer. Asking about the
+        // ink would mean paintedBounds over every drawing, which reads pixels
+        // -- too much to pay every time the playhead moves, and the answer it
+        // would add is a layer whose cels are all empty, which the grid
+        // releases anyway.
         refusal = QStringLiteral("nothing is drawn on this layer yet");
+    } else if (layer->kind != LayerKind::Reference &&
+               doc_.layerDrawings(track_, layer->id).size() == 1) {
+        // **Through time needs a second drawing to be through.** With one, this
+        // button used to hand the gesture to the Transform tool -- which is the
+        // right gesture and the wrong button: it read "Transform layer through
+        // time" and did something else, on the most ordinary layer there is.
+        refusal = QStringLiteral("there is only one drawing on this layer.\n"
+                                 "Through time needs a second one to be through; use the\n"
+                                 "Transform tool, which is the same gesture with one.");
+    }
+
+    // Convert to drawings, whose refusals are its own and mostly the opposite
+    // of the ones above: this is the one button in the panel that works on an
+    // import and nothing else.
+    if (layer_convert_) {
+        QString convert;
+        if (!layer) {
+            convert = QStringLiteral("there is no layer selected");
+        } else if (layer->kind != LayerKind::Reference) {
+            // The common case by far, so it says what the button is *for*
+            // rather than only that this is not it. A greyed control whose
+            // tooltip merely restates the greying teaches nobody what the
+            // control does.
+            convert = QStringLiteral("this layer is already drawings.\n"
+                                     "Converting is the way back from an imported picture, "
+                                     "which\nis shown from its files and holds no pixels of its "
+                                     "own.");
+        } else if (layer->locked) {
+            convert = QStringLiteral("this layer is locked");
+        } else if (doc_.referenceDrawings(track_, layer->id).empty()) {
+            // referenceDrawings and not layerDrawings, which would answer
+            // "empty" about every import there is: a reference layer has no
+            // cels, and what says it is not blank at a drawing is its source
+            // frame. See Document::referenceDrawings.
+            convert = QStringLiteral("this import shows nothing on any drawing");
+        }
+        layer_convert_->setEnabled(convert.isEmpty());
+        layer_convert_->setToolTip(
+            !convert.isEmpty()
+                ? QStringLiteral("Cannot convert to drawings: %1").arg(convert)
+                : QStringLiteral(
+                      "Write what the imported picture shows into ordinary drawings.\n\n"
+                      "Every drawing of the layer at once, in one undo step. Afterwards it "
+                      "can\nbe painted on and erased, and a colour layer can cut against it -- "
+                      "which\nan import cannot be used for at all.\n\n"
+                      "What you see is what is kept. It is where the picture comes from "
+                      "afterwards\nthat changes: the drawings become the truth and the files "
+                      "stop being read.\nThey stay in the project folder, so it can be taken "
+                      "back."));
     }
 
     layer_transform_->setEnabled(refusal.isEmpty());
+    // An imported picture is *placed* and not transformed, and the button says
+    // so. One word for two things whose costs differ by everything -- one
+    // writes every drawing in the layer, the other writes nothing at all --
+    // would be the button telling the same lie the tooltip is here to prevent.
+    const bool placing = layer && layer->kind == LayerKind::Reference;
+    layer_transform_->setText(placing ? QStringLiteral("Place this picture")
+                                      : QStringLiteral("Transform layer through time"));
     layer_transform_->setToolTip(
-        refusal.isEmpty()
-            ? QStringLiteral("Move, turn or scale every drawing of this layer at once.\n\n"
+        !refusal.isEmpty()
+            ? QStringLiteral("Cannot %1: %2")
+                  .arg(placing ? QStringLiteral("place this picture")
+                               : QStringLiteral("transform this layer through time"),
+                       refusal)
+        : placing
+            // Worth saying because it is the opposite of every other warning on
+            // this button, and because nobody would assume it: a placement is
+            // stored rather than written, so it can be adjusted again and again
+            // and the picture is still one resample away from the file.
+            ? QStringLiteral("Move, turn or scale the imported picture.\n\n"
+                             "Nothing is written: where it sits is stored, and the picture is\n"
+                             "made from the file again each time you move it. Adjusting it\n"
+                             "never costs it any quality, however often you do it.")
+            : QStringLiteral("Move, turn or scale every drawing of this layer at once.\n\n"
                              "It is baked on Apply: every drawing in the layer is written,\n"
                              "in one undo step. A nudge or a flip is exact; turning or\n"
-                             "scaling resamples every drawing, once.")
-            : QStringLiteral("Cannot transform this layer through time: %1").arg(refusal));
+                             "scaling resamples every drawing, once."));
+
+    // **And the Transform tool itself, which a sequence import has nothing for.**
+    //
+    // A still routes to the placement and the tool is the right door for it. A
+    // sequence is several pictures, so "move this drawing" has nothing it can
+    // honestly do -- the way in is to convert it to drawings, which is what the
+    // tooltip says. Greyed rather than left to refuse when pressed, because a
+    // tool that looks available and then bounces you back to the brush is a
+    // tool you try twice.
+    if (transform_action_) {
+        const bool sequence = layer && layer->kind == LayerKind::Reference &&
+                              layer->reference_sources.size() > 1;
+        // Left checked while disabled it would sit there looking chosen and
+        // doing nothing, so the brush takes over -- the same thing
+        // chooseTransformTool does when the canvas refuses.
+        if (sequence && transform_action_->isChecked()) {
+            brush_action_->setChecked(true);
+            canvas_->setTool(CanvasWidget::Tool::Brush);
+            syncToolSettings();
+        }
+        transform_action_->setEnabled(!sequence);
+        setKeyedTipText(
+            transform_action_,
+            sequence ? QStringLiteral("Cannot transform an imported sequence")
+                     : QStringLiteral("Move, turn or resize this drawing on the layer you are on"),
+            sequence ? QStringLiteral(
+                           "It is shown from its files rather than drawn, so there is nothing\n"
+                           "here to move. Convert it to drawings first.\n\n"
+                           "Where the whole sequence sits is a placement rather than a\n"
+                           "transform: \"Place this picture\", in the layer panel.")
+                     : QStringLiteral(
+                           "With nothing selected it takes the whole drawing.\n"
+                           "%1 applies, %2 cancels, and the nudge keys move it a pixel at a "
+                           "time."));
+    }
+
+    // Remove layer, which had the same fault the button above was built to
+    // avoid and had it from the start: `removeCurrentLayer` returns without a
+    // word on a track with one layer, so the button was dead and nothing said
+    // why. Every fresh track has one layer and so does every import, which is
+    // what made it easy to meet.
+    //
+    // The guard itself is right and is not what changes here -- a track with no
+    // layers has nowhere to draw, and the answer to that is not to allow it but
+    // to say so. Greyed out rather than removed, for the reason above: a
+    // control that comes and goes is one nobody can find twice.
+    if (!layer_remove_) return;
+    const Track* track = doc_.scene().findTrack(track_);
+    const bool last_one = !track || track->layers.size() <= 1;
+    layer_remove_->setEnabled(!last_one);
+    layer_remove_->setToolTip(
+        last_one ? QStringLiteral("Cannot remove this layer: it is the only one on this track,\n"
+                                  "and a track with no layers has nowhere to draw.\n\n"
+                                  "Add another layer first, or delete the whole track from\n"
+                                  "the Track menu.")
+                 : QStringLiteral("Remove this layer and every drawing on it, from this track."));
 }
 
 // The layer panel's button. The canvas owns the gesture; this is the door.
 void MainWindow::transformLayerThroughTime() {
-    const CanvasWidget::Refusal why = canvas_->beginLayerTransform();
+    // An imported picture is placed rather than baked, and what the gesture
+    // floats is the file at 1:1 -- the stored placement is absolute, so the
+    // pixels under it must be unplaced. Decoded here because this is the side
+    // of the seam that knows where `imports/` is; the canvas is handed pixels
+    // and never a path.
+    TileGrid unplaced;
+    if (const Layer* layer = currentLayer();
+        layer && layer->kind == LayerKind::Reference) {
+        QString trouble;
+        // The frame in front of you, because that is the picture the box is
+        // drawn round. A placement is a property of the whole layer, so which
+        // frame is floated changes nothing about what Apply stores -- but a box
+        // fitted to a different frame than the one on screen would be a box
+        // round nothing.
+        int frame = Image::kNoSourceFrame;
+        if (const Track* track = doc_.scene().findTrack(track_)) {
+            if (const Image* image = track->findImage(canvas_->currentImage())) {
+                frame = image->sourceFrameFor(layer->id);
+            }
+        }
+        unplaced = importAtOneToOne(*layer, frame, &trouble);
+        if (unplaced.empty()) {
+            statusBar()->showMessage(
+                QStringLiteral("Cannot place this picture: %1")
+                    .arg(trouble.isEmpty() ? QStringLiteral("it has nothing in it") : trouble),
+                6000);
+            return;
+        }
+    }
+
+    const CanvasWidget::Refusal why = canvas_->beginLayerTransform(std::move(unplaced));
     if (why != CanvasWidget::Refusal::None) {
         sayCannot(statusBar(), "transform this layer through time", why);
         return;
@@ -3483,6 +5263,201 @@ void MainWindow::transformLayerThroughTime() {
     // canvas is where the keyboard lives; this is the one that also matters for
     // the pen, because the gesture that follows is entirely on the canvas.
     canvas_->setFocus();
+}
+
+// The way back from an import: the whole layer, converted to drawings.
+//
+// **Everything before the conversion is this function saying what it will do**,
+// and the reason it is this much text is that all of it is either irreversible
+// or expensive. What is said, in order: how many drawings, what they weigh,
+// what happens to the quality, and what happens to the undo history. See
+// docs/importing.md, "convert to drawings", which is where each was argued.
+void MainWindow::convertLayerToDrawings() { askToConvertLayer(false); }
+
+void MainWindow::askToConvertLayer(const bool because_a_stroke_was_refused) {
+    stopPlayback();
+
+    const Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Reference) {
+        statusBar()->showMessage(
+            QStringLiteral("Cannot convert to drawings: this is not an imported picture"), 6000);
+        return;
+    }
+    const LayerId layer_id = layer->id;
+    const QString name = QString::fromStdString(layer->name);
+    // Taken now rather than read off `layer` further down, because two of the
+    // ways out below run an event loop and a pointer into the layer vector is
+    // good for exactly as long as nothing edits the document.
+    const bool one_file = layer->reference_sources.size() == 1;
+
+    const ConversionCost cost = conversionCostFor(track_, layer_id);
+    if (cost.drawings == 0) {
+        statusBar()->showMessage(
+            QStringLiteral("Cannot convert to drawings: this import shows nothing on any drawing"),
+            6000);
+        return;
+    }
+
+    // **Sometimes it refuses, and that is not a gap to be closed later.** The
+    // case this serves is scanned line art -- tens of drawings, which is what
+    // colouring an import means -- and it cannot serve a two-hundred-frame
+    // video, because nothing can: those pixels do not fit in memory and
+    // colouring them was never the point. Said before the work rather than
+    // discovered partway through it, which is the difference between a number
+    // somebody can act on and a window that stops.
+    //
+    // The same ceiling one drawing's commit is measured against, and it is a
+    // ceiling rather than a bound on the growth -- `commitFitsInBudget`'s layer
+    // form measures against what the layer already holds, and a reference layer
+    // holds nothing at all, so that form would answer about zero.
+    if (cost.tiles > kCommitTileBudget) {
+        QMessageBox::warning(
+            this, QStringLiteral("Convert to drawings"),
+            QStringLiteral(
+                "This layer is too long to convert.\n\n"
+                "%1 is %2 drawings, about %3 GB of pixels, and converting writes all of them "
+                "at once. The most that can be written in one go is about %4 GB.\n\n"
+                "Two things make it fit: importing a shorter range of the source, and "
+                "importing at half size, which is a quarter of the pixels.")
+                .arg(name)
+                .arg(cost.drawings)
+                .arg(static_cast<double>(cost.tiles) / 8192.0, 0, 'f', 1)
+                .arg(static_cast<double>(kCommitTileBudget) / 8192.0, 0, 'f', 1));
+        return;
+    }
+
+    // Arriving from a refused stroke, this says why it turned up -- and it is a
+    // line on the front of the recap rather than a question of its own, because
+    // two dialogs asking the same thing is the program not hearing the first
+    // answer. Reported.
+    QString recap;
+    if (because_a_stroke_was_refused) {
+        recap = QStringLiteral("%1 is an imported picture, shown from its files rather than "
+                               "drawn, so there is nothing here to paint on.\n\n")
+                    .arg(name);
+    }
+
+    // A tile is 128x128 RGBA half = exactly 128 KB, so tiles/8 is megabytes.
+    const double megabytes = static_cast<double>(cost.tiles) / 8.0;
+    recap +=
+        QStringLiteral("Convert %1 to drawings?\n\n"
+                       "%2 %3 will be written, about %4 MB of pixels. It can then be painted "
+                       "on, erased, and used as the line art a colour layer cuts against.\n\n")
+            .arg(name)
+            .arg(cost.drawings)
+            .arg(cost.drawings == 1 ? QStringLiteral("drawing") : QStringLiteral("drawings"))
+            .arg(megabytes, 0, 'f', megabytes < 10.0 ? 1 : 0);
+
+    // **What is lost is the future, and not this step.** The conversion writes
+    // the grid that is already on screen, so any resampling a placement asked
+    // for happened when the picture was derived and happens once. The user's
+    // instinct was to say whether this is lossless; that is the right thing to
+    // key on and the wrong tense to say it in.
+    //
+    // And it must not claim more than that. A JPEG or a video frame was lossy
+    // before it reached this program, so "every pixel is kept" is a statement
+    // about this step and never about the artwork.
+    recap += cost.resampled
+                 ? QStringLiteral(
+                       "The drawings will hold exactly what you see now. Placing it again "
+                       "afterwards would resample what has already been resampled -- so if you "
+                       "have not placed it yet, place it first.\n\n")
+                 : QStringLiteral("Every pixel of the files is kept exactly as it is.\n\n");
+
+    if (cost.unreadable > 0) {
+        // Said rather than refused, which is the house rule, and said here
+        // rather than afterwards because afterwards is one undo too late.
+        recap += QStringLiteral("%1 of the frames cannot be read and will convert to empty "
+                                "drawings.\n\n")
+                     .arg(cost.unreadable);
+    }
+
+    // **This paragraph said the wrong thing first, and what it says now was
+    // measured.** docs/importing.md predicted that a conversion "will clear the
+    // rest of the undo history", by analogy with a layer bake, and this recap
+    // was written to warn about that. It does not: a bake displaces every tile
+    // of every drawing and the journal holds all of them, where a conversion
+    // writes into cels that did not exist and so displaces nothing. The history
+    // is charged nothing at all -- pinned in test_transform, because a wrong
+    // sentence in a dialog is worse than no sentence.
+    //
+    // What is true, and is the thing worth saying instead: the files stay in
+    // the project, so this is reversible in the strong sense and not only in
+    // the undo-stack sense. That was the user's call and it took a change to
+    // the save -- which used to carry forward only the files something still
+    // named, and would therefore have taken the scan out of the project the
+    // next time it wrote. See ProjectIO::save.
+    // Keyed on the number of *files* and not on the number of drawings, which
+    // are not the same number: a duplicated drawing is two drawings showing one
+    // file. Small, and it is the sort of small that reads as the program not
+    // knowing what it is talking about.
+    recap += QStringLiteral(
+        "It can be undone, and it costs the undo history almost nothing. The imported %1 "
+        "in the project folder %2 kept either way, so nothing is thrown away.")
+                 .arg(one_file ? QStringLiteral("file") : QStringLiteral("files"),
+                      one_file ? QStringLiteral("is") : QStringLiteral("are"));
+
+    if (QMessageBox::question(this, QStringLiteral("Convert to drawings"), recap,
+                              QMessageBox::Ok | QMessageBox::Cancel,
+                              QMessageBox::Ok) != QMessageBox::Ok) {
+        return;
+    }
+
+    QString trouble;
+    if (!convertReferenceLayerFrom(track_, layer_id, &trouble)) {
+        QMessageBox::warning(this, QStringLiteral("Convert to drawings"),
+                             QStringLiteral("%1 was not converted: %2").arg(name, trouble));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Converted %1 to %2 %3 -- it can be painted on now")
+                                 .arg(name)
+                                 .arg(cost.drawings)
+                                 .arg(cost.drawings == 1 ? QStringLiteral("drawing")
+                                                         : QStringLiteral("drawings")),
+                             8000);
+}
+
+// Somebody tried to draw on an imported picture. The refusal is where the
+// question actually gets asked, so this is where the offer is made.
+//
+// **Queued rather than raised from inside the press**, and that is not caution
+// about re-entrancy alone. `tabletEvent` ignores every event while a modal
+// dialog is up, which is right -- the dialog has a better claim on the pen --
+// but the pen *release* is one of those events, and a gesture that loses its
+// release is the trap docs/handover.md puts first among the traps. Nothing is
+// open here, the stroke having been refused before it began, so this is the
+// cheap end of that rule rather than an instance of it; the queue is what keeps
+// it the cheap end.
+void MainWindow::offerToConvertRefusedLayer() {
+    // Pen-downs arrive faster than a dialog opens, and a hand resting on the
+    // canvas is a stream of them. One at a time, and asking again after a
+    // Cancel is right -- somebody who tries to draw a second time has asked the
+    // question a second time.
+    if (offering_conversion_) return;
+
+    const Layer* layer = currentLayer();
+    if (!layer || layer->kind != LayerKind::Reference) return;
+
+    offering_conversion_ = true;
+    QTimer::singleShot(0, this, [this] {
+        // Asked again on the way in: the queue means a frame has passed, and a
+        // layer that is no longer an import -- converted from the panel in the
+        // meantime, or undone away -- must not be offered a conversion.
+        const Layer* still = currentLayer();
+        const bool offer = still && still->kind == LayerKind::Reference;
+        // Cleared before the dialog rather than after it, because that dialog
+        // is modal: leaving this set across it would leave it set for as long
+        // as somebody reads the recap, and a second pen-down on a picture they
+        // have decided against would then be ignored rather than answered.
+        offering_conversion_ = false;
+        // **Straight to the recap, which is the only question there is.** This
+        // used to ask "convert this layer?" here and then hand over to a recap
+        // that asked the same thing again with the numbers on it -- two dialogs
+        // for one decision, reported as exactly that. What the refusal is
+        // entitled to add is the sentence saying why it turned up, and that is
+        // now the first line of the recap rather than a dialog of its own.
+        if (offer) askToConvertLayer(true);
+    });
 }
 
 // What the panel's rename editor typed, applied to the document.
@@ -3533,7 +5508,7 @@ void MainWindow::onLayerItemChanged(QTreeWidgetItem* item, int column) {
     // Hiding a layer is one of the two things that takes the layer transform
     // away, and it is the only one of them the panel can do -- so the button
     // has to be asked again here and not only when the selection moves.
-    syncLayerTransformButton();
+    syncLayerButtons();
     syncStatus();
 }
 

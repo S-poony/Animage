@@ -329,6 +329,11 @@ const CtgFill* CtgFillCache::find(const CtgKey& key) const {
     return &found->second.fill;
 }
 
+bool CtgFillCache::has(const CtgKey& key) const {
+    auto found = entries_.find(key);
+    return found != entries_.end() && found->second.fill.valid;
+}
+
 CtgFill& CtgFillCache::store(const CtgKey& key, CtgFill fill) {
     ++stores_;
     auto found = entries_.find(key);

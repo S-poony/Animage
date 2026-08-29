@@ -32,10 +32,16 @@ add_library(animage_ui STATIC
   animage/floating_dock_frame.h
   animage/scene_settings_dialog.cpp
   animage/scene_settings_dialog.h
+  animage/sequence_import_dialog.cpp
+  animage/sequence_import_dialog.h
   animage/shortcuts.cpp
   animage/shortcuts.h
   animage/shortcuts_dialog.cpp
   animage/shortcuts_dialog.h
+  animage/image_import.cpp
+  animage/image_import.h
+  animage/reference_decoder.cpp
+  animage/reference_decoder.h
   animage/project_io.cpp
   animage/project_io.h
   animage/export_sequence.cpp
@@ -44,8 +50,44 @@ add_library(animage_ui STATIC
   animage/exr_writer.h
   animage/crash_report.cpp
   animage/crash_report.h
+  animage/audio_device.cpp
+  animage/audio_device.h
+  animage/audio_import.cpp
+  animage/audio_import.h
+  animage/audio_player.cpp
+  animage/audio_player.h
+  animage/marks.h
+  animage/audio_import_dialog.cpp
+  animage/audio_import_dialog.h
 )
 target_link_libraries(animage_ui PUBLIC Qt6::Widgets animage::core)
+
+# ---------------------------------------------------- Qt Multimedia, optional
+#
+# **Never in the root find_package.** A component in that list which the
+# installed Qt does not have fails the whole call: Qt6_FOUND comes back false,
+# the if(Qt6_FOUND) around this directory skips every GUI target, and configure,
+# build and ctest all report success while the application quietly stops being
+# built. Every Qt this project builds against today is such an install. Asked
+# for as its own package, a missing module disables one feature instead.
+# See docs/handover.md, "what asking for a private Qt component at the top level
+# switches off", which is this mistake already paid for once.
+#
+# What needs it is `audio_device.cpp`, which owns the one QAudioSink in the
+# program, and `audio_import.cpp`, which decodes a file on the way in. Nothing
+# else in the tree includes a Qt Multimedia header, which is the whole point of
+# the seam -- see audio_device.h.
+#
+# The deployment spike that came before all of this is gone, as its own header
+# said it would be: `audio_check.*` and the `--audio-check` flag are out, and
+# what they found is docs/audio-spike.md. `tests/audio_probe` stays.
+find_package(Qt6Multimedia QUIET)
+if(Qt6Multimedia_FOUND)
+  target_link_libraries(animage_ui PUBLIC Qt6::Multimedia)
+  target_compile_definitions(animage_ui PUBLIC ANIMAGE_HAVE_AUDIO)
+else()
+  message(STATUS "Qt Multimedia not found: building without audio")
+endif()
 target_include_directories(animage_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/animage)
 
 # OpenEXR, via tinyexr: one vendored BSD-3 header, compiled in exr_writer.cpp

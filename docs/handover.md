@@ -17,6 +17,7 @@ the shape of the program. Those five maps are.
 | [Where it got to](#where-it-got-to) | what exists, milestone by milestone |
 | [**How the program fits together**](#how-the-program-fits-together) | five paths traced end to end, each across several files |
 | [Several tracks, and a track that overwrites](#several-tracks-and-a-track-that-overwrites) | what a second track changed, and what it broke |
+| [Duplicating a track](#duplicating-a-track) | every id inside it is new, and one of them would not have looked wrong |
 | [Restacking by dragging](#restacking-by-dragging) | layers and tracks, one gesture, and where the panel had been scrolling to |
 | [Naming a track or a layer](#naming-a-track-or-a-layer) | renaming a row where it is, and what a name is allowed to be |
 | [Colour through time](#colour-through-time) | a mark carried to a drawing that has none |
@@ -34,12 +35,17 @@ the shape of the program. Those five maps are.
 | [Copy, cut and paste](#copy-cut-and-paste) | which is a float from the clipboard |
 | [What a transform costs](#what-a-transform-costs) | measured, then made to cost less |
 | [Transforming a layer through time](#transforming-a-layer-through-time) | every drawing at once, and the two numbers that decided its shape |
+| [**Importing a picture**](#importing-a-picture) | a layer with no cels, and the one gesture that stores instead of baking |
+| [**Importing a sequence**](#importing-a-sequence) | which frame a drawing shows, a bounded cache, and a decode the paint asks for |
+| [**Importing a soundtrack**](#importing-a-soundtrack) | its own list, two selections, a row you can move and crop, and the picture derived from the sound rather than from a clock |
+| [**Converting an import to drawings**](#converting-an-import-to-drawings) | the way back, one command; and the save that had been quietly deleting the scan |
 | [What a pan costs](#what-a-pan-costs) | the onion skin rebuilt from nothing every 64 pixels, and the cache that scrolls instead |
 | [What a commit does to a line](#what-a-commit-does-to-a-line) | one filter chosen on the wrong quantity, and what it did to a rim |
 | [What a commit is allowed to cost](#what-a-commit-is-allowed-to-cost) | a budget in tiles, and a box that goes red before Enter does anything |
 | [What the pointer says](#what-the-pointer-says) | one place deciding it, in the canvas and in the timeline |
 | [**Looking at the interface**](#looking-at-the-interface) | `shots`: a picture of the program, per situation, and yours to add to |
 | [**Asking Qt a question directly**](#asking-qt-a-question-directly) | `dock_probe`: plain Qt with docks in it, for "ours or theirs?" |
+| [**What taking Qt Multimedia costs**](#what-taking-qt-multimedia-costs) | the audio spike: all three packagers bundled it, and scrubbing needs none of it |
 | [**The same source, two different pictures**](#the-same-source-two-different-pictures) | what a downloaded build does not share with yours, and where to look first |
 | [What the history is allowed to cost](#what-the-history-is-allowed-to-cost) | a budget in bytes, and a save marker that had to stop counting steps |
 | [What is not what the plan asked for](#what-is-not-what-the-plan-asked-for) | deliberate departures, each reversible |
@@ -885,6 +891,44 @@ And **`Timeline` is now `Track`** throughout, including the French
 specification. A `Track` is one stack of layers with its own time; the timeline
 is the scene's shared time axis and the panel that shows it. A scene has several
 tracks and one timeline. If you find the old name anywhere, it meant the track.
+
+## Duplicating a track
+
+**Track ▸ Duplicate track**, and the copy lands directly under the one it came
+from. It follows the highlight like the rest of that menu, so on a soundtrack
+row it duplicates the soundtrack — which is also, today, **the only way a scene
+gets a second one**. The model has been a list since audio arrived and the row
+loop has always walked it; what was missing was any way to put another in, and
+duplicating the one you have is the obvious one.
+
+**Every id inside a track is new, and that is the whole of the work.** A track's
+insides are named by ids that mean something only within it, and three of them
+point at each other:
+
+| | names | so a copy must |
+|---|---|---|
+| `Track::slots` | image ids | be rebuilt from the new ones, holds and all |
+| `Image::cels`, `Image::source_frames` | layer ids | be re-keyed onto the new layers |
+| `Layer::ctg_sources` | the line-art layers a colour layer is cut against | point at the copy's own line art |
+
+**The last one is the one that would not look wrong.** A copy whose colour
+layers still named the original's line art draws perfectly until somebody
+redraws one of the two tracks, and then the wrong fill re-cuts. It is what
+`aDuplicatedColourLayerIsCutAgainstItsOwnTracksLineArt` pins, and taking the
+remap out reddens that test and nothing else — which is exactly what makes it
+worth having.
+
+Drawing numbers are **kept rather than renumbered**: a number is unique within a
+track and this is a whole track, so the copy's cards read the same as the
+original's. Cels are copied rather than shared, which is what makes it a
+duplicate and not a second view, and is the one part of it that costs memory —
+the same cost `duplicateImage` pays, once per drawing.
+
+A soundtrack's copy is cheap by comparison: a file name and four numbers, no
+cels and no ids inside it. `Document::duplicateAudioTrack` does not copy the
+decoded samples, because `core` does not decode — `MainWindow` hands the clip
+across afterwards rather than paying for a second decode of a file it already
+has in memory.
 
 ## Restacking by dragging
 
@@ -3079,6 +3123,1234 @@ that stops working quietly. The hook is taken by the next call to
 `transformLayer` whatever that call does, so one armed before an identity cannot
 lie in wait and go off on a real bake later.
 
+## Importing a picture
+
+**File ▸ Import ▸ Image.** A picture comes in as a `LayerKind::Reference`
+layer: one that holds **no cels at all** and whose pixels are derived from the
+imported file and memoised. Why it is that rather than an ordinary layer with a
+drawing in it, and what a sequence and a video will be, is
+[importing.md](importing.md). This is what was built and what it cost.
+
+Read the section above this one first if you have not. Everything here is a
+contrast with it: a layer transform **bakes**, and this is the one gesture in the
+program that does not.
+
+### Where an imported picture's pixels come from, in order
+
+A sixth path, in the register of [how the program fits
+together](#how-the-program-fits-together), because like the others it is not
+written down in any one file it passes through.
+
+**In.** `MainWindow::importImageFrom` decodes the file
+(`image_import::decode` — QImage, colour-converted to sRGB and linearised into
+half), makes a new track with one `Reference` layer and one drawing,
+`TrackEnd::HoldLast`, and records the file under a name inside the project. The
+picture is installed with `Document::setReferenceFrame`, which is **not an
+edit**: no cel, no journal entry, no undo step. The menu item is a file dialog
+and a recap in front of that function, and nothing else — which is what lets
+`shots` and the tests drive an import without answering a dialog.
+
+**Out.** `Compositor`'s `collectPasses` is the one place in the program that
+resolves a layer to pixels, and the reference branch sits beside the colour
+layer's and has the same shape: ask the document, draw what is there, start
+nothing. What comes back is an ordinary `TileGrid`, so **nothing below
+`collectPasses` knows this kind exists** — `compositeGrids`, the export's
+per-layer path and the eyedropper all work with no changes at all.
+
+**Kept.** `refreshEverything` calls `MainWindow::refreshReferenceFrames`, which
+re-derives any layer whose picture is missing or was made at a placement the
+layer no longer has. Cheap when there is nothing to do, which is nearly always:
+the test is a hash lookup per drawing.
+
+**On disk.** `imports/` in the project folder, carried forward by every save.
+See the trap below, which is the one thing here that would have gone wrong
+silently.
+
+### A drawing carries a picture two ways, and a copy has to take both
+
+`Image::cels` is how a raster layer has something at a drawing. `source_frames`
+is how a *reference* layer does — an entry naming which frame of the imported
+file this drawing shows. They sit beside each other on the `Image` and answer
+the same question for two kinds of layer.
+
+`copyOfImage` took only the first, so **a duplicated drawing came back without
+its imported picture**. On a track that is nothing but an import the whole
+drawing was blank, which is what it was reported as: *"Duplicate drawing fails
+silently on an import."* It had not failed. It had succeeded and handed back an
+empty frame.
+
+**The mixed track is the case worth knowing about**, and it is the one that hid:
+a track can hold a raster layer and a reference layer together, and there half
+the drawing came through. It reads as having worked, and the imported half is
+gone.
+
+Nothing is refcounted in the fix, unlike a cel: the entry is an int naming a
+frame of a file the layer already lists, and two drawings pointing at the same
+frame of the same file is the ordinary case — it is what holding an imported
+frame a second time means. `copyOfImage` is the only place in the program that
+builds a copy of an `Image`, which is why this was one hole and not several.
+
+### It stores where the picture goes, and does not bake it
+
+The section above spends its length on why a layer transform bakes: a stored
+affine would force everything that reads a layer's pixels through a matrix —
+the brush, the eyedropper, `ctgBarrier`, `celBounds`, fit-to-drawing, export.
+
+**That argument is entirely about layers whose pixels are the truth.** A
+reference layer's are derived, so its placement is applied in the *derive step*
+— decode, colour-convert, tile, `transformTiles`, cache — and what reaches
+`collectPasses` is a plain, already-placed grid. `compositeScene` is still a flat
+list of untransformed grids and `LayerPass` is still not widened. The thing #25
+refused is still refused.
+
+What it buys is that **the loss never compounds**: adjusting a placement
+re-derives from the original file, so a picture nudged, scaled and nudged again
+has been resampled once, from the bytes that came off disk. A baked one would be
+a resample of a resample of a resample, and would look fine until the third
+adjustment.
+
+**The box opens at the placement the layer already has**, and that is not only a
+courtesy. `Transform` holds `scale_x` and `scale_y` separately, so two of them do
+not compose into a third — rotate, then scale non-uniformly, and the result is a
+shear the struct cannot express. Absolute numbers that the drag *edits* avoid
+composition altogether. A design that started the box at the identity and
+composed onto the stored value would have hit that wall after the arithmetic was
+written.
+
+**The cache is keyed on the placement, and absent beats stale.** A frame derived
+at an earlier placement is not a slightly-out-of-date picture, it is a picture of
+where the import used to be — and it would go on being drawn, convincingly, until
+something happened to refresh it. `Document::referenceFrameFor` therefore takes
+the placement and reports a mismatch as *nothing here*. Same lesson as [why a
+cache key of cel revisions serves wrong fills, not slow
+ones](#why-a-cache-key-of-cel-revisions-serves-wrong-fills-not-slow-ones), from
+the other end.
+
+### What the box's colour means, which changed
+
+**Blue is what you pointed at — your selection, or the drawing in front of you.
+Green is more than that.**
+
+It used to be blue for the tool and green for the layer button, on the grounds
+that the two doors "write amounts two orders of magnitude apart". That reason
+does not survive this feature in either direction: a placement writes *nothing*
+and can still move forty drawings, and a one-drawing layer came through the layer
+door and moved exactly the drawing in front of you — the blue case wearing green.
+
+So the rule is about scope, and the cost signal it used to carry is left to red,
+which is the urgent one anyway.
+
+**What the colour deliberately does not carry is whether the lasso applies.**
+That already announces itself and better: a gesture that ignores a loop clears
+it, so the loop visibly goes. One signal per fact — and the drawing count has no
+other signal, since a layer of two drawings barely has ghosts.
+
+### A layer of one drawing is the Transform tool's job — and is now told so
+
+*Superseded in part. What follows is the reasoning, which stands; what changed is
+what the code does with it — see [a layer of one drawing is refused, where it
+used to be handed over](#a-layer-of-one-drawing-is-refused-where-it-used-to-be-handed-over)
+below.*
+
+`beginLayerTransform` used to hand over to `beginTransform` when the layer had
+one drawing, and **that is what gave the lasso back**. The whole-layer path
+clears the selection because a loop describes a shape on this drawing and
+nothing at all on the other forty; with one drawing there are no other forty,
+and refusing the lasso there while honouring it in the tool was a difference
+with no reason behind it.
+
+Everything else already agreed — the box is that drawing's bounds either way,
+Apply writes one cel either way — and the ordinary path does it without the
+bake's rescue, its deferred trim or its history cost. **It refuses and names the
+tool now instead of handing over silently**, which reaches the same place with
+the button telling the truth on the way.
+
+Not for a reference layer, whatever the drawing count: there is no cel for the
+tool to lift, and a placement is a property of the whole file. **There is no
+lasso on an import for that reason and not because of the drawing count**, which
+is a different sentence and needs to stay one.
+
+### The Transform tool works on an import, and the doors do not disagree
+
+`chooseTransformTool` routes a reference layer **of one file** to the placement.
+Both doors mean one thing when there is one picture, and refusing with a message
+pointing at the other button would be a rule with no consequence behind it. A
+sequence is where that stops — see below.
+
+"Two doors and no switch" is untouched by this: what that refuses is a control
+that changes the scope of a gesture *already on screen*, and this is decided
+before there is one.
+
+### And a sequence is where that argument stops
+
+`chooseTransformTool` routes a reference layer of **one** file to the placement.
+A sequence is several, so the tool — which says it moves *this drawing* — has
+nothing here it can honestly do, and it is greyed out with a tooltip naming the
+two ways forward: convert it to drawings, or use "Place this picture", which is
+what moving a whole sequence actually is.
+
+The reasoning above is what decides it rather than a new rule: *"both doors mean
+one thing when there is one picture"* was always the argument, and it simply
+stops being true at two. Greyed rather than left to refuse when pressed, because
+a tool that looks available and then bounces you back to the brush is a tool you
+try twice.
+
+### A layer of one drawing is refused, where it used to be handed over
+
+**This reverses a decision recorded a few paragraphs up**, and the paragraph it
+reverses is worth reading first because the reasoning in it was not wrong — the
+conclusion was.
+
+`beginLayerTransform` used to hand a one-drawing layer to `beginTransform`, on
+the grounds that with one drawing the two gestures mean the same thing and the
+whole-layer path would throw away a lasso for no reason. Both halves of that are
+true. What it produced was a button reading **"Transform layer through time"**
+that quietly did something else, on the most ordinary layer there is — a fresh
+track has exactly one drawing.
+
+So the door refuses with `Refusal::OneDrawing` and the button greys with the
+reason, which names the Transform tool. The lasso comes back by the same route
+it always did: the tool is where you are now sent, by a sentence instead of by
+machinery. What went with the change is the branch that did the handing over,
+which is the simplification the change was predicted to allow.
+
+The general shape: **a control that silently does something other than what it
+says is worse than one that refuses and explains**, even when the thing it
+silently does is the right thing.
+
+### Four labels that would have been false
+
+Worth listing because each was true before this feature and silently stopped
+being, which is the shape of thing this file exists to catch:
+
+| | said | says |
+|---|---|---|
+| the transform bar | "Whole layer" | "Placing — nothing is written" |
+| the panel button | "Transform layer through time" | "Place this picture" |
+| Apply's tooltip | "Bake it into the drawing" | "Put the picture down here. Nothing is written" |
+| `refuseToEditHere`'s comment | "The layer kind is not here" | which kind is, and why the rest are not |
+
+The last one is the important one. That comment explained a deliberate decision —
+the brush puts scribbles on a colour layer, so nothing on that list has to care
+what kind of mark it is carrying — and a reference layer is the first kind the
+brush itself must refuse, because there is nowhere to put a mark rather than
+because of what kind of mark it would be. The reasoning is intact and still
+decides the colour layer; the comment now says which is which.
+
+Apply's tooltip is composed from the keyed-tooltip table like every other, so it
+still names the right key after a rebinding. `setKeyedTipText` is how a tooltip
+that changes with the gesture reaches into that table rather than around it.
+
+### What it costs, and where the next line is
+
+Nothing measurable yet, and that is the point: an imported picture contributes
+**no cels**, so it costs a save nothing, costs the undo history nothing, and adds
+nothing to `totalTileCount`. `an-imported-picture-placed-and-applied` in `shots`
+photographs `tiles 0  undo 2 (0 MB)` after a placement, which is the whole claim
+in one line.
+
+**The re-derive runs on the interface thread**, from `refreshEverything`. That is
+affordable for a still and will not be for a sequence: a decode you can feel on a
+300 dpi scan is a decode per frame on an animatic. That is the line where this
+grows a worker and the request path becomes `requestCtgFills`' — paint asks, a
+worker computes, a poll installs — which is what [importing.md](importing.md)
+already specifies and what `CtgFillCache` is the template for, bound and
+generation counter included.
+
+### What is not built
+
+- **Video.** A sequence with a decoder in front of it and no new storage at all:
+  extracted to frames once, at import, so `QMediaPlayer` never reaches the paint
+  path. The shape is settled in [importing.md](importing.md).
+- **Playing a soundtrack.** Importing one is built and so is its row — see
+  [importing a soundtrack](#importing-a-soundtrack) — and the deployment spike
+  is done ([what taking Qt Multimedia
+  costs](#what-taking-qt-multimedia-costs)). What is left is `AudioDevice` and
+  the scrub.
+- **Telling a reference layer from an ordinary one in the panel**, which is
+  [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
+  sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
+  layers.
+
+## Importing a sequence
+
+**File ▸ Import ▸ Image sequence.** The still was deliberately the smallest
+instance of this and the shape did not change: the same `LayerKind::Reference`,
+the same no cels, the same derived-and-memoised pixels. What a sequence added is
+three things one frame never needed, and each of them turned out to be a
+different kind of problem.
+
+### Which frame a drawing shows, and why position cannot answer it
+
+`Image` has a second sparse map beside `cels`: `LayerId → source frame index`,
+absent meaning the layer is empty at this drawing exactly as a missing cel does.
+`Layer::reference_source` became `reference_sources`, a list, and **a still is a
+list of one** — making the single picture the one thing that is not a sequence
+would have meant answering placement, export, save cost and colouring twice for
+two features a user thinks of as one.
+
+**It is not a retiming feature and it is not provenance.** Without it, "which
+frame of the source does this drawing show" has to be derived from where the
+drawing sits, and position moves: add a hold and two drawings share a slot
+index, delete a frame and everything after it shifts. The very first hold breaks
+it, and adding the field afterwards would be a migration of every project with
+an import in it. It is not keyed on `Image::number`, which
+[track.h](../src/core/track.h) says is reused after a deletion.
+
+`setSourceFrame` is an edit — journaled, undone, saved — unlike everything else
+in that part of `Document`, because the pixels are derived and cost a decode to
+lose while this is a fact only the file remembers. It rides on `ImageOp`, which
+already swaps a whole `Image` and fixes the cel refcounts on both sides.
+
+### A bound, and the rule that is not obvious
+
+`ReferenceCache` is `CtgFillCache` with the words changed, and the resemblance
+is the point rather than a coincidence: both are derived data, bounded in bytes,
+kept on the `Document` rather than on the thing they describe, precisely because
+losing an entry costs a rebuild and nothing else.
+
+**A lookup renews an entry and a store does not.** That is the whole rule. A
+scrub goes back and forth over a handful of frames, so the frames being *looked
+at* are the ones that must survive; renewing on store would hold whatever was
+decoded most recently, which during a scrub is exactly the frame you are
+leaving. `aLookupIsWhatKeepsAFrameResident` drives it against a budget small
+enough to fill, which is the only reason the bound is settable at all.
+
+**Absent still beats stale.** An entry records the placement it was derived at
+and a lookup at any other reports *nothing here* — a frame derived under an old
+placement is not slightly out of date, it is a picture of where the import used
+to be, and it would go on being drawn convincingly.
+
+**And eviction may only happen where the document may be edited**, which does
+not look like an invariant and so is written where the class is: `LayerPass`
+holds raw pointers into these grids and `compositeGrids` reads them from several
+threads.
+
+The budget is 512 MB and is **not measured**. The arithmetic is on the constant
+so it can be argued with.
+
+### Where an imported picture's pixels come from, in order — and what changed
+
+The still's version of this path had the derive step running from
+`refreshEverything`. **That could not survive a sequence, and the reason is a
+fact about the program rather than about cost:** a frame change goes
+`TimelineWidget::setCurrentSlot` → `onSlotChanged` → `canvas_->setFrame` and
+never touches `refreshEverything` at all. A still did not care, because every
+drawing of its track showed the same picture and the only thing that changed it
+was a placement, which does arrive there. A sequence shows a different frame at
+every drawing, so scrubbing one would have shown frame 1 for ever.
+
+So the ask moved to the paint, which is the one thing that reliably happens when
+what is on screen changes — the shape [importing.md](importing.md) specified and
+the one the colour layer already uses. `refreshEverything` now touches imports
+not at all, and the absence has a comment on it saying so.
+
+`ReferenceDecoder` is `CtgSolver` with a decode in it. Its header lists the
+three places they differ rather than pretending they do not: a job names a path
+instead of a document, nothing is abandoned mid-decode, and there is one kind of
+question so a request is identified by the drawing and the layer alone. It takes
+**newest first** off its queue, which is the opposite of the solver and is right
+here — a queue that backed up during a scrub is a list of frames already dragged
+past.
+
+**The canvas still never works out a path.** Where an import lives depends on
+whether the project has been saved and into which folder, which is MainWindow
+state that moves on the interface thread — so the canvas is given a locator it
+calls once, on the interface thread, at the moment a job is queued, and never
+inspects what comes back.
+
+### Three things that were wrong, and what each one taught
+
+**A frame that will not read is remembered as an empty picture.** Not tidiness:
+the paint asks for whatever is not in the cache, so a failed decode that left
+nothing behind would be asked for again on the next paint and every sixteen
+milliseconds after that, for as long as the window is open — a decode a frame,
+on a worker, for ever. `aFileThatWillNotReadIsAskedForOnce` pins it.
+
+**Leaving a frame is not a reason to cancel a decode, and copying the colour's
+rule said it was.** A paint drops stale requests and then asks, so at
+twenty-four frames a second every decode was called off forty-one milliseconds
+after it started — and a frame that takes longer than that never finished.
+Reported as a libpng warning repeating during playback; the warning was the
+file's, and the *repetition* was every pass decoding every frame and throwing
+all of them away. The import was never visible during a take at all.
+
+The colour's reason does not transfer either. A `CtgJob` carries copies of the
+tile grids it will solve from, so a queue of them that fills faster than it
+drains is real memory; a decode job is a path and nine numbers. And **a decoded
+frame is worth having even for a drawing you have left** — it is the frame you
+will be on again next time round, and the cache it lands in is bounded.
+
+**The colour had the same bug and it was worse there**, because `abandoned()` is
+checked *inside* the max-flow: the solve gave up partway and produced nothing,
+so no fill ever completed during playback and the cache never accumulated. Found
+here, fixed there — [#85](https://github.com/S-poony/Animage/issues/85), and
+written up in [the answer that was called off a moment before it
+landed](#the-answer-that-was-called-off-a-moment-before-it-landed), which is
+worth reading for the part that generalises: the benchmark that should have
+caught it was warming the thing it was measuring.
+
+### What it costs, measured
+
+`bench_import` exists because a report arrived that nothing here could answer,
+and it takes a folder so it measures the real files rather than made-up ones —
+what a PNG costs depends on what wrote it.
+
+It found the tiling loop paying three `std::pow` per pixel through
+`srgbToLinear`, and a hash-map lookup per pixel as well. Six million
+transcendentals for an HD frame: **145 ms of tiling against 21 ms of actually
+reading the PNG.** A 65536-entry table — every 16-bit value there is, which is
+every input that can arrive once the image has been widened — and the tile
+lookup hoisted to once per tile per row take that to **35 ms**.
+
+**Every pixel is bit for bit what it was**, and that is required rather than
+nice: the table is a memo of `color.h`'s function and not a second version of
+it, because the derive step must be deterministic — a frame that is evicted and
+decoded again has to come back the same or the picture changes while somebody
+scrubs over it.
+
+On the 4000×2250 sequence that was reported: 94 ms a frame, of which **70 is
+libpng reading a 3.7 MB file and is not ours**. Those frames are mostly
+transparent, so each is 18 tiles rather than 576 — all 151 come to 339 MB
+against the budget, and every pass after the first is cached.
+
+### Saying so, which is not optional at these speeds
+
+An import whose frames are not decoded draws nothing — correctly, since
+compositing may not start a decode — so a take that runs before they are in
+shows the playhead advancing over a blank canvas. **That is indistinguishable
+from the program being broken**, and it was reported as exactly that.
+
+The status bar gains `loading imported pictures: 43 of 151`, its own permanent
+widget beside the playback rate and in the same red. Three decisions in it:
+
+- **Shown while a decode is outstanding, not while frames are merely missing.** A
+  frame is only asked for when it is on screen, so a sequence somebody scrubbed
+  part of sits at 40 of 151 with nothing happening — and a number that does not
+  move is worse than none, being exactly what stuck looks like.
+- **The denominator is the whole sequence**, because during a take every frame
+  is visited and the climb is the progress being waited on. "How many are being
+  worked out right now" would read 1 throughout.
+- **`ReferenceCache::has` exists because asking is not using.** The count asks
+  about every frame at once, and going through `find` would renew all of them on
+  every status update — flattening the eviction order that keeps a scrub's own
+  frames resident, from the one place whose whole job is to report and change
+  nothing.
+
+### What the dialog asks, and the one thing it will not offer
+
+Order is **numeric and not correctable**: the last run of digits in the name,
+padding not part of the group, files that surround their number differently kept
+as separate runs, and a name with no digits at all put last. So there is no list
+to drag rows about in — and what replaces it is the recap *saying what the rule
+did*, which is this program's house rule for input it will not refuse and will
+not silently pick over.
+
+Three things it says rather than offers, because none is a choice: a new track,
+one drawing per file on 1s, and `TrackEnd::Nothing`. That last is deliberately
+not the still's `HoldLast` — a modelsheet is meant to stay up for the whole shot
+and an animatic is a stretch of timing that ends where it ends.
+
+Two it offers: a start frame defaulting to 1, and half size — which is a
+*placement* of 50% and not a separate mechanism, so it is undoable, adjustable
+afterwards through Place this picture, and cheaper rather than dearer, the
+derive step applying the scale so a frame caches a quarter of the tiles.
+
+A file that will not read is kept in the list rather than dropped, because
+position in that list is what each drawing points at: removing one would move
+every frame after it onto the wrong picture. Same reason a missing number leaves
+a gap.
+
+**And it does not ask which track to land in.** That was settled the other way
+in [importing.md](importing.md) and reversed on the user's call: the argument
+was that `ctg_sources` resolve inside the track, so a colour layer could not cut
+against an import that landed elsewhere — and it never asked where the colour
+layer is. `addColourLayer` acts on whichever track is current and an import
+makes its track current, so the whole chain sits inside one track. What that
+gives up is named there rather than dropped.
+
+### What is not built
+
+- **Telling a reference layer from an ordinary one in the panel**, which is
+  [#84](https://github.com/S-poony/Animage/issues/84) and is smaller than it
+  sounds: `layerLabel` and `applyLayerFlag` already do exactly this for colour
+  layers.
+
+## Importing a soundtrack
+
+**File ▸ Import ▸ Audio.** A sound comes in, is decoded, is copied into the
+project, and gets a row in the timeline it can be moved and cropped in. **It
+plays**: dragging the playhead along the ruler scrubs it, and Play carries it
+with the picture. What is left is set out at the end of this section.
+
+Why audio is not a `Track`, what scrubbing is for and what the playback clock
+has to be derived from is [importing.md](importing.md). What taking Qt
+Multimedia cost, measured before a line of this was written, is
+[audio-spike.md](audio-spike.md). This is what was built.
+
+### Audio is its own list, and that is what keeps everything else meaning what it meant
+
+`Scene::audio_tracks` sits beside `Scene::tracks` rather than being a kind of
+one. The specification has it that way and the code makes it sharper: `Track`
+carries layers, slots, an image map, drawing numbers, `overwrite_drawings`,
+`TrackEnd`, `blend`, `celSourceFor` and `nearestWithCel`, and audio answers *not
+applicable* to every one. About twenty places walk `scene.tracks`; a kind flag
+would put a guard in all of them.
+
+`theSceneCarriesAudioTracksBesideItsTracksAndNotAmongThem` asserts the property
+that argument rests on rather than assuming it — adding a soundtrack leaves
+`scene.tracks` empty, so every one of those loops is untouched.
+
+**It does not enter `shotFrames`.** A shot's length is what the drawings make it
+or what the scene was told; a soundtrack running long is reference, and a scene
+that grew when one was imported would be taking the shot's length from the wrong
+thing. What it *does* enter is `Document::timelineFrames` — see below.
+
+### The one line that will make lipsync right, built before anything can play it
+
+`slotForPlayedFrames` derives the picture's slot from how much audio has come
+out of the device, replacing a slot derived from the system clock. Three of the
+four ways two clocks come apart stop existing rather than being separately
+corrected: the device's output latency is already inside the count, a loop seam
+wraps both together because there is only one number, and an interface stall
+cannot reach a number that is not counted on that thread.
+
+**It takes the sample count as an argument, and that is a requirement rather
+than a style.** The runners have no audio device, so anything opening one there
+fails or hangs — which means the arithmetic the whole of lipsync rests on is
+exactly the part that could never be tested if it lived inside something owning
+a `QAudioSink`. `test_audio` drives it with a fake and pins the loop seam and
+the stall case on every platform on every push, with no hardware at all. The
+precedent is `exporting::Solve`.
+
+Four things in it that are not obvious, each of which was a bug avoided rather
+than a style choice:
+
+- **`played * fps / rate` in one step.** Going through whole milliseconds
+  truncates a fortieth of a frame away on every tick.
+- **A count that goes backwards is clamped.** A driver misreporting across a
+  restart would otherwise turn a small negative into a colossal slot through the
+  unsigned arithmetic — a picture on a random frame, which is much harder to
+  recognise as a fault than a picture that has stopped.
+- **`sampleForSlot` floors rather than truncates.** Truncation rounds towards
+  zero, so a slot a fraction *before* the sound would come back as sample 0:
+  audible, on a frame that should be silent, and only on the negative side.
+- **A negative index says how far before the sound the slot is**, rather than
+  being a sentinel. A caller plays silence until it reaches zero and then reads
+  on, which is what a sound placed halfway into a frame needs.
+
+### It decodes on the way in, where a picture does not
+
+A sequence points its drawings at files and lets the paint ask for them, because
+two hundred decodes on the interface thread is not a thing to do. A soundtrack
+cannot: what would ask for it later is a device callback that must never wait on
+a disk. So `audio_import::decode` reads the whole file before the track exists —
+one file, tens of milliseconds — which is also what lets the recap say how long
+the sound is.
+
+It runs a **nested event loop**, because `QAudioDecoder` is asynchronous by
+construction and there is no call that returns samples. The header says why that
+is safe here and where it would not be. Three things in it are bugs if dropped:
+
+- **Every buffer is read at its own format.** Setting a format is a request; a
+  backend may hand back its own, and reading Int16 bytes as Float is a scream
+  through somebody's headphones.
+- **A silence timeout.** A backend that fails in a way it has no error for
+  simply stops emitting, and the loop would otherwise spin for ever behind a
+  modal dialog — which from the outside is the program hanging on a file
+  somebody double-clicked.
+- **Int16 divides by 32768, not 32767**, or a full-scale negative sample comes
+  out past −1.0 and clips on the way to the device.
+
+The decoded `AudioClip` is **derived data on the `Document`**, like a reference
+frame's tiles and for the same bargain: losing it costs a decode of a file
+sitting in the project folder. It is unbounded unlike the reference cache,
+because a shot's worth of PCM is single-digit megabytes where one HD picture
+frame is 17. `refreshAudioSamples` re-decodes after a load and nowhere else.
+
+### The timeline reaches the sound; the shot is asked before it does
+
+Two different questions, and the split is what makes both answers right.
+
+`Document::timelineFrames` is the scene's own answer widened by any decoded
+soundtrack. **It is on the Document because the Scene cannot answer it** — a
+clip is derived data held here, so this is the one object that knows both the
+tracks and the sound. The canvas and `stepFrame` moved onto it too, or the
+playhead would be in two places at once: the strip showing it out over the sound
+and the canvas showing an earlier frame.
+
+The **shot** is a separate matter, and importing asks. Playback derives its slot
+from `Scene::shotFrames`, so a one-second soundtrack in a shot of one drawing
+played one frame and stopped — widening the timeline lets the playhead be
+*dragged* over the sound and does nothing for Play. So the import dialog offers
+to make the shot reach the end of the sound, and the rule is:
+
+> **The box appears when it would change something, and is ticked only when
+> nothing has decided the length yet.**
+
+No box when the sound fits; ticked when no length is fixed; offered and unticked
+when one is — saying how long a shot is is a decision, and an import has no
+business overruling one already made. It never *shortens* the shot, whatever
+offset is picked: the box says "reach the end of the sound", and a shot that
+shrank would take drawings out of the export.
+
+`scene.h` already named animating to a soundtrack as the case `fixed_length`
+exists for, which is worth knowing before arguing with any of this.
+
+### Two selections where the timeline had one
+
+`MainWindow::track_` is read by five things — the canvas, the layer panel, the
+Track menu, the drawing buttons and the status bar — and every one of them wants
+a real `Track`. Clicking an audio row through the old path would have handed
+`findTrack` an id that is not one: nothing to point at, the brush stops working,
+and nothing says why.
+
+So the timeline has a **narrow selection** (`track()`, only ever a drawing
+track) and a **wide one** (`highlightedAudio()`, which may name something that
+is not a `Track` at all and therefore may not be read by anything needing one).
+Clicking a soundtrack row moves the highlight and leaves the brush where it was.
+
+**Three things a soundtrack row walks into**, found by auditing every place that
+assumed a row is a track:
+
+- The paint loop dereferenced `trackAt` without asking. Every other call site
+  already guarded — `trackAt` has always answered null past the end, and what
+  changed is only that there is now something *after* the end.
+- Restacking was bounded by `rowCount()`. A drawing row dropped below the
+  soundtracks would hand `moveTrack` an index past the list it indexes, so it is
+  bounded by `drawingRowCount()` now.
+- `renameAt` would have opened an editor over a soundtrack's name and written
+  the result to a track, which is the exact confusion the two selections exist
+  to prevent. It renames soundtracks now, and what makes that safe is
+  `renaming_audio_`: which list the id belongs to is settled when the editor
+  opens rather than guessed when it closes.
+
+#### What the two selections owed the interface, and did not pay until it was reported
+
+The split above is right and stays. What was wrong is that **the interface drew
+it as one thing and the Track menu read the wrong half of it**, and both were
+reported from use in the same breath — as *"you can't delete an audio track; it
+would be simpler if you could only select one track at a time"*.
+
+That conclusion is the natural one to draw from what was on screen. A drawing
+row was painted current whenever `track_` named it, and a soundtrack row was
+painted current whenever `audio_row_` named it, in the same colour — so clicking
+a soundtrack lit **two rows at once**, which is what two selections look like.
+
+Collapsing them would cost more than it saves, and the cost falls on the exact
+gesture a lipsync shot is made of: with one selection, clicking a soundtrack row
+to nudge the sound half a frame puts the brush away — no track for the canvas,
+an empty layer panel, dead drawing buttons — and getting it back means clicking
+a drawing row again. Every single time you touch the sound.
+
+So the two facts stay and are drawn as two facts:
+
+> **The fill means "pointed at". The washed-back fill means "the brush lives
+> here".** One row has the first at any moment.
+
+- While a soundtrack is highlighted, the drawing track's gutter is the highlight
+  colour at a third of its strength and its name drops back to ordinary text.
+  It is the same colour washed back rather than a new one, so it is right in a
+  dark theme for the reason everything else in this palette is.
+- **A stroke landing on the canvas takes the highlight back**, through
+  `clearAudioHighlight`. Drawing is the unambiguous statement that you are done
+  with the sound, and without it a soundtrack clicked once stays lit for the
+  rest of the session while every stroke lands somewhere else.
+- **The Track menu acts on the row you are pointed at.** Rename and Delete
+  follow the highlight; "Overwrite drawings" and "Past the last drawing" grey
+  out while a soundtrack is highlighted, because neither means anything for one
+  and both would otherwise act on a row nobody pointed at. `highlightChanged`
+  is what tells the menu, and it exists because `trackChanged` cannot: clicking
+  a soundtrack row deliberately leaves the current track where it was.
+
+**A submenu whose every item is greyed still opens**, which is a thing worth
+knowing because it looks fixed and is not. "Past the last drawing" had its three
+items disabled on a soundtrack row and went on opening to offer them — a menu
+that offers a choice and then refuses all of it says *there is something here
+you may not have*, where one that does not open says *there is nothing here*.
+The second is the true one. `QMenu::menuAction()` is what has to be disabled,
+and holding the submenu as well as its items is the only reason `end_menu_`
+exists.
+
+#### The ruler is pinned, and the option that looked better was the same picture
+
+Same report, same cause: **soundtracks are under every drawing row**, so a scene
+with a few tracks in it is one you scroll down to reach the sound — and the
+ruler is where scrubbing happens, which is the only way to hear that sound. A
+ruler that scrolled away with the rows took the scrub band off the screen
+exactly when it was wanted.
+
+It is pinned **inside** the scrolled widget: `setRulerTop` is the scroll area's
+vertical position, the band is painted last so it covers what slides under it,
+and every gesture asks `inRuler` before it asks which row it is on.
+
+**The alternative was to lift it out of the scroll area entirely**, into a strip
+of its own above the viewport, and that was argued for here on the grounds that
+a pinned band inside the widget *hides content*. **That was wrong and it is
+worth writing down why**, because it is a plausible-sounding mistake. Taking the
+ruler out reserves its 18 pixels above the viewport; leaving it in spends the
+same 18 covering the top of it. Either way the row at the top of the view is cut
+off by the same amount and comes out from under by scrolling. Neither costs the
+dock any height — `syncTimelineHeight` moves it by *row differences*, and the
+ruler is part of the fixed surround in both. Same picture, one sixth of the
+code, and the end-of-shot line stays one `drawLine` through both bands instead
+of being split across two widgets.
+
+The general shape of the error: **two designs that differ in which side of a
+boundary a fixed cost sits on are the same design.** What would have made the
+split worth it is a fact about the *content* — something the band must never be
+able to cover — and there is none here.
+
+**And the gutter is pinned the same way, which is the argument above turned
+ninety degrees.** Asked for from use, and it is the axis that needed it more: a
+shot is long sideways where it is short downwards, so scrolling right is the
+ordinary thing to do in a timeline — and it used to take the column of names off
+the screen, leaving rows of identical cells with nothing saying which track was
+which, and nothing showing which row the brush was on. `setGutterLeft` is
+`setRulerTop` with the axis changed.
+
+Three things it needed that the ruler did not, and each is a consequence of
+which axis it is on rather than a new decision:
+
+- **The names move to a pass of their own, after every row.** A gutter was the
+  first thing each row painted, which was fine while it could not move — a cell
+  drawn afterwards was always to the right of it. Pinned, the cells it must
+  cover are drawn *after* it in the same pass, so it has to come later than all
+  of them. It goes before the ruler rather than after, so the top-left corner
+  stays the ruler's exactly as it looks unscrolled.
+- **The band's contents are clipped to the right of it.** The fill still spans
+  the whole width, but a frame number over the name column would be labelling a
+  cell the gutter is covering, and the end-of-shot grip would be a control
+  sitting on the names. `isOnSceneEnd` refuses inside the gutter for the reason
+  its own comment already gave: *a grab zone you cannot see is worse than no
+  handle at all*.
+- **The rename editor has to be moved.** It is a real child widget laid over the
+  name rather than something painted, so no repaint puts it right; without that
+  line it stays where the gutter used to be. The ruler has nothing living in it.
+
+`inGutter` replaces `x < kGutterWidth` at every hit test and at none of the
+arithmetic — `slotAt` is deliberately not a caller, exactly as `rowAtY` was left
+alone when the ruler was pinned. Cells are where they always were; what the
+column does is cover some. What `test_canvas` pins is not that it is drawn in
+the right place, which a shot says better, but that **where it is drawn and
+where it is pressed are the same place**: those are two pieces of code, and
+moving one without the other is a name column you can see and cannot rename.
+
+**Renaming a soundtrack is allowed, and the objection to it is answered rather
+than dismissed.** It was raised that a user should perhaps not be able to rename
+an import at all. The thing that makes it safe is that an `AudioTrack` carries
+two separate strings: `name`, a label, and `source`, the file in the project's
+`audio/` folder, which nothing here touches. What renaming genuinely costs is
+the row's last visible link to the file it came from — so the row has a tooltip
+saying which file that is. Two takes both imported as `dialogue` is the ordinary
+case the rename exists for.
+
+### The row: one shape carrying three facts
+
+Painted by `paintEvent` and hit-tested in `mousePressEvent`, **not a `QSlider`**
+— a widget placed on a row disables that row's own hit testing, which this file
+already records for the rename editor and the layer panel already paid for.
+
+The block is where the sound sits; its *height* is the level, so at the bottom
+it is silent and no separate mute is needed; its *ends* are where the crop is.
+The extent stays visible at any level, because a row that vanished when it was
+silenced would be a row nobody could grab to bring back.
+
+**And its top edge is the waveform**, which was left out of the first cut and is
+in now. [importing.md](importing.md) put it out on the grounds that a labelled
+bar is enough to *place* a sound and peaks are a second derived thing to build
+before anything is audible. That was right, and it expired the day scrubbing
+worked: a bar says where the sound is, and somebody reading a track needs to see
+where the syllables are.
+
+**It is the block's own top edge and not a picture laid over it**, which is what
+keeps all three sentences above true. The whole shape is scaled by the gain, so
+turning the sound down flattens the syllables with it and at the bottom there is
+a flat line — which is what silent looks like, and is the same statement the
+height was already making. The alternative, a centred waveform with a level bar
+behind it, would have taken the level off the shape and needed a second thing to
+carry it.
+
+Two decisions in it that are not obvious:
+
+- **Normalised to the file's own loudest moment, not to full scale.** A dialogue
+  take recorded at a sensible level is a low ripple against full scale, with no
+  syllables in it — and a waveform that cannot be read has not earned its row.
+  So the shape says *where the sound is* and the block's height says *how loud
+  it will be*. What that costs is that two takes recorded at different levels
+  look equally loud.
+- **A quiet passage draws a one-pixel line rather than a gap.** Without the
+  floor the row breaks into islands, which reads as a sound that is not there
+  rather than a sound that is soft — and the gaps are also where somebody has to
+  grab to move the block.
+
+**And the level got a line of its own back, which the waveform had taken away.**
+Before the shape came from the sound, the top of the fill *was* the level and
+there was nothing else it could be. With a waveform the top of the fill is the
+loudest syllable in view and everywhere else it is lower — so the number the
+drag is setting had no edge left. The line sits where a flat block would have
+ended: the waveform touches it at the file's loudest moment and stays under it
+everywhere else. Reported from use, on the first row anybody dragged after the
+waveform landed.
+
+`AudioPeaks` in `core/audio_peaks.h` is what it draws from: one bucket per 64
+frames of audio, built when a file decodes and thrown away with the samples.
+Derived from derived data, never written to a project, about 30 KB for a
+ten-second take. **The bucket is narrower than a pixel column by construction** —
+a cell is 26 pixels and a frame at 24 fps is 2000 samples at 48 kHz, so a column
+is about 77 — which is what stops the row drawing a shape it invented between
+two of them. It is rectified rather than signed, because a shape rising from the
+bottom needs one number per column and not a pair.
+
+A trap worth keeping, from the situation that photographs it: **a tone at one
+level draws as a flat-topped block**, which is exactly what this row looked like
+before. `writeTone` in `tests/shots.cpp` shapes its amplitude into six bursts
+for that reason — a shot taken with a flat tone would have come back green
+having shown nothing.
+
+### Three gestures, one of them decided rather than chosen
+
+Dragging an end crops. Dragging the body sideways moves the sound along the
+shot. Dragging it up and down sets the level.
+
+The ends are unambiguous and start on the press. The other two share a press and
+are told apart by **which way the pointer goes first** — the same way this file
+already tells a drawing drag (along a row) from a track restack (across one),
+except that both of these start inside the row so the threshold decides rather
+than the side of the gutter.
+
+**A press that never moves opens no command and applies nothing.** Selecting a
+soundtrack must not change it, which the first version got wrong by setting the
+level to wherever the click landed.
+
+**Nothing rounds to a frame**, on the user's call, and there is no snap
+modifier. 1/24 of a second is 42 ms, which is most of the way to a syllable, so
+a sound placed to the nearest frame is not placed at all. A pixel is 1/26 of a
+frame at this cell width, which is the precision the gesture actually has.
+
+Every drag is computed *from* the placement as it was when the press landed,
+never by accumulating deltas — the same reason the transform box holds absolute
+numbers. Accumulating makes the result depend on how many mouse events arrived,
+which is not something a person can aim at.
+
+### Two units, and neither is the other one's
+
+**The offset is in frames and the trim is in seconds.** That is not an
+inconsistency waiting to be tidied: it is what keeps both numbers correct after
+somebody changes the scene's frame rate.
+
+| | is a fact about | so a rate change |
+|---|---|---|
+| `offset_frames` | the shot — you placed the sound so a consonant lands on the drawing at frame 12 | leaves it on that drawing |
+| `trim_start_seconds`, `trim_end_seconds` | the sound — "start 0.3 seconds into the take" | leaves it pointing at the same moment of audio |
+
+In the other units each would drift, and the drift would be invisible until
+somebody wondered why their lipsync had moved.
+
+**Cropping the front moves the in-point and the offset together**, so the audio
+under every remaining frame is the audio that was there before. Moving only the
+trim would slide the whole take earlier, which is a different gesture and not
+this one. `croppingTheFrontMovesTheReadHeadAndNotTheSound` pins it by asserting
+that a given slot hears the same sample before and after a crop.
+
+The crop is **non-destructive by construction**: two numbers, no samples
+touched. It undoes by putting them back and can be taken out to the whole take
+at any point. It is bounded so a frame of audio always survives, because a sound
+trimmed to nothing draws no block and a row with no block is one nobody can take
+hold of.
+
+### The device is a seam, and what goes through it is a value
+
+Two files, built before anything uses them, and both of them are shaped by the
+same fact: **the thing that plays a sound runs on another thread.**
+
+`audio_device.h` is the seam [importing.md](importing.md) asks for — open at
+rate R, receive a callback asking for N frames, report what has come out, stop.
+It is the only place in the program that knows what a `QAudioSink` is. Three
+things in it are decisions rather than shape:
+
+- **It is opened once and kept open.** The spike measured `QAudioSink::start()`
+  at 335 ms, and a scrub is a burst of sound on every frame the playhead is
+  dragged past. A device opened per burst would be silent for eight frames and
+  then say something about the ninth. So the device stays and the *content*
+  changes underneath it, which is why the callback is handed in once and must
+  answer with silence rather than with nothing.
+- **`playedFrames` is `processedUSecs()` as it comes**, with no
+  buffer-in-flight subtraction, because the spike measured that it counts audio
+  played *out*. Microseconds to frames in one step, for the reason
+  `slotForPlayedFrames` does its own arithmetic in one step.
+- **The rate asked for is the clip's**, so the ordinary case is an exact
+  sample-for-sample read; a driver that refuses it says what it will take
+  instead, and the renderer resamples. A refusal costs quality, not sound.
+- **It is bound to the output it opened and cannot follow one.** That is right —
+  a stream cannot chase a moving target — and it is why `outputId()` and
+  `healthy()` exist. Somebody switching a speaker on changes what the machine's
+  *default* output is, and the sink goes on feeding whatever was default before:
+  reported from use as a scrub that stopped making a noise. Opening another
+  device is the only answer, so the seam provides the two questions that say
+  when to, and `watchOutputs` so that nothing has to keep asking.
+
+  **The asking version was built first and it was reported broken**, in a way
+  worth keeping because it is a shape rather than a slip: it worked for a scrub
+  and not for Play. Both call the same check. What differed was *when* — Qt
+  learns about a device from the system, and holding a `QMediaDevices` is what
+  makes it listen at all, so a question asked in the moment after somebody
+  flicks a switch gets yesterday's answer. Polling more often would not have
+  fixed it; being told is what fixes it.
+
+  Two things fall out of being told. A take already running is **re-anchored on
+  the frame it has reached** rather than the one Play was pressed on, because the
+  count it derives from starts again with the new device. And the remembered
+  failure — the one that stops a machine with no output spending a third of a
+  second retrying on every edit — is cleared here and nowhere else: news that the
+  outputs changed is exactly the news that makes retrying worthwhile, and
+  without it, plugging a speaker into a machine that had none would be remembered
+  as still having none.
+
+`core/audio_render.h` is what the callback calls. `renderAudio` turns an
+`AudioProgram` — the soundtracks, their placements, a rate, a start slot, and
+optionally a loop length and a burst length — into interleaved floats, and it is
+a **pure function of its arguments**, which is the same requirement
+`slotForPlayedFrames` is built to and for the same reason: a runner with no
+sound card can still check the loop seam, the sub-frame offset, the trim and the
+resampling. `test_audio_render` does, with no hardware.
+
+Two things in it that are not obvious:
+
+- **A program holds its clips by shared pointer, and that is about the thread
+  rather than about sharing.** `Document::audioSamplesFor` answers a raw pointer
+  into a map that an import or an undo may rehash, which is fine on the
+  interface thread and fatal on a device's. `Document::sharedAudioSamplesFor` is
+  the one accessor built for the other thread, and taking a share costs one
+  atomic increment and no samples.
+- **The interpolation is what makes the matched-rate case right**, not only the
+  resampled one. An index that should land exactly on sample N arrives as N
+  minus a rounding; interpolating gives sample N back, and taking the nearer of
+  the two neighbours gives N − 1. Swapping it for nearest-neighbour reddens
+  tests that have no resampling in them at all, which is how this was found.
+
+### The scrub, and the burst it is made of
+
+Dragging or clicking in the ruler plays about a frame's worth of sound from
+where the playhead landed. `TimelineWidget::scrubbed` is what fires it, and it
+is **narrower than `currentSlotChanged` on purpose**: stepping frames with the
+arrow keys is what somebody does all day while drawing, and it is not a request
+to hear anything.
+
+**A burst is one frame's worth or 90 ms, whichever is longer.** One frame's
+worth is what [importing.md](importing.md) asks for and at 24 fps it is 42 ms,
+which is under half a syllable — fine while dragging, because each burst is cut
+off by the next, and a blip you cannot tell a *b* from a *d* in the moment you
+stop to listen. 120 ms was the first guess and came back as slightly long from
+the first person to drag a playhead over a line of dialogue. Three milliseconds
+of ramp at each end, because a buffer that starts part-way up a waveform is a
+click on every frame you pass.
+
+### The one line, and the quarter of a second it costs
+
+`onPlaybackTick` derives the picture's slot from `AudioPlayer::playedFrames`
+instead of from `QElapsedTimer::elapsed`, which is the change the whole of
+[the playback clock](importing.md#the-playback-clock) is written about. Three of
+the four ways two clocks come apart stop existing rather than being separately
+corrected, and the loop is one number in two places that cannot disagree —
+`AudioProgram::loop_slots` and `slotForPlayedFrames`'s `% count` — because both
+wrap on the same count of played samples.
+
+**Only when a device is actually running with something to play.**
+`playing_to_audio_` is that condition, and everywhere else the wall clock is
+untouched. "Everywhere else" includes every machine CI runs on, which is why
+`playbackRunsOnAMachineWithNoAudioOutput` exists: the way to get this wrong is
+total — a take waiting for a count that will never move sits on one frame for
+ever — and every arithmetic test would still pass. Forcing `playing_to_audio_`
+true reddens exactly that one test.
+
+**What it costs is visible and is the point.** `playedFrames` is zero until the
+program's first sample is out of the buffer, so the picture holds on the frame
+Play was pressed on for about a buffer — a quarter of a second on the machine
+the spike measured. That hold *is* starting together; a picture that moved first
+would be the error this exists to remove. Two things follow from it:
+
+- **The rate readout is not sampled through the hold.** It counts paints against
+  wall time, and a quarter-second of deliberate stillness inside its first
+  window reads as dropped frames — a warning crying wolf on the one take it
+  should be trusted on.
+- **The wait is bounded.** `kAudioStartWaitMs` is a second, four times the
+  measured buffer, after which the take falls back to the wall clock and the
+  clock restarts so it begins now rather than a second in. What that catches is
+  a driver that accepted the stream and reports nothing.
+
+The readout goes on measuring against the wall clock and deliberately: what it
+asks is whether the *interface* is keeping up, and judging a picture derived
+from the sound against the sound would make the instrument and the thing it
+measures the same number.
+
+### On disk
+
+`audio/` in the project folder, carried forward by every save exactly as
+`imports/` is and for the identical reason: nothing in the document can rebuild
+a sound. The carry-forward is now **one function run twice** rather than a loop
+written twice, which is this repository's own rule about extracting when the
+second caller arrives.
+
+`imports/` and `audio/` are two namespaces on purpose — a picture and a sound
+may both be called `take-3.x` without either shadowing the other.
+
+**The format version went to 4**, in two steps and for two reasons, both of them
+the same standard: bump when an older build would get it *wrong*, not merely
+when it would not understand.
+
+- **3 is soundtracks.** A build that does not know `audio_tracks` drops the key
+  and autosaves over the project without it — and unlike a cel there is nothing
+  in the document to write it back from, so the file would sit in `audio/`
+  orphaned, with the placement that timed the shot to it gone.
+- **4 is the trim and the fractional offset.** A build reading `offset_frames`
+  as an integer puts a sound placed at frame 12.4 back on frame 12 — 17 ms,
+  which is where a consonant lives — and drops the in and out points entirely,
+  playing whole takes where a line had been cropped out of one.
+
+A project with no sound writes no `audio_tracks` key and an untrimmed sound
+writes no trim, so every file that existed before each step is the same bytes it
+was.
+
+### What it costs
+
+Nothing a save can see: the samples are derived and are never written. In memory
+it is about 384 KB a second of decoded float, which is what the import recap says
+— **beside the size of the file**, because a 799 KB mp3 announcing 7.5 MB reads
+as the program having gone wrong and does not stop reading that way until the two
+numbers are shown together. That was reported from use on the first file
+somebody imported that was not a WAV.
+
+**Derived means somebody has to decode it again, and there are two moments, not
+one.** A project opened from disk has soundtracks naming files and nothing
+decoded — that one is obvious and `afterProjectLoaded` covers it. The second is
+an *undo*: `Document::removeAudioTrack` throws the samples away deliberately,
+rather than carrying megabytes on the undo stack against a redo that may never
+come, so bringing the track back has to decode the file again. While that ran
+only after a load it was a bug with no visible cause — the row came back on
+Ctrl+Z drawing "no sound loaded", silent on a scrub and on a take, and only a
+save-and-reopen put it right. `MainWindow::refreshEverything` calls
+`refreshAudioSamples` for this reason; the test for "already decoded" is a hash
+lookup per soundtrack, which is what makes it affordable on every refresh.
+
+### What is not built
+
+- **A manual sync offset**, which [importing.md](importing.md) defers on the
+  user's call and this has not needed. What survives the subtraction is a
+  constant per machine and per driver, and the spike measured two drivers on one
+  machine twelve milliseconds apart — a third of a frame. It is a preference and
+  not a project setting, so adding it later touches no file and is not a format
+  change.
+- **Audio in an export**, which is out of scope in the plan and stays there.
+
+### And what a video will not share with this
+
+Worth saying because it looks like it should. A video is [extracted to frames at
+import](importing.md#video-is-a-sequence-with-a-decoder-in-front), so its row is
+a **track row with cards**, not a block: moving it in time is a slot operation
+and cropping it is a question of which drawings exist. Neither reaches
+`AudioPlacement`, and a video does not want sub-frame placement at all.
+
+So the reuse point, if there is one, is the *gesture* code in `TimelineWidget` —
+drag the body to move, drag the ends to crop — and not the data. Pre-shaping the
+model for a second caller whose shape is different would have been reuse in name
+only, against this repository's own rule of extracting when the second caller
+arrives.
+
+## Converting an import to drawings
+
+**The way back.** An import holds no pixels, so nothing can be painted on it and
+nothing can cut against it — `ctg_sources` resolve to a cel-bearing layer in the
+same track, so a reference layer cannot be a CTG barrier at all. For an
+application whose headline is a colour solver, that is the whole of what
+importing gives up, and this is the command that gives it back:
+`Document::convertReferenceLayer` writes every frame the layer was showing into
+a cel, in one command, and leaves the layer an ordinary raster one.
+
+Why it is the whole layer rather than a drawing at a time, and why it is offered
+by a popup as well as a button, is [importing.md](importing.md#convert-to-drawings).
+This is what was built, and **two of that note's predictions turned out to be
+wrong** — both in ways that mattered to what the interface says, and both found
+by measuring rather than by reading.
+
+### It is the bake's loop, and now they share it rather than resemble it
+
+The note said to write it as `Document::transformLayer`'s loop with a decode
+where the resample is, and to **extract the loop when the second caller
+arrived**. This is that caller, so `writeWholeLayer` now holds the six decisions
+both of them depend on and neither of them may get right differently:
+
+- one command for the whole layer, which is what makes it one undo step;
+- the trim held until the outcome is known, because a history spent on a write
+  that is about to be undone is a session's undo history spent on nothing;
+- the redo stack held aside rather than cleared;
+- the `bad_alloc` caught **inside** the command's own scope, letting it out
+  being a terminate rather than an error;
+- the rescue undoing everything that landed;
+- and the rescued undo popped off the redo stack, so a redo cannot put the layer
+  back into the half-written state the rescue just took it out of.
+
+All six were found the expensive way once already — see [running out of memory,
+and why that is a rescue rather than a
+crash](#running-out-of-memory-and-why-that-is-a-rescue-rather-than-a-crash).
+`test_transform` asserts the rescue through *both* callers, because what is
+being tested is that it is one rescue.
+
+`finish` is the one thing the bake did not need: the layer has to stop being an
+import in the same command its cels arrive in — kind, source list, placement and
+every drawing's source frame — because half of either is a layer nothing can
+draw.
+
+### Which drawings an import has is not which drawings have cels
+
+`layerDrawings` filters on `Image::cels` and therefore reports **every import as
+empty**. What says a reference layer is not blank at a drawing is its
+`source_frames` entry, which is the sparse map beside `cels` and means exactly
+what a cel means. So there is a second list, `referenceDrawings`, and a
+conversion built on the first would have converted nothing and reported success.
+
+### The cache is asked before the decode, and that is not an optimisation
+
+What is in `ReferenceCache` is what is on screen, derived under this very
+placement — the cache [refuses to answer under any
+other](#a-bound-and-the-rule-that-is-not-obvious) — and what the conversion
+promises to keep is what is on screen. So a frame already derived is used as it
+stands; only the rest are decoded. Deciding it the other way would let a fresh
+decode disagree with the picture at the moment somebody converted it.
+
+The decode itself runs on the **interface thread**, which is the opposite of
+everywhere else an import is read, and deliberately: this is one command that
+has to be all or nothing, so there is nothing useful to do while it runs and
+nothing that may touch the document meanwhile. What it costs is a window that
+sits still, which is why the recap puts the frame count in front of somebody
+first.
+
+### The first prediction that was wrong: it costs the history nothing
+
+[importing.md](importing.md#convert-to-drawings) said the popup had to warn that
+converting **"will clear the rest of the undo history"**, reasoning from the
+bake, and the popup was written to say so.
+
+Measured: **nothing at all.** `Command::retainedBytes` counts the tiles a
+command *displaced* — the ones it is keeping alive for undo. A bake displaces
+every tile of every drawing. A conversion writes into cels that **did not
+exist**, so it displaces nothing, and a 60-tile conversion charges the history
+zero bytes and trims not one older command. The pixels are entirely real; what
+they are not in is the history.
+
+Pinned in `test_transform` against a history budget small enough that anything
+charged at all would empty it, so a zero there means zero rather than "under the
+budget".
+
+### The second, which was a bug rather than a sentence: the save deleted the scan
+
+This is the one worth reading, because it had no symptom at the time.
+
+A save builds a new folder and swaps it in, so it carried forward only the
+imports something still **named**. Converting is the first thing in the program
+that stops naming a file without anybody having said to remove it — so the next
+save took the scanned sequence out of the project folder.
+
+Nothing looked wrong. The pictures were still in the reference cache, so undoing
+the conversion put them straight back on screen. **The save after that failed
+outright**, on a layer naming three files that by then existed nowhere, and it
+was the failing save that found this.
+
+Two things are worth separating in it. The deletion was arguably intended —
+[importing.md](importing.md#convert-to-drawings) says the drawings become the
+truth and the files stop being read. What was not intended is that undo landed
+you somewhere the project could not be written from at all.
+
+**Fixed on the user's call, by keeping the files rather than by explaining the
+loss:** `ProjectIO::save` now carries forward every file already in `imports/`
+and `audio/`, whether or not anything names it — as a best effort, unlike the
+named ones, because a file nothing is asking for going missing is not a project
+that cannot be written. The whole sequence is pinned in `test_canvas`, reopen
+included: the reopen is what empties the pending list, so that the copy inside
+the project is the only one the document can reach.
+
+**What that trades, and it cannot be scoped away.** The imports folder now only
+ever grows: nothing there can tell a file left behind by a conversion from one
+left behind by a track somebody deleted, and telling them apart would need a
+layer recording where it came from — the field
+[importing.md](importing.md#where-an-import-lands) refuses, and refuses for
+reasons that have not changed. Keeping both is the price, and it is the same
+principle the video plan already states about keeping a source beside the frames
+drawn from it. It also closes a trap that was there before any of this: import a
+scan, save, delete the track, save, and the project's copy was gone.
+
+### What it refuses, and why that is not a gap
+
+Above `kCommitTileBudget` — about 2 GB of placed pixels, which is roughly 120
+frames of HD — it refuses with the number, before the wait rather than partway
+through it. The case this serves is scanned line art, tens of drawings, which is
+what colouring an import means; it cannot serve a two-hundred-frame video
+because nothing can. The recap names the two things that make a long import fit:
+a shorter range, and half size, which is a quarter of the pixels.
+
+The ceiling is `kCommitTileBudget` itself and **not** `commitFitsInBudget`'s
+layer form, which bounds the growth against what the layer already holds — a
+reference layer holds nothing, so that form would be answering about zero.
+
+The count in front of it comes from `MainWindow::conversionCostFor`, which
+surveys each frame's header rather than decoding it, and sizes it through the
+layer's placement: an import at half size converts to a quarter of the tiles,
+and a recap quoting the file's own dimensions would be describing a picture
+nobody is looking at. It counts with `tilesCovering` and not from the pixel
+dimensions, because **where a picture sits counts** — 200×150 at the origin
+crosses the tile boundary on both axes and is four tiles, not one.
+
+### Both doors, and why the popup is queued
+
+A command in the layer panel beside "Transform layer through time", greyed with
+a reason everywhere else; and a popup on the attempt to draw, which is where the
+question actually gets asked. They are not alternatives — the popup is
+discoverability, the button is findability, and a control that comes and goes as
+you move between layers is one nobody can find twice.
+
+The canvas emits `drawingRefusedOnImport` and does not raise the dialog itself.
+`MainWindow::offerToConvertRefusedLayer` queues it through a zero-delay timer,
+and the reason is [what a missing pen release takes down with
+it](#what-a-missing-pen-release-takes-down-with-it): `tabletEvent` ignores every
+event while a modal dialog is up, and a release is one of those events. Nothing
+is open here — the stroke was refused before it began — so this is the cheap end
+of that rule rather than an instance of it, and the queue is what keeps it the
+cheap end. A flag stops a hand resting on the canvas stacking dialogs, and the
+layer is asked about again on the way in, a frame having passed.
+
+### The grey row, which this was supposed to expire and did not
+
+[What I would do next](#what-i-would-do-next) parked a warning against this
+landing: a reference layer's row is drawn in the theme's disabled grey, and what
+that grey was said to mean is *"nothing here can be acted on"* — true then, and
+due to stop being true the day a conversion existed. Revisit it rather than
+inherit it, it said. So, revisited:
+
+**The paraphrase had already drifted from what the code says, and the code was
+the accurate one.** `applyLayerFlag`'s tooltip has always read "the brush, the
+eraser and the transform all refuse here", which is still exactly true — and it
+ends "the way in is to convert it to drawings first", which was pointing at
+something that did not exist and now points at something that does. Two things
+act on a reference layer and neither is a mark: placing it, which predates this,
+and converting it. So the grey means *not drawn on*, which is what a disabled
+foreground reads as anyway, and nothing here had to change.
+
+What the panel's colours should be at all is
+[#84](https://github.com/S-poony/Animage/issues/84), and picking one ahead of it
+would be deciding that issue sideways.
+
+### What it does not do
+
+- **Per drawing.** Deliberately, and it is the user's call: a layer that is
+  drawings at some drawings and reference at others is a state nobody can see.
+- **Reach the popup from `shots`.** Both dialogs are modal, so the shot drives
+  `convertReferenceLayerFrom` — the same division every import here already has,
+  where the menu item is a dialog in front of a function that does the work.
+- **Free anything on undo.** The cels survive so the redo can bring them back,
+  and the reference cache keeps its frames on purpose: undoing brings the import
+  back with its pictures already in hand rather than re-decoding a sequence
+  somebody has just decided against. Its own bound is what eventually drops them.
+
 ## What a pan costs
 
 Reported as the program going heavy after a while at work — panning, with
@@ -3709,6 +4981,45 @@ of state, that state can be set directly and a dozen candidate fixes tried by
 machine in a second each. That is what `--bench` does, and it is the reason #54
 has a table of eight cures rather than an argument about one.
 
+## What taking Qt Multimedia costs
+
+**Measured, before a line of audio code.** [importing.md](importing.md) puts a
+deployment spike before all of it and calls it the highest-risk item in the
+note: if `windeployqt` does not bundle the FFmpeg backend, that is a disaster to
+find out after the audio layer exists. It was run, and the full record with the
+numbers is [audio-spike.md](audio-spike.md).
+
+Four things from it are worth having here, because each one is a thing somebody
+would otherwise assume.
+
+- **All three deployment tools bundled the backend with no help at all.**
+  `windeployqt`, `macdeployqt` and `linuxdeploy-plugin-qt` each read it out of
+  `animage`'s import table along with its FFmpeg libraries. The expensive
+  outcome did not arrive.
+- **It costs about 20 MB on every platform and nothing at startup.**
+  `Qt6Multimedia` imports no FFmpeg; the backend is a plugin loaded lazily on
+  first use of the media stack, and startup timed through the full window build
+  is 29 ms either way.
+- **Scrub audio needs none of that 20 MB.** With `plugins/multimedia` deleted
+  outright, Qt keeps `QMediaDevices`, `QAudioDevice`, `QAudioSink` and
+  `QAudioSource` — the raw audio path is native inside `Qt6Multimedia` itself.
+  The payload buys `QAudioDecoder` and `QMediaPlayer`: a compressed audio file,
+  and video. So if the backend is ever a problem somewhere, the half that
+  matters degrades to WAV rather than disappearing.
+- **`QAudioSink::processedUSecs()` counts audio played out**, so `playedMs()` is
+  that number as it comes. That was the first of the note's two open
+  measurements; the second belongs to video and is untouched.
+
+`tests/audio_probe.cpp` is the instrument, in the register of the section above
+— built, never run by `ctest`, and there for the first machine whose driver
+disagrees with those numbers. `src/app/animage/audio_check.*` was the other half
+and is **gone**, as its own header said it would be: the deployment tools only
+look at `animage`, so the spike had to be inside the application to ask them
+anything, and once it had asked there was nothing left for it to do. What
+replaced it is `audio_device.h`, which is a seam and not a report. What that
+cost the packaging steps in CI is in
+[audio-spike.md](audio-spike.md#what-comes-out-again).
+
 ## The same source, two different pictures
 
 This section exists because it was missing, and its absence cost most of an
@@ -3980,6 +5291,9 @@ trap.
 | [Every route that changes the input to a differencing function](#every-route-that-changes-the-input-to-a-differencing-function) | `syncTimelineHeight` takes a difference, so a load has to announce itself |
 | [A tablet gesture is not one device's](#a-tablet-gesture-is-not-one-devices) | The barrel button presses as a mouse and the drag arrives as tablet moves |
 | [Three explanations for a bug nobody here had](#three-explanations-for-a-bug-nobody-here-had) | #75 was Qt 6.8's, and every instrument was running 6.11 |
+| [What a save deletes that the document cannot write again](#what-a-save-deletes-that-the-document-cannot-write-again) | The swap replaces every entry; an imported file has no second copy |
+| [A `shots` situation that presses an id nothing bound](#a-shots-situation-that-presses-an-id-nothing-bound) | `press` on an id with no QAction does nothing, silently |
+| [Which Qt classes answer "what are you" and which only answer "are you this"](#which-qt-classes-answer-what-are-you-and-which-only-answer-are-you-this) | `QColorSpace` compares against a named space and never names one |
 
 
 ### Which rectangle counts the columns, and which sizes the buffer
@@ -5270,6 +6584,69 @@ derives it has to actually run, and a view is not entitled to switch it off.**
 `aLayerShowingItsMarksIsStillSolved` in `test_canvas` constructs it.
 
 
+### The answer that was called off a moment before it landed
+**A queue that never catches up may be a queue where nothing ever finishes**,
+and the two look identical from outside. `dropStaleColourRequests` cancelled a
+fill the moment its drawing went off screen, with a reason on it: playing a
+coloured shot asks twenty-four questions a second against solves taking a tenth
+of one, and a queue that fills faster than it drains never catches up. A paint
+drops and *then* asks, so at 24 fps every solve was called off 41 ms after it
+started — and `abandoned()` is checked inside the max-flow, so it gave up
+partway and produced nothing at all. Playing a coloured shot never coloured
+anything, however long anybody watched. Issue
+[#85](https://github.com/S-poony/Animage/issues/85).
+
+**The same line, copied, did the same thing to imported pictures**, where it
+was found first: an animatic played as a blank canvas for the same reason, and
+said so through a libpng warning repeating once per file per pass. Two
+subsystems, one sentence, and neither report described the cause.
+
+Three things to take from it.
+
+**The stated reason was measurable and nobody had measured it.** The queue is
+bounded by one entry per drawing per layer, because a repeat about the same
+drawing supersedes — the shot, not the take — and a job's grids are handles to
+cels that exist regardless. So it could not fill faster than it drained in the
+way the comment claimed. What it could do, and did, was never finish.
+
+**An answer for a drawing you have left is not a wasted answer.** It is the
+drawing you will be on again next time round the loop, and the cache it lands in
+is bounded, so keeping it cannot cost more than the bound. Judgements were
+already kept on exactly that reasoning — being about the drawings you are not
+looking at is the whole of what they are for — and it took a report to notice
+that fills are the same.
+
+**And the benchmark that should have caught it was measuring the other
+question.** `bench_playback` calls `presolveColour`, which walks the shot and
+waits for every fill *before* the timed pass, so it plays a shot whose colour is
+entirely on hand. That is a fair question — does a solved fill survive to
+playback — and it is not how a shot is coloured: you scribble the first drawing
+and let `ctg_inherit` carry the marks, so every drawing after it has never been
+looked at and pressing Play is the first thing that ever asks. `coldColourPasses`
+plays without presolving and reports what is on hand after each pass, which is
+where the bug is a table rather than an opinion:
+
+| | before | after |
+|---|---|---|
+| pass 1 | 1 of 48 | 6 of 48 |
+| pass 2 | 1 of 48 | 11 of 48 |
+| pass 3 | 1 of 48 | 16 of 48 |
+| pass 4 | 1 of 48 | 21 of 48 |
+
+The one is the drawing that was scribbled. **A benchmark that warms the thing it
+is about measures the warm case**, and that is worth checking of every fixture
+here before trusting a row of it.
+
+Two things the fix needed beyond the deletion, both about not swamping the
+solver with work nobody is waiting for. **A take does not climb the ladder** —
+the coarse answer is a tenth of a second and the fine one is a second and a
+half, and asking for the second as soon as the first lands is forty-eight fine
+solves nobody asked for. An animator watching a take is judging motion and where
+the colour went, which is the argument
+[playback-resolution.md](playback-resolution.md) already makes one subsystem
+over. And **playback asks at `Whenever`**, so a stroke made after the take jumps
+a queue two seconds long rather than joining the back of it.
+
 ### What the lattice fallback was being compared against
 **A floor between two answers is a measurement, and this one was being taken in
 the units of the wrong question.** When the rest run moves no node,
@@ -5832,6 +7209,79 @@ event the canvas is offered and what the canvas made of each. It writes one
 synthetic event through its own filter first, so an empty log means the probe is
 broken rather than the pen.
 
+### What a save deletes that the document cannot write again
+**A save builds a new folder and renames it into place, so every directory entry
+in the project is replaced on every save** — and anything the build step did not
+put into the new folder is gone. That is fine for a cel: its pixels are in the
+document, so a save can always write it out again. It is not fine for an
+imported file, because what the document holds is a **name**.
+
+Nothing about getting this wrong announces itself at the time. The import looks
+right, the save reports success, and the picture is missing the next time the
+project is opened — or two minutes later, when autosave has fired and written
+the folder without it.
+
+So `ProjectIO::save` carries `imports/` forward, looking in three places in
+order: the folder the last successful save wrote them to (`SaveState::folder`,
+which is where they are for every save after the first, Save As included); the
+path an import came from, for a project that has never been saved; and the
+target folder, for a re-save whose state was lost. A name in none of them fails
+the save **loudly**, while the original is still wherever the person imported it
+from — a save that quietly dropped it would be discovered somewhere else, later,
+by somebody who no longer has the file.
+
+`anImportSurvivesSavingAndOpening` in `test_canvas` saves, saves again over the
+same folder, does a Save As, **deletes the original picture** and reopens. The
+deletion is the half that matters: without it the test passes on a project that
+is still leaning on a path outside itself.
+
+The general shape: **anything the project folder holds that the document cannot
+regenerate has to be carried across the swap by name.** Cels are the exception
+here, not the rule, and they are the only thing that was ever in that folder
+before.
+
+
+### A `shots` situation that presses an id nothing bound
+**`Stage::press` takes a shortcut id, looks up the `QAction` the window made for
+it, and does nothing at all if there is none** — silently, because an id with no
+action is indistinguishable from an action that ran and changed nothing.
+
+`Id::TransformApply` is such an id. Apply is a button on the transform bar and
+its key is handled elsewhere; `makeAction` is never called for it. So
+`s.press(Id::TransformApply)` is a no-op, and a situation that used it
+photographed the transform still live — a picture that looks like a placement
+that failed to commit, which is a bug you can spend a while looking for in the
+committing code.
+
+Use `s.choose("Apply")`, which finds the button by its label and clicks it.
+
+**The general rule is the one this harness already has written down**: a shot is
+only worth what the run behind it set up, and a situation that quietly did less
+than it says is worse than no situation, because the picture is evidence. Before
+believing a shot that shows something *not* happening, check that the step which
+was supposed to make it happen actually ran. See [what the screenshot showed, and
+what the run had never set
+up](#what-the-screenshot-showed-and-what-the-run-had-never-set-up), which is the
+same lesson one layer out.
+
+
+### Which Qt classes answer "what are you" and which only answer "are you this"
+**`QColorSpace` has no accessor that hands back which named colour space it is.**
+There is `QColorSpace::NamedColorSpace` and there is a constructor taking one,
+but a space read from a file is a set of primaries and a transfer function and
+usually matches none of them exactly — so Qt offers equality against a named one
+and not a name.
+
+Naming a file's colour space for a message therefore means comparing against the
+handful that are worth naming and falling back to `description()`. That is what
+`image_import`'s `nameOfSpace` does, and it is worth a comment there because
+"ask it which one it is" is the obvious thing to reach for and compiles into a
+different error every Qt version.
+
+Small, and here because it is the cheap end of a habit worth having: a Qt class
+that models something continuous will let you *test* a value and often will not
+*tell* you one.
+
 ### Three explanations for a bug nobody here had
 **Issue #75 was a bug in Qt 6.8, and every instrument pointed at it was running
 Qt 6.11.** Nothing in this repository ever caused it, nothing here ever fixed it,
@@ -5929,6 +7379,7 @@ ctest --test-dir build --output-on-failure
 ./build/tests/bench_hand -platform offscreen [--project FOLDER] [--pictures DIR]  # against a hand
 ./build/tests/bench_transform     # what moving a drawing -- or a whole layer -- costs, and what it costs the history
 ./build/tests/bench_playback -platform offscreen   # what playback drops, coloured and not
+./build/tests/bench_import -platform offscreen [dir]   # what one imported frame costs to decode
 ./build/tests/shots [--list] [name]   # pictures of the interface, one per situation
 ./build/tests/dock_probe [--bench]    # plain Qt with docks: is a panel fault Qt's?
 ./build/tests/window_probe            # the same readings from the real window: is it ours?
@@ -6177,8 +7628,35 @@ come off it since the first build, with where the reasoning went:
 | One place deciding the pointer (#27), the eraser (#4), the resize ring (#5) | "what the pointer says" |
 | A screenshot target (#28) | "looking at the interface" |
 | Capping the undo history (#23) | "what the history is allowed to cost" |
+| Importing a single image, and placing it | "importing a picture" |
+| Importing an image sequence | "importing a sequence" |
+| A soundtrack, and making it audible: the device, the scrub, and the picture derived from the sound | "importing a soundtrack" |
 
-1. **TIFF export**, which is the half of the format list still missing. It is
+1. **The rest of importing**, which is the thing in flight and the only entry
+   here with a design note of its own: [importing.md](importing.md) settles the
+   shape, and "importing a picture", "importing a sequence" and "importing a
+   soundtrack" above record what is built.
+
+   **Audio went first, and that was a decision rather than the order falling
+   out.** This list used to run video-then-audio, because a video is the
+   sequence with one thing added and building it second means building nothing
+   twice. That argument is about the *pictures*, and audio shares none of that
+   machinery — so the tie was broken the way [importing.md](importing.md)
+   breaks it, on what the shot is for: a lipsync shot is the thing the note is
+   written around, and video is reference for it. It is built; what it has left
+   is the manual sync offset the note defers on the user's call, and nothing has
+   needed one yet.
+
+   - **A video**, which is a sequence with a decoder in front and no new
+     storage: extracted to frames once, at import, so the decoder never reaches
+     the paint path. The one open measurement in the whole note belongs to it —
+     whether `QMediaPlayer` at 1× extracts every frame — and it is the only
+     question left whose answer could change what gets built.
+   Convert to drawings was the other half of this and is now built — see
+   [converting an import to drawings](#converting-an-import-to-drawings), which
+   also settles the colour question this entry used to park here.
+
+2. **TIFF export**, which is the half of the format list still missing. It is
    the **compatibility** deliverable and not the lossless one — EXR is the
    lossless one and is built — and keeping that straight is what stops it being
    argued about twice.
@@ -6207,7 +7685,7 @@ come off it since the first build, with where the reasoning went:
    combo box. The writer converts exactly as `toSrgb16` does; that is the point
    of it.
 
-2. **Rung four is the default and the queue moved on.** What it took is in
+3. **Rung four is the default and the queue moved on.** What it took is in
    "colour through time, part three" and "what the push step is allowed to see";
    the defect that held it up was [#69](https://github.com/S-poony/Animage/issues/69)
    and it is fixed. Two things it left behind, both reported from use rather
@@ -6225,7 +7703,7 @@ come off it since the first build, with where the reasoning went:
    It matters less the moment rung four is the default, which is a reason to
    settle that first rather than to do them together.
 
-3. **A flag that means something.** There was one, built on `spread`, and it came
+4. **A flag that means something.** There was one, built on `spread`, and it came
    out — see "the flag that had to come out". Anything that replaces it has to
    clear a bar the old one did not: "wrong" only exists by reference to the
    drawing a mark came from, so it needs a correspondence between regions on two
@@ -6234,13 +7712,13 @@ come off it since the first build, with where the reasoning went:
    went — so the thing this was waiting for exists. It still has to be computed
    for drawings nobody has opened, which is what the audit did and what
    `CtgSolver`'s second priority is still there for.
-4. **GPU compositing**, if `bench_playback` says it is worth it — not
+5. **GPU compositing**, if `bench_playback` says it is worth it — not
    `bench_composite`, which watches the half that is not the problem. What it
    says today is that HD is comfortable at any track count and 4K drops between
    a quarter and two fifths of its frames, so this is a 4K deliverable and not a
    general one. It does not answer the coloured case at all: the max-flow stays
    on the CPU, and what breaks there is the fill cache, not the compositing.
-5. **The rest of the open issues.** Transforming a layer across time
+6. **The rest of the open issues.** Transforming a layer across time
    ([#25](https://github.com/S-poony/Animage/issues/25)) is done, and it did
    *not* want `LayerPass` widened from an offset to an affine, which is what
    this entry used to say it needed. It bakes instead — see

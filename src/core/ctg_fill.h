@@ -350,6 +350,23 @@ public:
     // node-based and the entry being returned is never the one evicted. A
     // caller may not hold one across a *second* solve, and none does.
     const CtgFill* find(const CtgKey& key) const;
+
+    // Whether a drawing has a fill at all, **without counting it as used**.
+    //
+    // For counting how much of a shot is coloured, which is a question asked
+    // about every drawing at once. Asking is not using: going through `find`
+    // would renew all of them on every status update, so every fill would look
+    // equally recent and the eviction order -- the whole of what keeps the
+    // drawings somebody is working on resident -- would be flattened by the
+    // thing that merely wanted to report on it. Same trap, and the same answer,
+    // as ReferenceCache::has.
+    //
+    // Says nothing about whether the fill is *current*. A fill whose inputs have
+    // moved still draws, and what this counts is how much of the shot has colour
+    // on it -- asking each one whether it is up to date would mean hashing every
+    // barrier cel of every drawing, four times a second.
+    bool has(const CtgKey& key) const;
+
     CtgFill& store(const CtgKey& key, CtgFill fill);
 
     void clear();

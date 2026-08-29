@@ -3,12 +3,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "audio_peaks.h"
 #include "cel.h"
 #include "command.h"
 #include "ctg_fill.h"
@@ -16,6 +18,123 @@
 #include "transform.h"
 
 namespace animage {
+
+// A bounded store of what imported files decode to: one entry per drawing per
+// reference layer, holding the already-placed pixels.
+//
+// **`CtgFillCache` is the template and the resemblance is not an accident.**
+// Both are derived data, bounded, kept on the Document rather than on the thing
+// they describe, precisely because losing an entry costs a rebuild and nothing
+// else -- a recompute there, a decode here. Read that class before changing
+// this one; four of its decisions are repeated below for the same reasons.
+//
+// It lives here rather than in a file of its own because the key it needs is
+// `CtgKey`, which document.h already has, and because Document is its only
+// owner. Nothing outside asks it a question that Document does not forward.
+//
+// **Absent beats stale, which is the one thing here that is not `CtgFillCache`
+// with the words changed.** An entry records the placement it was derived at,
+// and a lookup at any other placement reports *nothing here*. A frame derived
+// under an old placement is not a slightly out-of-date picture, it is a picture
+// of where the import used to be, and it would go on being drawn convincingly
+// until something happened to refresh it.
+//
+// **Eviction may only happen where the document may be edited.** This does not
+// look like an invariant, which is why it is written down: `LayerPass` holds
+// raw pointers into these grids and `compositeGrids` reads them from several
+// threads, so dropping an entry while a paint is in flight is a dangling read.
+// It is the same rule the document already has -- it simply does not read as
+// "editing the document" to whoever writes the eviction.
+class ReferenceCache {
+public:
+    // Defined in document.cpp, where the default budget is, so that the number
+    // and the arithmetic that argues for it stay in one place.
+    ReferenceCache();
+
+    // Null when there is no entry, and null when the entry was derived under a
+    // different placement. The caller cannot tell the two apart and does not
+    // need to: both mean "ask for this again".
+    //
+    // References into the store survive an insertion, because the map is
+    // node-based and the entry being returned is never the one evicted.
+    const TileGrid* find(const CtgKey& key, const Transform& under) const;
+
+    // Whether a frame is here, **without counting it as used**.
+    //
+    // For counting how much of a sequence is ready, which is a question asked
+    // about every drawing of it at once. Asking is not using: going through
+    // `find` would renew all hundred and fifty of them on every status update,
+    // so every frame would look equally recent and the eviction order -- the
+    // whole of what keeps a scrub's own frames resident -- would be flattened
+    // by the thing that merely wanted to report on it.
+    bool has(const CtgKey& key, const Transform& under) const;
+
+    void store(const CtgKey& key, const Transform& under, TileGrid tiles);
+
+    void clear();
+
+    // Moves the bound, and takes effect immediately. The default is half a
+    // gigabyte; see the definition in document.cpp for the arithmetic behind
+    // that and what would change it.
+    //
+    // Reachable so that the rule above -- a *lookup* keeps an entry alive, a
+    // store does not -- can be tested against a budget a test can fill, rather
+    // than by building half a gigabyte of tiles. That rule is the one worth
+    // pinning: it is what stops a scrub evicting the frames being scrubbed
+    // over, and it is invisible until somebody has already made it wrong.
+    void setByteBudget(std::size_t bytes);
+
+    // How many times the store has been emptied.
+    //
+    // The same counter `CtgFillCache` has and for the same reason, which is
+    // worth stating because it is the one piece here that exists before the bug
+    // rather than after it. What a decoded frame depends on is not all in its
+    // key: the source list is on the layer and so is the placement, and the way
+    // both say "that is all wrong now" is by emptying this. That reaches the
+    // shelf and not the answers in the air -- a decode started before a
+    // placement changed lands after it and would be installed as current.
+    // Anything with a decode in flight records this alongside what it asked.
+    std::uint64_t generation() const { return generation_; }
+
+    std::size_t size() const { return entries_.size(); }
+
+    // What the frames held weigh, which is every tile of every one of them.
+    //
+    // Unlike a fill's marks, none of this is shared with anything else: each
+    // frame is decoded on its own, so a tile in here is a tile this cache is
+    // the reason for. Two drawings pointed at the same source frame decode
+    // twice and are counted twice, which is what actually happens.
+    std::size_t bytes() const { return bytes_; }
+
+    // How many frames have been put in, which is how many decodes have
+    // happened. Exposed for the reason CtgFillCache counts its stores: "did
+    // that decode again?" has no honest answer but a count, and a wrong key
+    // does not fail, it only gets slow.
+    std::uint64_t storeCount() const { return stores_; }
+
+private:
+    struct Entry {
+        // What the pixels were derived at. Held rather than assumed, because a
+        // placement is stored on the layer and can be changed and undone, and
+        // nothing else about the layer moves when it does.
+        Transform under;
+        TileGrid tiles;
+        // Touched by a *lookup* and not by a store, so the order reflects what
+        // is being looked at rather than what was last decoded. That is the
+        // whole point on this cache: scrubbing back and forth over a syllable
+        // must not evict the frames being scrubbed over.
+        mutable std::uint64_t used = 0;
+    };
+
+    void evictDownToBudget(const CtgKey& keep);
+
+    std::unordered_map<CtgKey, Entry, CtgKeyHash> entries_;
+    mutable std::uint64_t clock_ = 0;
+    std::size_t bytes_ = 0;
+    std::size_t budget_;
+    std::uint64_t stores_ = 0;
+    std::uint64_t generation_ = 0;
+};
 
 // Owns the scene, every cel, the id counters and the undo history. Editing goes
 // through this class rather than through the structs directly, because that is
@@ -29,8 +148,130 @@ public:
     // --- structure -------------------------------------------------------
 
     TrackId addTrack(std::string name);
+
+    // The same track again, directly under the one it came from.
+    //
+    // **Every id inside it is new, and that is the whole of the work.** A
+    // track's layers, drawings and cels are named by ids that mean something
+    // only within it, and three of them point at each other: `Image::cels` and
+    // `Image::source_frames` are keyed on layer ids, `Track::slots` names image
+    // ids, and a colour layer's `ctg_sources` names the line-art layers it is
+    // cut against. A copy that reused any of them would be a second track
+    // wired to the first one's insides -- and the colour case is the one that
+    // would not look wrong until somebody drew on the original.
+    //
+    // Drawing numbers are kept rather than renumbered: they are unique within
+    // a track and this is a whole track, so the copy's cards read the same as
+    // the original's, which is what a duplicate should look like.
+    //
+    // Cels are copied rather than shared. That is what makes it a duplicate and
+    // not a second view, and it is the one part of this that costs memory --
+    // the same cost `duplicateImage` pays, once per drawing.
+    TrackId duplicateTrack(TrackId track);
+
     void removeTrack(TrackId track);
     void updateTrack(TrackId track, const TrackProperties& properties);
+
+    // --- soundtracks -----------------------------------------------------
+    //
+    // Their own list on the Scene rather than a kind of Track, and so their own
+    // three functions here rather than a flag threaded through the ones above.
+    // See audio_track.h.
+    //
+    // Ids come from the same counter as a drawing track's, which is what stops
+    // the two ever colliding; what stops them being *confused* is that they are
+    // looked up by different functions in different lists, and that an id
+    // handed to the wrong one answers nothing rather than something plausible.
+
+    // Adds a soundtrack naming a file inside the project's `audio/` folder.
+    // An edit, journaled and undoable like adding a track.
+    TrackId addAudioTrack(std::string name, std::string source);
+
+    // The same soundtrack again, pointing at the same file.
+    //
+    // Cheap where a drawing track's copy is not: there are no cels, no layers
+    // and no ids inside it -- a soundtrack is a file name and four numbers. The
+    // decoded samples are **not** copied here, because `core` does not decode:
+    // a caller that has them can install them with `setAudioSamples` and one
+    // that does not leaves the row saying so until something decodes the file
+    // again.
+    TrackId duplicateAudioTrack(TrackId track);
+
+    void removeAudioTrack(TrackId track);
+
+    // What the row is called. **The label and not the file**: `source` names a
+    // file in the project's `audio/` folder and nothing here touches it. Two
+    // takes both imported as `dialogue` is the ordinary case this exists for.
+    //
+    // An empty name is refused rather than accepted, as a track's is: a row
+    // with no label is a row with nothing to tell it by.
+    void renameAudioTrack(TrackId track, std::string name);
+
+    // Where the sound sits, how much of it is used, and how loud.
+    //
+    // One command for the whole struct, because a caller cannot write half a
+    // placement and an undo entry is one swap. The same shape updateTrack has.
+    //
+    // **Everything is clamped here and not at the call sites.** A gain from a
+    // spin box and a gain from a drag must not be able to disagree about what a
+    // gain is; and a trim is clamped against the *clip*, which is why this is
+    // on the Document -- the one object that holds both the placement and the
+    // decoded samples. A trim that ate the whole sound would leave a row with
+    // nothing to grab and no way back.
+    void setAudioTrackPlacement(TrackId track, AudioPlacement placement);
+
+    // Installs decoded samples. **Not an edit**: no command, no journal entry,
+    // no undo step. The document is not changed by this, only the memo of what
+    // a file decodes to -- exactly as setReferenceFrame is not an edit, and for
+    // the same reason. `core` never opens a file; what decodes is the
+    // application, which knows about `audio/` and about Qt.
+    void setAudioSamples(TrackId track, AudioClip clip);
+
+    // What that file decoded to, or null if nothing has decoded it yet. A
+    // caller that finds nothing draws nothing and plays silence -- it must not
+    // start a decode, for the reason compositing may not start one.
+    const AudioClip* audioSamplesFor(TrackId track) const;
+
+    // The same clip, as something that can be held on to.
+    //
+    // **For the one caller that reads samples off another thread**, which is
+    // whatever is feeding an audio device: the pointer above is into a map that
+    // an import or an undo may rehash, and a device callback cannot be asked to
+    // notice. Taking a share of the clip costs one atomic increment and no
+    // samples. Everything on the interface thread should go on using
+    // `audioSamplesFor`.
+    std::shared_ptr<const AudioClip> sharedAudioSamplesFor(TrackId track) const;
+
+    // How loud that file is, column by column, for the row that draws it.
+    //
+    // Worked out when the samples are installed and thrown away with them:
+    // derived from derived data, and never written to a project. Null before a
+    // file has decoded, exactly as `audioSamplesFor` is.
+    const AudioPeaks* audioPeaksFor(TrackId track) const;
+
+    // Throws the decoded samples away. Everything a clip depends on that is not
+    // in its key says so by calling this: a track being repointed at another
+    // file, a document being replaced by another whose tracks answer to the
+    // same ids.
+    void forgetAudioSamples();
+
+    // How far the timeline reaches: `Scene::timelineFrames`, widened by any
+    // soundtrack that runs past it.
+    //
+    // **Here and not on the Scene, because the Scene cannot answer it.** A
+    // soundtrack's length is its decoded clip's, and a clip is derived data
+    // held on this class -- so the one object that knows both the tracks and
+    // the sound is this one.
+    //
+    // **And it widens the timeline without touching the shot**, which is
+    // exactly the split `Scene::shotFrames` and `Scene::timelineFrames` already
+    // make: everything that draws or scrubs wants this one, everything that
+    // plays or writes files wants `shotFrames`. Importing three seconds of
+    // dialogue into a shot with one drawing in it is the *ordinary* first move
+    // of a lipsync shot, and a playhead that could not be dragged onto the
+    // sound would make the whole feature unusable -- while a shot that grew to
+    // the length of its reference would export twenty seconds of blank frames.
+    std::size_t timelineFrames() const;
 
     // Restacks a track: index 0 is the top row of the timeline and the top group
     // of the composite. `to` is counted in the list with the track already taken
@@ -147,13 +388,17 @@ public:
     // long as the history can bring it back.
     void clearCel(TrackId track, ImageId image, LayerId layer);
 
-    // What a layer bake did, which is two facts and not one: how many drawings
-    // it wrote, and whether it ran out of memory partway and put them back.
+    // What a whole-layer write did, which is two facts and not one: how many
+    // drawings it wrote, and whether it ran out of memory partway and put them
+    // back.
     //
     // A count alone could not say that. Nothing written is the answer for an
     // identity, for a layer with no drawings on it and for a layer that would
     // not fit -- and the last of those is the only one anybody has to be told
     // about.
+    //
+    // Named for the bake because that is the one it was written for. It is the
+    // answer `convertReferenceLayer` gives too, the two being the same loop.
     struct LayerBake {
         std::size_t drawings = 0;
         bool ran_out_of_memory = false;
@@ -199,6 +444,51 @@ public:
     // than merely shrugging.
     LayerBake transformLayer(TrackId track, LayerId layer, const Transform& t);
 
+    // Every drawing of a reference layer replaced by a cel holding the picture
+    // it was showing, and the layer left an ordinary raster one. The way back
+    // from an import: see docs/importing.md, "convert to drawings".
+    //
+    // **It is `transformLayer` with a decode where the resample is**, and
+    // sharing the scaffolding rather than copying it is the whole reason
+    // `writeWholeLayer` exists -- the bake's four hard-won details are four
+    // bugs if any of them is omitted here, and every one of them was found the
+    // expensive way once already. See docs/handover.md, "running out of memory,
+    // and why that is a rescue rather than a crash".
+    //
+    // **The whole layer, and that is the user's call rather than a limitation.**
+    // A layer that is drawings at some drawings and reference at others is a
+    // state nobody asked for and nobody can see, and the first question it
+    // produces is "why can I draw here and not there".
+    //
+    // `pixels` is asked for one frame of the import, by its index into
+    // `Layer::reference_sources`, and must hand back what the compositor would
+    // draw -- **already placed**, because that is what is on screen and what
+    // the conversion promises to keep. It is only called for the frames not
+    // already derived: a frame in the reference cache at the layer's current
+    // placement is used as it stands, which is both cheaper and the same
+    // answer. An empty grid from it is taken as a frame that would not read,
+    // and the drawing gets an empty cel rather than the conversion failing --
+    // the same rule the derive step has, for the same reason.
+    //
+    // **What is lost is the future and not the pixels.** The grid written is
+    // the grid on screen, so any resampling a placement asked for happened in
+    // the derive step and happens once. Afterwards the pixels are the truth, so
+    // placing the layer again would bake on top of what is already baked. That
+    // is what the interface has to say, and it is not entitled to say more:
+    // a JPEG was lossy before it reached this program.
+    //
+    // Nothing here asks whether the layer is too long to fit. That is the
+    // caller's, asked before the work, in `commitFitsInBudget`'s shape and
+    // against `kCommitTileBudget` -- which is the difference between refusing
+    // with a number and failing in the middle. This end is the other half: the
+    // allocation failing is caught and every drawing already written is put
+    // back, exactly as a bake's is.
+    //
+    // Nothing written, and the document untouched, for a layer that is not a
+    // Reference one or that points at no frames.
+    LayerBake convertReferenceLayer(TrackId track, LayerId layer,
+                                    const std::function<TileGrid(int source_frame)>& pixels);
+
     // **A rescued bake leaves the history exactly as it found it**, which is
     // what its refusal message promises and what the first version of it did
     // not do. Closing a command trims the history to its byte budget, and one
@@ -217,10 +507,14 @@ public:
     // a test can arrange -- a machine with room to swap succeeds and is merely
     // slow, and one without it takes the test process down with it.
     //
-    // Nothing in the interface reaches this, and the next call to
-    // transformLayer takes it whether or not that call gets as far as writing
-    // anything -- so a hook armed before an identity, or before a layer with no
-    // drawings on it, cannot go off on some later bake instead.
+    // Nothing in the interface reaches this, and the next whole-layer write
+    // takes it whether or not that call gets as far as writing anything -- so a
+    // hook armed before an identity, or before a layer with no drawings on it,
+    // cannot go off on some later bake instead.
+    //
+    // **The next one of either**, `transformLayer` or `convertReferenceLayer`,
+    // because they are one loop and the rescue being tested is one rescue.
+    // Named for the bake because that is the caller it was written for.
     void failLayerBakeAfterForTesting(std::size_t drawings) { fail_bake_after_ = drawings; }
 
     // The drawings `transformLayer` would move, in the order it would move
@@ -236,6 +530,21 @@ public:
     // anything about, and a ghost picture merged in that order would be a
     // different picture each time it was drawn.
     std::vector<ImageId> layerDrawings(TrackId track, LayerId layer) const;
+
+    // The same for a reference layer, which needs its own because the question
+    // "is this layer empty here" has a different answer on one.
+    //
+    // A reference layer has no cels at all, so `layerDrawings` reports every
+    // import as having nothing in it. What says the layer is not blank at a
+    // drawing is a `source_frames` entry, which is the sparse map beside `cels`
+    // and means exactly what a cel means -- see Image::source_frames.
+    //
+    // Sorted, for `layerDrawings`' reason and not for tidiness: `images` is an
+    // unordered_map whose walk order is not the timeline's and is not stable
+    // between two runs, and a conversion that journalled its tiles in a
+    // different order each time would be one no test could assert anything
+    // about.
+    std::vector<ImageId> referenceDrawings(TrackId track, LayerId layer) const;
 
     // The same list as grids, for the budget. The pointers are the document's
     // and are good for exactly as long as it is not edited.
@@ -300,6 +609,67 @@ public:
     // caller decides when it is worth paying for.
     const CtgFill* ctgFillFor(TrackId track, ImageId image, LayerId layer) const;
     std::size_t totalTileCount() const;
+
+    // --- imported pictures -----------------------------------------------
+
+    // Which frame of its source a Reference layer shows at one drawing.
+    //
+    // **An edit, unlike everything else in this section.** The pixels below are
+    // derived and cost a decode to lose; this is a fact about the shot that
+    // only the file remembers, so it is journaled, undone and saved like any
+    // other. `Image::kNoSourceFrame` removes the entry, which is what makes the
+    // layer empty at that drawing.
+    //
+    // It rides on ImageOp, which swaps a whole Image record: the map lives on
+    // the Image and there is nothing smaller to swap. One command per call, so
+    // an import of two hundred frames wraps the lot in a ScopedCommand rather
+    // than leaving two hundred steps on the stack.
+    void setSourceFrame(TrackId track, ImageId image, LayerId layer, int frame);
+
+    // The derived pixels of a Reference layer at one drawing, or null if they
+    // have not been built yet. Const for exactly the reason `ctgFillFor` is:
+    // **compositing is not the place to start a decode**, so a paint draws
+    // whatever is here and asks for what is missing somewhere it is allowed to
+    // wait. See docs/importing.md.
+    //
+    // `core` never opens a file. What derives these is the application, which
+    // knows about `imports/` and about QImage; this class only holds the
+    // answer, exactly as it holds a fill somebody else solved.
+    // `under` is the placement the answer has to have been derived at. A frame
+    // derived under a different one is not stale-and-usable, it is **the wrong
+    // picture** -- a modelsheet at the size and angle it used to be -- so it is
+    // reported as absent and the layer draws nothing until the right one
+    // arrives. That is the same choice the fill cache makes and for the same
+    // reason: see "why a cache key of cel revisions serves wrong fills, not slow
+    // ones" in docs/handover.md, which is this mistake made the other way round.
+    const TileGrid* referenceFrameFor(TrackId track, ImageId image, LayerId layer,
+                                      const Transform& under) const;
+
+    // Installs derived pixels. Not an edit: no command, no journal, no undo
+    // entry and no cel -- the document is not changed by this, only the
+    // memo of what a file decodes to. That is why it is allowed to be called
+    // from a paint.
+    void setReferenceFrame(TrackId track, ImageId image, LayerId layer, const Transform& under,
+                           TileGrid tiles);
+
+    // Throws the derived pixels away. Everything a reference frame depends on
+    // that is not in its key says so by calling this -- the layer's source
+    // being repointed, a document being replaced by another whose drawings
+    // answer to the same ids.
+    void forgetReferenceFrames();
+
+    // The store itself, for what only it can answer: how many frames are
+    // resident, what they weigh, and the generation anything with a decode in
+    // flight has to record. Const, because installing a frame goes through
+    // setReferenceFrame -- which is the one place the eviction rule above is
+    // honoured.
+    const ReferenceCache& referenceCache() const { return reference_frames_; }
+
+    // Moves the cache's bound. Here rather than on a non-const accessor,
+    // because lowering it evicts, and the rule is that evicting happens only
+    // where the document may be edited -- an accessor that handed the cache out
+    // by reference would put that decision at every call site instead.
+    void setReferenceCacheBudget(std::size_t bytes) { reference_frames_.setByteBudget(bytes); }
 
     // --- history ---------------------------------------------------------
 
@@ -410,7 +780,40 @@ private:
 
     // A new drawing with its own copy of every cel of `source`, refcounted and
     // numbered, but in no slot yet. Shared by both ways of duplicating one.
+    //
+    // **Every way a drawing can carry a picture, and there are two.** A cel for
+    // a raster layer, and a `source_frames` entry for a reference one. A copy
+    // that took only the first came back blank on an import, which is what a
+    // duplicate that "did nothing" turned out to be.
     std::optional<Image> copyOfImage(Track& track, ImageId source);
+
+    // Everything a whole-layer write has to get right, in one place, so that
+    // the two of them cannot get it right differently.
+    //
+    // **Six decisions live in here and all six are bugs if omitted**, which is
+    // why this exists at all rather than the second caller copying the first:
+    // one command for the whole layer, the trim held until the outcome is
+    // known, the redo stack held aside rather than cleared, the `bad_alloc`
+    // caught *inside* the command's own scope, the rescue undoing what landed,
+    // and the rescued undo popped off the redo stack so it cannot be redone
+    // into the half-written state. Each of them is argued where it happens
+    // below, and `transformLayer`'s comment is where they were first written
+    // down. docs/importing.md said to extract this when the second caller
+    // arrived; this is that.
+    //
+    // `write` is called for each drawing in turn and says whether it wrote one;
+    // it may throw `std::bad_alloc`, which is the whole point. `finish` runs
+    // inside the same command once every drawing is written, for the part of a
+    // whole-layer write that is not per drawing -- a conversion leaves the
+    // layer an ordinary raster one, and that has to land or not land with the
+    // cels rather than beside them.
+    //
+    // `fail_after` is the test hook, taken by the caller so that it is consumed
+    // whether or not the call gets this far.
+    LayerBake writeWholeLayer(const char* name, const std::vector<ImageId>& drawings,
+                              const std::optional<std::size_t>& fail_after,
+                              const std::function<bool(ImageId)>& write,
+                              const std::function<void()>& finish = {});
 
     Scene scene_;
     std::unordered_map<CelId, std::shared_ptr<Cel>> cels_;
@@ -464,6 +867,32 @@ private:
     };
     static constexpr std::size_t kCarriedMarksKept = 16;
     mutable std::unordered_map<CtgKey, CarriedMarksEntry, CtgKeyHash> carried_marks_;
+
+    // What imported files decoded to, per drawing and layer. Derived: nothing
+    // here is written to disk and losing it costs a decode. Keyed the same way
+    // a fill is -- see "why a cache key of cel revisions serves wrong fills,
+    // not slow ones" in docs/handover.md for why the key names the drawing and
+    // the layer rather than anything with a revision in it.
+    ReferenceCache reference_frames_;
+
+    // What soundtrack files decoded to, by track. Derived, like the cache
+    // above, and unbounded unlike it -- a shot's worth of PCM is single-digit
+    // megabytes where one HD picture frame is 17, so there is nothing here to
+    // spend a budget on.
+    //
+    // **Held by shared pointer, and that is about a thread rather than about
+    // sharing.** What plays a soundtrack is a device callback on somebody
+    // else's thread, and a raw pointer into this map dangles the moment an
+    // import or an undo rehashes it. A clip a callback has taken hold of stays
+    // alive until the callback is finished with it; nothing else about the map
+    // changes, and copying no samples is what makes handing one over free.
+    std::unordered_map<TrackId, std::shared_ptr<const AudioClip>> audio_samples_;
+
+    // And what a row draws from them. Kept beside rather than inside the clip
+    // because a clip is what a decode produced and this is what somebody worked
+    // out afterwards -- see audio_peaks.h. Written and cleared with the samples
+    // in every case, so the two cannot disagree about which file they describe.
+    std::unordered_map<TrackId, AudioPeaks> audio_peaks_;
 };
 
 // RAII wrapper: begins a command on construction, ends it on destruction.

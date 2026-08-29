@@ -98,6 +98,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
+#include <QTemporaryDir>
 #include <QStyleOptionSlider>
 #include <QDir>
 #include <QDockWidget>
@@ -109,10 +110,12 @@
 #include <QScrollBar>
 #include <QStatusBar>
 #include <QTimer>
+#include <QFile>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLayout>
 #include <QMouseEvent>
+#include <QColorSpace>
 #include <QPainter>
 #include <QPixmap>
 #include <QLineEdit>
@@ -133,7 +136,9 @@
 #include "document.h"
 #include "floating_dock_frame.h"
 #include "layer_list.h"
+#include "image_import.h"
 #include "scene_settings_dialog.h"
+#include "sequence_import_dialog.h"
 #include "main_window.h"
 #include "shortcuts.h"
 #include "shortcuts_dialog.h"
@@ -258,6 +263,11 @@ struct Stage {
         QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
         loop.exec();
     }
+
+    // Somewhere to put a file a situation needs to exist -- a picture to
+    // import, a project to open. Removed with the Stage, so a situation that
+    // writes one leaves nothing behind and two runs cannot see each other's.
+    QString scratch() const { return scratch_.path(); }
 
     // --- doing things ------------------------------------------------------
 
@@ -422,6 +432,23 @@ struct Stage {
         settle();
     }
 
+    // The same for an imported picture, and it is wanted for the same reason
+    // one line up: the frame is asked for by a paint and decoded on a worker,
+    // so there is nothing to wait for until something has painted, and nothing
+    // on screen until the answer has been installed and painted again.
+    //
+    // **A situation that places an import and photographs it without this gets
+    // a blank canvas**, which is what happened to
+    // an-imported-picture-placed-and-applied the day the decode moved off the
+    // interface thread. It is not a bug in the placement: a placement is stored
+    // and the picture is made from the file again at it, so between the two
+    // there is a moment with no picture. The program shows that moment too; it
+    // is a frame long in use and the whole of a screenshot.
+    void settlePicture() {
+        window.settleReferenceFrames();
+        settle();
+    }
+
     // --- what to photograph ------------------------------------------------
 
     QWidget* dockCalled(const char* title) const {
@@ -541,7 +568,132 @@ private:
     // Where the pointer was last put, so a drag continues from it rather than
     // making every situation say twice where it started.
     QPointF pointer_;
+    QTemporaryDir scratch_;
 };
+
+// A picture to import: colour swatches over a grid, at a size that reads as a
+// modelsheet rather than as a test pattern.
+//
+// The swatches are the point. An imported palette being eyedropped is a stated
+// use, and the conversion an import does -- sRGB in, linear half out, through a
+// widening step when the file carries any other profile -- is exactly the kind
+// of thing that is wrong by a little and invisible in a screenshot of a drawing.
+// Flat saturated patches beside each other are where a wrong conversion shows.
+// A board with a number on it, for the sequence shots. The number is the point:
+// a sequence photographed with three identical pictures cannot show whether the
+// playhead is looking at the frame it says it is.
+// A 16-bit PCM WAV of a sine, written by hand: forty-four bytes of header and
+// the samples after it. Built here rather than committed as a binary, for
+// writeSwatchGrid's reason -- a situation that makes its own input cannot be
+// broken by somebody tidying away a file nothing appears to reference.
+//
+// **The amplitude is shaped and that is not decoration.** A tone at one level
+// draws as a flat-topped block, which is exactly what the row looked like
+// before it had a waveform -- so a situation photographing the waveform with a
+// flat tone would come back green having shown nothing. Six bursts with gaps
+// between them is roughly what a line of dialogue looks like from a distance,
+// which is the thing the row now has to be able to say.
+void writeTone(const QString& path, double seconds) {
+    constexpr int kRate = 48000;
+    const int frames = static_cast<int>(kRate * seconds);
+
+    // Where the syllables fall, as fractions of the file: start, end, level.
+    struct Burst {
+        double from, to, level;
+    };
+    const Burst bursts[] = {{0.02, 0.14, 0.55}, {0.17, 0.27, 0.95}, {0.31, 0.40, 0.40},
+                            {0.47, 0.62, 0.85}, {0.68, 0.76, 0.30}, {0.82, 0.97, 0.70}};
+    const auto envelopeAt = [&](double t) {
+        for (const Burst& burst : bursts) {
+            if (t < burst.from || t > burst.to) continue;
+            // Eased in and out over a tenth of the burst, so the shape has
+            // shoulders rather than being a row of rectangles.
+            const double into = (t - burst.from) / (burst.to - burst.from);
+            const double edge = std::min(1.0, std::min(into, 1.0 - into) / 0.1);
+            return burst.level * edge;
+        }
+        return 0.0;
+    };
+
+    const auto put32 = [](QByteArray& out, quint32 v) {
+        for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+    const auto put16 = [](QByteArray& out, quint16 v) {
+        for (int i = 0; i < 2; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+
+    QByteArray data;
+    for (int i = 0; i < frames; ++i) {
+        const double level = envelopeAt(frames > 0 ? double(i) / frames : 0.0);
+        const auto v = static_cast<qint16>(
+            std::lround(level * 32767.0 * std::sin(2.0 * M_PI * 440.0 * i / kRate)));
+        put16(data, static_cast<quint16>(v));
+    }
+
+    QByteArray out;
+    out.append("RIFF");
+    put32(out, static_cast<quint32>(36 + data.size()));
+    out.append("WAVEfmt ");
+    put32(out, 16);
+    put16(out, 1);              // PCM
+    put16(out, 1);              // mono
+    put32(out, kRate);
+    put32(out, kRate * 2);      // byte rate
+    put16(out, 2);              // block align
+    put16(out, 16);             // bits
+    out.append("data");
+    put32(out, static_cast<quint32>(data.size()));
+    out.append(data);
+
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly)) file.write(out);
+}
+
+bool writeNumberedBoard(const QString& path, int number) {
+    QImage board(640, 400, QImage::Format_RGBA8888);
+    board.fill(QColor(246, 244, 238));
+
+    QPainter painter(&board);
+    painter.setPen(QColor(40, 40, 46));
+    painter.drawRect(board.rect().adjusted(0, 0, -1, -1));
+    QFont big = painter.font();
+    big.setPointSize(160);
+    big.setBold(true);
+    painter.setFont(big);
+    painter.drawText(board.rect(), Qt::AlignCenter, QString::number(number));
+    painter.end();
+
+    board.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return board.save(path, "PNG");
+}
+
+bool writeSwatchGrid(const QString& path) {
+    QImage sheet(640, 400, QImage::Format_RGBA8888);
+    sheet.fill(QColor(246, 244, 238));
+
+    QPainter painter(&sheet);
+    const QColor swatches[] = {QColor(220, 40, 40),  QColor(240, 160, 30), QColor(240, 220, 60),
+                              QColor(60, 170, 80),   QColor(50, 120, 210), QColor(120, 70, 180),
+                              QColor(20, 20, 24),    QColor(255, 255, 255)};
+    const int across = 4;
+    const int patch = 120;
+    const int margin = 40;
+    for (int i = 0; i < 8; ++i) {
+        const int x = margin + (i % across) * (patch + 20);
+        const int y = margin + (i / across) * (patch + 20);
+        painter.fillRect(QRect(x, y, patch, patch), swatches[i]);
+        painter.setPen(QColor(120, 120, 128));
+        painter.drawRect(QRect(x, y, patch, patch));
+    }
+    painter.setPen(QColor(40, 40, 46));
+    painter.drawRect(sheet.rect().adjusted(0, 0, -1, -1));
+    painter.end();
+
+    // Tagged sRGB rather than left untagged, so that what this exercises is the
+    // ordinary path and not the "no profile, read it as sRGB" fallback.
+    sheet.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return sheet.save(path, "PNG");
+}
 
 // The cursors, side by side, each on paper and on ink -- because the rule they
 // follow is light under dark, and a cursor crosses both by definition. A glyph
@@ -799,6 +951,311 @@ const std::vector<Situation>& situations() {
         {"the-window-as-it-opens",
          "menus, tools, layer panel, timeline and status bar, all in their places",
          [](Stage&) {}},
+
+        {"an-imported-picture-being-placed",
+         "the box round an import should be BLUE -- one drawing moves, so it is the blue case "
+         "however it was reached -- and the panel button should read 'Place this picture'. "
+         "Nothing is written by this box: the numbers are stored and the picture is made from "
+         "the file again at them",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // Through the tool, which for a reference layer routes to the same
+             // placement the panel button reaches -- both doors mean one thing
+             // when there is one picture, and this is the picture of that.
+             s.press(Id::Transform);
+             s.settle();
+         }},
+
+        {"an-imported-picture-placed-and-applied",
+         "the picture should have MOVED and been scaled, and the status bar should still say "
+         "tiles 0: a placement writes no pixels at all, so the document holds exactly as many "
+         "tiles after it as before",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             s.press(Id::Transform);
+             s.settle();
+             // Through the numeric fields rather than the handles, so the shot
+             // is of an exact placement and not of wherever a synthetic drag
+             // happened to land.
+             s.canvas->setTransformValues([] {
+                 Transform t;
+                 t.dx = 500.0;
+                 t.dy = 260.0;
+                 t.scale_x = 0.6;
+                 t.scale_y = 0.6;
+                 return t;
+             }());
+             s.settle();
+             s.choose("Apply");
+             s.settlePicture();
+         }},
+
+        {"a-soundtrack-in-the-timeline",
+         "the soundtrack is a row under every drawing row, with the sound drawn where it sits "
+         "in the shot -- a block from frame 5 to the end of the clip, shaped by the sound "
+         "itself and scaled to its level, with the level said as a number too. The waveform is "
+         "the block's own top edge and not a picture laid over it, so the height of the fill is "
+         "still the level and the block's ends are still the crop",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);  // 24 frames at 24 fps
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+         }},
+
+        {"a-soundtrack-turned-down",
+         "the same row with the level dragged most of the way down. The whole shape is scaled "
+         "by the level, syllables and all, which is what makes it one shape rather than a "
+         "waveform with a bar behind it -- and at the bottom it flattens to a line, which is "
+         "what silent looks like. The block stays visible at any level including none: a row "
+         "that vanished when it was silenced would be a row nobody could grab to bring back. "
+         "The line across it is the level itself: the waveform touches it at the file's loudest "
+         "moment and stays under it everywhere else, which is the edge a flat block used to "
+         "have and the shape took away",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             animage::Document& doc = s.window.documentForTesting();
+             if (!doc.scene().audio_tracks.empty()) {
+                 animage::AudioPlacement quiet;
+                 quiet.offset_frames = 4;
+                 quiet.gain = 0.2;
+                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, quiet);
+             }
+             s.settlePicture();
+             // Close up, because what this is about is one row and the canvas
+             // above it is empty.
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-timeline-scrolled-to-the-sound",
+         "the ruler stays put while the rows go past it. Soundtracks are under every drawing "
+         "row, so a scene with a few tracks in it is one you scroll down to reach the sound -- "
+         "and the ruler is where scrubbing happens, which is the only way to hear that sound. "
+         "It is pinned inside the scrolled widget rather than lifted out above it, which comes "
+         "to the same picture: either way the same 18 pixels go to the ruler and the row at the "
+         "top of the view is cut off by the same amount",
+         [](Stage& s) {
+             for (int i = 0; i < 5; ++i) s.choose("Add track");
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // Seven rows in a strip that stops growing at four, so it scrolls.
+             if (auto* area = s.timelinePanel()->findChild<QScrollArea*>()) {
+                 QScrollBar* bar = area->verticalScrollBar();
+                 bar->setValue(bar->maximum());
+             }
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-timeline-scrolled-along-the-shot",
+         "the same thing on the other axis: the names stay put while the frames go past them. "
+         "A shot is long sideways where it is short downwards, so scrolling right is the "
+         "ordinary thing to do here -- and it used to take the gutter off the screen, leaving "
+         "rows of identical cells with nothing saying which track was which and nothing "
+         "showing which row the brush was on. The frame numbers under the column should be "
+         "covered rather than absent, the highlight on the current row should still be "
+         "visible, and the top-left corner should still be the ruler's",
+         [](Stage& s) {
+             for (int i = 0; i < 3; ++i) s.choose("Add track");
+             // Long enough to have somewhere to scroll to. The names are the
+             // point, so they are made distinguishable.
+             Document& doc = s.doc();
+             for (std::size_t row = 0; row < doc.scene().tracks.size(); ++row) {
+                 const Track& line = doc.scene().tracks[row];
+                 TrackProperties named = line.properties();
+                 named.name = "character " + std::to_string(row + 1);
+                 doc.updateTrack(line.id, named);
+                 // Well past what the panel can show at once, or there is
+                 // nothing to scroll and the shot photographs the unscrolled
+                 // case by accident.
+                 for (int i = 0; i < 120; ++i) doc.insertImage(line.id, 0);
+             }
+             // The drawings went in through the document rather than through a
+             // menu item, so nothing has told the strip it is wider now -- and
+             // a scrollbar whose maximum is still zero scrolls nowhere and
+             // photographs the unscrolled case.
+             s.timeline->refresh();
+             s.settlePicture();
+             if (auto* area = s.timelinePanel()->findChild<QScrollArea*>()) {
+                 QScrollBar* bar = area->horizontalScrollBar();
+                 bar->setValue(bar->maximum() / 2);
+             }
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-soundtrack-highlighted",
+         "one row is pointed at and one row is where the brush is, and they must not read as "
+         "the same thing. The soundtrack's gutter takes the full highlight; the drawing track "
+         "keeps it washed back and drops the highlighted-text pen, so it still says the brush "
+         "lives there without claiming to be selected. Two rows drawn identically current is "
+         "what this replaces, and it read as two selections because that is what it looked like",
+         [](Stage& s) {
+             s.choose("Add track");
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.0);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 5, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // The soundtrack's row is the one after the drawing rows, and its
+             // gutter is the part of it that starts no gesture at all -- a
+             // press there selects and nothing else.
+             const int row = static_cast<int>(s.window.documentForTesting().scene().tracks.size());
+             s.pressOn(s.timeline, trackName(s, row));
+             s.releaseOn(s.timeline, trackName(s, row));
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
+        {"a-soundtrack-cropped-and-nudged",
+         "the same sound cropped at both ends and nudged off the frame line. The block's front "
+         "and back are where the crop left them, and its left edge sits four tenths of a cell "
+         "past frame 9 -- which is the only way a placement finer than a frame is visible. "
+         "Nothing was cut: the crop is two numbers and the samples are untouched",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/dialogue.wav");
+             writeTone(file, 1.5);
+             QString trouble;
+             if (!s.window.importAudioFrom(file, 1, &trouble, true)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             animage::Document& doc = s.window.documentForTesting();
+             if (!doc.scene().audio_tracks.empty()) {
+                 animage::AudioPlacement cropped;
+                 // Between two frames, deliberately: 1/24 s is 42 ms and a
+                 // sound placed to the nearest frame is not placed.
+                 cropped.offset_frames = 8.4;
+                 cropped.trim_start_seconds = 0.25;
+                 cropped.trim_end_seconds = 0.35;
+                 doc.setAudioTrackPlacement(doc.scene().audio_tracks.front().id, cropped);
+             }
+             s.settlePicture();
+         }},
+
+        {"an-imported-picture",
+         "the picture is on the canvas from a file and not from a cel: a second track at the "
+         "bottom of the timeline, its layer listed, and the status bar saying the brush will "
+         "not draw there because it is imported rather than because it is locked",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+         }},
+
+        {"what-a-layer-row-says",
+         "issue #84: three kinds of layer in one panel, and each one saying which it is. The "
+         "imported row is in the theme's disabled grey, because on a reference layer nothing "
+         "works at all -- no drawing, no cut, no transform -- and grey is the colour every "
+         "theme already uses for that. The colour layer is in the same blue a carried cell is "
+         "drawn in, one panel over, because it is the same machinery. The raster row is left "
+         "alone, being the case that needs nothing said about it. Everything else is in the "
+         "tooltips: the panel is two hundred pixels wide and a row that explains itself is a "
+         "row elided to '...'",
+         [](Stage& s) {
+             const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
+             writeSwatchGrid(file);
+             QString trouble;
+             if (!s.window.importImageFrom(file, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // Onto the import's own track, so that all three kinds are in one
+             // panel -- the comparison is the whole point of the picture.
+             s.choose("Add layer");
+             s.choose("Add colour layer");
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.layerPanel());
+         }},
+
+        {"an-imported-sequence",
+         "one drawing per file across the timeline, the playhead on the third of them and that "
+         "frame's own picture on the canvas -- three cards on the import's row, not one held "
+         "across three, and the row stopping where the files stop rather than holding past them",
+         [](Stage& s) {
+             std::vector<QString> files;
+             for (int i = 1; i <= 3; ++i) {
+                 const QString file =
+                     s.scratch() + QStringLiteral("/board%1.png").arg(i, 3, 10, QLatin1Char('0'));
+                 writeNumberedBoard(file, i);
+                 files.push_back(file);
+             }
+             QString trouble;
+             if (!s.window.importSequenceFrom(files, 1, false, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             // The third frame, because the first would be the picture a still
+             // shows too -- what this has to photograph is a *different* one.
+             s.timeline->setCurrentSlot(2);
+             s.settlePicture();
+         }},
+
+        {"an-import-converted-to-drawings",
+         "the way back from an import, photographed after it: the same three frames, now held "
+         "as cels. Four things should have changed and nothing else -- the status bar's tile "
+         "count is no longer 0, the layer row has come out of the disabled grey an import is "
+         "drawn in, the panel button reads 'Transform layer through time' where it read 'Place "
+         "this picture', and 'Convert to drawings' beside it has greyed out because there is "
+         "nothing left to convert. The picture on the canvas should not have moved a pixel: "
+         "what is written is what was on screen",
+         [](Stage& s) {
+             std::vector<QString> files;
+             for (int i = 1; i <= 3; ++i) {
+                 const QString file =
+                     s.scratch() + QStringLiteral("/board%1.png").arg(i, 3, 10, QLatin1Char('0'));
+                 writeNumberedBoard(file, i);
+                 files.push_back(file);
+             }
+             QString trouble;
+             if (!s.window.importSequenceFrom(files, 1, false, &trouble)) {
+                 std::printf("  could not import: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+             s.timeline->setCurrentSlot(2);
+             s.settlePicture();
+
+             // Through the function the button drives, and not through the
+             // button: the button raises a modal recap, and a shot cannot
+             // answer one. Same division every import here already uses.
+             const Document& doc = s.window.documentForTesting();
+             const Track& track = doc.scene().tracks.back();
+             if (!track.layers.empty() &&
+                 !s.window.convertReferenceLayerFrom(track.id, track.layers.front().id,
+                                                     &trouble)) {
+                 std::printf("  could not convert: %s\n", qPrintable(trouble));
+             }
+             s.settlePicture();
+         }},
 
         {"a-transform-box-round-a-drawing",
          "the box should sit on the ink: #28 was raised on one drawn 128 px clear of "
@@ -1160,6 +1617,24 @@ const std::vector<Situation>& situations() {
              s.picture = Stage::closeUpOf(s.timelinePanel());
          }},
 
+        {"a-duplicated-track",
+         "Track > Duplicate track, on a track with a hold and a drawing on it. The copy lands "
+         "directly under the one it came from and carries the same cards, because a drawing "
+         "number is unique within a track and this is a whole track -- so the copy reads the "
+         "same, which is what a duplicate should look like. Everything inside it is new: its "
+         "own layers, its own drawings and its own cels, which is what stops drawing on one of "
+         "the two reaching the other",
+         [](Stage& s) {
+             s.press(Id::InsertDrawing);
+             s.press(Id::HoldLonger);
+             s.press(Id::HoldLonger);
+             s.line(QPointF(300.0, 300.0), QPointF(600.0, 420.0));
+             s.settlePicture();
+             s.choose("Duplicate track");
+             s.settlePicture();
+             s.picture = Stage::closeUpOf(s.timelinePanel());
+         }},
+
         {"a-track-being-restacked",
          "left mid-drag on purpose: the caret is where the row would land, and it goes "
          "across the whole width because the whole row moves and not just its name",
@@ -1237,6 +1712,29 @@ const std::vector<Situation>& situations() {
              for (int i = 0; i < 30; ++i) s.choose("Add layer");
              s.choose("Add colour layer");
              s.picture = Stage::closeUpOf(s.layerPanel());
+         }},
+
+        {"what-importing-a-sequence-asks",
+         "the recap is an account of what the ordering rule DID, because the order is numeric "
+         "and not correctable and there is no list to drag rows about in. This selection is the "
+         "awkward one on purpose: two naming schemes, one file with no number at all and one "
+         "that will not read, and every one of those has to be a sentence rather than a "
+         "surprise. The cost is per frame and not for all of them, because a reference layer "
+         "holds what is being looked at and decodes the rest again",
+         [](Stage& s) {
+             SequenceImportDialog::Found found;
+             found.ordering = image_import::order({QStringLiteral("a_001.png"),
+                                                   QStringLiteral("a_002.png"),
+                                                   QStringLiteral("b_010.png"),
+                                                   QStringLiteral("cover.png")});
+             found.width = 1920;
+             found.height = 1080;
+             found.unreadable = 1;
+
+             auto* dialog = new SequenceImportDialog(found, 7, &s.window);
+             dialog->show();
+             s.settle();
+             s.picture = dialog->grab().toImage();
          }},
 
         {"the-keyboard-shortcuts-panel",

@@ -1129,6 +1129,274 @@ void aBakeThatFailsBeforeWritingUndoesNothingElse() {
     CHECK(doc.celAt(track, image, ink)->pixel(50, 50).a > 0.9f);
 }
 
+// --- converting an import to drawings ---------------------------------------
+//
+// The other caller of the same loop, and it is here rather than beside the
+// import tests for exactly that reason: what is worth pinning about it is the
+// scaffolding the bake taught us -- one command, the rescue, the history left
+// as it was found -- and a copy of those assertions somewhere else would be a
+// second opinion about one piece of code.
+
+// An import over four drawings, each showing a different frame, with nothing
+// decoded yet. What a conversion is handed in the real program.
+struct ImportFixture {
+    Document doc;
+    TrackId track = kNoId;
+    LayerId imported = kNoId;
+    std::vector<ImageId> drawings;
+
+    ImportFixture() {
+        track = doc.addTrack("animatic");
+        imported = doc.addLayer(track, "animatic", 0, LayerKind::Reference);
+
+        Layer sources = *doc.scene().findTrack(track)->findLayer(imported);
+        sources.reference_sources = {"a.png", "b.png", "c.png", "d.png"};
+        doc.updateLayer(track, imported, sources);
+
+        for (int i = 0; i < 4; ++i) {
+            drawings.push_back(doc.insertImage(track, static_cast<std::size_t>(i)));
+            doc.setSourceFrame(track, drawings.back(), imported, i);
+        }
+    }
+
+    // One frame of the pretend import: a box whose position says which frame it
+    // is, so a conversion that put the wrong picture on a drawing is a failed
+    // assertion rather than a picture that merely looks plausible.
+    static TileGrid frame(int n) { return gridWith({10 * n, 10 * n, 8, 8}, kInk); }
+};
+
+void convertingAnImportWritesTheFrameEachDrawingWasShowing() {
+    TEST("converting an import gives every drawing the frame it was showing");
+
+    ImportFixture f;
+    const std::size_t depth = f.doc.undoDepth();
+
+    int asked = 0;
+    const Document::LayerBake done =
+        f.doc.convertReferenceLayer(f.track, f.imported, [&](const int frame) {
+            ++asked;
+            return ImportFixture::frame(frame);
+        });
+
+    CHECK(!done.ran_out_of_memory);
+    CHECK_EQ(done.drawings, std::size_t{4});
+    CHECK_EQ(asked, 4);
+
+    // Each drawing has its own frame and not its neighbour's, which is what the
+    // moving box is here to be able to say.
+    for (int i = 0; i < 4; ++i) {
+        const Cel* cel = f.doc.celAt(f.track, f.drawings[static_cast<std::size_t>(i)], f.imported);
+        CHECK(cel != nullptr);
+        CHECK(cel->pixel(10 * i + 2, 10 * i + 2).a > 0.9f);
+        if (i > 0) CHECK_EQ(cel->pixel(2, 2).a, 0.0f);
+    }
+
+    // And the layer has stopped being an import, in all three of the ways it
+    // has to: nothing would draw a raster layer's placement, and a source list
+    // left behind would make a save copy files the picture no longer comes from.
+    const Layer* after = f.doc.scene().findTrack(f.track)->findLayer(f.imported);
+    CHECK(after->kind == LayerKind::Raster);
+    CHECK(after->reference_sources.empty());
+    CHECK(after->placement.isIdentity());
+    for (const ImageId drawing : f.drawings) {
+        CHECK_EQ(f.doc.scene().findTrack(f.track)->findImage(drawing)->sourceFrameFor(f.imported),
+                 Image::kNoSourceFrame);
+    }
+
+    // One step, which is the whole claim of doing it in one command -- and the
+    // step puts back every part of it, the kind and the frame pointers with the
+    // cels. Half of either is a layer nothing can draw.
+    CHECK_EQ(f.doc.undoDepth(), depth + 1);
+    CHECK(f.doc.undo());
+    CHECK_EQ(f.doc.undoDepth(), depth);
+
+    const Layer* back = f.doc.scene().findTrack(f.track)->findLayer(f.imported);
+    CHECK(back->kind == LayerKind::Reference);
+    CHECK_EQ(back->reference_sources.size(), std::size_t{4});
+    for (int i = 0; i < 4; ++i) {
+        const ImageId drawing = f.drawings[static_cast<std::size_t>(i)];
+        CHECK_EQ(f.doc.scene().findTrack(f.track)->findImage(drawing)->sourceFrameFor(f.imported),
+                 i);
+        CHECK(f.doc.celAt(f.track, drawing, f.imported) == nullptr);
+    }
+}
+
+void convertingTakesWhatIsAlreadyDerivedRatherThanAskingAgain() {
+    TEST("a frame already derived is converted from the cache and not decoded again");
+
+    // Not an optimisation being pinned but an identity: what is in the cache is
+    // what is on screen, and the conversion promises to keep what is on screen.
+    // A decode that ran anyway could disagree with it -- that is what "absent
+    // still beats stale" is about at the other end -- and here it would be the
+    // picture changing at the moment somebody converted it.
+    ImportFixture f;
+    const Layer* layer = f.doc.scene().findTrack(f.track)->findLayer(f.imported);
+
+    // Deliberately not what the decode below would hand back, so that which one
+    // was used is a fact the assertion can read.
+    f.doc.setReferenceFrame(f.track, f.drawings[1], f.imported, layer->placement,
+                            gridWith({300, 300, 8, 8}, kInk));
+
+    std::vector<int> asked;
+    const Document::LayerBake done =
+        f.doc.convertReferenceLayer(f.track, f.imported, [&](const int frame) {
+            asked.push_back(frame);
+            return ImportFixture::frame(frame);
+        });
+
+    CHECK_EQ(done.drawings, std::size_t{4});
+    // Three decodes, not four.
+    CHECK_EQ(asked.size(), std::size_t{3});
+    CHECK(std::find(asked.begin(), asked.end(), 1) == asked.end());
+
+    const Cel* from_cache = f.doc.celAt(f.track, f.drawings[1], f.imported);
+    CHECK(from_cache->pixel(302, 302).a > 0.9f);
+    CHECK_EQ(from_cache->pixel(12, 12).a, 0.0f);
+}
+
+void aFrameThatWillNotReadConvertsToAnEmptyDrawing() {
+    TEST("a frame that cannot be read converts to an empty drawing rather than none");
+
+    // Skipping it would leave a hole the layer cannot express once it is no
+    // longer an import: absence on a raster layer is a drawing that is not
+    // there at all, so the slot would be lost rather than blank.
+    ImportFixture f;
+    const Document::LayerBake done =
+        f.doc.convertReferenceLayer(f.track, f.imported, [&](const int frame) {
+            return frame == 2 ? TileGrid{} : ImportFixture::frame(frame);
+        });
+
+    CHECK_EQ(done.drawings, std::size_t{4});
+    for (const ImageId drawing : f.drawings) {
+        CHECK(f.doc.celAt(f.track, drawing, f.imported) != nullptr);
+    }
+    CHECK_EQ(drawnPixels(f.doc.celAt(f.track, f.drawings[2], f.imported)->tiles()), std::size_t{0});
+}
+
+void aConversionThatRunsOutOfMemoryPutsTheImportBack() {
+    TEST("a conversion that runs out of memory leaves the import exactly as it was");
+
+    // The bake's rescue, asserted through the other caller, because what is
+    // being tested is that it *is* the other caller. Two in, so that some
+    // drawings really have been written by the time it gives up.
+    ImportFixture f;
+    const std::size_t depth = f.doc.undoDepth();
+    const std::uint64_t stamp = f.doc.historyStamp();
+
+    f.doc.failLayerBakeAfterForTesting(2);
+    const Document::LayerBake done = f.doc.convertReferenceLayer(
+        f.track, f.imported, [](const int frame) { return ImportFixture::frame(frame); });
+
+    CHECK(done.ran_out_of_memory);
+    CHECK_EQ(done.drawings, std::size_t{0});
+
+    // Still an import, on every drawing, with no cels anywhere -- including the
+    // two that had been written.
+    const Layer* after = f.doc.scene().findTrack(f.track)->findLayer(f.imported);
+    CHECK(after->kind == LayerKind::Reference);
+    CHECK_EQ(after->reference_sources.size(), std::size_t{4});
+    for (int i = 0; i < 4; ++i) {
+        const ImageId drawing = f.drawings[static_cast<std::size_t>(i)];
+        CHECK(f.doc.celAt(f.track, drawing, f.imported) == nullptr);
+        CHECK_EQ(f.doc.scene().findTrack(f.track)->findImage(drawing)->sourceFrameFor(f.imported),
+                 i);
+    }
+
+    // And no trace in the history: not a step to undo past, and above all not
+    // one to redo into.
+    CHECK_EQ(f.doc.undoDepth(), depth);
+    CHECK_EQ(f.doc.historyStamp(), stamp);
+    CHECK(!f.doc.canRedo());
+}
+
+void aConversionCostsTheHistoryNothingAndTrimsNothing() {
+    TEST("converting an import spends none of the history's budget");
+
+    // **docs/importing.md predicted the opposite and it was wrong**, which is
+    // why this is pinned rather than left as a pleasant surprise: the note said
+    // a conversion "will clear the rest of the undo history", by analogy with a
+    // layer bake, and the popup was written to say so. A bake displaces every
+    // tile of every drawing and the journal has to hold all of them; a
+    // conversion writes into cels that *did not exist*, so it displaces nothing
+    // and `Command::retainedBytes` counts nothing. The pixels are real and are
+    // in the document; what they are not in is the history.
+    ImportFixture f;
+    // Small enough that anything charged at all would empty it, which is what
+    // makes a zero here mean zero rather than merely "under the budget".
+    f.doc.setHistoryBudget(64u * 1024u);
+
+    const std::size_t depth = f.doc.undoDepth();
+    const std::size_t bytes = f.doc.historyBytes();
+
+    CHECK_EQ(f.doc
+                 .convertReferenceLayer(f.track, f.imported,
+                                        [](const int frame) { return ImportFixture::frame(frame); })
+                 .drawings,
+             std::size_t{4});
+
+    // A step gained and none lost, over a budget one bake of this size would
+    // have blown through several times.
+    CHECK_EQ(f.doc.undoDepth(), depth + 1);
+    CHECK_EQ(f.doc.historyBytes(), bytes);
+    // And the pixels really were written, so this is not a conversion that
+    // costs nothing by having done nothing.
+    CHECK(f.doc.totalTileCount() > 0);
+}
+
+void convertingWhatIsNotAnImportWritesNothing() {
+    TEST("converting a layer that is not an import writes nothing");
+
+    ImportFixture f;
+    const LayerId ink = f.doc.addLayer(f.track, "ink");
+    const std::size_t depth = f.doc.undoDepth();
+
+    int asked = 0;
+    const auto decode = [&](const int frame) {
+        ++asked;
+        return ImportFixture::frame(frame);
+    };
+
+    // An ordinary layer, a layer that is not there, and a track that is not
+    // there. None of them is an error and none of them opens a command.
+    CHECK_EQ(f.doc.convertReferenceLayer(f.track, ink, decode).drawings, std::size_t{0});
+    CHECK_EQ(f.doc.convertReferenceLayer(f.track, 9999, decode).drawings, std::size_t{0});
+    CHECK_EQ(f.doc.convertReferenceLayer(9999, f.imported, decode).drawings, std::size_t{0});
+    CHECK_EQ(asked, 0);
+    CHECK_EQ(f.doc.undoDepth(), depth);
+
+    // An import pointing at nothing, which is the fourth way out and the one
+    // that is not a mistake: a layer whose drawings have all been deleted.
+    Document empty;
+    const TrackId track = empty.addTrack("t");
+    const LayerId nothing = empty.addLayer(track, "l", 0, LayerKind::Reference);
+    empty.insertImage(track, 0);
+    CHECK_EQ(empty.convertReferenceLayer(track, nothing, decode).drawings, std::size_t{0});
+    CHECK_EQ(asked, 0);
+}
+
+void whichDrawingsAnImportHasIsNotWhichHaveCels() {
+    TEST("an import's drawings are the ones with a source frame, not the ones with cels");
+
+    // The two lists answer differently on a reference layer and identically on
+    // every other, which is why there are two functions: layerDrawings reports
+    // every import as empty, so a conversion built on it would convert nothing
+    // and say it had succeeded.
+    ImportFixture f;
+    CHECK(f.doc.layerDrawings(f.track, f.imported).empty());
+
+    const std::vector<ImageId> listed = f.doc.referenceDrawings(f.track, f.imported);
+    CHECK_EQ(listed.size(), std::size_t{4});
+    // Sorted, and that is not tidiness: `images` is an unordered_map whose walk
+    // order is not the timeline's and is not stable between two runs.
+    CHECK(std::is_sorted(listed.begin(), listed.end()));
+
+    // And the other way round on an ordinary layer: cels, no source frames.
+    const LayerId ink = f.doc.addLayer(f.track, "ink");
+    drawBox(f.doc, f.track, f.drawings[0], ink, {40, 40, 40, 20});
+    CHECK_EQ(f.doc.layerDrawings(f.track, ink).size(), std::size_t{1});
+    CHECK(f.doc.referenceDrawings(f.track, ink).empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1163,5 +1431,12 @@ int main() {
     aRescuedBakeGivesTheRedoStackBack();
     theBakeFailureHookIsTakenByTheNextBakeWhateverItDoes();
     everyDrawingOfALayerIsListedInAStableOrder();
+    convertingAnImportWritesTheFrameEachDrawingWasShowing();
+    convertingTakesWhatIsAlreadyDerivedRatherThanAskingAgain();
+    aFrameThatWillNotReadConvertsToAnEmptyDrawing();
+    aConversionThatRunsOutOfMemoryPutsTheImportBack();
+    aConversionCostsTheHistoryNothingAndTrimsNothing();
+    convertingWhatIsNotAnImportWritesNothing();
+    whichDrawingsAnImportHasIsNotWhichHaveCels();
     return testing::summarise("transform");
 }

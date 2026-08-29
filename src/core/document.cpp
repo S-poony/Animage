@@ -2,15 +2,272 @@
 #include "document.h"
 
 #include <algorithm>
+#include <cmath>
 #include <new>
 #include <unordered_set>
 #include <utility>
 
 namespace animage {
+namespace {
+
+// How much decoded import is worth keeping.
+//
+// **Not measured, and the arithmetic is here so that it can be argued with.** A
+// tile is 128 KB, so one HD frame is 135 tiles = 17 MB and one 4K frame is
+// 510 = 64 MB. The gesture this exists to serve is dragging the playhead back
+// and forth across a syllable, which at 24 fps over a second is 24 frames --
+// 408 MB at HD. Half a gigabyte is the next round number above that, so a scrub
+// of about that length holds, and one twice as long re-decodes its far end.
+//
+// It is a budget, so by the rule this codebase learned the hard way it will
+// express itself as a threshold somewhere else: the somewhere is "how far you
+// can scrub before the frame you come back to has to be decoded again", and
+// decoding again is the ordinary cost of arriving at a drawing.
+//
+// docs/importing.md lists "what a cache bound should be, in bytes, against a
+// realistic scrub" as one of the things worth benchmarking, and this is what
+// stands in until it is. What would change it is somebody reporting a scrub
+// that stutters at one end, with the frame size they were working at.
+constexpr std::size_t kReferenceByteBudget = 512u << 20;
+
+// What one frame weighs. Every tile of it: unlike a fill's marks, nothing here
+// is a handle shared with something else that would exist anyway.
+std::size_t footprintOf(const TileGrid& tiles) { return tiles.tileCount() * sizeof(Tile); }
+
+}  // namespace
+
+ReferenceCache::ReferenceCache() : budget_(kReferenceByteBudget) {}
+
+const TileGrid* ReferenceCache::find(const CtgKey& key, const Transform& under) const {
+    auto found = entries_.find(key);
+    if (found == entries_.end()) return nullptr;
+    // Absent rather than stale, and the lookup is not counted as a use in that
+    // case: an entry nobody can read is not one worth keeping alive, and the
+    // store that is about to replace it would then be evicting on its behalf.
+    if (!(found->second.under == under)) return nullptr;
+    found->second.used = ++clock_;
+    return &found->second.tiles;
+}
+
+bool ReferenceCache::has(const CtgKey& key, const Transform& under) const {
+    auto found = entries_.find(key);
+    return found != entries_.end() && found->second.under == under;
+}
+
+void ReferenceCache::store(const CtgKey& key, const Transform& under, TileGrid tiles) {
+    ++stores_;
+    auto found = entries_.find(key);
+    if (found != entries_.end()) {
+        bytes_ -= footprintOf(found->second.tiles);
+        found->second.under = under;
+        found->second.tiles = std::move(tiles);
+    } else {
+        found = entries_.emplace(key, Entry{under, std::move(tiles), 0}).first;
+    }
+    found->second.used = ++clock_;
+    bytes_ += footprintOf(found->second.tiles);
+
+    evictDownToBudget(key);
+}
+
+void ReferenceCache::clear() {
+    entries_.clear();
+    bytes_ = 0;
+    ++generation_;
+}
+
+// kNoId names no drawing, so nothing is spared: a budget being lowered is not a
+// store, and there is no entry a caller is holding a reference to.
+void ReferenceCache::setByteBudget(std::size_t bytes) {
+    budget_ = bytes;
+    evictDownToBudget(CtgKey{});
+}
+
+// Oldest first, and never the entry just stored: the caller is holding a
+// reference to it. One frame can be larger than the whole budget on its own --
+// a 300 dpi A4 scan is 70 MB and nothing stops a larger one -- and that is the
+// case this rule quietly handles: the budget is exceeded rather than the answer
+// thrown away before it is read.
+void ReferenceCache::evictDownToBudget(const CtgKey& keep) {
+    if (bytes_ <= budget_) return;
+
+    std::vector<std::pair<std::uint64_t, CtgKey>> by_age;
+    by_age.reserve(entries_.size());
+    for (const auto& [key, entry] : entries_) {
+        if (key == keep) continue;
+        by_age.emplace_back(entry.used, key);
+    }
+    std::sort(by_age.begin(), by_age.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [used, key] : by_age) {
+        if (bytes_ <= budget_) break;
+        auto found = entries_.find(key);
+        if (found == entries_.end()) continue;
+        bytes_ -= footprintOf(found->second.tiles);
+        entries_.erase(found);
+    }
+}
 
 Document::Document() = default;
 
 // --- structure -----------------------------------------------------------
+
+TrackId Document::addAudioTrack(std::string name, std::string source) {
+    ScopedCommand command(*this, "Import audio");
+
+    AudioTrack track;
+    track.id = track_ids_.next();
+    track.name = std::move(name);
+    track.source = std::move(source);
+
+    const std::size_t index = scene_.audio_tracks.size();
+    scene_.audio_tracks.push_back(std::move(track));
+
+    recordOp(std::make_unique<AudioTrackOp>(index, std::nullopt));
+    return scene_.audio_tracks.back().id;
+}
+
+TrackId Document::duplicateAudioTrack(TrackId id) {
+    for (std::size_t i = 0; i < scene_.audio_tracks.size(); ++i) {
+        if (scene_.audio_tracks[i].id != id) continue;
+
+        ScopedCommand command(*this, "Duplicate soundtrack");
+        AudioTrack copy = scene_.audio_tracks[i];
+        copy.id = track_ids_.next();
+        copy.name = copy.name + " copy";
+
+        const std::size_t index = i + 1;
+        scene_.audio_tracks.insert(
+            scene_.audio_tracks.begin() + static_cast<std::ptrdiff_t>(index), std::move(copy));
+        recordOp(std::make_unique<AudioTrackOp>(index, std::nullopt));
+        return scene_.audio_tracks[index].id;
+    }
+    return kNoId;
+}
+
+void Document::removeAudioTrack(TrackId track) {
+    for (std::size_t i = 0; i < scene_.audio_tracks.size(); ++i) {
+        if (scene_.audio_tracks[i].id != track) continue;
+        ScopedCommand command(*this, "Remove audio");
+        // The samples go, and that is not part of the command. They are derived
+        // from a file the save still carries, so an undo re-decodes rather than
+        // restoring -- the same bargain a reference frame makes. Keeping them
+        // would be keeping megabytes alive against a redo that may never come.
+        //
+        // **What makes that true is MainWindow::refreshAudioSamples, called
+        // from refreshEverything**, which is the refresh an undo goes through.
+        // While it ran only after a load, this line was the whole of a bug: the
+        // track came back on Ctrl+Z with no waveform, no length and no sound,
+        // and only a save-and-reopen brought it round. `core` cannot fix that
+        // here -- it never opens a file -- so the promise is kept one layer up,
+        // and this comment is where to look if it stops being kept.
+        audio_samples_.erase(track);
+        audio_peaks_.erase(track);
+        AudioTrack extracted = std::move(scene_.audio_tracks[i]);
+        scene_.audio_tracks.erase(scene_.audio_tracks.begin() +
+                                  static_cast<std::ptrdiff_t>(i));
+        recordOp(std::make_unique<AudioTrackOp>(i, std::move(extracted)));
+        return;
+    }
+}
+
+void Document::renameAudioTrack(TrackId track, std::string name) {
+    AudioTrack* found = scene_.findAudioTrack(track);
+    if (!found || name.empty() || name == found->name) return;
+
+    ScopedCommand command(*this, "Rename soundtrack");
+    recordOp(std::make_unique<AudioNameOp>(track, found->name));
+    found->name = std::move(name);
+}
+
+void Document::setAudioTrackPlacement(TrackId track, AudioPlacement placement) {
+    AudioTrack* found = scene_.findAudioTrack(track);
+    if (!found) return;
+
+    placement.gain = std::clamp(placement.gain, 0.0, 1.0);
+    placement.trim_start_seconds = std::max(0.0, placement.trim_start_seconds);
+    placement.trim_end_seconds = std::max(0.0, placement.trim_end_seconds);
+
+    // The trim is bounded by the sound it trims, and this is the only place
+    // that can do it: the clip is derived data held here, not on the track.
+    //
+    // **A minimum of one frame of audio survives**, rather than zero. A sound
+    // trimmed to nothing draws no block, and a row with no block is a row with
+    // nothing to take hold of -- so the gesture that emptied it would be the
+    // last one anybody could make on it. Undo would still work; needing it to
+    // is the failure.
+    if (const AudioClip* clip = audioSamplesFor(track)) {
+        if (clip->rate > 0 && !clip->empty()) {
+            const double whole =
+                static_cast<double>(clip->frames()) / static_cast<double>(clip->rate);
+            const double floor_seconds = std::min(whole, 1.0 / 24.0);
+            const double room = std::max(0.0, whole - floor_seconds);
+            placement.trim_start_seconds = std::min(placement.trim_start_seconds, room);
+            placement.trim_end_seconds =
+                std::min(placement.trim_end_seconds, room - placement.trim_start_seconds);
+        }
+    }
+
+    const AudioPlacement& live = found->placement;
+    if (live.offset_frames == placement.offset_frames && live.gain == placement.gain &&
+        live.trim_start_seconds == placement.trim_start_seconds &&
+        live.trim_end_seconds == placement.trim_end_seconds) {
+        return;
+    }
+
+    ScopedCommand command(*this, "Place audio");
+    recordOp(std::make_unique<AudioPlacementOp>(track, found->placement));
+    found->placement = placement;
+}
+
+void Document::setAudioSamples(TrackId track, AudioClip clip) {
+    // The peaks first, from the clip that is about to be moved from. Both maps
+    // are written in the one call so that neither can be left describing a file
+    // the other one has stopped holding.
+    audio_peaks_[track] = peaksOf(clip);
+    audio_samples_[track] = std::make_shared<const AudioClip>(std::move(clip));
+}
+
+const AudioClip* Document::audioSamplesFor(TrackId track) const {
+    const auto it = audio_samples_.find(track);
+    return it == audio_samples_.end() ? nullptr : it->second.get();
+}
+
+std::shared_ptr<const AudioClip> Document::sharedAudioSamplesFor(TrackId track) const {
+    const auto it = audio_samples_.find(track);
+    return it == audio_samples_.end() ? nullptr : it->second;
+}
+
+const AudioPeaks* Document::audioPeaksFor(TrackId track) const {
+    const auto it = audio_peaks_.find(track);
+    return it == audio_peaks_.end() ? nullptr : &it->second;
+}
+
+void Document::forgetAudioSamples() {
+    audio_samples_.clear();
+    audio_peaks_.clear();
+}
+
+std::size_t Document::timelineFrames() const {
+    std::size_t frames = scene_.timelineFrames();
+    for (const AudioTrack& sound : scene_.audio_tracks) {
+        const auto it = audio_samples_.find(sound.id);
+        if (it == audio_samples_.end()) continue;
+        // The *audible* length, so a sound cropped short stops asking the
+        // timeline to reach where it used to end.
+        const std::size_t length = audibleFrames(*it->second, sound.placement, scene_.framerate);
+        if (length == 0) continue;
+        // A soundtrack that starts before the shot contributes only what is
+        // inside it: the part before frame 0 is not somewhere the playhead can
+        // go, so it is not length the timeline has to reach.
+        const double last = sound.placement.offset_frames + static_cast<double>(length);
+        if (last > 0.0) {
+            frames = std::max(frames, static_cast<std::size_t>(std::ceil(last)));
+        }
+    }
+    return frames;
+}
 
 TrackId Document::addTrack(std::string name) {
     ScopedCommand command(*this, "Add track");
@@ -26,6 +283,83 @@ TrackId Document::addTrack(std::string name) {
     // command the track did not exist.
     recordOp(std::make_unique<TrackOp>(index, std::nullopt));
     return scene_.tracks.back().id;
+}
+
+TrackId Document::duplicateTrack(TrackId id) {
+    const auto at = std::find_if(scene_.tracks.begin(), scene_.tracks.end(),
+                                 [&](const Track& t) { return t.id == id; });
+    if (at == scene_.tracks.end()) return kNoId;
+    const Track& source = *at;
+    const std::size_t index = static_cast<std::size_t>(at - scene_.tracks.begin()) + 1;
+
+    ScopedCommand command(*this, "Duplicate track");
+
+    Track copy;
+    copy.id = track_ids_.next();
+    copy.setProperties(source.properties());
+    copy.name = source.name + " copy";
+
+    // The layers first, because everything below is keyed on their ids.
+    std::unordered_map<LayerId, LayerId> layers;
+    copy.layers.reserve(source.layers.size());
+    for (const Layer& layer : source.layers) {
+        Layer fresh = layer;
+        fresh.id = layer_ids_.next();
+        layers[layer.id] = fresh.id;
+        copy.layers.push_back(std::move(fresh));
+    }
+
+    // **And then the one place a layer points at another layer.** A colour
+    // layer's sources name the line art it is cut against, within this track --
+    // so a copy that left them alone would have its fills cut against the
+    // *original's* line art, which looks perfectly right until somebody draws
+    // on one of the two tracks.
+    for (Layer& layer : copy.layers) {
+        for (LayerId& cut_against : layer.ctg_sources) {
+            const auto found = layers.find(cut_against);
+            if (found != layers.end()) cut_against = found->second;
+        }
+    }
+
+    std::unordered_map<ImageId, ImageId> images;
+    images.reserve(source.images.size());
+    for (const auto& [image_id, image] : source.images) {
+        Image fresh;
+        fresh.id = image_ids_.next();
+        // Kept, not renumbered: a number is unique within a track and this is a
+        // whole track, so the copy's cards read the same as the original's.
+        fresh.number = image.number;
+        fresh.marker = image.marker;
+
+        for (const auto& [layer_id, cel_id] : image.cels) {
+            const Cel* original = cel(cel_id);
+            const auto mapped = layers.find(layer_id);
+            if (!original || mapped == layers.end()) continue;
+            const CelId made = createCelCopy(*original);
+            fresh.cels[mapped->second] = made;
+            addCelRef(made);
+        }
+        // The other way a drawing carries a picture -- see copyOfImage, where
+        // forgetting this one made a duplicate come back blank.
+        for (const auto& [layer_id, frame] : image.source_frames) {
+            const auto mapped = layers.find(layer_id);
+            if (mapped != layers.end()) fresh.source_frames[mapped->second] = frame;
+        }
+
+        images[image_id] = fresh.id;
+        copy.images.emplace(fresh.id, std::move(fresh));
+    }
+
+    copy.slots.reserve(source.slots.size());
+    for (ImageId slot : source.slots) {
+        const auto found = images.find(slot);
+        copy.slots.push_back(found == images.end() ? kNoId : found->second);
+    }
+
+    scene_.tracks.insert(scene_.tracks.begin() + static_cast<std::ptrdiff_t>(index),
+                         std::move(copy));
+    recordOp(std::make_unique<TrackOp>(index, std::nullopt));
+    return scene_.tracks[index].id;
 }
 
 void Document::removeTrack(TrackId id) {
@@ -91,6 +425,11 @@ void Document::loadScene(Scene scene) {
     ctg_cache_.clear();
     ctg_carries_.clear();
     carried_marks_.clear();
+    // The keys are drawing and layer ids, and the document arriving here hands
+    // out its own from one -- so an entry kept across a load would answer to an
+    // id belonging to a drawing that no longer exists, with a picture from the
+    // project that was open before.
+    reference_frames_.clear();
     undo_stack_.clear();
     redo_stack_.clear();
     pending_ = Command{};
@@ -121,6 +460,19 @@ void Document::loadScene(Scene scene) {
                 found->second->addImageRef();
             }
         }
+    }
+
+    // **And the soundtracks, which come out of the same counter.** They are
+    // their own list on the Scene, so the walk above does not reach them --
+    // which is exactly why they have to be counted here by hand. Missed, a
+    // project whose highest id belongs to a soundtrack resumes below it, and
+    // the next track added is handed an id that row already has: findTrack and
+    // findAudioTrack both answer, the samples map describes the wrong row, and
+    // an undo entry cannot say which of the two it is about. What keeps the two
+    // apart is that the id is unique; this is where that is made true again
+    // after a load.
+    for (const AudioTrack& sound : scene_.audio_tracks) {
+        highest_track = std::max(highest_track, sound.id);
     }
 
     cel_ids_.resumeAfter(highest_cel);
@@ -341,6 +693,21 @@ std::optional<Image> Document::copyOfImage(Track& track, ImageId source_id) {
     copy.id = image_ids_.next();
     copy.number = track.nextDrawingNumber();  // a copy is a new drawing
     copy.marker = source->marker;
+
+    // **The imported picture comes too, and forgetting it is what made
+    // duplicating an import look like a refusal.** `source_frames` sits beside
+    // `cels` and answers the same question for a reference layer that a cel
+    // answers for a raster one -- which is exactly why a copy that took only
+    // the cels produced a drawing with nothing on it. Reported from use as
+    // "Duplicate drawing fails silently on an import"; what it actually did was
+    // succeed, and hand back a blank frame.
+    //
+    // Nothing is refcounted here, unlike a cel: the entry is an int naming a
+    // frame of a file the layer already lists. Two drawings pointing at the
+    // same frame of the same file is the ordinary case -- it is what holding an
+    // imported frame a second time means.
+    copy.source_frames = source->source_frames;
+
     for (const auto& [layer_id, cel_id] : source->cels) {
         const Cel* original = cel(cel_id);
         if (!original) continue;
@@ -639,6 +1006,21 @@ std::vector<ImageId> Document::layerDrawings(TrackId track_id, LayerId layer_id)
     return drawings;
 }
 
+std::vector<ImageId> Document::referenceDrawings(TrackId track_id, LayerId layer_id) const {
+    const Track* track = scene_.findTrack(track_id);
+    if (!track) return {};
+
+    std::vector<ImageId> drawings;
+    drawings.reserve(track->images.size());
+    // A `source_frames` entry and not a cel, which is the whole reason this is
+    // a second function. See the header.
+    for (const auto& [id, image] : track->images) {
+        if (image.sourceFrameFor(layer_id) != Image::kNoSourceFrame) drawings.push_back(id);
+    }
+    std::sort(drawings.begin(), drawings.end());
+    return drawings;
+}
+
 std::vector<const TileGrid*> Document::layerGrids(TrackId track_id, LayerId layer_id) const {
     std::vector<const TileGrid*> grids;
     for (const ImageId image : layerDrawings(track_id, layer_id)) {
@@ -662,6 +1044,112 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
     const std::vector<ImageId> drawings = layerDrawings(track_id, layer_id);
     if (drawings.empty()) return {};
 
+    return writeWholeLayer(
+        "Transform layer through time", drawings, fail_after, [&](const ImageId image) {
+            Cel* cel = celForWriting(track_id, image, layer_id);
+            if (!cel) return false;
+            // Nothing is created here: every drawing in the list already has a
+            // cel, which is what keeps this off the inheriting path a colour
+            // layer would take. Read into a new grid and swapped in one step,
+            // so no drawing is ever half moved.
+            cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
+            return true;
+        });
+}
+
+// Every drawing of a reference layer given the picture it was showing, and the
+// layer left an ordinary one. See the header, and docs/importing.md.
+Document::LayerBake Document::convertReferenceLayer(
+    TrackId track_id, LayerId layer_id, const std::function<TileGrid(int)>& pixels) {
+    // Taken here for transformLayer's reason, and it has to be the first thing
+    // in either of them: the hook belongs to whichever whole-layer write comes
+    // next, and a call that returns below without writing has still been that
+    // one.
+    const std::optional<std::size_t> fail_after = std::exchange(fail_bake_after_, std::nullopt);
+
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return {};
+    const Layer* layer = track->findLayer(layer_id);
+    if (!layer || layer->kind != LayerKind::Reference) return {};
+
+    // Copied rather than pointed at, because the layer is about to be rewritten
+    // inside the command below and the placement is read on every drawing.
+    const Transform placement = layer->placement;
+
+    const std::vector<ImageId> drawings = referenceDrawings(track_id, layer_id);
+    if (drawings.empty()) return {};
+
+    return writeWholeLayer(
+        "Convert to drawings", drawings, fail_after,
+        [&](const ImageId image) {
+            const Track* now = scene_.findTrack(track_id);
+            const Image* record = now ? now->findImage(image) : nullptr;
+            if (!record) return false;
+            const int frame = record->sourceFrameFor(layer_id);
+            if (frame == Image::kNoSourceFrame) return false;
+
+            // **The cache first, and it is not merely an optimisation.** What
+            // is in it is what is on screen, derived under this very placement
+            // -- ReferenceCache refuses to answer under any other -- so using
+            // it is both the cheaper answer and the one this conversion
+            // promises. `find` and not `has`: this is a use.
+            const TileGrid* derived = reference_frames_.find(CtgKey{image, layer_id}, placement);
+            TileGrid grid = derived ? *derived : pixels(frame);
+
+            Cel* cel = celForWriting(track_id, image, layer_id);
+            if (!cel) return false;
+            // A frame that would not read arrives here as an empty grid and is
+            // written as an empty cel rather than skipped. Skipping would leave
+            // a hole the layer could not express once it is no longer a
+            // reference one -- absence on a raster layer is a drawing that is
+            // not there at all, which would shift nothing and lose the slot.
+            cel->replaceTiles(std::move(grid), journal());
+            return true;
+        },
+        [&] {
+            // Inside the same command, so the layer stops being an import in
+            // the same step its cels arrive in -- and a rescue that puts the
+            // cels back puts this back with them. Half of either is a layer
+            // nothing can draw.
+            Track* writing = scene_.findTrack(track_id);
+            const Layer* found = writing ? writing->findLayer(layer_id) : nullptr;
+            if (!found) return;
+
+            // The frames each drawing pointed at, dropped one at a time because
+            // that is what `setSourceFrame` records. They have to go: what they
+            // mean is "this layer is not blank here, and the picture is in a
+            // file", and both halves have just stopped being true.
+            for (const ImageId image : drawings) {
+                setSourceFrame(track_id, image, layer_id, Image::kNoSourceFrame);
+            }
+
+            Layer converted = *found;
+            converted.kind = LayerKind::Raster;
+            // Emptied, not left pointing at files nobody reads. A raster layer
+            // holding a source list is the shape of a field that decides
+            // nothing, which is what docs/importing.md warns about under "where
+            // an import lands" -- and it would make a save copy files the
+            // picture no longer comes from.
+            converted.reference_sources.clear();
+            // Back to the identity, and this is the one that would be a bug
+            // rather than untidiness. The placement is applied in the derive
+            // step, so it is *already in* the pixels just written; leaving it
+            // on the layer would mean nothing at all today -- a raster layer's
+            // placement is never read -- and would apply the move a second time
+            // the day anything started reading it.
+            converted.placement = Transform{};
+            updateLayer(track_id, layer_id, converted);
+        });
+}
+
+// The scaffolding both whole-layer writes share. Every paragraph below was
+// written for the bake and is quoted from where it was argued; see the header
+// for the list of what is here and why none of it may be dropped.
+Document::LayerBake Document::writeWholeLayer(const char* name,
+                                              const std::vector<ImageId>& drawings,
+                                              const std::optional<std::size_t>& fail_after,
+                                              const std::function<bool(ImageId)>& write,
+                                              const std::function<void()>& finish) {
     // Where the history stood before any of this, so that the rescue below can
     // tell whether there is anything to put back. A depth would not do: the
     // history trims itself from the bottom, so it can gain a command and lose
@@ -696,19 +1184,18 @@ Document::LayerBake Document::transformLayer(TrackId track_id, LayerId layer_id,
         // inside it. The newest is never dropped, so the bake itself always
         // undoes. See "what the history is allowed to cost" in
         // docs/handover.md.
-        ScopedCommand command(*this, "Transform layer through time");
+        ScopedCommand command(*this, name);
         try {
             for (const ImageId image : drawings) {
                 if (fail_after && done.drawings >= *fail_after) throw std::bad_alloc();
-                Cel* cel = celForWriting(track_id, image, layer_id);
-                if (!cel) continue;
-                // Nothing is created here: every drawing in the list already
-                // has a cel, which is what keeps this off the inheriting path a
-                // colour layer would take. Read into a new grid and swapped in
-                // one step, so no drawing is ever half moved.
-                cel->replaceTiles(transformTiles(cel->tiles(), t), journal());
-                ++done.drawings;
+                if (write(image)) ++done.drawings;
             }
+            // After every drawing and inside the command, so that whatever is
+            // not per drawing lands with them or does not land at all. Also
+            // inside the `try`: a conversion's finish copies a layer and a
+            // vector of names, which is not a pixel and can still be the
+            // allocation that fails.
+            if (finish) finish();
         } catch (const std::bad_alloc&) {
             // Caught inside the command's own scope on purpose. Letting it out
             // would unwind through ~ScopedCommand, and an exception escaping a
@@ -765,6 +1252,39 @@ const CtgFill* Document::ctgFillFor(TrackId, ImageId image_id, LayerId layer_id)
     const CtgFill* found = ctg_cache_.find(CtgKey{image_id, layer_id});
     return (found && found->valid) ? found : nullptr;
 }
+
+void Document::setSourceFrame(TrackId track_id, ImageId image_id, LayerId layer_id, int frame) {
+    Track* track = scene_.findTrack(track_id);
+    if (!track) return;
+    Image* image = track->findImage(image_id);
+    if (!image) return;
+    if (image->sourceFrameFor(layer_id) == frame) return;  // nothing to record
+
+    ScopedCommand command(*this, "Point at a frame");
+    // The whole record, because the map is on it and ImageOp is what swaps one.
+    // It costs a copy of two small hash maps and no pixels at all -- the cels
+    // it carries are ids, so an undo entry for this weighs nothing against the
+    // history budget, which is what makes it affordable per drawing.
+    recordOp(std::make_unique<ImageOp>(track_id, image_id, *image));
+
+    if (frame == Image::kNoSourceFrame) {
+        image->source_frames.erase(layer_id);
+    } else {
+        image->source_frames[layer_id] = frame;
+    }
+}
+
+const TileGrid* Document::referenceFrameFor(TrackId, ImageId image_id, LayerId layer_id,
+                                            const Transform& under) const {
+    return reference_frames_.find(CtgKey{image_id, layer_id}, under);
+}
+
+void Document::setReferenceFrame(TrackId, ImageId image_id, LayerId layer_id,
+                                 const Transform& under, TileGrid tiles) {
+    reference_frames_.store(CtgKey{image_id, layer_id}, under, std::move(tiles));
+}
+
+void Document::forgetReferenceFrames() { reference_frames_.clear(); }
 
 void Document::setCtgCarry(const CtgKey& key, const CtgWarp& warp) {
     ctg_carries_[key] = warp;

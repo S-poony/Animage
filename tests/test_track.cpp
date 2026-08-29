@@ -506,6 +506,213 @@ void duplicatingOverwritesTheSameWay() {
     CHECK_NEAR(duplicate->pixel(40, 40).a, 1.0, 1e-2);
 }
 
+// **A drawing carries a picture in two different ways, and a copy has to take
+// both.** A raster layer has a cel; a reference layer has an entry in
+// `source_frames` naming which frame of the imported file it shows. Copying
+// only the cels produced a duplicate with the drawn part intact and the
+// imported part gone -- which on a track that is nothing but an import looks
+// like the command doing nothing at all, and was reported that way.
+//
+// The mixed track is the case worth pinning rather than the pure one, because
+// it is the one where the failure hides: half the drawing came through, so it
+// reads as having worked.
+void duplicatingADrawingTakesTheImportedPictureWithIt() {
+    TEST("duplicating a drawing takes its imported picture as well as its cels");
+    Fixture f;
+    const LayerId imported =
+        f.doc.addLayer(f.track, "modelsheet", 1, LayerKind::Reference);
+
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    paintDot(f.doc, f.track, one, f.layer, 40.0f, 40.0f);
+    f.doc.setSourceFrame(f.track, one, imported, 7);
+    CHECK_EQ(f.tl().findImage(one)->sourceFrameFor(imported), 7);
+
+    const ImageId copy = f.doc.duplicateDrawing(f.track, 0);
+    CHECK(copy != kNoId);
+    const Image* made = f.tl().findImage(copy);
+    CHECK(made != nullptr);
+
+    // The drawn half: its own cel, not the original's.
+    const Cel* original = f.doc.celAt(f.track, one, f.layer);
+    const Cel* duplicate = f.doc.celAt(f.track, copy, f.layer);
+    CHECK(original != nullptr && duplicate != nullptr);
+    CHECK(original != duplicate);
+    CHECK_NEAR(duplicate->pixel(40, 40).a, 1.0, 1e-2);
+
+    // And the imported half, which is the part that used to go missing. Not
+    // copied pixels -- a reference layer has none -- but the same frame of the
+    // same file, which is what holding an imported frame twice means.
+    CHECK_EQ(made->sourceFrameFor(imported), 7);
+}
+
+// The same thing on a track that is nothing but an import, which is how it was
+// found: the whole drawing came back blank, so the command looked like a
+// refusal that had forgotten to say why.
+void duplicatingAnImportOnItsOwnTrackIsNotABlankDrawing() {
+    TEST("duplicating an import on its own track is not a blank drawing");
+    Document doc;
+    const TrackId track = doc.addTrack("modelsheet");
+    const LayerId imported =
+        doc.addLayer(track, "modelsheet", 0, LayerKind::Reference);
+    const ImageId one = doc.insertImage(track, 0);
+    doc.setSourceFrame(track, one, imported, 0);
+
+    const ImageId copy = doc.duplicateDrawing(track, 0);
+    const Track& line = *doc.scene().findTrack(track);
+    CHECK(copy != kNoId);
+    CHECK_EQ(line.frameCount(), std::size_t{2});
+    CHECK_EQ(line.findImage(copy)->sourceFrameFor(imported), 0);
+}
+
+// --- duplicating a whole track ---------------------------------------------
+//
+// **Every id inside a track means something only within it, and three of them
+// point at each other.** `Image::cels` and `Image::source_frames` are keyed on
+// layer ids, `Track::slots` names image ids, and a colour layer's `ctg_sources`
+// names the line-art layers it is cut against. A copy that reused any of them
+// would be a second track wired to the first one's insides.
+void aDuplicatedTrackHasItsOwnDrawingsAndItsOwnPixels() {
+    TEST("a duplicated track has its own drawings and its own pixels");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.insertImage(f.track, 1);
+    f.doc.extendExposure(f.track, 0, 2);  // a hold, so the slot shape is worth checking
+    paintDot(f.doc, f.track, one, f.layer, 40.0f, 40.0f);
+
+    const TrackId copy_id = f.doc.duplicateTrack(f.track);
+    CHECK(copy_id != kNoId);
+    CHECK(copy_id != f.track);
+    const Track& original = f.tl();
+    const Track& copy = *f.doc.scene().findTrack(copy_id);
+
+    // Directly under the one it came from, which is where a duplicate belongs.
+    CHECK_EQ(f.doc.scene().tracks.size(), std::size_t{2});
+    CHECK_EQ(f.doc.scene().tracks[0].id, f.track);
+    CHECK_EQ(f.doc.scene().tracks[1].id, copy_id);
+    CHECK_EQ(copy.name, original.name + " copy");
+
+    // The same shape in time, holds and all.
+    CHECK_EQ(copy.slots.size(), original.slots.size());
+    CHECK_EQ(copy.frameCount(), original.frameCount());
+    CHECK_EQ(copy.images.size(), original.images.size());
+    for (std::size_t i = 0; i < copy.slots.size(); ++i) {
+        // The same *pattern* of repeats -- a hold is the same id in consecutive
+        // slots -- made of entirely different ids.
+        CHECK_EQ(copy.slots[i] == copy.slots[0], original.slots[i] == original.slots[0]);
+        CHECK(copy.slots[i] != original.slots[i]);
+    }
+
+    // And its own pixels: the dot came across, in a cel of its own.
+    const LayerId copied_layer = copy.layers.front().id;
+    CHECK(copied_layer != f.layer);
+    const Cel* here = f.doc.celAt(f.track, one, f.layer);
+    const Cel* there = f.doc.celAt(copy_id, copy.slots[0], copied_layer);
+    CHECK(here != nullptr && there != nullptr);
+    CHECK(here != there);
+    CHECK_NEAR(there->pixel(40, 40).a, 1.0, 1e-2);
+}
+
+// **The one that would not look wrong until somebody drew on the original.** A
+// colour layer's sources name the line art it is cut against, within its own
+// track. Left alone in a copy they would go on naming the *first* track's
+// layers, and the copy's fills would be cut against a drawing somewhere else.
+void aDuplicatedColourLayerIsCutAgainstItsOwnTracksLineArt() {
+    TEST("a duplicated colour layer is cut against its own track's line art");
+    Fixture f;
+    const LayerId colour = f.doc.addLayer(f.track, "colour", 0, LayerKind::Ctg);
+    Layer wired = *f.tl().findLayer(colour);
+    wired.ctg_sources = {f.layer};
+    f.doc.updateLayer(f.track, colour, wired);
+    CHECK_EQ(f.tl().findLayer(colour)->ctg_sources.front(), f.layer);
+
+    const TrackId copy_id = f.doc.duplicateTrack(f.track);
+    const Track& copy = *f.doc.scene().findTrack(copy_id);
+
+    // Find the copy's two layers by name, since their ids are new by design.
+    const Layer* copied_colour = nullptr;
+    const Layer* copied_line = nullptr;
+    for (const Layer& layer : copy.layers) {
+        if (layer.kind == LayerKind::Ctg) copied_colour = &layer;
+        else copied_line = &layer;
+    }
+    CHECK(copied_colour != nullptr && copied_line != nullptr);
+    CHECK_EQ(copied_colour->ctg_sources.size(), std::size_t{1});
+    // Its own line art, and specifically not the original's.
+    CHECK_EQ(copied_colour->ctg_sources.front(), copied_line->id);
+    CHECK(copied_colour->ctg_sources.front() != f.layer);
+}
+
+// The other thing a drawing carries a picture with -- see copyOfImage, where
+// forgetting it made a duplicated drawing come back blank.
+void aDuplicatedTrackKeepsItsImportedPictures() {
+    TEST("a duplicated track keeps its imported pictures");
+    Fixture f;
+    const LayerId imported = f.doc.addLayer(f.track, "board", 1, LayerKind::Reference);
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    f.doc.setSourceFrame(f.track, one, imported, 5);
+
+    const TrackId copy_id = f.doc.duplicateTrack(f.track);
+    const Track& copy = *f.doc.scene().findTrack(copy_id);
+    const Layer* copied = nullptr;
+    for (const Layer& layer : copy.layers)
+        if (layer.kind == LayerKind::Reference) copied = &layer;
+    CHECK(copied != nullptr);
+    CHECK(copied->id != imported);
+    CHECK_EQ(copy.findImage(copy.slots[0])->sourceFrameFor(copied->id), 5);
+    // And keyed on the copy's layer, not on the one it was copied from.
+    CHECK_EQ(copy.findImage(copy.slots[0])->sourceFrameFor(imported), Image::kNoSourceFrame);
+}
+
+void duplicatingATrackUndoesInOneStep() {
+    TEST("duplicating a track undoes in one step");
+    Fixture f;
+    const ImageId one = f.doc.insertImage(f.track, 0);
+    paintDot(f.doc, f.track, one, f.layer, 40.0f, 40.0f);
+
+    const std::size_t before = f.doc.undoDepth();
+    f.doc.duplicateTrack(f.track);
+    CHECK_EQ(f.doc.scene().tracks.size(), std::size_t{2});
+    CHECK_EQ(f.doc.undoDepth(), before + 1);
+
+    f.doc.undo();
+    CHECK_EQ(f.doc.scene().tracks.size(), std::size_t{1});
+    // The original is untouched by the copy having been made and unmade.
+    CHECK(f.doc.celAt(f.track, one, f.layer) != nullptr);
+    CHECK_NEAR(f.doc.celAt(f.track, one, f.layer)->pixel(40, 40).a, 1.0, 1e-2);
+
+    f.doc.redo();
+    CHECK_EQ(f.doc.scene().tracks.size(), std::size_t{2});
+}
+
+// A soundtrack is a file name and four numbers, so its copy is cheap -- and it
+// is also, today, the only way a scene gets a second soundtrack.
+void aDuplicatedSoundtrackPointsAtTheSameFile() {
+    TEST("a duplicated soundtrack points at the same file");
+    Document doc;
+    AudioPlacement placed;
+    placed.offset_frames = 12.5;
+    placed.gain = 0.4;
+    const TrackId first = doc.addAudioTrack("dialogue", "take-3.wav");
+    doc.setAudioTrackPlacement(first, placed);
+
+    const TrackId second = doc.duplicateAudioTrack(first);
+    CHECK(second != kNoId);
+    CHECK(second != first);
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{2});
+
+    const AudioTrack* copy = doc.scene().findAudioTrack(second);
+    CHECK(copy != nullptr);
+    CHECK_EQ(copy->source, std::string("take-3.wav"));
+    CHECK_EQ(copy->name, std::string("dialogue copy"));
+    CHECK_NEAR(copy->placement.offset_frames, 12.5, 1e-9);
+    CHECK_NEAR(copy->placement.gain, 0.4, 1e-9);
+
+    doc.undo();
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    // And the one it was copied from is where it was.
+    CHECK_EQ(doc.scene().findAudioTrack(first)->source, std::string("take-3.wav"));
+}
+
 // The issue's second example. Drawing1 held 11 then Drawing2 held 1; drop
 // Drawing2 on frame 4 and it owns everything from there, while the frame it
 // came from is absorbed by the drawing beside it rather than disappearing.
@@ -892,6 +1099,13 @@ int main() {
     withoutOverwritingAddingADrawingStillLengthensTheTrack();
     overwritingNeverTakesADrawingsLastFrame();
     duplicatingOverwritesTheSameWay();
+    aDuplicatedTrackHasItsOwnDrawingsAndItsOwnPixels();
+    aDuplicatedColourLayerIsCutAgainstItsOwnTracksLineArt();
+    aDuplicatedTrackKeepsItsImportedPictures();
+    duplicatingATrackUndoesInOneStep();
+    aDuplicatedSoundtrackPointsAtTheSameFile();
+    duplicatingADrawingTakesTheImportedPictureWithIt();
+    duplicatingAnImportOnItsOwnTrackIsNotABlankDrawing();
     movingOverAHoldTakesTheRestOfItAndLeavesNoGap();
     nudgingADrawingAlongItsOwnHold();
     framesLeftAtTheStartGoToTheDrawingAfterThem();

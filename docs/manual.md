@@ -238,17 +238,38 @@ same drawing still showing, not a thing of their own, and they travel with it.
 
 ## Tracks
 
+**The ruler stays put.** Scroll the timeline down past a few tracks and the
+strip of frame numbers stays at the top, because that strip is where you scrub —
+and soundtracks are under every drawing row, so reaching the sound is exactly
+when you have scrolled. The row directly under the ruler is cut off while you
+are down there; scroll a little further and it comes out.
+
 **Tracks.** One row each, under one ruler and one playhead. Click a row to work
 on that track: the layer panel, the brush and every timing button follow it,
-while the canvas goes on showing all of them. The Track menu adds, renames and
-deletes them; a new track arrives at the bottom of the stack, with a layer and a
-drawing so there is something to draw on.
+while the canvas goes on showing all of them. The Track menu adds, duplicates,
+renames and deletes them; a new track arrives at the bottom of the stack, with a
+layer and a drawing so there is something to draw on.
+
+**Duplicate track** makes a complete copy directly under the original — the same
+layers, the same drawings, the same timing — and puts you on the copy. It is a
+real copy and not a second view of the same thing: drawing on one does not
+reach the other. On a soundtrack row it duplicates the soundtrack instead, which
+is how a scene gets a second one.
 
 Drag a track's name up or down the strip on the left to restack it — the top row
 is the front of the picture, so that is how a background gets behind a character.
 Hovering a name says what the track is and what it does with a drawing put down
 on it. Double-click a name to rename it there, and a layer's name in the panel
 the same way; Enter keeps the new name and Escape leaves the old one.
+
+**What a layer row's colour means.** In the layer panel, an ordinary drawing
+layer is in the usual text colour, a **greyed** row is an imported picture, and
+a **blue** row is a colour layer. The grey is the same grey everything else uses
+for "you cannot act here": an imported picture's pixels come from a file, so the
+brush, the eraser and the transform all refuse there. The blue is the same blue
+the timeline draws carried marks in, because it is the same thing — a mark you
+make on a blue row is a label rather than paint. Hover any of them and the
+tooltip says the rest, including which file an imported row came from.
 
 Tracks need not be the same length. What a track shows once the playhead is past
 its last drawing is set under Track ▸ Past the last drawing: nothing (the
@@ -282,6 +303,16 @@ so the length never changes. It never takes a drawing's last frame, so nothing i
 wiped out by putting something down: standing on the first frame of a hold the
 new drawing starts one frame later, and a hold of one frame has nothing to spare
 at all, so there the track goes back to getting longer.
+
+**Transform layer through time** needs more than one drawing on the layer — with
+one there is no "through time" to speak of, and the Transform tool is the same
+gesture. The button says so when it is greyed.
+
+**An imported sequence cannot be transformed.** Its pictures come from files
+rather than from drawings, so the Transform tool is greyed out on one: convert it
+to drawings first. Moving the whole sequence around the canvas is a different
+thing and still works — that is "Place this picture" in the layer panel, and it
+writes nothing.
 
 ## Colour layers
 
@@ -360,6 +391,91 @@ There was a warning beside them — an orange corner for carried marks that had
 landed on nothing — and it was taken out because it fired on drawings whose
 colour was perfectly good. What it was measuring, and why the measurement cannot
 carry a flag, is in [handover.md](handover.md).
+
+## Importing a soundtrack
+
+**File ▸ Import ▸ Audio…** brings in a `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`
+or `.opus`. The file is copied into the project, so the project goes on working
+after you move or delete the original.
+
+**You can hear it by scrubbing.** Drag the playhead along the ruler — the strip
+of frame numbers at the top of the timeline — and you hear the sound under it as
+you go. Click a frame in the ruler and you hear that frame. That is how you find
+which frame a consonant is on, which is most of what a soundtrack is for.
+
+If you switch a speaker on, plug one in, or pull one out, Animage moves to
+whatever the machine now uses. It does not wait to be asked: a take that is
+playing carries on from the frame it had reached, on the new speaker.
+
+**Play carries the sound with it**, and the picture follows the sound rather
+than the other way round — so what you see on a frame is what you hear on it,
+however busy the drawing is. There is a pause of about a quarter of a second
+between pressing Play and the picture moving: that is the sound reaching the
+speakers, and the picture waiting for it is what starting together means.
+
+Nothing else makes a noise. Stepping through frames with the arrow keys is
+silent on purpose: you do that all day while drawing, and it is not a request to
+hear anything.
+
+The dialog says how long the sound is **in frames** as well as in seconds —
+which frame a sound is on is the whole of lipsync — and asks one thing: which
+frame it starts on. **Before frame 1 is allowed**, and it is what you want when
+a line of dialogue has a breath in front of the word: put the word on frame 1
+and let the breath fall off the start.
+
+If the sound runs past the end of your shot, the dialog offers to **make the
+shot reach the end of the sound**. It is ticked when nothing has said how long
+the shot is, and offered unticked when you have already set a length — an import
+will not overrule a decision you made. It never makes the shot *shorter*.
+
+### The soundtrack's row
+
+A soundtrack gets a row under every drawing row. The block in it is where the
+sound sits in the shot, **shaped by the sound itself** so you can see where the
+syllables are, and it does three things:
+
+| gesture | what it does |
+|---|---|
+| drag the block **sideways** | moves the sound along the shot |
+| drag the block **up or down** | sets the level — the line across the block is where you have set it, and at the bottom it is silent |
+| drag either **end** | crops the sound, without changing the file |
+
+The waveform is the block's own top edge rather than a picture drawn on it, so
+the level scales the whole shape: turn the sound down and the syllables shrink
+with it, and at the bottom it is a flat line. It is drawn relative to the
+loudest moment in that file rather than to full scale — a take recorded at a
+sensible level would otherwise be a ripple with nothing readable in it — so the
+shape tells you *where* the sound is and the block's height tells you how loud
+it will be. The line across the block is the level itself: the waveform touches
+it at the loudest moment in the file and stays under it everywhere else.
+
+Nothing snaps to whole frames. A frame at 24 fps is 42 milliseconds, which is
+most of the way to a syllable, so placing a sound to the nearest frame is not
+placing it — the drag is as fine as the pixels are.
+
+**Cropping takes nothing away.** It moves two numbers, so the whole take is
+still there: drag the end back out and it returns. Cropping the front does not
+move the rest of the sound — the audio under every frame you kept is the audio
+that was there before.
+
+**Clicking a soundtrack's row does not change which track you are drawing on.**
+The row you clicked is highlighted; the track your brush is on keeps a fainter
+version of the same highlight, so you can always see where it is. As soon as you
+draw, the brush's row goes back to being the bright one.
+
+**Rename it** by double-clicking its name, or with Track ▸ Rename. This changes
+the label on the row and nothing else — the file in the project keeps the name
+it had, and the row's tooltip says which file that is. Worth doing the moment
+you have two takes both called `dialogue`.
+
+**Delete it** with Track ▸ Delete track while its row is highlighted. The Track
+menu always acts on the row you are pointed at, which is why "Overwrite
+drawings" and "Past the last drawing" go grey while a soundtrack is highlighted:
+neither means anything for a sound. Deleting takes the soundtrack out of the
+shot and leaves the file in the project folder, and it undoes.
+
+**Audio is not exported.** It is there to animate against; an exported sequence
+has no sound in it.
 
 ## Exporting
 

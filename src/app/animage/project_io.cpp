@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <system_error>
 #include <unordered_set>
 
@@ -140,6 +141,15 @@ float asFloat(const QJsonValue& value, float fallback) {
     return value.isDouble() ? static_cast<float>(value.toDouble()) : fallback;
 }
 
+// Wanted for exactly one thing: a reference layer's placement, whose fields are
+// doubles. Reading those through asFloat would narrow them, and a placement is
+// compared exactly -- see Transform::operator== -- so a number that came back
+// slightly different would not be a slightly different picture, it would be a
+// cache key that never matches and a layer that re-derives on every refresh.
+double asDouble(const QJsonValue& value, double fallback) {
+    return value.isDouble() ? value.toDouble() : fallback;
+}
+
 int asInt(const QJsonValue& value, int fallback) {
     if (!value.isDouble()) return fallback;
     const double d = value.toDouble();
@@ -196,10 +206,19 @@ TrackEnd endFromName(const std::string& name) {
     return TrackEnd::Nothing;
 }
 
-const char* kindName(LayerKind kind) { return kind == LayerKind::Ctg ? "ctg" : "raster"; }
+const char* kindName(LayerKind kind) {
+    switch (kind) {
+        case LayerKind::Ctg: return "ctg";
+        case LayerKind::Reference: return "reference";
+        case LayerKind::Raster: break;
+    }
+    return "raster";
+}
 
 LayerKind kindFromName(const std::string& name) {
-    return name == "ctg" ? LayerKind::Ctg : LayerKind::Raster;
+    if (name == "ctg") return LayerKind::Ctg;
+    if (name == "reference") return LayerKind::Reference;
+    return LayerKind::Raster;
 }
 
 const char* directionName(CtgDirection direction) {
@@ -231,6 +250,46 @@ Rgba readColour(const QJsonArray& array) {
     return colour;
 }
 
+// Where an imported picture sits, which is the one transform in the program
+// that outlives the gesture that made it. Everywhere else a transform is
+// committed into pixels and forgotten; a reference layer has no pixels of its
+// own, so this *is* the picture's position and losing it loses the placing.
+//
+// All nine fields, and the pivot is not padding. Transform::operator== compares
+// every one of them because the derived pixels are keyed on the placement they
+// were derived under, and two placements agreeing everywhere but the pivot put
+// a rotation somewhere else. Writing eight of them would reopen the project
+// with the picture in a different place and nothing on screen to say why.
+QJsonObject writeTransform(const Transform& t) {
+    QJsonObject out;
+    out.insert("dx", jsonNumber(t.dx));
+    out.insert("dy", jsonNumber(t.dy));
+    out.insert("rotation", jsonNumber(t.rotation));
+    out.insert("scale_x", jsonNumber(t.scale_x));
+    out.insert("scale_y", jsonNumber(t.scale_y));
+    out.insert("flip_x", t.flip_x);
+    out.insert("flip_y", t.flip_y);
+    out.insert("pivot_x", jsonNumber(t.pivot_x));
+    out.insert("pivot_y", jsonNumber(t.pivot_y));
+    return out;
+}
+
+// The fallbacks are the identity, member by member, so an object with keys
+// missing reads as "not placed" rather than as a scale of zero.
+Transform readTransform(const QJsonObject& json) {
+    Transform t;
+    t.dx = asDouble(json.value("dx"), 0.0);
+    t.dy = asDouble(json.value("dy"), 0.0);
+    t.rotation = asDouble(json.value("rotation"), 0.0);
+    t.scale_x = asDouble(json.value("scale_x"), 1.0);
+    t.scale_y = asDouble(json.value("scale_y"), 1.0);
+    t.flip_x = asBool(json.value("flip_x"), false);
+    t.flip_y = asBool(json.value("flip_y"), false);
+    t.pivot_x = asDouble(json.value("pivot_x"), 0.0);
+    t.pivot_y = asDouble(json.value("pivot_y"), 0.0);
+    return t;
+}
+
 QJsonObject writeLayer(const Layer& layer) {
     QJsonObject out;
     out.insert("id", jsonNumber(static_cast<double>(layer.id)));
@@ -253,6 +312,18 @@ QJsonObject writeLayer(const Layer& layer) {
         out.insert("ctg_inherit", layer.ctg_inherit);
         out.insert("ctg_direction", QString::fromLatin1(directionName(layer.ctg_direction)));
         out.insert("ctg_follow_motion", layer.ctg_follow_motion);
+    }
+    if (layer.kind == LayerKind::Reference) {
+        QJsonArray files;
+        for (const std::string& name : layer.reference_sources) {
+            files.append(QString::fromStdString(name));
+        }
+        out.insert("reference_sources", files);
+        // Under the same version gate as the line above and for the same
+        // reason: a build that does not know `reference` reads the layer as
+        // raster, finds no cels on it, and saves the emptiness back. The
+        // picture and where it goes are lost together or not at all.
+        out.insert("placement", writeTransform(layer.placement));
     }
     return out;
 }
@@ -278,6 +349,21 @@ Layer readLayer(const QJsonObject& json) {
     layer.ctg_inherit = asBool(json.value("ctg_inherit"), true);
     layer.ctg_direction = directionFromName(asText(json.value("ctg_direction"), "forward"));
     layer.ctg_follow_motion = asBool(json.value("ctg_follow_motion"), true);
+    for (const QJsonValue& file : json.value("reference_sources").toArray()) {
+        // Kept even when it is empty, because the position in this list is what
+        // Image::source_frames names. Dropping an unreadable entry would shift
+        // every frame after it onto the wrong picture, which is worse than one
+        // frame that draws nothing.
+        layer.reference_sources.push_back(asText(file));
+    }
+    // A single `reference_source` is what version 2 wrote before a sequence
+    // existed, and a still is a sequence of one. Read here rather than migrated,
+    // because there is nothing to migrate: the shapes mean the same thing.
+    if (layer.reference_sources.empty()) {
+        const std::string one = asText(json.value("reference_source"));
+        if (!one.empty()) layer.reference_sources.push_back(one);
+    }
+    layer.placement = readTransform(json.value("placement").toObject());
     return layer;
 }
 
@@ -300,6 +386,21 @@ QJsonObject writeImage(const Image& image, const std::vector<Layer>& layers) {
         cels.append(entry);
     }
     out.insert("cels", cels);
+
+    // And which frame of its file a reference layer shows here, which is the
+    // same sparse shape and written the same way: layer order, absent means the
+    // layer is empty at this drawing. Only written when there is one, so a
+    // project with no imports in it looks exactly as it did.
+    QJsonArray sources;
+    for (const Layer& layer : layers) {
+        const int frame = image.sourceFrameFor(layer.id);
+        if (frame == Image::kNoSourceFrame) continue;
+        QJsonObject entry;
+        entry.insert("layer", jsonNumber(static_cast<double>(layer.id)));
+        entry.insert("frame", jsonNumber(frame));
+        sources.append(entry);
+    }
+    if (!sources.isEmpty()) out.insert("source_frames", sources);
     return out;
 }
 
@@ -315,6 +416,15 @@ Image readImage(const QJsonObject& json) {
         const LayerId layer = asId(entry.toObject().value("layer"), kNoId);
         const CelId cel = asId(entry.toObject().value("cel"), kNoId);
         if (layer != kNoId && cel != kNoId) image.cels[layer] = cel;
+    }
+    const QJsonArray sources = json.value("source_frames").toArray();
+    for (const QJsonValue& entry : sources) {
+        const LayerId layer = asId(entry.toObject().value("layer"), kNoId);
+        const int frame = asInt(entry.toObject().value("frame"), Image::kNoSourceFrame);
+        // A negative index is what "no entry" is written as, so a file saying
+        // one is saying nothing and is treated as such rather than reaching
+        // backwards off the front of the source list.
+        if (layer != kNoId && frame >= 0) image.source_frames[layer] = frame;
     }
     return image;
 }
@@ -576,8 +686,8 @@ bool ProjectIO::save(const Document& doc, const QString& folder, QString* error)
     return save(doc, folder, nothing, error);
 }
 
-bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& state,
-                     QString* error) {
+bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& state, QString* error,
+                     const Imports& imports) {
     const QString scratch = scratchFolderFor(folder);
     if (!removeTree(scratch)) {
         if (error) *error = QStringLiteral("cannot clear %1").arg(scratch);
@@ -630,6 +740,106 @@ bool ProjectIO::save(const Document& doc, const QString& folder, SaveState& stat
         if (!writeFile(scratch + QStringLiteral("/cels/") + name, packed, &why)) {
             return giveUp(why);
         }
+    }
+
+    // The imported files, which the swap would otherwise delete. Nothing in the
+    // document can rebuild these -- a reference layer holds a name, not pixels
+    // -- so a folder assembled without them is a folder that has lost the
+    // picture. See ProjectIO::Imports for where they are looked for and why in
+    // that order.
+    //
+    // Written once and run twice, for `imports/` and for `audio/`. The second
+    // caller is what makes this a function rather than a loop; the two folders
+    // differ in nothing but their name and which pending map answers for them.
+    const auto carryFolder =
+        [&](const char* subdir, const std::vector<std::string>& names,
+            const std::unordered_map<std::string, QString>& pending) -> std::optional<QString> {
+        const QString dir = QLatin1String(subdir);
+
+        // One file, tried everywhere it could be. False when none of them had
+        // it, with `tried` left saying where it looked.
+        const auto carryOne = [&](const std::string& name, QStringList& tried) {
+            const QString file = QString::fromStdString(name);
+            const QString into = scratch + QLatin1Char('/') + dir + QLatin1Char('/') + file;
+
+            const auto attempt = [&](const QString& from) {
+                if (from.isEmpty()) return false;
+                tried.append(from);
+                return carryForward(from, into);
+            };
+
+            if (attempt(state.folder.isEmpty()
+                            ? QString()
+                            : state.folder + QLatin1Char('/') + dir + QLatin1Char('/') + file)) {
+                return true;
+            }
+            const auto found = pending.find(name);
+            if (found != pending.end() && attempt(found->second)) return true;
+            return attempt(folder + QLatin1Char('/') + dir + QLatin1Char('/') + file);
+        };
+
+        if (!names.empty() && !root.mkpath(scratch + QLatin1Char('/') + dir)) {
+            return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
+        }
+        for (const std::string& name : names) {
+            QStringList tried;
+            if (carryOne(name, tried)) continue;
+
+            // Said rather than skipped, and said now: the original is still
+            // wherever it was imported from, and a save that quietly dropped it
+            // would be discovered when the project was next opened somewhere
+            // else.
+            return QStringLiteral("cannot find the imported file \"%1\". Looked in: %2")
+                .arg(QString::fromStdString(name),
+                     tried.isEmpty() ? QStringLiteral("nowhere it could be")
+                                     : tried.join(QStringLiteral(", ")));
+        }
+
+        // **And everything else the folder already holds, which nothing in the
+        // document names any more.**
+        //
+        // A save builds a new folder and swaps it in, so a file the loop above
+        // did not carry is a file deleted -- and until convert-to-drawings
+        // existed, nothing could stop naming a file without the person having
+        // said to remove it. Converting does exactly that: the layer becomes
+        // drawings and stops being an import, so the next save would take the
+        // scan out of the project. Undoing then left a layer naming files that
+        // existed nowhere, and the save after *that* failed outright on the
+        // error above.
+        //
+        // So the folder keeps what has been put in it. Which means it only ever
+        // grows: nothing here can tell a file left behind by a conversion from
+        // one left behind by a track somebody deleted, and telling them apart
+        // would need a layer recording where it came from -- the field
+        // docs/importing.md refuses under "where an import lands". Keeping both
+        // is the trade, and it is the same principle the video plan already
+        // states about keeping a source beside the frames drawn from it.
+        //
+        // Best-effort, unlike the loop above: these are files nothing is asking
+        // for, so one that has gone missing is not a project that cannot be
+        // written.
+        std::unordered_set<std::string> named(names.begin(), names.end());
+        for (const QString& where : {state.folder, folder}) {
+            if (where.isEmpty()) continue;
+            const QDir already(where + QLatin1Char('/') + dir);
+            if (!already.exists()) continue;
+            for (const QString& file : already.entryList(QDir::Files)) {
+                if (!named.insert(file.toStdString()).second) continue;
+                if (!root.mkpath(scratch + QLatin1Char('/') + dir)) {
+                    return QStringLiteral("cannot create %1/%2").arg(scratch, dir);
+                }
+                QStringList tried;
+                carryOne(file.toStdString(), tried);
+            }
+        }
+        return std::nullopt;
+    };
+
+    if (const auto why = carryFolder("imports", importsReferencedBy(doc), imports.pending)) {
+        return giveUp(*why);
+    }
+    if (const auto why = carryFolder("audio", audioReferencedBy(doc), imports.pending_audio)) {
+        return giveUp(*why);
     }
 
     const std::string text = writeSceneJson(doc);
@@ -937,6 +1147,34 @@ std::string ProjectIO::writeSceneJson(const Document& doc) {
     for (const Track& track : scene.tracks) tracks.append(writeTrack(track));
     out.insert("tracks", tracks);
 
+    // Only when there are any. A project with no sound is the same bytes it
+    // always was, which is what keeps a save comparable across the version
+    // bump -- and what stops every existing project's file changing the first
+    // time it is opened by this build.
+    if (!scene.audio_tracks.empty()) {
+        QJsonArray sounds;
+        for (const AudioTrack& track : scene.audio_tracks) {
+            QJsonObject one;
+            one.insert("id", jsonNumber(static_cast<qint64>(track.id)));
+            one.insert("name", QString::fromStdString(track.name));
+            one.insert("source", QString::fromStdString(track.source));
+            // A double, and written as one. A sound placed to the nearest
+            // frame is not placed: 1/24 of a second is 42 ms.
+            one.insert("offset_frames", track.placement.offset_frames);
+            one.insert("gain", track.placement.gain);
+            // Only when they say something. A soundtrack nobody has cropped
+            // writes the same bytes it did before the trim existed.
+            if (track.placement.trim_start_seconds > 0.0) {
+                one.insert("trim_start_seconds", track.placement.trim_start_seconds);
+            }
+            if (track.placement.trim_end_seconds > 0.0) {
+                one.insert("trim_end_seconds", track.placement.trim_end_seconds);
+            }
+            sounds.append(one);
+        }
+        out.insert("audio_tracks", sounds);
+    }
+
     const QByteArray text = QJsonDocument(out).toJson(QJsonDocument::Indented);
     return std::string(text.constData(), static_cast<std::size_t>(text.size()));
 }
@@ -982,10 +1220,80 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
     }
     if (scene.tracks.empty()) return refuse("scene has no tracks");
 
+    // Soundtracks, which a project may simply not have -- an absent key is not
+    // damage and reads as no sound. A track with no id or no source is dropped
+    // rather than refused: it can name no file and so can make no noise, and
+    // refusing the whole project over one would be losing the drawings to save
+    // nothing.
+    for (const QJsonValue& value : object.value("audio_tracks").toArray()) {
+        const QJsonObject one = value.toObject();
+        AudioTrack track;
+        // asId and not asInt, which is what every other id in this file is read
+        // with. A TrackId is 64 bits and ids are never reused, so a project
+        // worked on long enough gets past what an int holds -- and asInt
+        // answers its fallback for anything outside that range, which here is
+        // kNoId and is dropped four lines below. That would lose the soundtrack
+        // and the timing with it, silently, on a file that is not damaged.
+        track.id = asId(one.value("id"), kNoId);
+        track.name = one.value("name").toString().toStdString();
+        track.source = one.value("source").toString().toStdString();
+        // toDouble and not asInt: a version 3 file wrote a whole number here
+        // and reads back as the same number, so nothing has to be migrated.
+        track.placement.offset_frames = one.value("offset_frames").toDouble(0.0);
+        track.placement.gain = std::clamp(one.value("gain").toDouble(1.0), 0.0, 1.0);
+        // Absent means untrimmed, which is what every project written before
+        // this existed means. Negatives are clamped rather than trusted: what
+        // bounds these against the *clip* is Document::setAudioTrackPlacement,
+        // and a load has no decoded clip to bound them with yet.
+        track.placement.trim_start_seconds =
+            std::max(0.0, one.value("trim_start_seconds").toDouble(0.0));
+        track.placement.trim_end_seconds =
+            std::max(0.0, one.value("trim_end_seconds").toDouble(0.0));
+        if (track.id == kNoId || track.source.empty()) continue;
+        scene.audio_tracks.push_back(std::move(track));
+    }
+
     // Nothing is written into `doc` before this point, so a file that fails any
     // check above leaves whatever was open alone.
     doc.loadScene(std::move(scene));
     return true;
+}
+
+std::vector<std::string> ProjectIO::importsReferencedBy(const Document& doc) {
+    std::vector<std::string> names;
+    std::unordered_set<std::string> seen;
+    for (const Track& track : doc.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference) continue;
+            // A reference layer with no source is not an error to a save: it
+            // draws nothing, and there is no file to carry. It is what a layer
+            // looks like between being created and being pointed at a file.
+            //
+            // De-duplicated across the whole list and not only across layers,
+            // because a sequence is allowed to name one file twice -- a hold
+            // that was flattened into the files somebody handed over -- and
+            // that is one file to copy, not two.
+            for (const std::string& name : layer.reference_sources) {
+                if (name.empty()) continue;
+                if (seen.insert(name).second) names.push_back(name);
+            }
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::vector<std::string> ProjectIO::audioReferencedBy(const Document& doc) {
+    std::vector<std::string> names;
+    std::unordered_set<std::string> seen;
+    for (const AudioTrack& track : doc.scene().audio_tracks) {
+        // De-duplicated for importsReferencedBy's reason: two soundtracks are
+        // allowed to name one file, and that is one file to copy.
+        if (track.source.empty()) continue;
+        if (seen.insert(track.source).second) names.push_back(track.source);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 std::vector<CelId> ProjectIO::celsReferencedBy(const Document& doc) {

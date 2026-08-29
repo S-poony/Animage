@@ -30,6 +30,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QColorSpace>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QCheckBox>
@@ -49,6 +50,7 @@
 
 #include "brush.h"
 #include "canvas_widget.h"
+#include "image_import.h"
 #include "layer_list.h"
 #include "name_limits.h"
 #include "export_sequence.h"
@@ -870,6 +872,24 @@ void theLayerTransformButtonSaysWhichReasonItIs() {
         if (layers[static_cast<std::size_t>(row)].id != ink) continue;
         list->setCurrentItem(list->topLevelItem(row));
     }
+    QCoreApplication::processEvents();
+
+    // One drawing is not enough, and this is the reason a fresh track meets
+    // first. It used to hand the gesture to the Transform tool instead, which
+    // meant a button reading "Transform layer through time" doing something
+    // else on the most ordinary layer there is.
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("only one drawing")));
+
+    // A second drawing, inked on the same layer, and now there is something for
+    // "through time" to be through. A frame change is what asks the button
+    // again -- the stroke went into the document directly and nothing heard it.
+    const ImageId second = doc.insertImage(track, 1);
+    strokeOn(doc, track, second, ink, 40.0f, 140.0f, 200.0f, 140.0f);
+    timeline->refresh();
+    timeline->setCurrentSlot(1);
+    QCoreApplication::processEvents();
+    timeline->setCurrentSlot(0);
     QCoreApplication::processEvents();
 
     // An ordinary ink layer with a drawing under the playhead: pressable, and
@@ -1920,6 +1940,92 @@ void theFillWaitsForTheStrokeToFinish() {
 // So the one view whose job is to show what the solver saw was the one view
 // that could not, and a stroke made there copied the wrong position into the
 // drawing for good.
+// A fill for a drawing you have left still lands, which is issue #85.
+//
+// **The whole of the bug is one line that used to be in
+// dropStaleColourRequests.** A paint drops stale requests and then asks, so
+// moving off a drawing called off the solve that drawing's own paint had just
+// started -- and `abandoned()` is checked inside the max-flow, so it gave up
+// partway and produced nothing at all. At twenty-four frames a second against
+// solves taking a tenth of one, that is every solve, so playing a coloured shot
+// never coloured anything and no length of watching helped.
+//
+// Constructed with two paints and no waiting between them, which is what a
+// frame change is: ask for the first drawing, leave it before the answer can
+// arrive, and then see whether the answer arrives at all.
+void aFillForADrawingYouHaveLeftStillLands() {
+    TEST("a colour solve is not called off for the drawing having gone off screen");
+    Document doc;
+    const TrackId track = doc.addTrack("main");
+    const LayerId ink = doc.addLayer(track, "ink");
+    const LayerId colour = doc.addLayer(track, "colour", 1, LayerKind::Ctg);
+    const ImageId first = doc.insertImage(track, 0);
+    const ImageId second = doc.insertImage(track, 1);
+    {
+        Layer settings = *doc.scene().findTrack(track)->findLayer(colour);
+        settings.ctg_sources = {ink};
+        doc.updateLayer(track, colour, settings);
+    }
+
+    const auto strokeOn = [&](ImageId image, LayerId layer, float x0, float y0, float x1,
+                              float y1, float radius, float r, float g, float b) {
+        ScopedCommand command(doc, "Stroke");
+        BrushSettings settings;
+        settings.radius = radius;
+        settings.hardness = 0.95f;
+        settings.pressure_affects_opacity = false;
+        settings.r = r;
+        settings.g = g;
+        settings.b = b;
+        settings.a = 1.0f;
+        Brush brush(settings);
+        brush.begin(doc, track, image, layer, {x0, y0, 1.0f});
+        brush.extend({x1, y1, 1.0f});
+        brush.end();
+    };
+    const auto boxOn = [&](ImageId image, float left, float top, float right, float bottom) {
+        strokeOn(image, ink, left, top, right, top, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, top, left, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, right, top, right, bottom, 2.5f, 0, 0, 0);
+        strokeOn(image, ink, left, bottom, right, bottom, 2.5f, 0, 0, 0);
+    };
+
+    // Line art on both, and the scribble only on the first -- which is how a
+    // shot is actually coloured, and why the second drawing has never been
+    // looked at and has no fill of its own.
+    boxOn(first, 60, 60, 200, 180);
+    boxOn(second, 60, 60, 200, 180);
+    strokeOn(first, colour, 90, 100, 170, 100, 10.0f, 1.0f, 0.0f, 0.0f);
+
+    CanvasWidget canvas(doc);
+    canvas.resize(900, 700);
+    canvas.setTrack(track);
+
+    // Stand on the second drawing and ask for it, then leave immediately --
+    // before anything could have been solved. This is a frame change and
+    // nothing else.
+    canvas.setFrame(1);
+    canvas.grab();
+    CHECK(canvas.colourPending());
+
+    canvas.setFrame(0);
+    canvas.grab();
+
+    // The request for the drawing that was left must still be outstanding. This
+    // is the check that fails on the old code, where the paint above cancelled
+    // it: there, only the drawing now on screen is ever being worked out.
+    CHECK(canvas.colourPending());
+
+    CHECK(canvas.settleColour());
+
+    // And the answer is in the cache, for a drawing nobody is standing on. That
+    // is the whole point of keeping it: it is the drawing you will be on again
+    // next time round the loop.
+    const CtgFill* left_behind = doc.ctgFillFor(track, second, colour);
+    CHECK(left_behind != nullptr);
+    if (left_behind) CHECK(left_behind->valid);
+}
+
 void aLayerShowingItsMarksIsStillSolved() {
     TEST("a layer showing its marks is solved, so they land where they are used");
     Document doc;
@@ -2514,6 +2620,434 @@ std::map<QString, QByteArray> projectBytes(const QString& folder) {
     QFile scene(folder + QStringLiteral("/scene.json"));
     if (scene.open(QIODevice::ReadOnly)) out[QStringLiteral("scene.json")] = scene.readAll();
     return out;
+}
+
+
+// --- a soundtrack, from a file to a saved project and back -------------------
+
+// A 16-bit PCM WAV of a sine, written by hand. Forty-four bytes of header, so a
+// fixture that builds its own input is cheaper than one committed as a binary
+// and cannot be broken by somebody tidying the repository.
+QByteArray makeWavBytes(int rate, int channels, int frames, double hz) {
+    const auto put32 = [](QByteArray& out, quint32 v) {
+        for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+    const auto put16 = [](QByteArray& out, quint16 v) {
+        for (int i = 0; i < 2; ++i) out.append(char((v >> (8 * i)) & 0xff));
+    };
+
+    QByteArray data;
+    for (int i = 0; i < frames; ++i) {
+        const auto v = qint16(std::lround(
+            0.5 * 32767.0 * std::sin(2.0 * 3.14159265358979323846 * hz * i / rate)));
+        for (int c = 0; c < channels; ++c) put16(data, quint16(v));
+    }
+
+    QByteArray out;
+    out.append("RIFF");
+    put32(out, quint32(36 + data.size()));
+    out.append("WAVEfmt ");
+    put32(out, 16);
+    put16(out, 1);
+    put16(out, quint16(channels));
+    put32(out, quint32(rate));
+    put32(out, quint32(rate * channels * 2));
+    put16(out, quint16(channels * 2));
+    put16(out, 16);
+    out.append("data");
+    put32(out, quint32(data.size()));
+    out.append(data);
+    return out;
+}
+
+// **The whole of what M2 claims, in one run.** A file outside the project is
+// imported, the project is saved somewhere it has never been, and a second
+// window opens it -- and the sound is still there, still placed where it was
+// put, with its samples decoded again from a copy that the save had to make for
+// itself. Every one of those steps is a place the picture-import path has been
+// wrong before.
+void aSoundtrackSurvivesAnImportASaveAndAReopen() {
+    TEST("a soundtrack imported from outside is carried into the project and comes back");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    // Deliberately *outside* the project folder, and deleted before the reopen.
+    // A project that still worked because the original was where it was left
+    // would be a project that breaks on somebody else's machine, which is the
+    // failure a self-contained folder exists to prevent.
+    const QString outside = scratch.filePath(QStringLiteral("somewhere-else.wav"));
+    {
+        QFile file(outside);
+        CHECK(file.open(QIODevice::WriteOnly));
+        file.write(makeWavBytes(48000, 2, 24000, 440.0));  // half a second
+    }
+
+    const QString folder = scratch.filePath(QStringLiteral("shot.animage"));
+    animage::TrackId sound = animage::kNoId;
+    {
+        MainWindow window;
+        window.resize(1000, 700);
+        window.show();
+        QCoreApplication::processEvents();
+
+        QString trouble;
+        // start_frame 7, so the placement is a number nothing could produce by
+        // accident: an offset of 6 slots.
+        CHECK(window.importAudioFrom(outside, 7, &trouble));
+        QCoreApplication::processEvents();
+
+        const animage::Scene& scene = window.documentForTesting().scene();
+        CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
+        if (scene.audio_tracks.empty()) return;
+        sound = scene.audio_tracks.front().id;
+        CHECK_NEAR(scene.audio_tracks.front().placement.offset_frames, 6.0, 1e-9);
+
+        // Decoded on the way in, unlike a picture -- there is nothing later to
+        // ask, because what would ask is a device callback that must not wait
+        // on a disk.
+        const animage::AudioClip* clip = window.documentForTesting().audioSamplesFor(sound);
+        CHECK(clip != nullptr);
+        if (clip) {
+            CHECK_EQ(clip->rate, 48000);
+            CHECK_EQ(clip->channels, 2);
+            CHECK(clip->frames() > 20000);
+        }
+
+        CHECK(window.saveTo(folder));
+    }
+
+    // The save had to copy the file into the project, because nothing in the
+    // document can rebuild a sound.
+    const QDir audio(folder + QStringLiteral("/audio"));
+    CHECK(audio.exists());
+    CHECK_EQ(audio.entryList(QDir::Files).size(), 1);
+
+    // And now the original goes. What opens next has only the project.
+    CHECK(QFile::remove(outside));
+
+    MainWindow reopened;
+    reopened.resize(1000, 700);
+    reopened.show();
+    QCoreApplication::processEvents();
+    QString error;
+    CHECK(reopened.openProjectAt(folder, &error));
+    CHECK_EQ(error.toStdString(), std::string());
+    QCoreApplication::processEvents();
+
+    const animage::Scene& scene = reopened.documentForTesting().scene();
+    CHECK_EQ(scene.audio_tracks.size(), std::size_t{1});
+    if (scene.audio_tracks.empty()) return;
+    CHECK_NEAR(scene.audio_tracks.front().placement.offset_frames, 6.0, 1e-9);
+
+    // Decoded again from the copy, which is the load path doing its one job.
+    const animage::AudioClip* clip =
+        reopened.documentForTesting().audioSamplesFor(scene.audio_tracks.front().id);
+    CHECK(clip != nullptr);
+    if (clip) {
+        CHECK_EQ(clip->rate, 48000);
+        CHECK(clip->frames() > 20000);
+        float peak = 0.0f;
+        for (float s : clip->samples) peak = std::max(peak, std::abs(s));
+        CHECK(peak > 0.2f);  // audible, not a well-shaped silence
+    }
+}
+
+
+// --- the timeline reaches the sound, and the shot may be told to ------------
+
+// **The rule is: the box appears when it would change something, and is ticked
+// only when nothing has decided the length yet.** Three cases, and this drives
+// the two halves that are not the dialog -- what the timeline reaches, and what
+// asking for the shot to be extended does.
+void aSoundtrackWidensTheTimelineWithoutWideningTheShot() {
+    TEST("a soundtrack past the drawings can be scrubbed over but is not exported");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second = 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    const animage::Document& doc = window.documentForTesting();
+    const std::size_t shot_before = doc.scene().shotFrames();
+    CHECK(shot_before < 24);  // a fresh document is nowhere near a second long
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble));  // no extend
+    QCoreApplication::processEvents();
+
+    // **The timeline reaches it and the shot does not.** That is the split
+    // Scene::shotFrames and Document::timelineFrames exist to make: everything
+    // that draws or scrubs wants the second, everything that plays or writes
+    // files wants the first.
+    CHECK_EQ(doc.scene().shotFrames(), shot_before);
+    CHECK(doc.timelineFrames() >= 24);
+}
+
+void extendingTheShotToTheSoundIsAskedForRatherThanAssumed() {
+    TEST("the shot reaches the sound only when the import is told to");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+
+    QString trouble;
+    // Placed at frame 5, so the sound reaches slot 4 + 24 = 28.
+    CHECK(window.importAudioFrom(file, 5, &trouble, true));
+    QCoreApplication::processEvents();
+
+    CHECK(doc.scene().fixed_length);
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{28});
+
+    // **And the whole import is one undo step.** Adding the track, placing it
+    // and lengthening the shot are three edits that join one command, so a
+    // mistaken import is one Ctrl+Z rather than three.
+    CHECK(doc.undo());
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+    CHECK(!doc.scene().fixed_length);
+}
+
+// Removing a soundtrack throws its decoded samples away on purpose, rather than
+// carrying megabytes on the undo stack against a redo that may never come --
+// and `Document::removeAudioTrack` says, in as many words, that an undo
+// re-decodes instead. Nothing kept that promise: refreshAudioSamples ran after
+// a load and nowhere else, so the track came back on Ctrl+Z with no waveform,
+// no length and no sound, and only a save-and-reopen brought it round.
+//
+// It asserts what somebody hears rather than which function was called, so it
+// goes on meaning the same thing whichever end the re-decode is arranged from.
+void undoingASoundtrackDeletionBringsTheSoundBackWithIt() {
+    TEST("a soundtrack undone back into the shot can be heard again");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second, 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    if (doc.scene().audio_tracks.empty()) return;
+
+    const animage::TrackId sound = doc.scene().audio_tracks.front().id;
+    CHECK(doc.audioSamplesFor(sound) != nullptr);
+    const std::size_t reach = doc.timelineFrames();
+    CHECK(reach >= 24);
+
+    // What removeCurrentTrack does, without the dialog a test cannot answer.
+    doc.removeAudioTrack(sound);
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+    // Gone deliberately. This is the line the promise is made about.
+    CHECK(doc.audioSamplesFor(sound) == nullptr);
+
+    // Through the real Undo, because what re-decodes is the refresh that action
+    // performs -- calling doc.undo() here would test the model and miss the
+    // whole of the bug.
+    QAction* undo = window.actionForTesting(shortcuts::Id::Undo);
+    CHECK(undo != nullptr);
+    if (!undo) return;
+    undo->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    // **And the sound with it.** Without this the row is back and silent: it
+    // draws "no sound loaded", audioProgramAt skips it so a scrub and a take
+    // are both quiet, and the timeline stops reaching the end of it.
+    const animage::AudioClip* back = doc.audioSamplesFor(sound);
+    CHECK(back != nullptr);
+    if (back) {
+        CHECK(!back->empty());
+        CHECK_EQ(back->rate, 48000);
+    }
+    // The peaks are written with the samples in every case, so the row has
+    // something to draw as well as something to play.
+    CHECK(doc.audioPeaksFor(sound) != nullptr);
+    CHECK_EQ(doc.timelineFrames(), reach);
+}
+
+// The timeline's tooltips are set on the widget by refreshTooltip and shown by
+// `QWidget::event`, which is the ordinary Qt route. A `QEvent::ToolTip`
+// override was added for the soundtrack's file name, and because it answered
+// *every* tooltip event and returned true, `QWidget::event` stopped running --
+// so every other tooltip in the file was set and never seen by anybody.
+//
+// This pins the property that failed: whatever a row has to say, hovering it
+// leaves it on the widget where Qt will find it.
+void everyTimelineRowStillHasSomethingToSay() {
+    TEST("hovering a timeline row leaves its tooltip where Qt can show it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));
+    }
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    TimelineWidget* strip = window.findChild<TimelineWidget*>();
+    CHECK(strip != nullptr);
+    if (!strip) return;
+
+    const animage::Document& doc = window.documentForTesting();
+    const std::size_t drawing_rows = doc.scene().tracks.size();
+    CHECK(drawing_rows >= 1);
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    // A drawing track's name strip, which is where its tooltip lives.
+    const QPoint on_a_track = strip->gutterPointForTesting(0);
+    sendMouse(strip, QEvent::MouseMove, QPointF(on_a_track), Qt::NoButton, Qt::NoButton);
+    CHECK(!strip->toolTip().isEmpty());
+    CHECK(strip->toolTip().contains(QStringLiteral("restack")));
+
+    // And a soundtrack's row, which says both things it has to say: what the
+    // drag does, and which file the row came from -- the second being what
+    // makes renaming the first safe.
+    const QPoint on_the_sound = strip->gutterPointForTesting(drawing_rows);
+    sendMouse(strip, QEvent::MouseMove, QPointF(on_the_sound), Qt::NoButton, Qt::NoButton);
+    CHECK(strip->toolTip().contains(QStringLiteral("set the level")));
+    CHECK(strip->toolTip().contains(QStringLiteral("dialogue.wav")));
+}
+
+void extendingTheShotNeverShortensIt() {
+    TEST("extending the shot to a short sound does not cut the drawings out of it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("blip.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 4800, 440.0));  // a tenth of a second
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+    doc.setSceneLength(true, 200);
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    // The box says "reach the end of the sound", not "be exactly the sound". A
+    // shot that shrank would take drawings out of the export, which is not
+    // something an audio import may do.
+    CHECK_EQ(doc.scene().shotFrames(), std::size_t{200});
+}
+
+// Reported from use: trimming the front looked like it moved the sound without
+// cropping it. Both numbers were sub-frame all along -- the *drawing* rounded
+// the length up to whole frames while leaving the start fractional, so the
+// block's right edge jumped a frame at a time while its left edge slid.
+//
+// This is the test that would have caught it, and it asserts what a person
+// sees rather than what the arithmetic does.
+void croppingTheFrontOfASoundDoesNotMoveItsEndOnScreen() {
+    TEST("cropping the front of a sound leaves its drawn end where it was");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second, 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    animage::Document& doc = window.documentForTesting();
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    if (doc.scene().audio_tracks.empty()) return;
+    const animage::TrackId sound = doc.scene().audio_tracks.front().id;
+
+    TimelineWidget* strip = window.findChild<TimelineWidget*>();
+    CHECK(strip != nullptr);
+    if (!strip) return;
+
+    // The soundtrack's row is under every drawing row.
+    const std::size_t row = doc.scene().tracks.size();
+    const auto [was_first, was_last] = strip->audioExtentForTesting(row);
+    CHECK(was_last > was_first);
+
+    // Crop the front by a third of a frame, the way the drag does: the in-point
+    // and the offset move together.
+    const int fps = doc.scene().framerate;
+    const double delta = 1.0 / 3.0;
+    animage::AudioPlacement cropped = doc.scene().findAudioTrack(sound)->placement;
+    cropped.offset_frames += delta;
+    cropped.trim_start_seconds += delta / fps;
+    doc.setAudioTrackPlacement(sound, cropped);
+    strip->refresh();
+
+    // Localising: the stored numbers first, then what is drawn from them.
+    const animage::AudioPlacement& stored = doc.scene().findAudioTrack(sound)->placement;
+    CHECK_NEAR(stored.offset_frames, cropped.offset_frames, 1e-9);
+    CHECK_NEAR(stored.trim_start_seconds, cropped.trim_start_seconds, 1e-9);
+
+    const auto [now_first, now_last] = strip->audioExtentForTesting(row);
+    // The front moved by exactly what was asked for -- a third of a frame, not
+    // rounded to none of one and not rounded to a whole one.
+    CHECK_NEAR(now_first - was_first, delta, 1e-6);
+    // And the back did not move at all, which is the whole claim.
+    CHECK_NEAR(now_last, was_last, 1e-6);
 }
 
 void aProjectSurvivesSavingAndLoading() {
@@ -8972,11 +9506,1366 @@ void shiftErasesInAStraightLineToo() {
     CHECK_EQ(alphaAt(f.doc, f.track, f.image, f.layer, 400, 350), 0.0f);
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A picture on disk to import. Flat, opaque, and a colour nothing else in the
+// program produces, so "did that reach the canvas" is one pixel read.
+bool writeATestPicture(const QString& path, const QColor& colour) {
+    QImage image(200, 150, QImage::Format_RGBA8888);
+    image.fill(colour);
+    image.setColorSpace(QColorSpace(QColorSpace::SRgb));
+    return image.save(path, "PNG");
+}
+
+// The one that would go wrong quietly.
+//
+// A save does not edit the project folder, it builds a new one alongside and
+// renames it into place -- so **every directory entry is replaced on every
+// save**, and anything the build step did not put into the new folder is gone.
+// A cel survives that because its pixels are in the document and can always be
+// written out again. An imported file cannot: the document holds a name.
+//
+// So this is the test for a failure with no symptom at the time. The import
+// looks right, the save reports success, and the picture is missing the next
+// time the project is opened -- or two minutes later, when autosave has fired.
+void anImportSurvivesSavingAndOpening() {
+    TEST("an imported picture is still there after a save, a reopen, and a Save As");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 0, 255)));
+
+    const QString first = dir.filePath(QStringLiteral("first.animage"));
+    const QString second = dir.filePath(QStringLiteral("second.animage"));
+
+    {
+        MainWindow window;
+        window.resize(1000, 700);
+        window.show();
+        QCoreApplication::processEvents();
+
+        QString trouble;
+        CHECK(window.importImageFrom(picture, &trouble));
+        CHECK(trouble.isEmpty());
+
+        // Saved through the window rather than through ProjectIO directly,
+        // because what is being tested includes the window knowing where the
+        // bytes are before the project has a folder to hold them.
+        CHECK(window.saveTo(first));
+        CHECK(QFileInfo::exists(first + QStringLiteral("/imports/modelsheet.png")));
+
+        // A second save over the same folder. This is the one the swap eats:
+        // the file is now only in the project, so a save that does not carry it
+        // forward deletes the copy it was meant to preserve.
+        CHECK(window.saveTo(first));
+        CHECK(QFileInfo::exists(first + QStringLiteral("/imports/modelsheet.png")));
+
+        // And Save As, which writes a project that has to stand on its own --
+        // reaching back to a folder it is no longer saving into.
+        CHECK(window.saveTo(second));
+        CHECK(QFileInfo::exists(second + QStringLiteral("/imports/modelsheet.png")));
+    }
+
+    // The original picture goes. A project is a self-contained folder, so
+    // opening it must not depend on where the file was imported from -- and
+    // deleting it is the only way to prove the folder is standing on its own
+    // rather than on a path that happens to still resolve.
+    CHECK(QFile::remove(picture));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.openProjectAt(second, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const Track* track = nullptr;
+    const Layer* layer = nullptr;
+    for (const Track& t : doc.scene().tracks) {
+        for (const Layer& l : t.layers) {
+            if (l.kind == LayerKind::Reference) {
+                track = &t;
+                layer = &l;
+            }
+        }
+    }
+    CHECK(track != nullptr && layer != nullptr);
+    if (!track || !layer) return;
+
+    CHECK_EQ(layer->reference_sources.size(), std::size_t{1});
+    if (!layer->reference_sources.empty()) {
+        CHECK_EQ(layer->reference_sources.front(), std::string("modelsheet.png"));
+    }
+    // The name coming back is not enough: it is the derived pixels that decide
+    // whether anything is on screen, and a layer whose file did not survive
+    // looks exactly like one whose file did until you ask for them.
+    //
+    // Waited for, because a project that has just opened has decoded nothing.
+    // The decode happens on a worker that the paint asks, so a freshly opened
+    // import is blank for as long as one takes -- which is the same thing a
+    // freshly opened colour layer does, and is why this settles rather than
+    // asserting straight after the load.
+    CHECK(window.settleReferenceFrames());
+    const TileGrid* frame =
+        doc.referenceFrameFor(track->id, track->imageAtSlot(0), layer->id, layer->placement);
+    CHECK(frame != nullptr);
+    if (frame) CHECK_NEAR(frame->pixel(10, 10).b, 1.0, 1e-2);
+}
+
+// A sequence shows a different picture at every drawing, which is the whole of
+// what the source frame map is for and the thing a still could never show.
+//
+// Built by hand rather than through an import dialog, because what is under
+// test is the model and the decode path and not a file picker: three files, one
+// reference layer naming all three, three drawings pointed at one each.
+//
+// The colours are what make it an assertion rather than a smoke test. Every
+// drawing having *a* picture would pass with one file decoded three times; only
+// reading the colour back says each drawing got its own.
+void aSequenceShowsADifferentFrameAtEachDrawing() {
+    TEST("each drawing of an imported sequence shows its own frame of the source");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    for (int i = 0; i < 3; ++i) {
+        CHECK(writeATestPicture(dir.filePath(QStringLiteral("board_%1.png").arg(i)), colours[i]));
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    // All three go through the real import, which is what puts them on the
+    // window's list of where imports are -- the canvas asks this window for a
+    // path and gets nothing for a file it has never heard of.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(window.importImageFrom(dir.filePath(QStringLiteral("board_%1.png").arg(i)), nullptr));
+        QCoreApplication::processEvents();
+    }
+
+    Document& doc = window.documentForTesting();
+
+    // What each landed as, read back rather than worked out. An import's file
+    // is renamed on the way in -- `board_0.png` arrives as `board-0.png` --
+    // and the reason is `importNameFor`'s rather than this test's to state. A
+    // test that rebuilt the rule would be checking its own copy of it, and
+    // would go quietly wrong the day the real one changed.
+    std::vector<std::string> named;
+    TrackId track = kNoId;
+    LayerId layer = kNoId;
+    for (const Track& t : doc.scene().tracks) {
+        for (const Layer& l : t.layers) {
+            if (l.kind != LayerKind::Reference || l.reference_sources.empty()) continue;
+            named.push_back(l.reference_sources.front());
+            if (track == kNoId) {
+                track = t.id;
+                layer = l.id;
+            }
+        }
+    }
+    CHECK_EQ(named.size(), std::size_t{3});
+    if (named.size() != 3) return;
+
+    // The first import's track becomes the sequence; the other two exist only
+    // so that their files are known to the window, and their tracks are left
+    // alone.
+    Layer sequence = *doc.scene().findTrack(track)->findLayer(layer);
+    sequence.reference_sources = named;
+    doc.updateLayer(track, layer, sequence);
+
+    // Two more drawings after the one the import made, and each pointed at its
+    // own frame. Deliberately not in file order for the last two, because a
+    // decode that recovered the frame by counting drawings would pass on 0,1,2
+    // and be wrong here.
+    const ImageId first = doc.scene().findTrack(track)->imageAtSlot(0);
+    const ImageId second = doc.insertImage(track, 1);
+    const ImageId third = doc.insertImage(track, 2);
+    doc.setSourceFrame(track, first, layer, 0);
+    doc.setSourceFrame(track, second, layer, 2);
+    doc.setSourceFrame(track, third, layer, 1);
+
+    // Everything derived under the old one-file layer is about a layer that no
+    // longer exists in that form, and the way that is said is by emptying.
+    doc.forgetReferenceFrames();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // The blue channel of each, because the three test colours differ in it in
+    // a way one comparison can tell apart: red is 0, green is 0, blue is 1.
+    const auto frameAt = [&](ImageId drawing) -> const TileGrid* {
+        const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+        return doc.referenceFrameFor(track, drawing, layer, now->placement);
+    };
+
+    // One drawing at a time, because the paint asks for what is *on screen* --
+    // which is one drawing of this track -- and that is the whole request path
+    // rather than a walk of the document.
+    const int wanted[3] = {0, 2, 1};
+    const ImageId drawings[3] = {first, second, third};
+    for (int slot = 0; slot < 3; ++slot) {
+        canvas->setFrame(static_cast<std::size_t>(slot));
+        CHECK(window.settleReferenceFrames());
+
+        const TileGrid* frame = frameAt(drawings[slot]);
+        CHECK(frame != nullptr);
+        if (!frame) continue;
+        const Rgba pixel = frame->pixel(10, 10);
+        CHECK_NEAR(pixel.a, 1.0, 1e-2);
+        // Blue is the third file, and only the drawing pointed at it may be it.
+        CHECK_NEAR(pixel.b, wanted[slot] == 2 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(pixel.r, wanted[slot] == 0 ? 1.0 : 0.0, 1e-2);
+    }
+}
+
+// A file that will not read is asked for once, and then not again.
+//
+// **This is a hang rather than a cosmetic defect, which is why it is pinned.**
+// The paint asks for every frame on screen that is not in the cache, so a
+// decode that fails and leaves nothing behind is asked for again on the next
+// paint, and again sixteen milliseconds later, for as long as the window is
+// open. Remembering the failure as an empty picture is what makes asking stop.
+// The order a set of files becomes a sequence in, which is a rule with no
+// control in front of it -- so it has to be right and it has to be *said*.
+void filesAreOrderedByTheirLastNumber() {
+    TEST("a sequence is ordered by the last number in each name, and says what it did");
+
+    const auto namesOf = [](const image_import::Ordering& order) {
+        std::vector<std::string> out;
+        for (const QString& path : order.paths) out.push_back(path.toStdString());
+        return out;
+    };
+
+    // The case the rule exists for: nine before ten, which alphabetical order
+    // gets backwards and which nobody has ever wanted corrected.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("frame10.png"), QStringLiteral("frame9.png"),
+             QStringLiteral("frame1.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{3});
+        if (names.size() == 3) {
+            CHECK_EQ(names[0], std::string("frame1.png"));
+            CHECK_EQ(names[1], std::string("frame9.png"));
+            CHECK_EQ(names[2], std::string("frame10.png"));
+        }
+        CHECK_EQ(order.numbered, 3);
+        CHECK_EQ(order.schemes, 1);
+        CHECK_EQ(order.first, 1LL);
+        CHECK_EQ(order.last, 10LL);
+        CHECK(order.gaps);  // 1, 9, 10 is three files across ten numbers
+    }
+
+    // The *last* run of digits and not the first, which is what tells frame ten
+    // of shot two from frame two of anything.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("shot2_frame010.png"), QStringLiteral("shot2_frame002.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{2});
+        if (names.size() == 2) {
+            CHECK_EQ(names[0], std::string("shot2_frame002.png"));
+            CHECK_EQ(names[1], std::string("shot2_frame010.png"));
+        }
+        CHECK_EQ(order.schemes, 1);
+    }
+
+    // Padding is not part of the group, or a run would split at its first
+    // carry -- frame9 and frame10 are one sequence with different digit counts.
+    {
+        const image_import::Ordering order =
+            image_import::order({QStringLiteral("a9.png"), QStringLiteral("a10.png")});
+        CHECK_EQ(order.schemes, 1);
+        CHECK(!order.gaps);
+    }
+
+    // Two schemes stay two runs rather than interleaving, and the ends of "the"
+    // run are not reported because there is no one run to have ends.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("b_002.png"), QStringLiteral("a_002.png"),
+             QStringLiteral("b_001.png"), QStringLiteral("a_001.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{4});
+        if (names.size() == 4) {
+            CHECK_EQ(names[0], std::string("a_001.png"));
+            CHECK_EQ(names[1], std::string("a_002.png"));
+            CHECK_EQ(names[2], std::string("b_001.png"));
+            CHECK_EQ(names[3], std::string("b_002.png"));
+        }
+        CHECK_EQ(order.schemes, 2);
+        CHECK_EQ(order.first, 0LL);
+        CHECK_EQ(order.last, 0LL);
+    }
+
+    // A name with no digits at all cannot take part in the rule, so it goes
+    // last rather than first: putting it first would push every frame somebody
+    // *did* number one slot later than its name says.
+    {
+        const image_import::Ordering order = image_import::order(
+            {QStringLiteral("cover.png"), QStringLiteral("f002.png"), QStringLiteral("f001.png")});
+        const std::vector<std::string> names = namesOf(order);
+        CHECK_EQ(names.size(), std::size_t{3});
+        if (names.size() == 3) {
+            CHECK_EQ(names[0], std::string("f001.png"));
+            CHECK_EQ(names[1], std::string("f002.png"));
+            CHECK_EQ(names[2], std::string("cover.png"));
+        }
+        CHECK_EQ(order.numbered, 2);
+        CHECK_EQ(order.unnumbered, 1);
+    }
+}
+
+// The import itself, through the function the menu item drives.
+void animportedSequenceLandsAsOneDrawingPerFile() {
+    TEST("an imported sequence is one drawing per file, on a track that ends where it ends");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, colours[i - 1]));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const std::size_t tracks_before = doc.scene().tracks.size();
+
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().tracks.size(), tracks_before + 1);
+    const Track* track = doc.scene().findTrack(doc.scene().tracks.back().id);
+    CHECK(track != nullptr);
+    if (!track || track->layers.empty()) return;
+
+    // One drawing per file, and each pointed at its own.
+    CHECK_EQ(track->slots.size(), std::size_t{3});
+    CHECK_EQ(track->layers.size(), std::size_t{1});
+    const Layer& layer = track->layers.front();
+    CHECK_EQ(static_cast<int>(layer.kind), static_cast<int>(LayerKind::Reference));
+    CHECK_EQ(layer.reference_sources.size(), std::size_t{3});
+    for (int i = 0; i < 3 && i < static_cast<int>(track->slots.size()); ++i) {
+        const Image* record = track->findImage(track->imageAtSlot(static_cast<std::size_t>(i)));
+        CHECK(record != nullptr);
+        if (record) CHECK_EQ(record->sourceFrameFor(layer.id), i);
+    }
+
+    // Nothing past the last frame, which is what an animation does and is
+    // deliberately not what a single imported picture does.
+    CHECK_EQ(static_cast<int>(track->end), static_cast<int>(TrackEnd::Nothing));
+
+    // **No cels and no tiles.** Two hundred frames would cost a save and the
+    // undo history exactly this much: nothing.
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+    for (const auto& [id, image] : track->images) {
+        CHECK(image.celFor(layer.id) == kNoId);
+    }
+
+    // And the whole import is one undo step, however many files it was.
+    CHECK(doc.canUndo());
+    const std::size_t depth = doc.undoDepth();
+    Document& editable = window.documentForTesting();
+    CHECK(editable.undo());
+    CHECK_EQ(editable.undoDepth(), depth - 1);
+    CHECK_EQ(editable.scene().tracks.size(), tracks_before);
+}
+
+// Starting later than frame one, which is the only thing about *when* the
+// dialog offers a choice over.
+// What the status bar counts.
+//
+// The count exists because a shot playing before its imported pictures are
+// decoded shows the playhead advancing over a blank canvas, and that is
+// indistinguishable from the program being broken. Whether it *appears* is
+// something to judge by looking; what it counts is not, and the two rules below
+// are the ones that would go wrong silently.
+void theCountOfReadyPicturesDescribesTheWholeSequence() {
+    TEST("the status bar counts every frame of a sequence, and only the ones it can wait for");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 4; ++i) {
+        const QString file = dir.filePath(QStringLiteral("f%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importSequenceFrom(files, 1, false, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer = track->layers.front().id;
+
+    // The denominator is the whole sequence and not what is on screen. During a
+    // take every frame is visited, and the climb from one to all of them is the
+    // progress somebody is waiting on; "how many are being worked out right
+    // now" would read one for the whole of it.
+    CHECK_EQ(window.importsReady().wanted, 4);
+
+    // **The numerator only moves for frames that have been on screen**, because
+    // a frame is only asked for when it is being drawn. Settling here fills one
+    // of the four and not all of them, and that is the honest shape of it: a
+    // sequence fills as it is played or scrubbed over, which is exactly why the
+    // count is worth showing during a take and worth hiding the rest of the
+    // time -- a number that stops at one of four with nothing outstanding is
+    // not progress, it is somewhere somebody stopped looking.
+    CHECK(window.settleReferenceFrames());
+    CHECK_EQ(window.importsReady().ready, 1);
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+    for (std::size_t slot = 0; slot < 4; ++slot) {
+        canvas->setFrame(slot);
+        CHECK(window.settleReferenceFrames());
+    }
+    CHECK_EQ(window.importsReady().ready, 4);
+
+    // A hidden layer is never asked for, so counting it would put a denominator
+    // up that nothing can ever reach -- and a number that cannot move is
+    // exactly what "stuck" looks like, which is what this is here to tell apart
+    // from working.
+    Layer hidden = *doc.scene().findTrack(track_id)->findLayer(layer);
+    hidden.visible = false;
+    doc.updateLayer(track_id, layer, hidden);
+    CHECK_EQ(window.importsReady().wanted, 0);
+    CHECK(doc.undo());
+    CHECK_EQ(window.importsReady().wanted, 4);
+
+    // A drawing pointed at no frame is not a frame anybody is waiting for. Same
+    // rule as a missing cel: absent means the layer is empty here.
+    doc.setSourceFrame(track_id, track->imageAtSlot(0), layer, Image::kNoSourceFrame);
+    CHECK_EQ(window.importsReady().wanted, 3);
+}
+
+void aSequenceCanStartAfterTheFirstFrame() {
+    TEST("a sequence started at frame 4 leaves the frames before it empty");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 2; ++i) {
+        const QString file = dir.filePath(QStringLiteral("f%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/4, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    const Track* track = doc.scene().findTrack(doc.scene().tracks.back().id);
+    CHECK(track != nullptr);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer = track->layers.front().id;
+
+    // Five slots: three before, then the two frames. The three before are real
+    // drawings with no picture on them, which is what "the track is silent
+    // until frame 4" has to be -- a track has no other way of being empty at
+    // its beginning.
+    CHECK_EQ(track->slots.size(), std::size_t{5});
+    for (std::size_t i = 0; i < track->slots.size() && i < 5; ++i) {
+        const Image* record = track->findImage(track->imageAtSlot(i));
+        CHECK(record != nullptr);
+        if (!record) continue;
+        const int wanted = (i < 3) ? Image::kNoSourceFrame : static_cast<int>(i) - 3;
+        CHECK_EQ(record->sourceFrameFor(layer), wanted);
+    }
+}
+
+void aFileThatWillNotReadIsAskedForOnce() {
+    TEST("an import that cannot be decoded is remembered as blank rather than asked for again");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    // The same name, no longer a picture. The project has not been saved, so
+    // the window still resolves this import to where it was imported from --
+    // which means the bytes under the name can be changed without touching the
+    // document at all.
+    {
+        QFile file(picture);
+        CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("this is not a picture");
+    }
+    doc.forgetReferenceFrames();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    CHECK(window.settleReferenceFrames());
+
+    // Present, and empty. Present is what stops the asking; empty is what makes
+    // the layer draw nothing, which is the honest picture of a file that is not
+    // there to be drawn.
+    const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+    const TileGrid* frame = doc.referenceFrameFor(track, drawing, layer, now->placement);
+    CHECK(frame != nullptr);
+    if (frame) CHECK(frame->empty());
+
+    // And nothing is outstanding afterwards. A settle that came back with a
+    // request still in the air would be the loop this exists to stop, one turn
+    // of it at a time.
+    CHECK(!canvas->referenceFramesPending());
+    CHECK(window.settleReferenceFrames());
+    CHECK(!canvas->referenceFramesPending());
+}
+
+void animportedLayerRefusesTheBrushAsItself() {
+    TEST("the brush refuses an imported layer as imported, not as locked or empty");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importImageFrom(picture, &trouble));
+    QCoreApplication::processEvents();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // **Which** refusal, and not merely that there is one. Every wrong answer
+    // here is a plausible one that sends somebody somewhere useless: "locked"
+    // sends them to unlock it, "nothing is drawn" sends them to draw on it, and
+    // both are reachable -- the layer really does have no cels, and a person is
+    // free to lock it. See refuseToEditHere, where the kind is asked first for
+    // exactly this reason.
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
+
+    // Still the same answer once it is locked as well, which is the ordering
+    // this is really pinning.
+    // The import lands at the bottom of the stack, so it is the last track.
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const Track& track = doc.scene().tracks.back();
+    CHECK(!track.layers.empty());
+    if (track.layers.empty()) return;
+    Layer locked = track.layers.front();
+    locked.locked = true;
+    doc.updateLayer(track.id, locked.id, locked);
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
+}
+
+
+// A button that does nothing is a bug from the outside, and this one did
+// nothing on every fresh track as well as on every import: `removeCurrentLayer`
+// returns without a word when the track has one layer. The guard is right --
+// a track with no layers has nowhere to draw -- so what was missing was the
+// saying, not the allowing.
+void removingTheOnlyLayerIsRefusedInTheOpen() {
+    TEST("Remove layer is greyed out with a reason when it is the only layer");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* remove = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Remove layer")) remove = button;
+    }
+    CHECK(remove != nullptr);
+    if (!remove) return;
+
+    // A new document's track has one layer, which is the state this was silent
+    // in for as long as the button has existed.
+    CHECK(!remove->isEnabled());
+    CHECK(remove->toolTip().contains(QStringLiteral("only one on this track")));
+
+    // A second layer, and it can be pressed.
+    QAction* add = nullptr;
+    for (QPushButton* button : window.findChildren<QPushButton*>()) {
+        if (button->text() == QStringLiteral("Add layer")) button->click();
+    }
+    (void)add;
+    QCoreApplication::processEvents();
+    CHECK(remove->isEnabled());
+
+    // And pressing it puts the track back to one layer, which disables it
+    // again -- the property that would break if anything stopped re-asking
+    // after the layer count changed.
+    remove->click();
+    QCoreApplication::processEvents();
+    CHECK(!remove->isEnabled());
+}
+
+// Importing the same picture twice is ordinary -- one to keep, one to move
+// about. Two tracks of the same name reach the export as two sequences claiming
+// one folder, which the export refuses: nothing is overwritten, but the job
+// stops at the end rather than at the start.
+void twoImportsOfOneFileAreToldApart() {
+    TEST("importing the same file twice gives two tracks, two names, and two files");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("model.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 200, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importImageFrom(picture, nullptr));
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    const Document& doc = window.documentForTesting();
+    std::vector<std::string> track_names;
+    std::vector<std::string> sources;
+    for (const Track& track : doc.scene().tracks) {
+        for (const Layer& layer : track.layers) {
+            if (layer.kind != LayerKind::Reference) continue;
+            track_names.push_back(track.name);
+            sources.push_back(layer.reference_sources.empty() ? std::string()
+                                                             : layer.reference_sources.front());
+        }
+    }
+
+    CHECK_EQ(track_names.size(), std::size_t{2});
+    if (track_names.size() == 2) {
+        // Different, and the second says which it is rather than being a
+        // silently identical row in the timeline gutter.
+        CHECK(track_names[0] != track_names[1]);
+        CHECK_EQ(track_names[0], std::string("model"));
+        CHECK_EQ(track_names[1], std::string("model 2"));
+    }
+
+    // The files are told apart too, and for a different reason: this rule is
+    // what stops two *different* pictures that happen to share a file name
+    // becoming one picture. Here it costs a second copy of identical bytes,
+    // which is the cheap side of the trade.
+    CHECK_EQ(sources.size(), std::size_t{2});
+    if (sources.size() == 2) CHECK(sources[0] != sources[1]);
+}
+
+
+// Placing an import, which is the one transform in the program that writes no
+// pixels at all.
+//
+// Everything here is about that difference. A bake resamples every drawing and
+// journals what it displaced; a placement stores five numbers and the picture
+// is derived from the file again at them. What that buys is that adjusting a
+// placement is free and lossless however often it is done -- so the things
+// worth asserting are that no cel appeared, that the history holds a layer
+// change rather than a pile of tiles, and that the picture on screen actually
+// moved.
+void placingAnImportStoresRatherThanBakes() {
+    TEST("placing an imported picture writes no cel, moves the picture, and undoes");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(0, 0, 255)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importImageFrom(picture, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    const std::size_t tiles_before = doc.totalTileCount();
+
+    // The picture starts at the origin, so it is over the top-left of the
+    // canvas and not over a point 400 across.
+    const auto opaqueAt = [&](int x, int y) {
+        const Layer* now = doc.scene().findTrack(track)->findLayer(layer);
+        const TileGrid* frame = doc.referenceFrameFor(track, drawing, layer, now->placement);
+        return frame && frame->pixel(x, y).a > 0.5f;
+    };
+    CHECK(opaqueAt(10, 10));
+    CHECK(!opaqueAt(410, 10));
+
+    // Placed 400 pixels across, the way Apply stores it.
+    Layer moved = *doc.scene().findTrack(track)->findLayer(layer);
+    moved.placement.dx = 400.0;
+    doc.updateLayer(track, layer, moved);
+    CHECK(window.settleReferenceFrames());
+
+    // **No cel, and no tiles.** The picture moved and the document holds
+    // exactly as many tiles as it did before -- which is none, because a
+    // reference layer has no cels at all. A bake would have written one per
+    // drawing and journalled what it displaced.
+    CHECK_EQ(doc.totalTileCount(), tiles_before);
+    CHECK(doc.scene().findTrack(track)->findImage(drawing)->celFor(layer) == kNoId);
+
+    CHECK(!opaqueAt(10, 10));
+    CHECK(opaqueAt(410, 10));
+
+    // And it undoes, because a placement is a layer property and goes through
+    // the same op every other one does.
+    CHECK(doc.undo());
+    CHECK(window.settleReferenceFrames());
+    CHECK_EQ(doc.scene().findTrack(track)->findLayer(layer)->placement.dx, 0.0);
+    CHECK(opaqueAt(10, 10));
+    CHECK(!opaqueAt(410, 10));
+}
+
+// The cache is keyed on the placement, and that is not an optimisation.
+//
+// A frame derived at an earlier placement is not stale-and-usable, it is a
+// picture of where the import used to be -- and it would go on being drawn,
+// convincingly, until something happened to refresh it. So it is reported as
+// absent, and the layer draws nothing until the right one arrives.
+void aFrameDerivedAtAnotherPlacementIsNotServed() {
+    TEST("a picture derived at a different placement counts as absent, not as stale");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString picture = dir.filePath(QStringLiteral("sheet.png"));
+    CHECK(writeATestPicture(picture, QColor(255, 0, 0)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(picture, nullptr));
+
+    Document& doc = window.documentForTesting();
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track = doc.scene().tracks.back().id;
+    const LayerId layer = doc.scene().tracks.back().layers.front().id;
+    const ImageId drawing = doc.scene().tracks.back().imageAtSlot(0);
+
+    CHECK(doc.referenceFrameFor(track, drawing, layer, Transform{}) != nullptr);
+
+    Transform elsewhere;
+    elsewhere.dx = 17.0;
+    CHECK(doc.referenceFrameFor(track, drawing, layer, elsewhere) == nullptr);
+}
+
+// **What a machine with no speakers must go on doing.**
+//
+// The picture's position now comes from how much audio has come out of a device
+// -- but only when there is one running with something to play. Everywhere else
+// it is the wall clock exactly as it always was, and "everywhere else" includes
+// every machine this test runs on: GitHub's runners have no audio output at all.
+//
+// So what this pins is the fallback, and it is worth pinning because the way to
+// get it wrong is total. A take that waited for a sample count that was never
+// going to move would sit on one frame for ever, on every machine without a
+// sound card, and the arithmetic tests would all still pass.
+void playbackRunsOnAMachineWithNoAudioOutput() {
+    TEST("a scene with a soundtrack in it still plays where there is no audio output");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    QAction* play = window.actionForTesting(shortcuts::Id::Play);
+    CHECK(timeline != nullptr && play != nullptr);
+    if (!timeline || !play) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    doc.extendExposure(track, 0, 11);  // twelve frames, half a second at 24 fps
+
+    // A soundtrack with no samples: enough to take every branch that asks
+    // whether there is sound in this scene, and it needs no file and no codec.
+    doc.addAudioTrack("dialogue", "take-3.wav");
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    timeline->setCurrentSlot(0);
+    play->trigger();
+    QCoreApplication::processEvents();
+
+    // Long enough for several frames at 24 fps, spun rather than slept so the
+    // 1 ms tick is actually delivered.
+    QElapsedTimer waiting;
+    waiting.start();
+    while (waiting.elapsed() < 300 && timeline->currentSlot() == 0) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+
+    CHECK(timeline->currentSlot() > 0);
+    play->trigger();  // stop
+    QCoreApplication::processEvents();
+}
+
+// **A sequence import is where "both doors mean one thing" stops being true.**
+//
+// The Transform tool routes a reference layer to the placement, on the stated
+// reasoning that with one picture the two gestures mean the same thing. A
+// sequence is several, so the tool -- which says it moves *this drawing* -- has
+// nothing here it can honestly do, and it is greyed rather than left to bounce
+// you back to the brush when pressed. The still is checked beside it, because
+// what would be easy to break is the half that still works.
+void theTransformToolIsOffForASequenceImportAndOnForAStill() {
+    TEST("the Transform tool is off for an imported sequence and on for an imported still");
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    if (!dir.isValid()) return;
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QAction* transform = actionCalled(window, QStringLiteral("Transform"));
+    CHECK(transform != nullptr);
+    if (!transform) return;
+    CHECK(transform->isEnabled());  // an ordinary drawing layer
+
+    const QString still = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(still, QColor(200, 60, 60)));
+    CHECK(window.importImageFrom(still, nullptr));
+    QCoreApplication::processEvents();
+
+    // One file, so the tool is the placement's other door and stays open.
+    CHECK(transform->isEnabled());
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(60, 60 * i, 200)));
+        files.push_back(file);
+    }
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK(!transform->isEnabled());
+    // And it says which way in, rather than only that this one is shut.
+    CHECK(transform->toolTip().contains(QStringLiteral("Convert it to drawings")));
+    CHECK(transform->toolTip().contains(QStringLiteral("Place this picture")));
+}
+
+// The one-drawing case, which used to be handed over and is now refused.
+//
+// A layer of one drawing *is* the Transform tool's job, and the door used to
+// hand it over on exactly that reasoning. What that produced was a button
+// reading "Transform layer through time" that quietly did something else, on
+// the most ordinary layer there is -- so the door refuses and names the tool
+// instead, which says the same thing without the button lying about it. The
+// lasso comes back by the same route: the tool is where you are sent.
+void aLayerOfOneDrawingIsRefusedAndNamesTheTool() {
+    TEST("the layer door refuses a one-drawing layer and names the tool");
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    // Something to move: a new track has one drawing and one layer, and the
+    // gesture refuses a layer with nothing on it.
+    Document& doc = window.documentForTesting();
+    const Track& track = doc.scene().tracks.front();
+    const LayerId layer = track.layers.front().id;
+    strokeOn(doc, track.id, track.imageAtSlot(0), layer, 100.0f, 100.0f, 300.0f, 300.0f);
+    canvas->refreshAll();
+    QCoreApplication::processEvents();
+
+    // Asked of the canvas rather than of the panel button, because the button
+    // is not the thing under test and its enabled state is refreshed by signals
+    // this fixture does not send -- the stroke above went into the document
+    // directly, which nothing in the window heard.
+    canvas->setActiveLayer(layer);
+    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::OneDrawing);
+    QCoreApplication::processEvents();
+    CHECK(!canvas->transformIsLive());
+
+    // And the reason names the way forward rather than only the obstacle, which
+    // is the rule every refusal on this list follows.
+    const QString said = CanvasWidget::explain(CanvasWidget::Refusal::OneDrawing);
+    CHECK(said.contains(QStringLiteral("one drawing")));
+    CHECK(said.contains(QStringLiteral("Transform tool")));
+
+    // A second drawing on the same layer, and the door opens.
+    Document& document = window.documentForTesting();
+    const ImageId second = document.insertImage(track.id, 1);
+    strokeOn(document, track.id, second, layer, 100.0f, 140.0f, 300.0f, 140.0f);
+    canvas->refreshAll();
+    QCoreApplication::processEvents();
+    CHECK(canvas->beginLayerTransform() == CanvasWidget::Refusal::None);
+    CHECK(canvas->transformIsLive());
+    CHECK(canvas->transformIsWholeLayer());
+}
+
+// The way back from an import, driven end to end through real files.
+//
+// `test_transform` pins the loop and the rescue against a decode a test writes
+// itself; what only this end can answer is whether the pixels that arrive are
+// the ones in the files, and whether the layer really stops being an import as
+// far as everything downstream is concerned.
+void convertingAnImportGivesEveryDrawingItsOwnPixels() {
+    TEST("converting an imported sequence writes each file into its own drawing");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    // The three pure channels, for the reason the sequence test uses them: they
+    // land on 1.0 and 0.0 exactly in linear light, so a drawing holding its
+    // neighbour's picture is a failed assertion rather than a near miss.
+    const QColor colours[3] = {QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255)};
+    std::vector<QString> files;
+    for (int i = 0; i < 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i + 1));
+        CHECK(writeATestPicture(file, colours[i]));
+        files.push_back(file);
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    // What the recap would have said, asked before the work exactly as the menu
+    // item asks it. Three 200x150 pictures at the origin is one tile each.
+    const MainWindow::ConversionCost cost = window.conversionCostFor(track_id, layer_id);
+    CHECK_EQ(cost.drawings, std::size_t{3});
+    // Four tiles each and not one: 200x150 at the origin crosses the 128-pixel
+    // boundary on both axes, so it is two columns by two rows. Counting from
+    // the pixel dimensions alone would say one.
+    CHECK_EQ(cost.tiles, std::size_t{12});
+    CHECK_EQ(cost.unreadable, 0);
+    // Nothing has been placed, so the popup gets to promise every pixel.
+    CHECK(!cost.resampled);
+
+    // **No cels before**, which is what a reference layer is.
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+
+    QString trouble;
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, &trouble));
+    QCoreApplication::processEvents();
+
+    const Track* after = doc.scene().findTrack(track_id);
+    CHECK(after != nullptr);
+    if (!after) return;
+    const Layer* layer = after->findLayer(layer_id);
+    CHECK(layer != nullptr);
+    if (!layer) return;
+
+    // An ordinary layer now, in all three of the ways that matter downstream.
+    CHECK_EQ(static_cast<int>(layer->kind), static_cast<int>(LayerKind::Raster));
+    CHECK(layer->reference_sources.empty());
+    CHECK(layer->placement.isIdentity());
+
+    // And the pixels are the files': each drawing its own colour, in the linear
+    // premultiplied half the rest of the program works in.
+    for (int i = 0; i < 3; ++i) {
+        const ImageId drawing = after->imageAtSlot(static_cast<std::size_t>(i));
+        const Cel* cel = doc.celAt(track_id, drawing, layer_id);
+        CHECK(cel != nullptr);
+        if (!cel) continue;
+        CHECK_EQ(after->findImage(drawing)->sourceFrameFor(layer_id), Image::kNoSourceFrame);
+
+        const Rgba got = cel->pixel(20, 20);
+        CHECK_NEAR(got.a, 1.0, 1e-2);
+        CHECK_NEAR(got.r, i == 0 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(got.g, i == 1 ? 1.0 : 0.0, 1e-2);
+        CHECK_NEAR(got.b, i == 2 ? 1.0 : 0.0, 1e-2);
+    }
+
+    // The brush stops refusing, which is the whole point of the feature: what
+    // it refused on was the kind, and there is now somewhere to put a mark.
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (canvas) {
+        canvas->setActiveLayer(layer_id);
+        CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::None);
+    }
+
+    // One step back to the import, cels and kind and frame pointers together.
+    CHECK(doc.undo());
+    const Layer* back = doc.scene().findTrack(track_id)->findLayer(layer_id);
+    CHECK_EQ(static_cast<int>(back->kind), static_cast<int>(LayerKind::Reference));
+    CHECK_EQ(back->reference_sources.size(), std::size_t{3});
+    CHECK_EQ(doc.totalTileCount(), std::size_t{0});
+}
+
+// A placed import, which is the other half of the conversion and the half the
+// popup's wording turns on.
+//
+// The conversion writes what is *on screen*, and on a placed layer that is the
+// derived grid rather than the file -- so this is where writing the file's own
+// pixels instead would show up, and where a cost quoted from the file's own
+// dimensions would be describing a picture nobody is looking at.
+void convertingAPlacedImportWritesItWhereItSits() {
+    TEST("converting a placed import writes the picture where it sits, at what it now costs");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    const QString file = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(file, QColor(255, 0, 0)));  // 200x150
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(file, nullptr));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    // Moved by a whole number of tiles and scaled to half. A whole-pixel move
+    // on its own would take the exact path and answer "not resampled", which is
+    // the branch this test is *not* about.
+    Layer placed = *track->findLayer(layer_id);
+    placed.placement.dx = 256.0;
+    placed.placement.dy = 128.0;
+    placed.placement.scale_x = 0.5;
+    placed.placement.scale_y = 0.5;
+    doc.updateLayer(track_id, layer_id, placed);
+    QCoreApplication::processEvents();
+
+    // Half size is a quarter of the pixels: 100x75 landing at (256, 128) is one
+    // tile, where the file at 1:1 on the origin was four. A cost quoted from
+    // the file's own 200x150 would say four and be describing the wrong
+    // picture -- and the popup would promise every pixel, on a layer that has
+    // been resampled.
+    const MainWindow::ConversionCost cost = window.conversionCostFor(track_id, layer_id);
+    CHECK_EQ(cost.drawings, std::size_t{1});
+    CHECK_EQ(cost.tiles, std::size_t{1});
+    CHECK(cost.resampled);
+
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+
+    const Track* after = doc.scene().findTrack(track_id);
+    const ImageId drawing = after->imageAtSlot(0);
+    const Cel* cel = doc.celAt(track_id, drawing, layer_id);
+    CHECK(cel != nullptr);
+    if (!cel) return;
+
+    // Where it was placed, and not where the file would have landed. Both
+    // assertions are needed: the second is what fails if the file's own pixels
+    // were written instead of the derived ones.
+    CHECK_NEAR(cel->pixel(300, 160).r, 1.0, 1e-2);
+    CHECK_NEAR(cel->pixel(300, 160).a, 1.0, 1e-2);
+    CHECK_EQ(cel->pixel(20, 20).a, 0.0f);
+    // And it ends where half size ends, rather than at the file's full width.
+    CHECK_EQ(cel->pixel(380, 160).a, 0.0f);
+
+    // The placement is not left on the layer to be applied a second time by
+    // anything that starts reading it.
+    CHECK(after->findLayer(layer_id)->placement.isIdentity());
+}
+
+// The gutter is pinned, which is the ruler's decision turned ninety degrees.
+//
+// What is worth pinning about it is not that it is drawn in the right place --
+// a shot says that better -- but that **where it is drawn and where it is
+// pressed are the same place**. Those are two different pieces of code, and a
+// pinned band that moved one without the other would be a name column you can
+// see and cannot rename, or a strip of empty timeline that starts a restack.
+void theGutterStaysPutWhileTheFramesGoPastIt() {
+    TEST("the timeline's names stay put when it is scrolled along the shot");
+
+    MainWindow window;
+    window.resize(900, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* timeline = window.findChild<TimelineWidget*>();
+    CHECK(timeline != nullptr);
+    if (!timeline) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track = doc.scene().tracks.front().id;
+    // Far wider than any panel this window can give it, so there is somewhere
+    // to scroll to.
+    for (int i = 0; i < 200; ++i) doc.insertImage(track, 0);
+    timeline->refresh();
+    QCoreApplication::processEvents();
+
+    const int unscrolled = timeline->gutterRectForTesting(0).x();
+    CHECK_EQ(unscrolled, 0);
+
+    // Driven through the scrollbar rather than by calling setGutterLeft, so
+    // that what is being tested includes the connection: a pinning nothing
+    // drives is a pinning that does not happen.
+    QScrollArea* area = nullptr;
+    for (QScrollArea* candidate : window.findChildren<QScrollArea*>()) {
+        if (candidate->widget() == timeline) area = candidate;
+    }
+    CHECK(area != nullptr);
+    if (!area) return;
+
+    QScrollBar* bar = area->horizontalScrollBar();
+    CHECK(bar->maximum() > 0);
+    if (bar->maximum() <= 0) return;
+    bar->setValue(bar->maximum() / 2);
+    QCoreApplication::processEvents();
+
+    const int scrolled = bar->value();
+    CHECK(scrolled > 0);
+    // Drawn where the scroll put it...
+    CHECK_EQ(timeline->gutterRectForTesting(0).x(), scrolled);
+
+    // ...and pressed there too. This is the half that would have gone wrong
+    // silently: the name strip is the handle a row is restacked by and the
+    // thing a double click renames, and both ask where the gutter is.
+    const QPointF name(timeline->gutterPointForTesting(0));
+    CHECK(name.x() > scrolled);
+    sendMouse(timeline, QEvent::MouseButtonPress, name, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, name, Qt::LeftButton, Qt::NoButton);
+    sendMouse(timeline, QEvent::MouseButtonDblClick, name, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    QLineEdit* editor = timeline->renameEditorForTesting();
+    CHECK(editor != nullptr);
+    if (!editor) return;
+    CHECK(editor->isVisible());
+    // And the editor is over the gutter rather than back at the origin, which
+    // is the one thing here that no repaint would have fixed: it is a real
+    // child widget and nothing moves it but setGutterLeft.
+    CHECK_EQ(editor->geometry().x(), scrolled);
+    timeline->abandonRename();
+    QCoreApplication::processEvents();
+
+    // And just past the column is ordinary timeline again, which is the other
+    // side of the same question: a gutter test that answered on width alone
+    // would call this the name strip, because it is still left of the hundred
+    // pixels the column used to end at.
+    const int width = 2 * (static_cast<int>(name.x()) - scrolled);
+    const QPointF past(scrolled + width + 6, name.y());
+    CHECK(past.x() < scrolled + 2 * width);
+    sendMouse(timeline, QEvent::MouseButtonPress, past, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(timeline, QEvent::MouseButtonRelease, past, Qt::LeftButton, Qt::NoButton);
+    sendMouse(timeline, QEvent::MouseButtonDblClick, past, Qt::LeftButton, Qt::LeftButton);
+    QCoreApplication::processEvents();
+    CHECK(!timeline->renameEditorForTesting()->isVisible());
+}
+
+// **Converting does not take the scan out of the project**, and this is the
+// test for a failure with no symptom at the time -- the same shape as the one
+// anImportSurvivesSavingAndOpening pins, and found the same way.
+//
+// A save builds a new folder and swaps it in, so it carried forward only the
+// files something still named. Converting is the first thing in the program
+// that stops naming a file without anybody having said to remove it, so the
+// save after a conversion deleted the imported scan from the project. Nothing
+// looked wrong: the pictures were still in the reference cache, so undoing the
+// conversion put them back on screen. **The save after that failed outright**,
+// on a layer naming files that now existed nowhere -- which is where it was
+// found.
+//
+// So the sequence below is the whole bug and not a part of it, and every step
+// of it is load-bearing: the reopen is what empties the pending list, so that
+// the copy inside the project is the only one the document can reach.
+void convertingDoesNotTakeTheImportOutOfTheProject() {
+    TEST("converting and saving keeps the imported files, so the conversion can be taken back");
+    QTemporaryDir sources;
+    QTemporaryDir where;
+    CHECK(sources.isValid() && where.isValid());
+    const QString folder = where.filePath(QStringLiteral("shot"));
+
+    std::vector<QString> files;
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = sources.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(255, 0, 0)));
+        files.push_back(file);
+    }
+
+    const auto importsIn = [&] {
+        return QDir(folder + QStringLiteral("/imports")).entryList(QDir::Files).size();
+    };
+
+    {
+        MainWindow first;
+        first.resize(1000, 700);
+        first.show();
+        QCoreApplication::processEvents();
+        CHECK(first.importSequenceFrom(files, 1, false, nullptr));
+        QCoreApplication::processEvents();
+        CHECK(first.saveTo(folder));
+    }
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // Reopened, so the only copy the document can reach is the one in
+    // `imports/`: nothing is left on the pending list of where files came from.
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    QString error;
+    CHECK(window.openProjectAt(folder, &error));
+    QCoreApplication::processEvents();
+
+    Document& doc = window.documentForTesting();
+    CHECK(!doc.scene().tracks.empty());
+    if (doc.scene().tracks.empty()) return;
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const Track* track = doc.scene().findTrack(track_id);
+    if (!track || track->layers.empty()) return;
+    const LayerId layer_id = track->layers.front().id;
+
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+    CHECK(window.saveTo(folder));
+
+    // The three files are still there, named by nothing at all.
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // And that is what makes taking it back work rather than only look like it.
+    CHECK(doc.undo());
+    QCoreApplication::processEvents();
+    const Layer* back = doc.scene().findTrack(track_id)->findLayer(layer_id);
+    CHECK_EQ(static_cast<int>(back->kind), static_cast<int>(LayerKind::Reference));
+    // The save that used to fail. Asserted before the picture, because a
+    // project that will not write is the worse half of this.
+    CHECK(window.saveTo(folder));
+    CHECK_EQ(static_cast<int>(importsIn()), 3);
+
+    // The picture comes from the files and not from what happens to be cached:
+    // emptying the cache is how "is it really still on disk" is asked.
+    doc.forgetReferenceFrames();
+    CHECK(window.settleReferenceFrames());
+    const ImageId first_drawing = doc.scene().findTrack(track_id)->imageAtSlot(0);
+    const TileGrid* frame =
+        doc.referenceFrameFor(track_id, first_drawing, layer_id, back->placement);
+    CHECK(frame != nullptr);
+    if (frame) CHECK_NEAR(frame->pixel(20, 20).r, 1.0, 1e-2);
+}
+
+// The button, which is the half of this feature somebody can find without
+// having tried to draw on an import first.
+void theConvertButtonIsGreyedWithAReasonEverywhereElse() {
+    TEST("Convert to drawings says what it is for on a layer it cannot be used on");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* convert = buttonCalled(window, QStringLiteral("Convert to drawings"));
+    CHECK(convert != nullptr);
+    if (!convert) return;
+
+    // On an ordinary layer it is off -- and the tooltip says what the control
+    // is *for*, not merely that this is not it. A greyed control whose reason
+    // restates the greying teaches nobody what it does.
+    CHECK(!convert->isEnabled());
+    CHECK(convert->toolTip().contains(QStringLiteral("already drawings")));
+    CHECK(convert->toolTip().contains(QStringLiteral("imported picture")));
+
+    const QString still = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(still, QColor(200, 60, 60)));
+    CHECK(window.importImageFrom(still, nullptr));
+    QCoreApplication::processEvents();
+
+    // An import makes its track current and selects its layer, so the button
+    // comes on without anybody having to go and find it.
+    CHECK(convert->isEnabled());
+
+    Document& doc = window.documentForTesting();
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const LayerId layer_id = doc.scene().findTrack(track_id)->layers.front().id;
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+
+    // And off again once there is nothing left to convert, without anybody
+    // changing layer -- which is the refresh that would otherwise be missing.
+    CHECK(!convert->isEnabled());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     std::printf("canvas:\n");
+    anImportSurvivesSavingAndOpening();
+    animportedLayerRefusesTheBrushAsItself();
+    aSequenceShowsADifferentFrameAtEachDrawing();
+    aFileThatWillNotReadIsAskedForOnce();
+    filesAreOrderedByTheirLastNumber();
+    animportedSequenceLandsAsOneDrawingPerFile();
+    aSequenceCanStartAfterTheFirstFrame();
+    theCountOfReadyPicturesDescribesTheWholeSequence();
+    removingTheOnlyLayerIsRefusedInTheOpen();
+    twoImportsOfOneFileAreToldApart();
+    placingAnImportStoresRatherThanBakes();
+    aFrameDerivedAtAnotherPlacementIsNotServed();
+    playbackRunsOnAMachineWithNoAudioOutput();
+    theTransformToolIsOffForASequenceImportAndOnForAStill();
+    aLayerOfOneDrawingIsRefusedAndNamesTheTool();
+    convertingAnImportGivesEveryDrawingItsOwnPixels();
+    theGutterStaysPutWhileTheFramesGoPastIt();
+    convertingAPlacedImportWritesItWhereItSits();
+    convertingDoesNotTakeTheImportOutOfTheProject();
+    theConvertButtonIsGreyedWithAReasonEverywhereElse();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();
@@ -9044,12 +10933,20 @@ int main(int argc, char** argv) {
     theVisibilityTickWorksOnAColourLayer();
     theFillWaitsForTheStrokeToFinish();
     aLayerShowingItsMarksIsStillSolved();
+    aFillForADrawingYouHaveLeftStillLands();
     oneScribbleReachesTheEndOfTheShot();
     theLastFillStaysUntilTheNextOneArrives();
     theColourIsCoarseFirstAndThenAsFineAsTheDrawing();
     movedMarksAgreeWithThemselvesInTheWindow();
     emptyingTheFillCacheThrowsAwayASolveAlreadyRunning();
     aProjectSurvivesSavingAndLoading();
+    aSoundtrackSurvivesAnImportASaveAndAReopen();
+    aSoundtrackWidensTheTimelineWithoutWideningTheShot();
+    extendingTheShotToTheSoundIsAskedForRatherThanAssumed();
+    undoingASoundtrackDeletionBringsTheSoundBackWithIt();
+    everyTimelineRowStillHasSomethingToSay();
+    extendingTheShotNeverShortensIt();
+    croppingTheFrontOfASoundDoesNotMoveItsEndOnScreen();
     aMultiTrackProjectComesBackWhole();
     aFailedSaveLeavesTheOldProjectAlone();
     aFailedSwapPutsThePreviousProjectBack();

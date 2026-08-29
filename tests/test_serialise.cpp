@@ -7,8 +7,10 @@
 // tests: the scene that comes back from its own file, the cel bits that come
 // back exactly, and the refusal of files that are not what they claim.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "project_io.h"
 #include "testing.h"
@@ -31,6 +33,55 @@ Document buildScene() {
     const LayerId clean = doc.addLayer(front, "clean");
     const LayerId colour = doc.addLayer(front, "colour", 2, LayerKind::Ctg);
     doc.addLayer(back, "sky");
+
+    // An imported picture on a track of its own, held past its last drawing --
+    // which is what an import lands as. It has no cels, deliberately: a
+    // reference layer's pixels are derived from the file named below.
+    const TrackId sheet = doc.addTrack("modelsheet");
+    const LayerId imported = doc.addLayer(sheet, "modelsheet", 0, LayerKind::Reference);
+    Layer reference = *doc.scene().findTrack(sheet)->findLayer(imported);
+    reference.reference_sources = {"model-sheet.png"};
+    // And where it was put. Every field away from its default, including the
+    // two that look decorative: a flip is a sign the matrix carries, and the
+    // pivot decides where the rotation happens, so a placement that came back
+    // with either of them missing would be a different picture. Nine numbers
+    // that are only ever compared exactly -- see Transform::operator== -- which
+    // is why they are pinned here rather than left to a round-trip of the ones
+    // somebody thought were interesting.
+    reference.placement.dx = 37.0;
+    reference.placement.dy = -12.0;
+    reference.placement.rotation = 22.5;
+    reference.placement.scale_x = 0.5;
+    reference.placement.scale_y = 1.25;
+    reference.placement.flip_x = true;
+    reference.placement.pivot_x = 640.0;
+    reference.placement.pivot_y = 360.0;
+    doc.updateLayer(sheet, imported, reference);
+    const ImageId sheet_drawing = doc.insertImage(sheet, 0);
+    doc.setSourceFrame(sheet, sheet_drawing, imported, 0);
+    TrackProperties held = doc.scene().findTrack(sheet)->properties();
+    held.end = TrackEnd::HoldLast;
+    doc.updateTrack(sheet, held);
+
+    // And an imported *sequence*, which is the same layer kind with more than
+    // one file. Three drawings pointed at three frames, and deliberately not in
+    // file order: nothing indexes the list by slot, so a file that reads the
+    // frames back by counting would pass on a straight 0,1,2 and be wrong here.
+    // The last drawing is pointed at no frame at all, which is what an empty
+    // drawing on a reference layer looks like -- absent, exactly as a missing
+    // cel is.
+    const TrackId animatic = doc.addTrack("animatic");
+    const LayerId shots = doc.addLayer(animatic, "animatic", 0, LayerKind::Reference);
+    Layer frames = *doc.scene().findTrack(animatic)->findLayer(shots);
+    frames.reference_sources = {"board_0001.png", "board_0002.png", "board_0003.png"};
+    doc.updateLayer(animatic, shots, frames);
+    const ImageId a0 = doc.insertImage(animatic, 0);
+    const ImageId a1 = doc.insertImage(animatic, 1);
+    const ImageId a2 = doc.insertImage(animatic, 2);
+    doc.insertImage(animatic, 3);
+    doc.setSourceFrame(animatic, a0, shots, 2);
+    doc.setSourceFrame(animatic, a1, shots, 0);
+    doc.setSourceFrame(animatic, a2, shots, 1);
 
     Layer settings = *doc.scene().findTrack(front)->findLayer(colour);
     settings.ctg_sources = {rough, clean};
@@ -102,6 +153,34 @@ void checkSameScene(const Document& a, const Document& b) {
             for (std::size_t s = 0; s < la.ctg_sources.size(); ++s) {
                 CHECK_EQ(la.ctg_sources[s], lb.ctg_sources[s]);
             }
+            // Which files a reference layer shows, and in what order. It holds
+            // no cels, so this is the only thing standing between the layer and
+            // drawing nothing -- losing it here would look exactly like an
+            // import that went blank. The order is checked and not only the
+            // set: a drawing names its picture by position in this list, so a
+            // list that came back shuffled is every frame on the wrong drawing.
+            CHECK_EQ(la.reference_sources.size(), lb.reference_sources.size());
+            for (std::size_t s = 0; s < la.reference_sources.size() &&
+                                    s < lb.reference_sources.size(); ++s) {
+                CHECK_EQ(la.reference_sources[s], lb.reference_sources[s]);
+            }
+            // And where that picture goes. This is the one transform in the
+            // program that outlives the gesture that made it -- everywhere else
+            // a transform is committed into pixels and forgotten -- so it is
+            // the file's job to keep it, and the picture reopens at the origin
+            // if it does not. Field by field so a failure says which one, and
+            // exactly rather than within a tolerance, because the derived
+            // pixels are keyed on this and a placement that is nearly right is
+            // a cache that never matches.
+            CHECK_EQ(la.placement.dx, lb.placement.dx);
+            CHECK_EQ(la.placement.dy, lb.placement.dy);
+            CHECK_EQ(la.placement.rotation, lb.placement.rotation);
+            CHECK_EQ(la.placement.scale_x, lb.placement.scale_x);
+            CHECK_EQ(la.placement.scale_y, lb.placement.scale_y);
+            CHECK_EQ(la.placement.flip_x, lb.placement.flip_x);
+            CHECK_EQ(la.placement.flip_y, lb.placement.flip_y);
+            CHECK_EQ(la.placement.pivot_x, lb.placement.pivot_x);
+            CHECK_EQ(la.placement.pivot_y, lb.placement.pivot_y);
         }
 
         CHECK_EQ(ta.images.size(), tb.images.size());
@@ -112,6 +191,14 @@ void checkSameScene(const Document& a, const Document& b) {
             CHECK_EQ(image.number, other->number);
             CHECK_EQ(image.cels.size(), other->cels.size());
             for (const auto& [layer, cel] : image.cels) CHECK_EQ(other->celFor(layer), cel);
+            // Which frame of an import each drawing shows. Both directions,
+            // because the two failures are different: a lost entry is a drawing
+            // that goes blank, and an entry that arrived where there was none
+            // is a drawing showing a picture nobody put there.
+            CHECK_EQ(image.source_frames.size(), other->source_frames.size());
+            for (const auto& [layer, frame] : image.source_frames) {
+                CHECK_EQ(other->sourceFrameFor(layer), frame);
+            }
         }
     }
 }
@@ -393,6 +480,381 @@ void acorruptCelIsRefused() {
     refused(cut, "truncated");
 }
 
+
+// --- imported pictures -----------------------------------------------------
+
+// A reference layer's whole connection to its picture is a name, so the file
+// has to carry it and a save has to know to bring the bytes along. Both halves
+// fail the same way from the outside -- the layer draws nothing -- and neither
+// is visible in a document that was never written to disk.
+
+void anImportContributesNoCels() {
+    TEST("a reference layer writes no cels, however many drawings it has");
+    Document doc = buildScene();
+
+    // The manifest a save writes is one file per cel the scene refers to. An
+    // imported picture must not be in it: it has no cel to write, and a
+    // manifest that named one would have the save encoding pixels that do not
+    // exist.
+    const std::size_t before = ProjectIO::celsReferencedBy(doc).size();
+
+    const TrackId track = doc.addTrack("another import");
+    const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
+    Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
+    settings.reference_sources = {"background.jpg"};
+    doc.updateLayer(track, layer, settings);
+    for (int i = 0; i < 5; ++i) doc.insertImage(track, 0);
+
+    CHECK_EQ(ProjectIO::celsReferencedBy(doc).size(), before);
+}
+
+void everyImportedFileIsNamedOnce() {
+    TEST("the import manifest lists each file once, sorted, and skips the unset");
+    Document doc;
+    const TrackId first = doc.addTrack("one");
+    const TrackId second = doc.addTrack("two");
+    const TrackId third = doc.addTrack("three");
+
+    const auto point = [&](TrackId track, const std::string& at) {
+        const LayerId layer = doc.addLayer(track, "reference", 0, LayerKind::Reference);
+        Layer settings = *doc.scene().findTrack(track)->findLayer(layer);
+        settings.reference_sources = {at};
+        doc.updateLayer(track, layer, settings);
+    };
+    point(first, "sky.png");
+    point(second, "animatic.png");
+    // The same file on two layers is one file to carry, not two.
+    point(third, "sky.png");
+    // And a reference layer that has not been pointed at anything yet is not a
+    // missing file. It is what a layer looks like before the import finishes.
+    doc.addLayer(first, "empty reference", 0, LayerKind::Reference);
+
+    const std::vector<std::string> named = ProjectIO::importsReferencedBy(doc);
+    CHECK_EQ(named.size(), std::size_t{2});
+    if (named.size() == 2) {
+        CHECK_EQ(named[0], std::string("animatic.png"));
+        CHECK_EQ(named[1], std::string("sky.png"));
+    }
+}
+
+// The version gate, from the direction that matters.
+//
+// A build that does not know this kind reads "reference" as raster -- that is
+// what kindFromName does with any word it has not heard of -- finds no cels,
+// concludes the layer is empty, and autosaves over the project having dropped
+// the import. Nothing about that fails loudly, which is exactly why the number
+// exists. This pins that the number moved.
+void importsRaisedTheFormatVersion() {
+    TEST("the version is past 2, which is what stops an older build eating an import");
+    // **A floor and not the number.** This used to assert the exact version its
+    // own bump introduced, and so broke the next time anything else was added
+    // -- which is the wrong failure: what this test is about is that imports
+    // are behind a gate at all, and the gate does not get lower. Whichever bump
+    // is current asserts its own number, next to what it was for.
+    const std::string text = ProjectIO::writeSceneJson(buildScene());
+    CHECK(ProjectIO::kSceneFormatVersion >= 2);
+    CHECK(text.find("\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion)) !=
+          std::string::npos);
+
+    // And a file from the future is still refused rather than half-read.
+    std::string tampered = text;
+    const std::string wrote = "\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion);
+    const std::size_t at = tampered.find(wrote);
+    if (at != std::string::npos) tampered.replace(at, wrote.size(), "\"version\": 99");
+    Document loaded;
+    std::string error;
+    CHECK(!ProjectIO::readSceneJson(tampered, loaded, &error));
+    CHECK(!error.empty());
+}
+
+
+// --- soundtracks -----------------------------------------------------------
+
+void aSoundtrackSurvivesTheRoundTrip() {
+    TEST("a soundtrack comes back with its file, its placement and its gain");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+    AudioPlacement placed;
+    placed.offset_frames = -4;
+    placed.gain = 0.5;
+    doc.setAudioTrackPlacement(sound, placed);
+
+    // The samples are derived and must not be written. Installing some here is
+    // what makes the next check mean something: a save that carried them would
+    // put megabytes of float into scene.json and nobody would notice until a
+    // ten-second track made the file unreadable in an editor.
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 2;
+    clip.samples.assign(4800, 0.25f);
+    doc.setAudioSamples(sound, std::move(clip));
+
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    CHECK(text.find("dialogue.wav") != std::string::npos);
+    CHECK(text.find("0.25") == std::string::npos);  // no samples anywhere in it
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+
+    const AudioTrack& back = loaded.scene().audio_tracks.front();
+    CHECK_EQ(back.source, std::string("dialogue.wav"));
+    CHECK_EQ(back.name, std::string("dialogue"));
+    CHECK_NEAR(back.placement.offset_frames, -4.0, 1e-9);  // a breath in front of the word
+    CHECK_NEAR(back.placement.gain, 0.5, 1e-9);
+
+    // Derived, so it does not come back -- and nothing pretends it did.
+    CHECK(loaded.audioSamplesFor(back.id) == nullptr);
+
+    // The tracks are untouched by any of it, which is the whole "audio is not a
+    // track" argument surviving a save.
+    CHECK_EQ(loaded.scene().tracks.size(), doc.scene().tracks.size());
+}
+
+// The id counter has to be resumed past the soundtracks as well as the tracks,
+// and a load is the one place that can get it wrong: `loadScene` walks
+// `scene.tracks`, and soundtracks are not in that list.
+//
+// What it costs to miss is not a tidy number being wrong. The two lists share
+// one counter precisely so that an id names exactly one row, and the timeline,
+// the Track menu, the samples map and three undo ops all rely on it: an id
+// handed to the wrong lookup has to answer *nothing here* rather than something
+// plausible. So this pins the property rather than the arithmetic -- add a
+// track after a load, and it must not be handed an id a soundtrack already has.
+void aLoadResumesPastSoundtrackIdsToo() {
+    TEST("a track added after a load cannot be given a soundtrack's id");
+    Document doc;
+    doc.addTrack("character");
+    // Added last, so its id is the highest in the file and nothing else would
+    // push the counter past it.
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(ProjectIO::writeSceneJson(doc), loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    CHECK_EQ(loaded.scene().audio_tracks.front().id, sound);
+
+    const TrackId added = loaded.addTrack("another");
+    CHECK(added != sound);
+    // And the lookups still disagree about it, which is the thing the id being
+    // unique is protecting: one id, one row, one list.
+    CHECK(loaded.scene().findTrack(added) != nullptr);
+    CHECK(loaded.scene().findAudioTrack(added) == nullptr);
+    CHECK(loaded.scene().findTrack(sound) == nullptr);
+    CHECK(loaded.scene().findAudioTrack(sound) != nullptr);
+
+    // The same for a soundtrack added after the load, which draws from the same
+    // counter and would collide with the drawing track the same way.
+    const TrackId second = loaded.addAudioTrack("room", "room-tone.wav");
+    CHECK(second != sound);
+    CHECK(second != added);
+}
+
+// A whole number is what version 3 wrote, and an id past what an int holds is
+// what a long-lived project eventually writes: ids come from a counter that is
+// never reused, so the range is not hypothetical. Reading one through `asInt`
+// answered its fallback -- kNoId -- and the load then dropped the soundtrack
+// without a word, leaving the file orphaned in `audio/`.
+void aSoundtrackIdBeyondAnIntSurvivesTheRoundTrip() {
+    TEST("a soundtrack whose id is past an int is not silently dropped");
+    Document doc;
+    doc.addTrack("character");
+    doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    // The file the writer produces, with the soundtrack's id raised past what
+    // an int holds. Edited rather than written out by hand so that this cannot
+    // drift from the format, and reached this way because arriving at the id
+    // through addAudioTrack would mean five billion calls.
+    std::string text = ProjectIO::writeSceneJson(doc);
+    const std::string::size_type sounds = text.find("\"audio_tracks\"");
+    CHECK(sounds != std::string::npos);
+    const std::string::size_type key = text.find("\"id\":", sounds);
+    CHECK(key != std::string::npos);
+    const std::string::size_type from = text.find_first_of("0123456789", key);
+    const std::string::size_type to = text.find_first_not_of("0123456789", from);
+    text.replace(from, to - from, "5000000000");
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    CHECK_EQ(loaded.scene().audio_tracks.front().id, TrackId{5000000000});
+
+    // And the counter is past it, so the fix above holds at this end of the
+    // range too.
+    CHECK(loaded.addTrack("another") > TrackId{5000000000});
+}
+
+void aProjectWithNoSoundIsTheSameBytesItAlwaysWas() {
+    TEST("a scene with no soundtrack writes no audio_tracks key at all");
+    const std::string text = ProjectIO::writeSceneJson(buildScene());
+    // Not tidiness: every project that exists has no sound in it, and a key
+    // appearing in all of them the first time this build opens them would make
+    // every one of those files differ for no reason anybody could point at.
+    CHECK(text.find("audio_tracks") == std::string::npos);
+}
+
+void everySoundtrackFileIsNamedOnce() {
+    TEST("two soundtracks naming one file is one file to carry");
+    Document doc = buildScene();
+    doc.addAudioTrack("take one", "dialogue.wav");
+    doc.addAudioTrack("take two", "dialogue.wav");
+    doc.addAudioTrack("room", "room-tone.wav");
+
+    const std::vector<std::string> named = ProjectIO::audioReferencedBy(doc);
+    CHECK_EQ(named.size(), std::size_t{2});
+    CHECK_EQ(named[0], std::string("dialogue.wav"));
+    CHECK_EQ(named[1], std::string("room-tone.wav"));
+
+    // And a soundtrack is not a picture: the two folders are two namespaces, so
+    // nothing here reaches imports/.
+    const std::vector<std::string> pictures = ProjectIO::importsReferencedBy(doc);
+    for (const std::string& one : pictures) CHECK(one != std::string("dialogue.wav"));
+}
+
+void undoingAnImportTakesTheSoundtrackWithIt() {
+    TEST("adding and placing a soundtrack are edits, and both undo");
+    Document doc = buildScene();
+    doc.clearHistory();
+
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    AudioPlacement moved;
+    moved.offset_frames = 12;
+    moved.gain = 0.4;
+    doc.setAudioTrackPlacement(sound, moved);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.offset_frames, 12.0, 1e-9);
+
+    CHECK(doc.undo());  // the placement
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.offset_frames, 0.0, 1e-9);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 1.0, 1e-9);
+
+    CHECK(doc.undo());  // the import
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+
+    CHECK(doc.redo());
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    // The id survives, which is what lets the samples installed against it
+    // still be the right samples after an undo and a redo.
+    CHECK_EQ(doc.scene().audio_tracks.front().id, sound);
+}
+
+void gainIsClampedWhereItIsStoredAndNotAtEachCaller() {
+    TEST("a gain out of range is clamped once, where it is written");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    AudioPlacement loud;
+    loud.gain = 4.0;
+    doc.setAudioTrackPlacement(sound, loud);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 1.0, 1e-9);
+    AudioPlacement negative;
+    negative.gain = -1.0;
+    doc.setAudioTrackPlacement(sound, negative);
+    CHECK_NEAR(doc.scene().findAudioTrack(sound)->placement.gain, 0.0, 1e-9);
+
+    // And a file that says something impossible is clamped on the way in too,
+    // rather than being trusted because it was written by us once.
+    std::string text = ProjectIO::writeSceneJson(doc);
+    const std::string wrote = "\"gain\": 0";
+    const std::size_t at = text.find(wrote);
+    CHECK(at != std::string::npos);
+    text.replace(at, wrote.size(), "\"gain\": 900");
+    Document loaded;
+    CHECK(ProjectIO::readSceneJson(text, loaded, nullptr));
+    CHECK_NEAR(loaded.scene().audio_tracks.front().placement.gain, 1.0, 1e-9);
+}
+
+void soundtracksRaisedTheFormatVersion() {
+    TEST("the version is past 3, which stops an older build orphaning a soundtrack");
+    // A floor and not the number, for the reason the imports test above gives:
+    // asserting the exact version a bump introduced breaks on the *next* bump,
+    // which is the wrong failure. This one has now happened twice.
+    Document doc = buildScene();
+    doc.addAudioTrack("dialogue", "dialogue.wav");
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    CHECK(ProjectIO::kSceneFormatVersion >= 3);
+    CHECK(text.find("\"version\": " + std::to_string(ProjectIO::kSceneFormatVersion)) !=
+          std::string::npos);
+}
+
+void acropSurvivesTheRoundTripAndAnUntrimmedSoundWritesNothing() {
+    TEST("a crop comes back, and a sound nobody cropped writes no trim at all");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    // Untrimmed first: the same bytes a project wrote before the trim existed.
+    const std::string plain = ProjectIO::writeSceneJson(doc);
+    CHECK(plain.find("trim_start_seconds") == std::string::npos);
+    CHECK(plain.find("trim_end_seconds") == std::string::npos);
+
+    AudioPlacement cropped;
+    // Fractional, which is the whole point: 1/24 of a second is 42 ms.
+    cropped.offset_frames = 12.4;
+    cropped.trim_start_seconds = 0.25;
+    cropped.trim_end_seconds = 0.5;
+    doc.setAudioTrackPlacement(sound, cropped);
+
+    const std::string text = ProjectIO::writeSceneJson(doc);
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    if (loaded.scene().audio_tracks.empty()) return;
+
+    const AudioPlacement& back = loaded.scene().audio_tracks.front().placement;
+    // **The fraction survives.** A file that wrote this as an integer would put
+    // the sound back on frame 12 -- 17 ms away, which is where a consonant
+    // lives, and is exactly what the version bump exists to refuse.
+    CHECK_NEAR(back.offset_frames, 12.4, 1e-9);
+    CHECK_NEAR(back.trim_start_seconds, 0.25, 1e-9);
+    CHECK_NEAR(back.trim_end_seconds, 0.5, 1e-9);
+}
+
+void aCropIsBoundedBySomethingLeftToGrab() {
+    TEST("a crop cannot eat the whole sound");
+    Document doc = buildScene();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 1;
+    clip.samples.assign(48000, 0.5f);  // one second
+    doc.setAudioSamples(sound, std::move(clip));
+
+    AudioPlacement greedy;
+    greedy.trim_start_seconds = 10.0;  // far more than there is
+    doc.setAudioTrackPlacement(sound, greedy);
+
+    // A sound trimmed to nothing draws no block, and a row with no block has
+    // nothing to take hold of -- so the gesture that emptied it would be the
+    // last one anybody could make on it.
+    const AudioClip* held = doc.audioSamplesFor(sound);
+    CHECK(held != nullptr);
+    if (!held) return;
+    CHECK(audibleSeconds(*held, doc.scene().findAudioTrack(sound)->placement) > 0.0);
+    CHECK(audibleFrames(*held, doc.scene().findAudioTrack(sound)->placement, 24) > 0);
+}
+
+void aSoundtrackDoesNotLengthenTheShot() {
+    TEST("importing an hour of sound does not make the shot an hour long");
+    Document doc = buildScene();
+    const std::size_t before = doc.scene().shotFrames();
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    AudioClip clip;
+    clip.rate = 48000;
+    clip.channels = 1;
+    clip.samples.assign(48000 * 60, 0.0f);  // a minute
+    doc.setAudioSamples(sound, std::move(clip));
+
+    CHECK_EQ(doc.scene().shotFrames(), before);
+    CHECK_EQ(doc.scene().timelineFrames(), std::max(before, doc.scene().longestTrack()));
+}
+
 }  // namespace
 
 int main() {
@@ -407,5 +869,19 @@ int main() {
     transparentTilesAreNotWritten();
     celBytesAreStable();
     acorruptCelIsRefused();
+    anImportContributesNoCels();
+    everyImportedFileIsNamedOnce();
+    importsRaisedTheFormatVersion();
+    aSoundtrackSurvivesTheRoundTrip();
+    aLoadResumesPastSoundtrackIdsToo();
+    aSoundtrackIdBeyondAnIntSurvivesTheRoundTrip();
+    aProjectWithNoSoundIsTheSameBytesItAlwaysWas();
+    everySoundtrackFileIsNamedOnce();
+    undoingAnImportTakesTheSoundtrackWithIt();
+    gainIsClampedWhereItIsStoredAndNotAtEachCaller();
+    soundtracksRaisedTheFormatVersion();
+    acropSurvivesTheRoundTripAndAnUntrimmedSoundWritesNothing();
+    aCropIsBoundedBySomethingLeftToGrab();
+    aSoundtrackDoesNotLengthenTheShot();
     return testing::summarise("serialise");
 }
