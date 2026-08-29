@@ -2,13 +2,11 @@
 #include "timeline_widget.h"
 
 #include <QFontMetrics>
-#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPalette>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QToolTip>
 #include <algorithm>
 #include <cmath>
 
@@ -1223,10 +1221,28 @@ void TimelineWidget::refreshTooltip(int x, int y) {
             // is on its name because the cells beside it are full of drawings
             // to say things about; a soundtrack's row has one thing in it, and
             // "drag this up and down" is not discoverable from a coloured bar.
-            setToolTip(QStringLiteral("%1\n\nDrag up or down to set the level. "
-                                      "At the bottom it is silent.\n"
-                                      "Audio is not exported.")
-                           .arg(QString::fromStdString(sound->name)));
+            QString tip = QStringLiteral("%1\n\nDrag up or down to set the level. "
+                                         "At the bottom it is silent.\n"
+                                         "Audio is not exported.")
+                              .arg(QString::fromStdString(sound->name));
+            // **And which file it came from, which is what makes renaming one
+            // safe**: the label on the row and the file in the project's
+            // `audio/` folder are two different things, and losing sight of the
+            // second was the one real objection to letting the first be
+            // changed.
+            //
+            // Said here rather than through a `QEvent::ToolTip` override, which
+            // is where it was and which cost every other tooltip in this file.
+            // That override answered *all* tooltip events and returned true, so
+            // `QWidget::event` -- the thing that reads the `toolTip()` property
+            // and shows it -- never ran, and the track tooltips set below were
+            // never seen by anybody. One place decides what a row says.
+            tip += sound->source.empty()
+                       ? QStringLiteral("\n\nNo file.")
+                       : QStringLiteral("\n\nFrom %1, in the project's audio folder.\n"
+                                        "Renaming this row does not rename that file.")
+                             .arg(QString::fromStdString(sound->source));
+            setToolTip(tip);
             return;
         }
     }
@@ -1458,30 +1474,6 @@ bool TimelineWidget::renameAt(int x, int y) {
     std::size_t row = 0;
     if (!rowAtY(y, &row)) return false;
     beginRenaming(row);
-    return true;
-}
-
-bool TimelineWidget::event(QEvent* event) {
-    if (event->type() != QEvent::ToolTip) return QWidget::event(event);
-
-    auto* help = static_cast<QHelpEvent*>(event);
-    std::size_t row = 0;
-    QString text;
-    if (rowAtY(help->pos().y(), &row)) {
-        if (const AudioTrack* sound = audioAt(row)) {
-            text = sound->source.empty()
-                       ? QStringLiteral("No file.")
-                       : QStringLiteral("From %1, in the project's audio folder.\n"
-                                        "Renaming this row does not rename that file.")
-                             .arg(QString::fromStdString(sound->source));
-        }
-    }
-    if (text.isEmpty()) {
-        QToolTip::hideText();
-    } else {
-        QToolTip::showText(help->globalPos(), text, this);
-    }
-    event->accept();
     return true;
 }
 

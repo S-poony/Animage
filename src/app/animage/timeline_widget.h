@@ -144,12 +144,6 @@ public:
     QLineEdit* renameEditorForTesting() const { return rename_edit_; }
 
 protected:
-    // A soundtrack row says which file it came from, and that is what makes
-    // renaming one safe: the label on the row and the file in the project's
-    // `audio/` folder are two different things, and losing sight of the second
-    // was the one real objection to letting the first be changed.
-    bool event(QEvent* event) override;
-
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;

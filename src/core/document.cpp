@@ -154,6 +154,14 @@ void Document::removeAudioTrack(TrackId track) {
         // from a file the save still carries, so an undo re-decodes rather than
         // restoring -- the same bargain a reference frame makes. Keeping them
         // would be keeping megabytes alive against a redo that may never come.
+        //
+        // **What makes that true is MainWindow::refreshAudioSamples, called
+        // from refreshEverything**, which is the refresh an undo goes through.
+        // While it ran only after a load, this line was the whole of a bug: the
+        // track came back on Ctrl+Z with no waveform, no length and no sound,
+        // and only a save-and-reopen brought it round. `core` cannot fix that
+        // here -- it never opens a file -- so the promise is kept one layer up,
+        // and this comment is where to look if it stops being kept.
         audio_samples_.erase(track);
         audio_peaks_.erase(track);
         AudioTrack extracted = std::move(scene_.audio_tracks[i]);
@@ -452,6 +460,19 @@ void Document::loadScene(Scene scene) {
                 found->second->addImageRef();
             }
         }
+    }
+
+    // **And the soundtracks, which come out of the same counter.** They are
+    // their own list on the Scene, so the walk above does not reach them --
+    // which is exactly why they have to be counted here by hand. Missed, a
+    // project whose highest id belongs to a soundtrack resumes below it, and
+    // the next track added is handed an id that row already has: findTrack and
+    // findAudioTrack both answer, the samples map describes the wrong row, and
+    // an undo entry cannot say which of the two it is about. What keeps the two
+    // apart is that the id is unique; this is where that is made true again
+    // after a load.
+    for (const AudioTrack& sound : scene_.audio_tracks) {
+        highest_track = std::max(highest_track, sound.id);
     }
 
     cel_ids_.resumeAfter(highest_cel);

@@ -187,6 +187,26 @@ public:
 
     bool referenceFramesPending() const { return !reference_asked_.empty(); }
 
+    // Gives up on every decode in flight and forgets every question asked.
+    //
+    // **For the moment the document underneath is replaced**, which is opening
+    // a project and starting a new one, and it has to be called there rather
+    // than left to the generation check in dropStaleReferenceRequests. That
+    // check compares a `ReferenceCache::generation`, which counts how many
+    // times *that* cache has been emptied -- and every document loaded from
+    // disk arrives with the same count, because `loadScene` empties it exactly
+    // once. So two projects opened one after the other are both at generation
+    // one, the questions asked about the first look current against the second,
+    // and an answer about a drawing in the old project is installed against
+    // whatever drawing happens to hold that id in the new one. Ids come from a
+    // counter that restarts per document, so small ones collide as a matter of
+    // course.
+    //
+    // A generation is the right test for "this cache was emptied under me" and
+    // simply is not a test for "this is another document". This is that test,
+    // and it is a statement rather than a comparison.
+    void forgetImports();
+
     // How many times this widget has actually painted.
     //
     // The honest way to ask whether a frame was *shown*. Playback sets a slot

@@ -827,6 +827,32 @@ private:
     // to the same original, and one path per import is nothing.
     ProjectIO::Imports imports_;
 
+    // Which document is open, counted rather than named.
+    //
+    // **The one number that tells one document from another**, and it exists
+    // because nothing else in the program does. A cache generation counts how
+    // often that cache has been emptied, so two projects loaded one after the
+    // other read the same; ids restart from a counter per document, so small
+    // ones collide as a matter of course; and a history stamp is equal across
+    // two freshly loaded documents. Bumped in afterProjectLoaded, which every
+    // replacement of `doc_` goes through.
+    //
+    // What reads it is anything that lets go of the interface thread and comes
+    // back expecting the same document: refreshAudioSamples, whose decode runs
+    // a nested event loop, is the one today.
+    std::uint64_t document_epoch_ = 0;
+
+    // Whether a soundtrack is being decoded right now, and for which document.
+    //
+    // Decoding runs a nested event loop, so refreshAudioSamples can be entered
+    // again from inside itself. Both halves are needed: the flag stops it
+    // decoding the same track once per event that arrives during the wait, and
+    // the epoch is what still lets through the one re-entry that has to run --
+    // a project opened from inside that loop, whose own soundtracks nothing
+    // else will decode. See refreshAudioSamples.
+    bool decoding_audio_ = false;
+    std::uint64_t decoding_audio_for_ = 0;
+
     // Whether this document has already been told about imports it cannot read.
     // The paint asks for every frame on screen and a missing file stays
     // missing, so without this the message box would come back for ever.

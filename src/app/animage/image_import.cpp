@@ -3,12 +3,14 @@
 
 #include <QColorSpace>
 #include <QFileInfo>
+#include <QImageIOHandler>
 #include <QImageReader>
 
 #include <algorithm>
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include "color.h"
 
@@ -226,6 +228,21 @@ Survey survey(const QString& path) {
     out.ok = true;
     out.width = size.width();
     out.height = size.height();
+
+    // **And turned the way `decode` will turn it, by hand, because `size` is
+    // not.** `decode` sets autoTransform, so a phone photograph tagged "rotate
+    // 90" arrives 3024 x 4032; `size` reads the sensor's own 4032 x 3024 off
+    // the header and setting autoTransform here does *not* change that --
+    // measured on Qt 6.11.1, where the reader answers 40 x 20 to `size` with
+    // the flag set either way and 20 x 40 to `read`. So the survey has to apply
+    // the quarter turn itself, or the recap quotes a picture nobody is about to
+    // see, sideways.
+    //
+    // Only the quarter turns, and `Rotate90` is the bit that names one: a
+    // mirror or a half turn moves no pixel out of the rectangle it was in.
+    if (reader.transformation().testFlag(QImageIOHandler::TransformationRotate90)) {
+        std::swap(out.width, out.height);
+    }
     return out;
 }
 
@@ -301,8 +318,20 @@ TileGrid decodeImage(const QImage& source, Converted* converted) {
 
 TileGrid decode(const QString& path, QString* trouble, Converted* converted) {
     QImageReader reader(path);
-    // Qt refuses very large images by default, and a 300 dpi A4 scan is not
-    // large by this program's standards -- a shot holds dozens of them.
+    // The EXIF rotation applied, so a photograph of a model sheet arrives the
+    // way up it was taken. A phone writes the sensor's pixels and a tag saying
+    // which way round they go, and a reader left to itself hands back the
+    // former -- a modelsheet on its side, with nothing on screen to say why.
+    //
+    // **`survey` has to arrive at the same answer**, or the recap quotes the
+    // dimensions transposed from the picture that actually lands -- and it
+    // cannot get there by setting this flag, because `size` does not read it.
+    // See the swap up there.
+    //
+    // Qt's own decode allocation limit is left where it is. It is a ceiling on
+    // one file rather than on this program, and a scan large enough to meet it
+    // is a scan whose tiles this would then be holding -- so the refusal is
+    // reported as trouble, like any other file that will not read.
     reader.setAutoTransform(true);
     const QImage image = reader.read();
     if (image.isNull()) {

@@ -4121,6 +4121,18 @@ as the program having gone wrong and does not stop reading that way until the tw
 numbers are shown together. That was reported from use on the first file
 somebody imported that was not a WAV.
 
+**Derived means somebody has to decode it again, and there are two moments, not
+one.** A project opened from disk has soundtracks naming files and nothing
+decoded — that one is obvious and `afterProjectLoaded` covers it. The second is
+an *undo*: `Document::removeAudioTrack` throws the samples away deliberately,
+rather than carrying megabytes on the undo stack against a redo that may never
+come, so bringing the track back has to decode the file again. While that ran
+only after a load it was a bug with no visible cause — the row came back on
+Ctrl+Z drawing "no sound loaded", silent on a scrub and on a take, and only a
+save-and-reopen put it right. `MainWindow::refreshEverything` calls
+`refreshAudioSamples` for this reason; the test for "already decoded" is a hash
+lookup per soundtrack, which is what makes it affordable on every refresh.
+
 ### What is not built
 
 - **A manual sync offset**, which [importing.md](importing.md) defers on the
@@ -4130,8 +4142,6 @@ somebody imported that was not a WAV.
   not a project setting, so adding it later touches no file and is not a format
   change.
 - **Audio in an export**, which is out of scope in the plan and stays there.
-- **More than one soundtrack** — the model is a list and the row loop walks it,
-  so what is missing is only the interface for a second one.
 
 ### And what a video will not share with this
 

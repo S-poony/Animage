@@ -2829,6 +2829,131 @@ void extendingTheShotToTheSoundIsAskedForRatherThanAssumed() {
     CHECK(!doc.scene().fixed_length);
 }
 
+// Removing a soundtrack throws its decoded samples away on purpose, rather than
+// carrying megabytes on the undo stack against a redo that may never come --
+// and `Document::removeAudioTrack` says, in as many words, that an undo
+// re-decodes instead. Nothing kept that promise: refreshAudioSamples ran after
+// a load and nowhere else, so the track came back on Ctrl+Z with no waveform,
+// no length and no sound, and only a save-and-reopen brought it round.
+//
+// It asserts what somebody hears rather than which function was called, so it
+// goes on meaning the same thing whichever end the re-decode is arranged from.
+void undoingASoundtrackDeletionBringsTheSoundBackWithIt() {
+    TEST("a soundtrack undone back into the shot can be heard again");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));  // one second, 24 frames
+    }
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    animage::Document& doc = window.documentForTesting();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+    if (doc.scene().audio_tracks.empty()) return;
+
+    const animage::TrackId sound = doc.scene().audio_tracks.front().id;
+    CHECK(doc.audioSamplesFor(sound) != nullptr);
+    const std::size_t reach = doc.timelineFrames();
+    CHECK(reach >= 24);
+
+    // What removeCurrentTrack does, without the dialog a test cannot answer.
+    doc.removeAudioTrack(sound);
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{0});
+    // Gone deliberately. This is the line the promise is made about.
+    CHECK(doc.audioSamplesFor(sound) == nullptr);
+
+    // Through the real Undo, because what re-decodes is the refresh that action
+    // performs -- calling doc.undo() here would test the model and miss the
+    // whole of the bug.
+    QAction* undo = window.actionForTesting(shortcuts::Id::Undo);
+    CHECK(undo != nullptr);
+    if (!undo) return;
+    undo->trigger();
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    // **And the sound with it.** Without this the row is back and silent: it
+    // draws "no sound loaded", audioProgramAt skips it so a scrub and a take
+    // are both quiet, and the timeline stops reaching the end of it.
+    const animage::AudioClip* back = doc.audioSamplesFor(sound);
+    CHECK(back != nullptr);
+    if (back) {
+        CHECK(!back->empty());
+        CHECK_EQ(back->rate, 48000);
+    }
+    // The peaks are written with the samples in every case, so the row has
+    // something to draw as well as something to play.
+    CHECK(doc.audioPeaksFor(sound) != nullptr);
+    CHECK_EQ(doc.timelineFrames(), reach);
+}
+
+// The timeline's tooltips are set on the widget by refreshTooltip and shown by
+// `QWidget::event`, which is the ordinary Qt route. A `QEvent::ToolTip`
+// override was added for the soundtrack's file name, and because it answered
+// *every* tooltip event and returned true, `QWidget::event` stopped running --
+// so every other tooltip in the file was set and never seen by anybody.
+//
+// This pins the property that failed: whatever a row has to say, hovering it
+// leaves it on the widget where Qt will find it.
+void everyTimelineRowStillHasSomethingToSay() {
+    TEST("hovering a timeline row leaves its tooltip where Qt can show it");
+    QTemporaryDir scratch;
+    CHECK(scratch.isValid());
+    if (!scratch.isValid()) return;
+
+    const QString file = scratch.filePath(QStringLiteral("dialogue.wav"));
+    {
+        QFile out(file);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(makeWavBytes(48000, 1, 48000, 440.0));
+    }
+
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QCoreApplication::processEvents();
+
+    QString trouble;
+    CHECK(window.importAudioFrom(file, 1, &trouble, true));
+    QCoreApplication::processEvents();
+
+    TimelineWidget* strip = window.findChild<TimelineWidget*>();
+    CHECK(strip != nullptr);
+    if (!strip) return;
+
+    const animage::Document& doc = window.documentForTesting();
+    const std::size_t drawing_rows = doc.scene().tracks.size();
+    CHECK(drawing_rows >= 1);
+    CHECK_EQ(doc.scene().audio_tracks.size(), std::size_t{1});
+
+    // A drawing track's name strip, which is where its tooltip lives.
+    const QPoint on_a_track = strip->gutterPointForTesting(0);
+    sendMouse(strip, QEvent::MouseMove, QPointF(on_a_track), Qt::NoButton, Qt::NoButton);
+    CHECK(!strip->toolTip().isEmpty());
+    CHECK(strip->toolTip().contains(QStringLiteral("restack")));
+
+    // And a soundtrack's row, which says both things it has to say: what the
+    // drag does, and which file the row came from -- the second being what
+    // makes renaming the first safe.
+    const QPoint on_the_sound = strip->gutterPointForTesting(drawing_rows);
+    sendMouse(strip, QEvent::MouseMove, QPointF(on_the_sound), Qt::NoButton, Qt::NoButton);
+    CHECK(strip->toolTip().contains(QStringLiteral("set the level")));
+    CHECK(strip->toolTip().contains(QStringLiteral("dialogue.wav")));
+}
+
 void extendingTheShotNeverShortensIt() {
     TEST("extending the shot to a short sound does not cut the drawings out of it");
     QTemporaryDir scratch;
@@ -10818,6 +10943,8 @@ int main(int argc, char** argv) {
     aSoundtrackSurvivesAnImportASaveAndAReopen();
     aSoundtrackWidensTheTimelineWithoutWideningTheShot();
     extendingTheShotToTheSoundIsAskedForRatherThanAssumed();
+    undoingASoundtrackDeletionBringsTheSoundBackWithIt();
+    everyTimelineRowStillHasSomethingToSay();
     extendingTheShotNeverShortensIt();
     croppingTheFrontOfASoundDoesNotMoveItsEndOnScreen();
     aMultiTrackProjectComesBackWhole();

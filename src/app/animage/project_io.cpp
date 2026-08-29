@@ -1228,7 +1228,13 @@ bool ProjectIO::readSceneJson(std::string_view text, Document& doc, std::string*
     for (const QJsonValue& value : object.value("audio_tracks").toArray()) {
         const QJsonObject one = value.toObject();
         AudioTrack track;
-        track.id = static_cast<TrackId>(asInt(one.value("id"), 0));
+        // asId and not asInt, which is what every other id in this file is read
+        // with. A TrackId is 64 bits and ids are never reused, so a project
+        // worked on long enough gets past what an int holds -- and asInt
+        // answers its fallback for anything outside that range, which here is
+        // kNoId and is dropped four lines below. That would lose the soundtrack
+        // and the timing with it, silently, on a file that is not damaged.
+        track.id = asId(one.value("id"), kNoId);
         track.name = one.value("name").toString().toStdString();
         track.source = one.value("source").toString().toStdString();
         // toDouble and not asInt: a version 3 file wrote a whole number here

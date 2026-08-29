@@ -2335,10 +2335,24 @@ bool MainWindow::openProjectAt(const QString& folder, QString* error) {
 }
 
 void MainWindow::afterProjectLoaded() {
-    // Before anything reads the scene. A soundtrack's samples are derived and
-    // went with the document that was replaced, so this is the one moment they
-    // are missing for a project that has them -- an import decodes as it
-    // arrives, and nothing else can lose them.
+    // **First, and before anything can wait.** Everything that replaces `doc_`
+    // comes through here, so this is the one place that can say "the document
+    // under you is not the one you were asked about" -- and two things are
+    // holding questions about the old one: the decodes in flight below, and any
+    // refreshAudioSamples suspended in its own nested event loop, which reads
+    // this number back when it wakes.
+    ++document_epoch_;
+
+    // The imported pictures being decoded for the project that has just gone.
+    // A ReferenceCache generation cannot tell one document from another -- see
+    // CanvasWidget::forgetImports -- so an answer about a drawing in the old
+    // project would be installed against whatever holds that id in this one.
+    canvas_->forgetImports();
+
+    // Then the scene. A soundtrack's samples are derived and went with the
+    // document that was replaced, so this is one of the two moments they are
+    // missing for a project that has them -- an import decodes as it arrives,
+    // and the other is an undo of a deletion, which refreshEverything covers.
     refreshAudioSamples();
 
     const Scene& scene = doc_.scene();
@@ -3050,7 +3064,13 @@ void MainWindow::refreshEverything() {
     // A soundtrack can arrive here by an import and leave by an undo, and the
     // output should match what the document holds either way. Free when it
     // already does.
-    refreshAudioDevice();
+    //
+    // **The samples and not only the device**, because an undo is the other way
+    // a soundtrack arrives here with nothing decoded: removing one throws its
+    // samples away deliberately, on the understanding that bringing it back
+    // decodes the file again. This is where that happens. It ends in
+    // refreshAudioDevice itself, so the two are one call.
+    refreshAudioSamples();
 }
 
 // --- importing -----------------------------------------------------------
@@ -3075,12 +3095,17 @@ std::string importNameIn(std::unordered_set<std::string>& taken, const QString& 
                          const char* fallback_suffix = "png") {
     QString stem = QFileInfo(path).completeBaseName();
     QString suffix = QFileInfo(path).suffix().toLower();
-    // Everything that is not a letter, a digit, a dash or a dot becomes a dash,
-    // which is the rule the export already uses for track and layer names --
-    // and the underscore is not an oversight in that list. It is the export's
-    // separator and nothing else is, so a name that kept one would put an extra
-    // field in a file name; see export_sequence.h. One rule rather than two, so
-    // that nothing has to remember which names are allowed what.
+    // Everything in the *stem* that is not a letter, a digit or a dash becomes
+    // a dash, which is the rule the export already uses for track and layer
+    // names -- and the underscore is not an oversight in that list. It is the
+    // export's separator and nothing else is, so a name that kept one would put
+    // an extra field in a file name; see export_sequence.h. One rule rather
+    // than two, so that nothing has to remember which names are allowed what.
+    //
+    // A dot goes the same way, and only one survives: the one put back below,
+    // between the stem and the suffix. `model.v2.png` lands as `model-v2.png`,
+    // so a name has exactly one extension and nothing downstream has to decide
+    // which of two dots ends it.
     for (QChar& c : stem) {
         if (!c.isLetterOrNumber() && c != QLatin1Char('-')) c = QLatin1Char('-');
     }
@@ -3570,26 +3595,100 @@ bool MainWindow::importAudioFrom(const QString& path, int start_frame, QString* 
 
 // Decodes every soundtrack the scene names and has no samples for.
 //
-// After a load, and nowhere else. A clip is derived data and goes with the
-// document it belonged to, so a project opened from disk has tracks naming
-// files and nothing decoded; an import decodes as it arrives. The test is a
-// hash lookup per soundtrack, so this is free on every call but that one.
+// **On a load, and on every refresh, because there are two ways to arrive here
+// with a track whose samples are gone.** A clip is derived data and goes with
+// the document it belonged to, so a project opened from disk has tracks naming
+// files and nothing decoded. The second way is an undo: `removeAudioTrack`
+// throws the samples away rather than carrying megabytes on the undo stack, and
+// says an undo re-decodes -- which was a promise nothing kept while this ran
+// only after a load. What it produced was a soundtrack that came back on Ctrl+Z
+// with no waveform, no length and no sound, until the project was saved and
+// reopened. So refreshEverything calls this, and the test for "already decoded"
+// is a hash lookup per soundtrack, which is what makes that affordable.
 //
 // **A file that will not read is remembered as an empty clip**, which is the
 // same rule a reference frame follows and for a sharper version of the same
 // reason: without it, every caller that finds nothing would try again, and one
 // of those callers is going to be a device callback.
 void MainWindow::refreshAudioSamples() {
+    // **Re-entrant, and that has to be handled rather than forbidden.** The
+    // decode below runs a nested event loop, so anything the user does inside
+    // it that reaches refreshEverything comes back here -- a second Ctrl+Z, a
+    // gesture ending on the timeline -- and finds the very track being decoded
+    // still missing, because nothing is installed until the decode returns. It
+    // would then decode it again inside itself, once per event.
+    //
+    // Guarded on the document rather than outright, because there is one
+    // re-entry that must be let through: the one afterProjectLoaded makes for a
+    // project opened from inside that loop. That call is about another
+    // document, and refusing it would leave the new project's sound undecoded
+    // for as long as it stayed open.
+    if (decoding_audio_ && decoding_audio_for_ == document_epoch_) return;
+
+    // What is missing, gathered before anything is decoded.
+    //
+    // **The scene's own list may not be walked across a decode.**
+    // `audio_import::decode` runs a nested event loop -- it is the only way to
+    // drive QAudioDecoder, which reports through signals -- and a nested event
+    // loop dispatches user input with no modal dialog in front of it. So File >
+    // Open is reachable from the middle of this, and it replaces the document:
+    // `scene_.audio_tracks` is destroyed and rebuilt, and a range-for standing
+    // in it is then walking freed memory. Ids and names copied out first cannot
+    // be invalidated by anything the decode lets in.
+    std::vector<std::pair<TrackId, std::string>> missing;
     for (const AudioTrack& track : doc_.scene().audio_tracks) {
         if (doc_.audioSamplesFor(track.id)) continue;
-        const QString path = audioPathFor(track.source);
-        if (path.isEmpty()) {
-            doc_.setAudioSamples(track.id, AudioClip{});
-            continue;
-        }
-        const audio_import::Decoded decoded = audio_import::decode(path);
-        doc_.setAudioSamples(track.id, decoded.ok ? decoded.clip : AudioClip{});
+        missing.emplace_back(track.id, track.source);
     }
+    if (missing.empty()) {
+        refreshAudioDevice();
+        return;
+    }
+
+    // Which document these are about. Anything that replaces it goes through
+    // afterProjectLoaded, which moves this on -- and which decodes the new
+    // document's own soundtracks on the way, so abandoning here loses nothing.
+    const std::uint64_t opened = document_epoch_;
+
+    // Saved and put back rather than simply cleared, so that the nested call
+    // described above hands the outer one its own state again on the way out.
+    const bool was_decoding = decoding_audio_;
+    const std::uint64_t was_decoding_for = decoding_audio_for_;
+    decoding_audio_ = true;
+    decoding_audio_for_ = opened;
+
+    bool replaced = false;
+    for (const auto& [id, source] : missing) {
+        const QString path = audioPathFor(source);
+        AudioClip clip;
+        if (!path.isEmpty()) {
+            const audio_import::Decoded decoded = audio_import::decode(path);
+            if (decoded.ok) clip = decoded.clip;
+        }
+
+        // Asked *after* the decode, because the decode is where the event loop
+        // was. A document that has been replaced is not one to write into: the
+        // ids in `missing` name drawings and rows that no longer exist, and the
+        // same small numbers name different ones now.
+        if (document_epoch_ != opened) {
+            replaced = true;
+            break;
+        }
+        // And the row itself, which the same event loop could have deleted or
+        // repointed at another file. Nothing here is worth installing against a
+        // track that has stopped naming the file it was decoded from. Left
+        // uninstalled rather than guessed at, so the next refresh asks again.
+        const AudioTrack* still = doc_.scene().findAudioTrack(id);
+        if (!still || still->source != source) continue;
+
+        doc_.setAudioSamples(id, std::move(clip));
+    }
+
+    decoding_audio_ = was_decoding;
+    decoding_audio_for_ = was_decoding_for;
+
+    // Whoever replaced the document has already opened the output for it.
+    if (replaced) return;
     refreshAudioDevice();
 }
 

@@ -1468,6 +1468,22 @@ current. The fill cache learned this the expensive way when its solve stopped
 finishing in the call that started it. Copy `CtgFillCache::generation()`; do not
 rediscover it.
 
+**And a generation is not a document identity, which is the one thing it looks
+like it is.** It counts how many times *that* cache has been emptied, so it
+answers "was the shelf cleared under me" and nothing else. Every project loaded
+from disk arrives at the same count, because `loadScene` empties the cache
+exactly once — so two projects opened one after the other are both at
+generation one, and the questions asked about the first are indistinguishable
+from current when the second arrives. Ids do not save you either: they come from
+a counter that restarts per document, so the small ones collide as a matter of
+course, and an answer about drawing 3 of the old project is installed against
+drawing 3 of the new one and composited. Replacing the document is a *statement*
+rather than a comparison: `CanvasWidget::forgetImports`, called from
+`afterProjectLoaded`, which is the one funnel every replacement of `doc_` goes
+through. Anything that keeps a question across a document swap needs the same
+treatment — `MainWindow::document_epoch_` is the number for the ones that cannot
+simply be dropped.
+
 **And a wrong key here is worse than a slow one.** The lesson from the fill cache
 is that a key which is a bijection today stops being one quietly: *"every cel in
 a project straight off disk is at revision 1"*. A reference frame's key has to

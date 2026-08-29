@@ -1124,6 +1124,21 @@ void CanvasWidget::collectReferenceFrames() {
     update();
 }
 
+// See the header for why a generation cannot do this job.
+void CanvasWidget::forgetImports() {
+    // The decoder first. `cancelAll` drops what is queued, tells what is
+    // running to give up, and waits for it -- so by the time this returns there
+    // is no answer left anywhere that could be collected against the document
+    // that is arriving.
+    reference_decoder_.cancelAll();
+    // And the questions, which are what `collect` matches an answer against.
+    // Left behind, they would keep the poll running for answers that were
+    // thrown away a line ago, and hold `referenceFramesPending` true for ever
+    // -- which is the status bar saying a shot is still loading when nothing is.
+    reference_asked_.clear();
+    noteReferencePending();
+}
+
 bool CanvasWidget::settleReferenceFrames(int timeout_ms) {
     QElapsedTimer clock;
     clock.start();

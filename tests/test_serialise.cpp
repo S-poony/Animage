@@ -612,6 +612,81 @@ void aSoundtrackSurvivesTheRoundTrip() {
     CHECK_EQ(loaded.scene().tracks.size(), doc.scene().tracks.size());
 }
 
+// The id counter has to be resumed past the soundtracks as well as the tracks,
+// and a load is the one place that can get it wrong: `loadScene` walks
+// `scene.tracks`, and soundtracks are not in that list.
+//
+// What it costs to miss is not a tidy number being wrong. The two lists share
+// one counter precisely so that an id names exactly one row, and the timeline,
+// the Track menu, the samples map and three undo ops all rely on it: an id
+// handed to the wrong lookup has to answer *nothing here* rather than something
+// plausible. So this pins the property rather than the arithmetic -- add a
+// track after a load, and it must not be handed an id a soundtrack already has.
+void aLoadResumesPastSoundtrackIdsToo() {
+    TEST("a track added after a load cannot be given a soundtrack's id");
+    Document doc;
+    doc.addTrack("character");
+    // Added last, so its id is the highest in the file and nothing else would
+    // push the counter past it.
+    const TrackId sound = doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(ProjectIO::writeSceneJson(doc), loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    CHECK_EQ(loaded.scene().audio_tracks.front().id, sound);
+
+    const TrackId added = loaded.addTrack("another");
+    CHECK(added != sound);
+    // And the lookups still disagree about it, which is the thing the id being
+    // unique is protecting: one id, one row, one list.
+    CHECK(loaded.scene().findTrack(added) != nullptr);
+    CHECK(loaded.scene().findAudioTrack(added) == nullptr);
+    CHECK(loaded.scene().findTrack(sound) == nullptr);
+    CHECK(loaded.scene().findAudioTrack(sound) != nullptr);
+
+    // The same for a soundtrack added after the load, which draws from the same
+    // counter and would collide with the drawing track the same way.
+    const TrackId second = loaded.addAudioTrack("room", "room-tone.wav");
+    CHECK(second != sound);
+    CHECK(second != added);
+}
+
+// A whole number is what version 3 wrote, and an id past what an int holds is
+// what a long-lived project eventually writes: ids come from a counter that is
+// never reused, so the range is not hypothetical. Reading one through `asInt`
+// answered its fallback -- kNoId -- and the load then dropped the soundtrack
+// without a word, leaving the file orphaned in `audio/`.
+void aSoundtrackIdBeyondAnIntSurvivesTheRoundTrip() {
+    TEST("a soundtrack whose id is past an int is not silently dropped");
+    Document doc;
+    doc.addTrack("character");
+    doc.addAudioTrack("dialogue", "dialogue.wav");
+
+    // The file the writer produces, with the soundtrack's id raised past what
+    // an int holds. Edited rather than written out by hand so that this cannot
+    // drift from the format, and reached this way because arriving at the id
+    // through addAudioTrack would mean five billion calls.
+    std::string text = ProjectIO::writeSceneJson(doc);
+    const std::string::size_type sounds = text.find("\"audio_tracks\"");
+    CHECK(sounds != std::string::npos);
+    const std::string::size_type key = text.find("\"id\":", sounds);
+    CHECK(key != std::string::npos);
+    const std::string::size_type from = text.find_first_of("0123456789", key);
+    const std::string::size_type to = text.find_first_not_of("0123456789", from);
+    text.replace(from, to - from, "5000000000");
+
+    Document loaded;
+    std::string error;
+    CHECK(ProjectIO::readSceneJson(text, loaded, &error));
+    CHECK_EQ(loaded.scene().audio_tracks.size(), std::size_t{1});
+    CHECK_EQ(loaded.scene().audio_tracks.front().id, TrackId{5000000000});
+
+    // And the counter is past it, so the fix above holds at this end of the
+    // range too.
+    CHECK(loaded.addTrack("another") > TrackId{5000000000});
+}
+
 void aProjectWithNoSoundIsTheSameBytesItAlwaysWas() {
     TEST("a scene with no soundtrack writes no audio_tracks key at all");
     const std::string text = ProjectIO::writeSceneJson(buildScene());
@@ -798,6 +873,8 @@ int main() {
     everyImportedFileIsNamedOnce();
     importsRaisedTheFormatVersion();
     aSoundtrackSurvivesTheRoundTrip();
+    aLoadResumesPastSoundtrackIdsToo();
+    aSoundtrackIdBeyondAnIntSurvivesTheRoundTrip();
     aProjectWithNoSoundIsTheSameBytesItAlwaysWas();
     everySoundtrackFileIsNamedOnce();
     undoingAnImportTakesTheSoundtrackWithIt();
