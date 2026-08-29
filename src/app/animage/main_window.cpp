@@ -4726,23 +4726,28 @@ QString MainWindow::layerLabel(const Layer& layer, ImageId here) const {
 //
 // Three kinds and three treatments, and the reason they are not the same
 // treatment is that **the brush behaves differently on each**, which is the
-// thing a row was failing to say. On a reference layer nothing works at all:
-// there is no cel and none that could be made, so drawing, cutting and
-// transforming all refuse. On a colour layer the brush *does* work -- it lays
-// down scribbles -- and what refuses is cut, copy and transform. On a raster
-// layer everything works.
+// thing a row was failing to say. On a reference layer the brush, the eraser
+// and cutting all refuse: there is no cel and none that could be made. On a
+// colour layer the brush *does* work -- it lays down scribbles -- and what
+// refuses is cut, copy and transform. On a raster layer everything works.
 //
 // | kind | what the row does | why that colour |
 // |---|---|---|
 // | Raster | nothing | there is nothing to say |
 // | Colour | the carried blue | the same blue a carried cell is drawn in, one panel over: it is the same machinery and saying so twice in two colours would be worse than not saying it |
-// | Reference | the theme's disabled grey | the one colour every theme already uses for "you cannot act here", which is exactly and completely true |
+// | Reference | the theme's disabled grey | the one colour every theme already uses for "you cannot act here" |
 //
-// **The grey has an expiry date and this is where it is written down.** It says
-// "nothing here can be acted on", and that stops being true the day *convert to
-// drawings* exists -- see docs/importing.md, "convert to drawings", which is on
-// the queue. At that point a reference layer has something you can do to it and
-// this treatment has to be revisited rather than inherited.
+// **The grey was chosen when that was the whole truth about one of these rows,
+// and it is no longer.** This paragraph used to carry the prediction rather
+// than the fact: it said the treatment would have to be revisited the day
+// *convert to drawings* existed, and pointed at docs/importing.md for a feature
+// that was then on the queue. It exists now, and so does *place this picture* --
+// both are buttons in this panel, both act on a reference layer, and neither
+// refuses. What still refuses is the brush, the eraser and cutting, which is
+// narrower than "you cannot act here" and is what the row is actually saying.
+//
+// The treatment itself was not revisited when those landed. That is recorded
+// here as what happened rather than argued either way.
 //
 // Everything else goes in the tooltip and not in the row, for `layerLabel`'s
 // reason: the panel is a couple of hundred pixels wide, and a row that spells
