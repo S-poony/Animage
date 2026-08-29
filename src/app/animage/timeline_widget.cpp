@@ -361,8 +361,17 @@ std::pair<double, double> TimelineWidget::audioExtent(const AudioTrack& sound) c
 
 double TimelineWidget::gainForY(std::size_t row, int y) const {
     const int top = rowTop(row) + 2;
-    const int height = kRowHeight - 8;
-    if (height <= 0) return 0.0;
+
+    // **The guard is on a constant, so it belongs at compile time.** The band's
+    // height is `kRowHeight` less its margins and nothing about it varies, so a
+    // runtime `if` on it is a branch that can never be taken -- which MSVC says
+    // out loud (C4127, an error under /WX here, and invisible under GCC). The
+    // assertion is also the more useful of the two: setting `kRowHeight` to
+    // something the band does not fit in would have failed the build instead of
+    // silently returning a gain of zero for every drag.
+    static_assert(kRowHeight > 8, "the level band needs room to be dragged in");
+    constexpr int height = kRowHeight - 8;
+
     return std::clamp(double(top + height - y) / double(height), 0.0, 1.0);
 }
 
