@@ -3281,6 +3281,29 @@ sequence is where that stops — see below.
 that changes the scope of a gesture *already on screen*, and this is decided
 before there is one.
 
+**But "one picture" is not "one drawing", and the tooltip said it was.** Reported:
+duplicate the drawing of an imported still and the tool moves both copies, while
+its tooltip promised *"resize this drawing"*. The behaviour is right — a
+placement is a property of the layer, so every drawing showing the file moves
+together — and the box already says so, going green on `layer_images.size() > 1`,
+which is what green means everywhere: more moves than the thing you pointed at.
+
+What was wrong was the words. The generic tip was *accidentally* true at one
+drawing, which is exactly why it survived; a tool announcing one scope and doing
+another is the fault that got the placement its own button name once already. So
+the tool now has three answers rather than two, and the middle one says it moves
+the whole import and names what somebody duplicating was probably after —
+**importing the file a second time**, which is two layers and two placements and
+genuinely independent.
+
+**Per-drawing placements were considered and declined**, on the user's call,
+with the reasoning in `layer.h` beside the field. The short version: the storage
+is cheap, because the cache and the decoder are already keyed per (drawing,
+layer); the *interface* is not, because a placement would gain two scopes and
+therefore need the switch this section is named after. Duplicate's tooltip was
+corrected in the same breath — it promised "the cels are independent", which is
+right on a drawing layer and vacuous on a reference layer, which has no cels.
+
 ### And a sequence is where that argument stops
 
 `chooseTransformTool` routes a reference layer of **one** file to the placement.

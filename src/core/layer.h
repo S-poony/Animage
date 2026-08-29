@@ -148,6 +148,30 @@ struct Layer {
     //
     // It is also why there is no lasso here: a placement is a property of the
     // whole file and there is no such thing as placing half of it.
+    //
+    // **One per layer and not one per drawing**, which was asked about and
+    // decided rather than merely inherited. Duplicating a drawing on a
+    // reference layer gives two drawings showing one file, and moving either
+    // moves both -- surprising enough to be reported, because Duplicate
+    // promises independence and on every other kind of layer delivers it.
+    //
+    // The storage would be cheap: `ReferenceCache` already keys each entry on
+    // the placement it was derived under and a decode job already carries one,
+    // so both are per (drawing, layer) already, and this could move to a sparse
+    // map on `Image` beside `source_frames` without either noticing. What it
+    // would cost is the interface. A placement would gain two scopes -- this
+    // drawing, or the whole import -- and so need a control to choose between
+    // them, which is the question docs/handover.md settles under "the two
+    // doors, and why there is no switch". Half size would become one placement
+    // per drawing instead of one, and a layer default beneath per-drawing
+    // overrides is two facts that can contradict each other.
+    //
+    // And what it would buy already works by a route that fits the model:
+    // **import the file twice**. That is two reference layers with two
+    // placements, `importNameFor` exists to tell two imports of one file apart,
+    // and two independently placed pictures being two layers rather than two
+    // drawings of one is what a reference layer already means -- one picture,
+    // put somewhere.
     Transform placement;
 
     // Defaulted, so a field added above is compared without anybody having to

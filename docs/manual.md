@@ -317,6 +317,13 @@ from the file again at them, so you can nudge and resize it as often as you like
 without ever costing it any quality. The transform bar says "Placing" while you
 are doing it, which is how you can tell.
 
+**Duplicating a drawing does not give you two copies you can move apart.** Where
+an imported picture sits is one fact about the layer, so both drawings show the
+same file and moving either moves both — the box goes green to say so, which is
+what green always means: more moves than the thing you pointed at. If you want
+the same picture in two places at once, import the file twice. That gives two
+layers with two positions, and they are genuinely independent.
+
 ## Painting on an imported picture
 
 **You cannot, until you convert it — and the program offers to.** An import holds

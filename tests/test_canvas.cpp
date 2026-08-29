@@ -10978,6 +10978,21 @@ void theLayerButtonKeepsOneNameAndGreysWhereTheToolIsTheDoor() {
         QAction* tool = actionCalled(window, QStringLiteral("Transform"));
         CHECK(tool != nullptr);
         if (tool) CHECK(tool->isEnabled());
+
+        // **And it stops saying "this drawing", which is the report.** The tool
+        // routes an import to the placement, and a placement is a property of
+        // the whole layer -- so with the drawing duplicated it moves two, while
+        // the tooltip claimed one. It was accidentally true at one drawing,
+        // which is why it survived: a tool announcing one scope and doing
+        // another is the fault that got the placement its own button name once
+        // already.
+        if (tool) {
+            CHECK(!tool->toolTip().contains(QStringLiteral("resize this drawing")));
+            CHECK(tool->toolTip().contains(QStringLiteral("whole import")));
+            // And it names the route to what somebody duplicating was probably
+            // after, rather than only refusing to be it.
+            CHECK(tool->toolTip().contains(QStringLiteral("importing the file a second time")));
+        }
     }
 
     // An imported sequence, which is what the button is left enabled for:

@@ -2054,9 +2054,26 @@ void MainWindow::buildTimelinePanel() {
     button(QStringLiteral("+ Drawing"), shortcuts::Id::InsertDrawing,
            QStringLiteral("Insert a new empty drawing after this one"), QString(),
            &MainWindow::insertInterval);
+    // **The second line used to say only "the cels are independent"**, which is
+    // exactly right on a drawing layer and says nothing at all on an imported
+    // one -- a reference layer has no cels. What it set up instead was the
+    // expectation that duplicating an import gives two pictures you can place
+    // apart, and it does not: the copy carries the source frame, so both
+    // drawings show one file, and where that file sits is one fact on the
+    // layer. Reported as a surprise. Said here as well as in the status bar at
+    // the moment it happens, because a tooltip is what somebody reads *before*
+    // pressing.
+    //
+    // Not made per-layer like the Transform tool's. This button is in the
+    // timeline, which is about time rather than about the layer you are on, and
+    // one sentence that is true everywhere beats a tooltip that changes under
+    // the pointer for a case this small.
     button(QStringLiteral("Duplicate"), shortcuts::Id::DuplicateDrawing,
            QStringLiteral("Copy this drawing into a new one"),
-           QStringLiteral("A real copy, not a hold: the cels are independent."),
+           QStringLiteral("A real copy, not a hold: the two can be drawn on apart.\n\n"
+                          "On an imported picture there is nothing to copy apart -- both\n"
+                          "drawings show the same file, and moving either moves both. Two\n"
+                          "copies you can place separately are two imports of the file."),
            &MainWindow::duplicateDrawing);
     button(QStringLiteral("Delete drawing"), shortcuts::Id::DeleteDrawing,
            QStringLiteral("Delete this drawing and every frame it is held on"),
@@ -4430,7 +4447,39 @@ void MainWindow::insertInterval() {
 
 void MainWindow::duplicateDrawing() {
     stopPlayback();
-    goToNewDrawing(doc_.duplicateDrawing(track_, timeline_widget_->currentSlot()));
+
+    // Whether the layer in front of you is an import, asked *before* the
+    // duplicate so that the message below is about what was there rather than
+    // about what the copy turned out to be.
+    const Layer* layer = currentLayer();
+    const bool imported = layer && layer->kind == LayerKind::Reference;
+
+    const ImageId made = doc_.duplicateDrawing(track_, timeline_widget_->currentSlot());
+    goToNewDrawing(made);
+
+    // **What a duplicate gives you on an import is not what it gives you
+    // anywhere else, and the button promises the wrong one.** "A real copy, not
+    // a hold: the cels are independent" is exactly right on a drawing layer and
+    // vacuous here -- a reference layer has no cels at all. What the copy
+    // actually carries is the *source frame*, so both drawings show one file,
+    // and where that file sits is one fact stored on the layer. Move either and
+    // both move. Reported as a surprise, and it is one.
+    //
+    // Said rather than refused, which is the house rule, and said with the way
+    // to what was wanted: two copies you can place apart are two imports. That
+    // works today -- importNameFor exists to tell two imports of one file apart
+    // -- and it is the shape the model already has for "two independent
+    // pictures", a reference layer being one picture placed somewhere.
+    //
+    // Not a dialog. Nothing has gone wrong and nothing needs deciding; this is
+    // a fact about what you just got, which is what the status bar is for.
+    if (imported && made != kNoId) {
+        statusBar()->showMessage(
+            QStringLiteral("Duplicated -- both drawings show the same imported picture, and "
+                           "moving either moves both. To place two copies separately, import "
+                           "the file again."),
+            8000);
+    }
 }
 
 // Deletes the drawing and every frame it is held on. Shortening a hold is a
@@ -5215,25 +5264,53 @@ void MainWindow::syncLayerButtons() {
             syncToolSettings();
         }
         transform_action_->setEnabled(!sequence);
-        setKeyedTipText(
-            transform_action_,
-            sequence ? QStringLiteral("Cannot transform an imported sequence")
-                     : QStringLiteral("Move, turn or resize this drawing on the layer you are on"),
+
+        // **Three answers and not two**, because the middle one was this tool
+        // saying "this drawing" and moving more than one.
+        //
+        // An imported still routes through the placement -- chooseTransformTool
+        // sends it there -- and a placement is a property of the whole layer.
+        // With one drawing that is the same thing and the generic text was
+        // accidentally true; duplicate the drawing and it stops being, which is
+        // how it was reported. A tool announcing one scope and doing another is
+        // the fault that got the placement its own button name once already, and
+        // the answer this time is to say what it does rather than to rename it.
+        const bool still_import = layer && layer->kind == LayerKind::Reference && !sequence;
+        QString title;
+        QString detail;
+        if (sequence) {
             // Points at the panel button by the name it now has. The two are
             // not the same gesture and the tooltip has to say which is which:
             // this tool moves one drawing, and a sequence has no one drawing to
             // move, where the panel's control moves the whole layer together --
             // which is exactly what a sequence wants.
-            sequence ? QStringLiteral(
-                           "This tool moves one drawing, and an imported sequence is several.\n\n"
-                           "To move, turn or scale the whole sequence at once, use \"Transform\n"
-                           "layer through time\" in the layer panel -- which writes nothing on\n"
-                           "an import, so it costs the picture no quality however often you\n"
-                           "do it. To paint on it, convert it to drawings first.")
-                     : QStringLiteral(
-                           "With nothing selected it takes the whole drawing.\n"
-                           "%1 applies, %2 cancels, and the nudge keys move it a pixel at a "
-                           "time."));
+            title = QStringLiteral("Cannot transform an imported sequence");
+            detail =
+                QStringLiteral("This tool moves one drawing, and an imported sequence is "
+                               "several.\n\n"
+                               "To move, turn or scale the whole sequence at once, use "
+                               "\"Transform\nlayer through time\" in the layer panel -- which "
+                               "writes nothing on\nan import, so it costs the picture no quality "
+                               "however often you\ndo it. To paint on it, convert it to drawings "
+                               "first.");
+        } else if (still_import) {
+            title = QStringLiteral("Move, turn or scale the imported picture");
+            detail = QStringLiteral(
+                "It moves the whole import and not one drawing: where an imported\n"
+                "picture sits is one fact about the layer, so every drawing showing\n"
+                "it moves together. Duplicating the drawing does not make two that\n"
+                "can be placed apart -- importing the file a second time does.\n\n"
+                "Nothing is written either way. The numbers are stored and the\n"
+                "picture is made from the file again at them, so moving it costs it\n"
+                "no quality however often you do it.\n\n"
+                "%1 applies, %2 cancels, and the nudge keys move it a pixel at a time.");
+        } else {
+            title = QStringLiteral("Move, turn or resize this drawing on the layer you are on");
+            detail = QStringLiteral(
+                "With nothing selected it takes the whole drawing.\n"
+                "%1 applies, %2 cancels, and the nudge keys move it a pixel at a time.");
+        }
+        setKeyedTipText(transform_action_, title, detail);
     }
 
     // Remove layer, which had the same fault the button above was built to
