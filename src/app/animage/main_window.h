@@ -686,10 +686,6 @@ private:
     // Enabled per layer rather than per program: a colour layer cannot be
     // transformed at all, and a locked or hidden one is not being edited.
     QPushButton* layer_transform_ = nullptr;
-    // The way back from an import, and the one panel button that is greyed on
-    // every layer but one. Beside Transform layer through time because it is
-    // the same scale of thing: one press writes every drawing in the layer.
-    QPushButton* layer_convert_ = nullptr;
     // Whether the popup offered on a refused stroke is already up. A pen-down
     // on an import raises it, and pen-downs arrive faster than a dialog opens;
     // without this a hand resting on the canvas stacks them.

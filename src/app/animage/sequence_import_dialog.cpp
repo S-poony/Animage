@@ -149,7 +149,8 @@ SequenceImportDialog::SequenceImportDialog(const Found& found, int playhead_fram
     half_->setToolTip(
         QStringLiteral("A quarter of the memory, for a reference you look at rather than export. "
                        "It is a placement of 50%% and not a separate kind of import, so it can be "
-                       "changed afterwards with Place this picture."));
+                       "changed afterwards with \"Transform layer through time\" in the layer "
+                       "panel, which writes nothing on an import."));
     form->addRow(QString(), half_);
     layout->addWidget(choices);
 

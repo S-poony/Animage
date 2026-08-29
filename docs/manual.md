@@ -308,11 +308,40 @@ at all, so there the track goes back to getting longer.
 one there is no "through time" to speak of, and the Transform tool is the same
 gesture. The button says so when it is greyed.
 
-**An imported sequence cannot be transformed.** Its pictures come from files
-rather than from drawings, so the Transform tool is greyed out on one: convert it
-to drawings first. Moving the whole sequence around the canvas is a different
-thing and still works — that is "Place this picture" in the layer panel, and it
-writes nothing.
+**An imported sequence cannot be transformed with the Transform tool.** That
+tool moves one drawing and a sequence is several, so it is greyed out on one.
+Moving the whole sequence around the canvas is a different thing and still
+works: "Transform layer through time" in the layer panel does it, and on an
+import it writes nothing at all — the numbers are stored and the picture is made
+from the file again at them, so you can nudge and resize it as often as you like
+without ever costing it any quality. The transform bar says "Placing" while you
+are doing it, which is how you can tell.
+
+## Painting on an imported picture
+
+**You cannot, until you convert it — and the program offers to.** An import holds
+no drawings of its own; it is shown from its files. So the brush will not mark
+it, and neither will copy, cut or paste. Try any of those on one and a dialog
+asks whether to convert the layer to drawings, saying how many drawings it will
+write and what they weigh.
+
+Say yes and the whole layer becomes ordinary drawings in one step. **What you
+see is exactly what is kept** — including any moving or resizing you have already
+done, because what is written is the picture on screen. Afterwards it can be
+painted on, erased, and used as the line art a colour layer cuts against, which
+an import cannot be at all.
+
+Two things worth knowing before you say yes. **Place it first if you are going
+to.** Once converted, the drawings are the picture, so moving it again resamples
+what has already been resampled — whereas before converting, moving it costs
+nothing however often you do it. And **it can be undone**: it costs the undo
+history almost nothing, and the imported files stay in the project folder either
+way, so nothing is thrown away.
+
+It refuses if the layer is too long — roughly a hundred and twenty frames of HD,
+because every drawing is written at once. It says the number when it refuses.
+Importing a shorter range, or importing at half size, is what makes a long one
+fit.
 
 ## Colour layers
 

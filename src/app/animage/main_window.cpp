@@ -1625,6 +1625,20 @@ void MainWindow::clipboard(Clipboard what) {
     }
 
     if (refusal != CanvasWidget::Refusal::None) {
+        // **A refusal whose reason is "convert it first" offers to do that**,
+        // rather than saying no and leaving somebody to find the way forward.
+        // The brush has worked this way since the conversion existed; this is
+        // the same rule applied to the other three gestures that meet the same
+        // wall, on the user's call.
+        //
+        // Only this one refusal. The rest are true refusals -- a locked layer,
+        // an empty clipboard, marks copied off a different kind of layer -- and
+        // turning any of those into an offer would be a dialog proposing
+        // something nobody asked about.
+        if (refusal == CanvasWidget::Refusal::ReferenceLayer) {
+            offerToConvertRefusedLayer();
+            return;
+        }
         sayCannot(statusBar(), verb, refusal);
         return;
     }
@@ -1981,15 +1995,15 @@ void MainWindow::buildLayerPanel() {
     layer_transform_ = panelButton(QStringLiteral("Transform layer through time"),
                                    &MainWindow::transformLayerThroughTime);
 
-    // Beside it because it is the same scale of thing -- one press writes every
-    // drawing in the layer -- and because a button is the half of this feature
-    // that can be *found*. The popup on a refused stroke is the other half and
-    // is not a substitute: a control that comes and goes as you move between
-    // layers is one nobody can find twice, and "why can I not do this here" is
-    // the question a disabled control exists to answer. So it is here on every
-    // layer, greyed with a reason on all but one.
-    layer_convert_ =
-        panelButton(QStringLiteral("Convert to drawings"), &MainWindow::convertLayerToDrawings);
+    // **No Convert to drawings button, on the user's call**, and the argument it
+    // reverses was written right here: that a popup is discoverability and a
+    // button is findability, and a control that comes and goes is one nobody can
+    // find twice. What that argument missed is that nobody goes looking for
+    // this. Converting is not a thing you set out to do -- it is what you find
+    // out you need when a stroke will not land, and the refusal is already
+    // where that happens. A permanent button for it was a fourth control in the
+    // panel, greyed on every layer but one, teaching a concept the program can
+    // raise for itself at the only moment anybody wants it.
 
     // No Move up and Move down. The stack is restacked by dragging a row, which
     // is one gesture for any distance where the buttons were one click per
@@ -3991,8 +4005,8 @@ bool MainWindow::convertReferenceLayerFrom(TrackId track_id, LayerId layer_id, Q
     // what eventually drops them.
     // Which reaches rebuildLayerList and through it syncLayerButtons, and both
     // have something to say now: the row's flag stops calling this an import,
-    // and the two whole-layer buttons swap over -- Place this picture becomes
-    // Transform layer through time, and Convert to drawings greys out.
+    // and the panel button changes what it does under an unchanged name --
+    // storing a placement before, writing every drawing after.
     refreshEverything();
     return true;
 }
@@ -5063,6 +5077,20 @@ void MainWindow::onLayerSelected() {
 void MainWindow::syncLayerButtons() {
     if (!layer_transform_) return;
 
+    // How many drawings a whole-layer gesture would touch, whichever kind of
+    // layer it is.
+    //
+    // **Two lists answer this and they are not interchangeable.** An ordinary
+    // layer says it with cels; a reference layer has none at all, and what says
+    // it is not blank at a drawing is a `source_frames` entry -- so
+    // `layerDrawings` reports every import as empty. Asking through one function
+    // is what stops the two rules below drifting apart, which is how a
+    // duplicated import came to be greyed on a count of its files.
+    const auto wholeLayerDrawings = [this](const Layer& of) {
+        return of.kind == LayerKind::Reference ? doc_.referenceDrawings(track_, of.id).size()
+                                               : doc_.layerDrawings(track_, of.id).size();
+    };
+
     const Layer* layer = currentLayer();
     QString refusal;
     if (canvas_->currentImage() == kNoId) {
@@ -5080,8 +5108,7 @@ void MainWindow::syncLayerButtons() {
         refusal = QStringLiteral("this layer is locked");
     } else if (!layer->visible) {
         refusal = QStringLiteral("this layer is hidden");
-    } else if (layer->kind != LayerKind::Reference &&
-               doc_.layerDrawings(track_, layer->id).empty()) {
+    } else if (wholeLayerDrawings(*layer) == 0) {
         // Last but one, because beginLayerTransform asks these two last. Cels
         // and not ink: a layer with no cel anywhere has nothing to move and is
         // the case worth catching, which is a brand-new layer. Asking about the
@@ -5089,72 +5116,71 @@ void MainWindow::syncLayerButtons() {
         // -- too much to pay every time the playhead moves, and the answer it
         // would add is a layer whose cels are all empty, which the grid
         // releases anyway.
-        refusal = QStringLiteral("nothing is drawn on this layer yet");
-    } else if (layer->kind != LayerKind::Reference &&
-               doc_.layerDrawings(track_, layer->id).size() == 1) {
-        // **Through time needs a second drawing to be through.** With one, this
-        // button used to hand the gesture to the Transform tool -- which is the
-        // right gesture and the wrong button: it read "Transform layer through
-        // time" and did something else, on the most ordinary layer there is.
-        refusal = QStringLiteral("there is only one drawing on this layer.\n"
-                                 "Through time needs a second one to be through; use the\n"
-                                 "Transform tool, which is the same gesture with one.");
-    }
-
-    // Convert to drawings, whose refusals are its own and mostly the opposite
-    // of the ones above: this is the one button in the panel that works on an
-    // import and nothing else.
-    if (layer_convert_) {
-        QString convert;
-        if (!layer) {
-            convert = QStringLiteral("there is no layer selected");
-        } else if (layer->kind != LayerKind::Reference) {
-            // The common case by far, so it says what the button is *for*
-            // rather than only that this is not it. A greyed control whose
-            // tooltip merely restates the greying teaches nobody what the
-            // control does.
-            convert = QStringLiteral("this layer is already drawings.\n"
-                                     "Converting is the way back from an imported picture, "
-                                     "which\nis shown from its files and holds no pixels of its "
-                                     "own.");
-        } else if (layer->locked) {
-            convert = QStringLiteral("this layer is locked");
-        } else if (doc_.referenceDrawings(track_, layer->id).empty()) {
-            // referenceDrawings and not layerDrawings, which would answer
-            // "empty" about every import there is: a reference layer has no
-            // cels, and what says it is not blank at a drawing is its source
-            // frame. See Document::referenceDrawings.
-            convert = QStringLiteral("this import shows nothing on any drawing");
-        }
-        layer_convert_->setEnabled(convert.isEmpty());
-        layer_convert_->setToolTip(
-            !convert.isEmpty()
-                ? QStringLiteral("Cannot convert to drawings: %1").arg(convert)
-                : QStringLiteral(
-                      "Write what the imported picture shows into ordinary drawings.\n\n"
-                      "Every drawing of the layer at once, in one undo step. Afterwards it "
-                      "can\nbe painted on and erased, and a colour layer can cut against it -- "
-                      "which\nan import cannot be used for at all.\n\n"
-                      "What you see is what is kept. It is where the picture comes from "
-                      "afterwards\nthat changes: the drawings become the truth and the files "
-                      "stop being read.\nThey stay in the project folder, so it can be taken "
-                      "back."));
+        //
+        // Through the same helper as the count below, so an import whose
+        // drawings have all been deleted is caught here rather than falling
+        // through to an enabled button with nothing to act on.
+        refusal = layer->kind == LayerKind::Reference
+                      ? QStringLiteral("this import shows nothing on any drawing")
+                      : QStringLiteral("nothing is drawn on this layer yet");
+    } else if (wholeLayerDrawings(*layer) == 1) {
+        // **Through time needs a second drawing to be through**, and this is one
+        // sentence covering both kinds of layer rather than two rules that
+        // happen to agree. With one drawing the button used to hand the gesture
+        // to the Transform tool -- which is the right gesture and the wrong
+        // button: it read "Transform layer through time" and did something else,
+        // on the most ordinary layer there is.
+        //
+        // **Counted in drawings and never in files**, which is a correction a
+        // report made. Keyed on the file count, an imported still that had been
+        // duplicated stayed greyed for ever: one file, two drawings, and a
+        // control refusing on the grounds that there is one of something there
+        // are plainly two of. What is being asked is whether there is a second
+        // drawing for the gesture to reach *through*, and a duplicated import
+        // has one.
+        //
+        // The Transform tool is still keyed on files, and the two are different
+        // questions rather than an inconsistency left behind: this asks whether
+        // there is any time to move through, and the tool asks whether "this
+        // drawing" names one picture -- which on any number of drawings of a
+        // single file it does. So a duplicated still is the one layer where both
+        // doors are open, and each is open for its own reason.
+        refusal = layer->kind == LayerKind::Reference
+                      ? QStringLiteral("this is one imported picture on one drawing, and\n"
+                                       "through time needs a second to be through; use the\n"
+                                       "Transform tool, which moves it without writing anything.")
+                      : QStringLiteral("there is only one drawing on this layer.\n"
+                                       "Through time needs a second one to be through; use the\n"
+                                       "Transform tool, which is the same gesture with one.");
     }
 
     layer_transform_->setEnabled(refusal.isEmpty());
-    // An imported picture is *placed* and not transformed, and the button says
-    // so. One word for two things whose costs differ by everything -- one
-    // writes every drawing in the layer, the other writes nothing at all --
-    // would be the button telling the same lie the tooltip is here to prevent.
+
+    // **One name for both, on the user's call, and this reverses an argument
+    // made right here.** The button used to read "Place this picture" on an
+    // import, on the grounds that one word for two things whose costs differ by
+    // everything would be the button telling the same lie its tooltip exists to
+    // prevent.
+    //
+    // What that missed is which way the surprise runs. The tooltip is there to
+    // stop somebody being caught out by something expensive and irreversible --
+    // and on an import this is the opposite in every respect: nothing is
+    // written, it undoes by being adjusted again, and it never costs the
+    // picture any quality however often you do it. Somebody who presses a
+    // button expecting every drawing to be rewritten, and finds that nothing
+    // was, has not been lied to in any way that can hurt them. Two names for
+    // one gesture is a distinction the program was asking people to learn for
+    // its own benefit rather than for theirs.
+    //
+    // **The tooltip still differs, and that is not a hedge.** It is where the
+    // good news goes, and the alternative is not silence but a falsehood: the
+    // ordinary tooltip says "it is baked on Apply: every drawing in the layer
+    // is written", which on an import is simply untrue.
     const bool placing = layer && layer->kind == LayerKind::Reference;
-    layer_transform_->setText(placing ? QStringLiteral("Place this picture")
-                                      : QStringLiteral("Transform layer through time"));
+    layer_transform_->setText(QStringLiteral("Transform layer through time"));
     layer_transform_->setToolTip(
         !refusal.isEmpty()
-            ? QStringLiteral("Cannot %1: %2")
-                  .arg(placing ? QStringLiteral("place this picture")
-                               : QStringLiteral("transform this layer through time"),
-                       refusal)
+            ? QStringLiteral("Cannot transform this layer through time: %1").arg(refusal)
         : placing
             // Worth saying because it is the opposite of every other warning on
             // this button, and because nobody would assume it: a placement is
@@ -5193,11 +5219,17 @@ void MainWindow::syncLayerButtons() {
             transform_action_,
             sequence ? QStringLiteral("Cannot transform an imported sequence")
                      : QStringLiteral("Move, turn or resize this drawing on the layer you are on"),
+            // Points at the panel button by the name it now has. The two are
+            // not the same gesture and the tooltip has to say which is which:
+            // this tool moves one drawing, and a sequence has no one drawing to
+            // move, where the panel's control moves the whole layer together --
+            // which is exactly what a sequence wants.
             sequence ? QStringLiteral(
-                           "It is shown from its files rather than drawn, so there is nothing\n"
-                           "here to move. Convert it to drawings first.\n\n"
-                           "Where the whole sequence sits is a placement rather than a\n"
-                           "transform: \"Place this picture\", in the layer panel.")
+                           "This tool moves one drawing, and an imported sequence is several.\n\n"
+                           "To move, turn or scale the whole sequence at once, use \"Transform\n"
+                           "layer through time\" in the layer panel -- which writes nothing on\n"
+                           "an import, so it costs the picture no quality however often you\n"
+                           "do it. To paint on it, convert it to drawings first.")
                      : QStringLiteral(
                            "With nothing selected it takes the whole drawing.\n"
                            "%1 applies, %2 cancels, and the nudge keys move it a pixel at a "
@@ -5422,8 +5454,16 @@ void MainWindow::askToConvertLayer(const bool because_a_stroke_was_refused) {
                              8000);
 }
 
-// Somebody tried to draw on an imported picture. The refusal is where the
-// question actually gets asked, so this is where the offer is made.
+// Somebody tried to do something an imported picture has no pixels for. The
+// refusal is where the question actually gets asked, so this is where the offer
+// is made.
+//
+// **Four gestures reach here**: the brush, and copy, cut and paste. All of them
+// want a cel and an import has none, so for all of them the honest answer is
+// not "no" but "not until it is converted" -- and a program that knows the way
+// forward should offer it rather than name it. There is no button for this at
+// all any more, on the user's call: converting is not something anybody sets
+// out to do, it is what you find out you need at exactly these four moments.
 //
 // **Queued rather than raised from inside the press**, and that is not caution
 // about re-entrancy alone. `tabletEvent` ignores every event while a modal

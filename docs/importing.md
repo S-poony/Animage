@@ -1017,6 +1017,18 @@ that comes and goes as you move between layers is one nobody can find twice, and
 answer."* The popup is discoverability; the button is findability; they are not
 alternatives.
 
+> **The button was built, used, and taken out again on the user's call.** What
+> the argument above missed is that nobody goes looking for this: converting is
+> not a thing anybody sets out to do, it is what you find out you need when a
+> stroke will not land — and the refusal is already there. A permanent control
+> for it was a fourth button in a four-button panel, greyed on every layer but
+> one, teaching a concept the program can raise for itself at the only moment it
+> is wanted.
+>
+> What replaced it is the offer reaching **four gestures instead of one**: the
+> brush, and copy, cut and paste, all of which want a cel an import has not got.
+> See [no button for converting](handover.md#no-button-for-converting-and-where-the-offer-went-instead).
+
 **What the popup says, and the one thing to get right about it.** The user's
 instinct was that it should say whether the conversion is lossless, depending on
 whether the reference was scaled or rotated. That is the right thing to key on

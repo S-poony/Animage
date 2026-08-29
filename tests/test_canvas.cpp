@@ -10492,9 +10492,15 @@ void theTransformToolIsOffForASequenceImportAndOnForAStill() {
     QCoreApplication::processEvents();
 
     CHECK(!transform->isEnabled());
-    // And it says which way in, rather than only that this one is shut.
-    CHECK(transform->toolTip().contains(QStringLiteral("Convert it to drawings")));
-    CHECK(transform->toolTip().contains(QStringLiteral("Place this picture")));
+    // And it says which way in, rather than only that this one is shut. Two
+    // ways, because a sequence has two different things somebody might have
+    // come here to do, and only one of them costs anything.
+    CHECK(transform->toolTip().contains(QStringLiteral("layer through time")));
+    CHECK(transform->toolTip().contains(QStringLiteral("convert it to drawings")));
+    // It must not point at a control by a name no control has. The panel button
+    // stopped renaming itself per layer kind, so a tooltip still naming the old
+    // one would be sending somebody to look for a button that is not there.
+    CHECK(!transform->toolTip().contains(QStringLiteral("Place this picture")));
 }
 
 // The one-drawing case, which used to be handed over and is now refused.
@@ -10905,10 +10911,17 @@ void convertingDoesNotTakeTheImportOutOfTheProject() {
     if (frame) CHECK_NEAR(frame->pixel(20, 20).r, 1.0, 1e-2);
 }
 
-// The button, which is the half of this feature somebody can find without
-// having tried to draw on an import first.
-void theConvertButtonIsGreyedWithAReasonEverywhereElse() {
-    TEST("Convert to drawings says what it is for on a layer it cannot be used on");
+// The layer panel's one whole-layer button, which no longer renames itself.
+//
+// **What is worth pinning is that the name stays put while the behaviour does
+// not.** The button used to read "Place this picture" on an import and
+// "Transform layer through time" everywhere else; it now reads the second
+// always, on the user's call, because on an import the gesture is strictly
+// better than the name promises -- nothing is written, and adjusting it costs
+// the picture no quality. A test that only checked the greying would not
+// notice the label creeping back.
+void theLayerButtonKeepsOneNameAndGreysWhereTheToolIsTheDoor() {
+    TEST("the panel's whole-layer button has one name, and is greyed where the tool is the door");
     QTemporaryDir dir;
     CHECK(dir.isValid());
 
@@ -10917,35 +10930,142 @@ void theConvertButtonIsGreyedWithAReasonEverywhereElse() {
     window.show();
     QCoreApplication::processEvents();
 
-    QPushButton* convert = buttonCalled(window, QStringLiteral("Convert to drawings"));
-    CHECK(convert != nullptr);
-    if (!convert) return;
+    QPushButton* button = buttonCalled(window, QStringLiteral("Transform layer through time"));
+    CHECK(button != nullptr);
+    if (!button) return;
+    // The button it replaced is gone, and so is the fourth one beside it.
+    CHECK(buttonCalled(window, QStringLiteral("Place this picture")) == nullptr);
+    CHECK(buttonCalled(window, QStringLiteral("Convert to drawings")) == nullptr);
 
-    // On an ordinary layer it is off -- and the tooltip says what the control
-    // is *for*, not merely that this is not it. A greyed control whose reason
-    // restates the greying teaches nobody what it does.
-    CHECK(!convert->isEnabled());
-    CHECK(convert->toolTip().contains(QStringLiteral("already drawings")));
-    CHECK(convert->toolTip().contains(QStringLiteral("imported picture")));
+    // A fresh track: one drawing, so the tool is the door and this is greyed.
+    CHECK(!button->isEnabled());
 
+    // An imported still, which is the case this rule was extended to cover: one
+    // picture is one thing to move, and the Transform tool already routes a
+    // still to this very gesture.
     const QString still = dir.filePath(QStringLiteral("modelsheet.png"));
     CHECK(writeATestPicture(still, QColor(200, 60, 60)));
     CHECK(window.importImageFrom(still, nullptr));
     QCoreApplication::processEvents();
 
-    // An import makes its track current and selects its layer, so the button
-    // comes on without anybody having to go and find it.
-    CHECK(convert->isEnabled());
+    CHECK_EQ(button->text().toStdString(), std::string("Transform layer through time"));
+    CHECK(!button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("Transform tool")));
 
+    // **And duplicating that drawing opens it**, which is the correction a
+    // report made: keyed on the file count, one import duplicated ten times
+    // stayed greyed for ever, on the grounds that there is one of something
+    // there were plainly ten of. What the button asks is whether there is a
+    // second drawing to reach *through*, and now there is.
+    {
+        // Through the button somebody actually presses, not through the
+        // document: half of what is being tested is that the panel notices. A
+        // direct call would leave the button showing its answer from before.
+        QPushButton* duplicate = buttonCalled(window, QStringLiteral("Duplicate"));
+        CHECK(duplicate != nullptr);
+        if (!duplicate) return;
+        duplicate->click();
+        QCoreApplication::processEvents();
+
+        Document& doc = window.documentForTesting();
+        const TrackId imported = doc.scene().tracks.back().id;
+        CHECK_EQ(doc.referenceDrawings(imported, doc.scene().findTrack(imported)->layers.front().id)
+                     .size(),
+                 std::size_t{2});
+        CHECK(button->isEnabled());
+        // Still one file, so the Transform tool stays open too -- the two ask
+        // different questions and this is the one layer where both say yes.
+        QAction* tool = actionCalled(window, QStringLiteral("Transform"));
+        CHECK(tool != nullptr);
+        if (tool) CHECK(tool->isEnabled());
+    }
+
+    // An imported sequence, which is what the button is left enabled for:
+    // several pictures moving together is what a whole-layer control is, and
+    // the tool is greyed there.
+    std::vector<QString> files;
+    for (int i = 1; i <= 3; ++i) {
+        const QString file = dir.filePath(QStringLiteral("board%1.png").arg(i));
+        CHECK(writeATestPicture(file, QColor(60, 60 * i, 200)));
+        files.push_back(file);
+    }
+    CHECK(window.importSequenceFrom(files, /*start_frame=*/1, /*half_size=*/false, nullptr));
+    QCoreApplication::processEvents();
+
+    CHECK_EQ(button->text().toStdString(), std::string("Transform layer through time"));
+    CHECK(button->isEnabled());
+    // The tooltip is where the good news goes, and it has to be the import's
+    // own: the ordinary one says every drawing is written on Apply, which here
+    // would be false.
+    CHECK(button->toolTip().contains(QStringLiteral("Nothing is written")));
+    CHECK(!button->toolTip().contains(QStringLiteral("baked on Apply")));
+
+    // And an ordinary layer of several drawings gets the other tooltip, so the
+    // one name really is covering two answers rather than one answer twice.
     Document& doc = window.documentForTesting();
     const TrackId track_id = doc.scene().tracks.back().id;
     const LayerId layer_id = doc.scene().findTrack(track_id)->layers.front().id;
     CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
     QCoreApplication::processEvents();
 
-    // And off again once there is nothing left to convert, without anybody
-    // changing layer -- which is the refresh that would otherwise be missing.
-    CHECK(!convert->isEnabled());
+    CHECK(button->isEnabled());
+    CHECK(button->toolTip().contains(QStringLiteral("baked on Apply")));
+}
+
+// The four gestures that meet the import wall, and all of them name it.
+//
+// **This is the precondition the convert offer hangs off**, and it is the half
+// of that feature a test can hold: what MainWindow does with a ReferenceLayer
+// refusal is raise a modal dialog, which no test here can answer, but *which
+// refusal comes back* is an ordinary question and is the thing that would
+// change silently. If any of these four started reporting NothingSelected or
+// NothingDrawn instead, the offer would quietly become a status-bar message
+// again and nobody would be told the way forward.
+//
+// The order matters as much as the value: an import has no cel, so "nothing is
+// drawn here" is also true of it -- and true is not the same as useful. The
+// kind is asked first precisely so the answer is the one with a way out in it.
+void everyGestureThatNeedsACelNamesTheImportRatherThanTheEmptiness() {
+    TEST("the brush, copy, cut and paste all refuse an import by naming the import");
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+
+    const QString file = dir.filePath(QStringLiteral("modelsheet.png"));
+    CHECK(writeATestPicture(file, QColor(200, 60, 60)));
+
+    MainWindow window;
+    window.resize(1000, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    CHECK(window.importImageFrom(file, nullptr));
+    QCoreApplication::processEvents();
+
+    CanvasWidget* canvas = window.findChild<CanvasWidget*>();
+    CHECK(canvas != nullptr);
+    if (!canvas) return;
+
+    Document& doc = window.documentForTesting();
+    const TrackId track_id = doc.scene().tracks.back().id;
+    const LayerId layer_id = doc.scene().findTrack(track_id)->layers.front().id;
+    canvas->setActiveLayer(layer_id);
+
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::ReferenceLayer);
+    CHECK(canvas->copySelection() == CanvasWidget::Refusal::ReferenceLayer);
+    CHECK(canvas->cutSelection() == CanvasWidget::Refusal::ReferenceLayer);
+    CHECK(canvas->paste() == CanvasWidget::Refusal::ReferenceLayer);
+
+    // And the refusal carries the way out in the words somebody reads, not only
+    // in the enum a caller switches on.
+    CHECK(CanvasWidget::explain(CanvasWidget::Refusal::ReferenceLayer)
+              .contains(QStringLiteral("convert")));
+
+    // Converted, all four stop refusing -- which is what makes the offer worth
+    // making rather than a dialog that changes nothing.
+    CHECK(window.convertReferenceLayerFrom(track_id, layer_id, nullptr));
+    QCoreApplication::processEvents();
+    canvas->setActiveLayer(layer_id);
+    CHECK(canvas->whyTheBrushWillNotDraw() == CanvasWidget::Refusal::None);
+    CHECK(canvas->copySelection() != CanvasWidget::Refusal::ReferenceLayer);
 }
 
 }  // namespace
@@ -10974,7 +11094,6 @@ int main(int argc, char** argv) {
     theGutterStaysPutWhileTheFramesGoPastIt();
     convertingAPlacedImportWritesItWhereItSits();
     convertingDoesNotTakeTheImportOutOfTheProject();
-    theConvertButtonIsGreyedWithAReasonEverywhereElse();
     thePointerSaysWhereTheBrushWillNotDraw();
     choosingALockedLayerChangesThePointerWithoutMoving();
     alockedLayerStillPansZoomsAndLassos();
@@ -11141,6 +11260,8 @@ int main(int argc, char** argv) {
     aWindowDestroyedMidRenameGivesItUp();
     aWindowIsDestroyedSafelyFromAnyState();
     theLayerPanelSaysWhichTrackItIsShowing();
+    theLayerButtonKeepsOneNameAndGreysWhereTheToolIsTheDoor();
+    everyGestureThatNeedsACelNamesTheImportRatherThanTheEmptiness();
     aNewColourLayerIsInViewWhenItArrives();
     return testing::summarise("canvas");
 }

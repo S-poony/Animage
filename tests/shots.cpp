@@ -954,9 +954,11 @@ const std::vector<Situation>& situations() {
 
         {"an-imported-picture-being-placed",
          "the box round an import should be BLUE -- one drawing moves, so it is the blue case "
-         "however it was reached -- and the panel button should read 'Place this picture'. "
-         "Nothing is written by this box: the numbers are stored and the picture is made from "
-         "the file again at them",
+         "however it was reached. Nothing is written by this box: the numbers are stored and "
+         "the picture is made from the file again at them. The panel button reads 'Transform "
+         "layer through time' here as it does everywhere, which is the one place a name is "
+         "promising MORE than the gesture costs rather than less -- and the transform bar's "
+         "scope word is where that is said, so it should read 'Placing'",
          [](Stage& s) {
              const QString file = s.scratch() + QStringLiteral("/modelsheet.png");
              writeSwatchGrid(file);

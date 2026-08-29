@@ -3286,14 +3286,109 @@ before there is one.
 `chooseTransformTool` routes a reference layer of **one** file to the placement.
 A sequence is several, so the tool — which says it moves *this drawing* — has
 nothing here it can honestly do, and it is greyed out with a tooltip naming the
-two ways forward: convert it to drawings, or use "Place this picture", which is
-what moving a whole sequence actually is.
+two ways forward: convert it to drawings, or use the layer panel's whole-layer
+control, which is what moving a whole sequence actually is.
 
 The reasoning above is what decides it rather than a new rule: *"both doors mean
 one thing when there is one picture"* was always the argument, and it simply
 stops being true at two. Greyed rather than left to refuse when pressed, because
 a tool that looks available and then bounces you back to the brush is a tool you
 try twice.
+
+### One name for both, and which way the surprise runs
+
+**Reversed on the user's call, and the argument it overturns was written in this
+file.** The layer panel's button used to rename itself: "Place this picture" on
+an import, "Transform layer through time" everywhere else. The reason given was
+that one word for two things whose costs differ by everything — one writes every
+drawing in the layer, the other writes nothing at all — would be the button
+telling the same lie its tooltip exists to prevent.
+
+**What that missed is which way the surprise runs.** A tooltip on a whole-layer
+control is there to stop somebody being caught out by something expensive and
+irreversible. On an import this gesture is the opposite in every respect:
+nothing is written, it is adjusted rather than undone, and it costs the picture
+no quality however often it is done. Somebody who presses a button expecting
+every drawing to be rewritten and finds that none was has not been harmed in any
+way a warning could help with. Two names for one gesture was a distinction the
+program was asking people to learn for its own benefit rather than for theirs.
+
+So the button reads **"Transform layer through time"** always. What changes
+underneath is which gesture it starts, and `beginLayerTransform` already decided
+that from the layer kind rather than from the button.
+
+**The tooltip still differs, and that is not a hedge.** It is where the good news
+goes, and the alternative is not silence but a falsehood: the ordinary tooltip
+says *"it is baked on Apply: every drawing in the layer is written"*, which on an
+import is simply untrue. The transform bar's scope word carries it too — it
+reads "Placing" there, which is the one word in the interface that says nothing
+is being written.
+
+**And the greying moved with it.** The rule is now the same sentence twice:
+
+| layer | drawings | files | the panel button | the Transform tool |
+|---|---|---|---|---|
+| ordinary | several | — | writes every one of them | this drawing |
+| ordinary | one | — | greyed — *use the tool* | this drawing |
+| an import | one | one | greyed — *use the tool* | places the whole import |
+| an import | several | one | places the whole import | places the whole import |
+| an import | several | several | places the whole import | greyed — *use the panel* |
+
+The third row is the second row's reasoning applied unchanged: one picture is
+one thing to move, the tool is where one thing is moved, and
+`chooseTransformTool` already routed a still to this very gesture. So one door
+stays one door.
+
+**The fourth row is a correction, and it is where the rule nearly went wrong.**
+It was first written keyed on the *file* count, which greyed an imported still
+for ever however many times its drawing was duplicated: one file, several
+drawings, and a control refusing on the grounds that there is one of something
+there are plainly several of. Reported. The count that matters is **drawings**,
+because what the button asks is whether there is a second drawing to reach
+*through* — so both branches now go through one `wholeLayerDrawings`, which
+picks `layerDrawings` or `referenceDrawings` by kind. Two lists answer that
+question and they are not interchangeable: `layerDrawings` filters on cels and
+therefore calls every import empty.
+
+**The Transform tool stays keyed on files, and that is not an inconsistency left
+behind.** The two ask different questions: the panel asks whether there is any
+time to move through, and the tool asks whether *"this drawing"* names one
+picture — which on any number of drawings of a single file it does. So the
+fourth row is the one layer where both doors are open, and each is open for a
+reason of its own.
+
+### No button for converting, and where the offer went instead
+
+**Removed on the user's call**, and again the argument against removing it is in
+this file: that a popup is discoverability and a button is findability, that a
+control which comes and goes as you move between layers is one nobody can find
+twice, and that "why can I not do this here" is the question a disabled control
+exists to answer.
+
+**What that missed is that nobody goes looking for this.** Converting is not a
+thing anybody sets out to do. It is what you find out you need when a stroke
+will not land — and the refusal is already where that happens. A permanent
+button for it was a fourth control in a four-control panel, greyed on every
+layer but one, teaching a concept the program can raise for itself at the only
+moment it is wanted.
+
+So the offer lives entirely in the refusals, and it now covers **four gestures
+rather than one**: the brush, and copy, cut and paste. All four want a cel and
+an import has none, so for all four the honest answer is not "no" but "not until
+it is converted" — and a program that knows the way forward should offer it
+rather than name it. `MainWindow::clipboard` routes exactly one refusal there,
+`Refusal::ReferenceLayer`, and leaves the rest as they were: a locked layer, an
+empty clipboard and marks copied off a different kind of layer are true
+refusals, and turning any of them into a dialog would be proposing something
+nobody asked about.
+
+What a test can hold of this is the precondition rather than the dialog — the
+modal box is not something a test here can answer. `test_canvas` pins that all
+four gestures report `ReferenceLayer`, **and that they report it before
+`NothingDrawn`**, which is the part that would go wrong silently: an import has
+no cel, so "nothing is drawn here" is also true of it, and true is not the same
+as useful. The kind is asked first precisely so the answer is the one with a way
+out in it.
 
 ### A layer of one drawing is refused, where it used to be handed over
 
@@ -3326,7 +3421,7 @@ being, which is the shape of thing this file exists to catch:
 | | said | says |
 |---|---|---|
 | the transform bar | "Whole layer" | "Placing — nothing is written" |
-| the panel button | "Transform layer through time" | "Place this picture" |
+| the panel button | "Transform layer through time" | the same, doing something else — see [one name for both](#one-name-for-both-and-which-way-the-surprise-runs) |
 | Apply's tooltip | "Bake it into the drawing" | "Put the picture down here. Nothing is written" |
 | `refuseToEditHere`'s comment | "The layer kind is not here" | which kind is, and why the rest are not |
 
@@ -3553,7 +3648,7 @@ and an animatic is a stretch of timing that ends where it ends.
 
 Two it offers: a start frame defaulting to 1, and half size — which is a
 *placement* of 50% and not a separate mechanism, so it is undoable, adjustable
-afterwards through Place this picture, and cheaper rather than dearer, the
+afterwards through the panel's whole-layer control, and cheaper rather than dearer, the
 derive step applying the scale so a frame caches a quarter of the tiles.
 
 A file that will not read is kept in the list rather than dropped, because
